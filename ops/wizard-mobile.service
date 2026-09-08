@@ -1,0 +1,25 @@
+[Unit]
+Description=Wizard mobile renderer and Hermes transport boundary
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/wizard-mobile
+EnvironmentFile=/etc/wizard-mobile.env
+Environment=WIZARD_HOST=127.0.0.1
+Environment=WIZARD_REQUIRE_CF_ACCESS=1
+ExecStart=/usr/bin/node /opt/wizard-mobile/server/index.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
