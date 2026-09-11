@@ -121,10 +121,11 @@ export function readHelmActivitySessionIds(path, activityIds) {
 }
 
 const PENDING_ASSISTANT_ADMISSION_SECONDS = 120
+const PENDING_ASSISTANT_CLOCK_SKEW_SECONDS = 5
 
 export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
-  const latestBySession = new Map()
+  const latestRowsBySession = new Map()
   if (!ids.length) return []
   const db = openReadOnly(path)
   if (!db) return []
@@ -138,21 +139,23 @@ export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = 
     `).all(...ids)
     for (const row of rows) {
       const sessionId = String(row.session_id || '')
-      const runId = String(row.run_id || '')
-      if (!sessionId || latestBySession.has(sessionId)) continue
-      if (/^[A-Za-z0-9._:-]+$/.test(runId)) {
-        latestBySession.set(sessionId, { sessionId, runId })
-        continue
-      }
-      const createdAt = Number(row.created_at) || 0
-      if (!runId && createdAt > 0 && createdAt + PENDING_ASSISTANT_ADMISSION_SECONDS >= nowSeconds) {
-        latestBySession.set(sessionId, { sessionId, runId: '', status: 'running' })
-      }
+      if (!sessionId || latestRowsBySession.has(sessionId)) continue
+      latestRowsBySession.set(sessionId, row)
     }
   } catch {
     return []
   } finally {
     try { db.close() } catch { /* read-only cleanup */ }
   }
-  return [...latestBySession.values()]
+  return [...latestRowsBySession.entries()].flatMap(([sessionId, row]) => {
+    const runId = String(row.run_id || '').trim()
+    if (/^[A-Za-z0-9._:-]+$/.test(runId)) return [{ sessionId, runId }]
+    const admissionStatus = String(row.admission_status || '').trim()
+    const createdAt = Number(row.created_at) || 0
+    const freshReservation = !admissionStatus
+      && createdAt > 0
+      && createdAt <= nowSeconds + PENDING_ASSISTANT_CLOCK_SKEW_SECONDS
+      && createdAt + PENDING_ASSISTANT_ADMISSION_SECONDS >= nowSeconds
+    return freshReservation ? [{ sessionId, runId: '', status: 'running' }] : []
+  })
 }
