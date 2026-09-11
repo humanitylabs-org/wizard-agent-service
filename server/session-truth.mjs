@@ -121,11 +121,11 @@ export function readHelmActivitySessionIds(path, activityIds) {
 }
 
 const PENDING_ASSISTANT_ADMISSION_SECONDS = 120
-const PENDING_ASSISTANT_CLOCK_SKEW_SECONDS = 5
 
 export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
-  const latestRowsBySession = new Map()
+  const latestBySession = new Map()
+  const seenSessions = new Set()
   if (!ids.length) return []
   const db = openReadOnly(path)
   if (!db) return []
@@ -139,23 +139,75 @@ export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = 
     `).all(...ids)
     for (const row of rows) {
       const sessionId = String(row.session_id || '')
-      if (!sessionId || latestRowsBySession.has(sessionId)) continue
-      latestRowsBySession.set(sessionId, row)
+      if (!sessionId || seenSessions.has(sessionId)) continue
+      seenSessions.add(sessionId)
+      const runId = typeof row.run_id === 'string' ? row.run_id : ''
+      if (/^[A-Za-z0-9._:-]+$/.test(runId)) {
+        latestBySession.set(sessionId, { sessionId, runId })
+        continue
+      }
+      const createdAt = Number(row.created_at) || 0
+      if (row.run_id === null && row.admission_status === null
+        && createdAt >= nowSeconds - PENDING_ASSISTANT_ADMISSION_SECONDS && createdAt <= nowSeconds + 5) {
+        latestBySession.set(sessionId, { sessionId, runId: '', status: 'running' })
+      }
     }
   } catch {
     return []
   } finally {
     try { db.close() } catch { /* read-only cleanup */ }
   }
-  return [...latestRowsBySession.entries()].flatMap(([sessionId, row]) => {
-    const runId = String(row.run_id || '').trim()
-    if (/^[A-Za-z0-9._:-]+$/.test(runId)) return [{ sessionId, runId }]
-    const admissionStatus = String(row.admission_status || '').trim()
-    const createdAt = Number(row.created_at) || 0
-    const freshReservation = !admissionStatus
-      && createdAt > 0
-      && createdAt <= nowSeconds + PENDING_ASSISTANT_CLOCK_SKEW_SECONDS
-      && createdAt + PENDING_ASSISTANT_ADMISSION_SECONDS >= nowSeconds
-    return freshReservation ? [{ sessionId, runId: '', status: 'running' }] : []
-  })
+  return [...latestBySession.values()]
+}
+
+export function readWizardAssistantRevision(path) {
+  const db = openReadOnly(path)
+  if (!db) return ''
+  try {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS total,
+             COALESCE(SUM(run_id IS NULL), 0) AS pending,
+             COALESCE(MAX(rowid), 0) AS latest_id,
+             COALESCE(MAX(updated_at), 0) AS latest_update
+      FROM assistant_requests
+    `).get()
+    return [row.total, row.pending, row.latest_id, row.latest_update].map((value) => Number(value) || 0).join(':')
+  } catch {
+    return ''
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+export function readPendingWizardAssistantAdmissions(path, sessionIds, nowSeconds = Date.now() / 1000) {
+  const ids = boundedIds(sessionIds)
+  const seenSessions = new Set()
+  const pending = []
+  if (!ids.length) return []
+  const db = openReadOnly(path)
+  if (!db) return []
+  try {
+    const placeholders = ids.map(() => '?').join(',')
+    const rows = db.prepare(`
+      SELECT session_id, run_id, admission_status, created_at
+      FROM assistant_requests
+      WHERE session_id IN (${placeholders})
+      ORDER BY updated_at DESC, created_at DESC, rowid DESC
+    `).all(...ids)
+    for (const row of rows) {
+      const sessionId = String(row.session_id || '')
+      if (!sessionId || seenSessions.has(sessionId)) continue
+      seenSessions.add(sessionId)
+      const createdAt = Number(row.created_at) || 0
+      if (row.run_id === null && row.admission_status === null
+        && createdAt >= nowSeconds - PENDING_ASSISTANT_ADMISSION_SECONDS && createdAt <= nowSeconds + 5) {
+        pending.push({ sessionId, runId: '', status: 'running' })
+      }
+    }
+    return pending
+  } catch {
+    return []
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
 }

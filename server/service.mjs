@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { readHelmActivitySessionIds, readHermesSessionTruth, readPendingWizardAssistantAdmissions, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -1203,7 +1203,7 @@ export function createWizardServer(options = {}) {
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (options.canonicalSessionListing ? () => readCanonicalSessions(sessionDbPath, helmDbPath) : null)
   const canonicalSessionSnapshots = new Map()
-  let canonicalSessionCache = { sessions: null, expiresAt: 0 }
+  let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let canonicalSessionInFlight = null
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
@@ -1519,11 +1519,12 @@ export function createWizardServer(options = {}) {
   const refreshCanonicalSessions = () => {
     if (!canonicalSessionReader) return Promise.resolve(null)
     if (!canonicalSessionInFlight) {
+      const assistantRevision = readWizardAssistantRevision(inboxDbPath)
       canonicalSessionInFlight = Promise.resolve()
         .then(() => canonicalSessionReader())
         .then((sessions) => {
           if (!Array.isArray(sessions)) throw new Error('canonical session listing unavailable')
-          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS) }
+          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS), assistantRevision }
           return sessions
         })
         .finally(() => { canonicalSessionInFlight = null })
@@ -1533,6 +1534,7 @@ export function createWizardServer(options = {}) {
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
+      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) return refreshCanonicalSessions()
       if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
       return canonicalSessionCache.sessions
     }
@@ -2200,7 +2202,12 @@ export function createWizardServer(options = {}) {
           const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
           const [helmActivities, externalRuns] = operator
             ? [[], []]
-            : await Promise.all([readHelmActivities(), canonicalPage ? [] : readExternalAssistantRuns(listedSessionIds)])
+            : await Promise.all([
+                readHelmActivities(),
+                canonicalPage
+                  ? readPendingWizardAssistantAdmissions(inboxDbPath, listedSessionIds)
+                  : readExternalAssistantRuns(listedSessionIds),
+              ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
           result = filterSessionList(
             result,
