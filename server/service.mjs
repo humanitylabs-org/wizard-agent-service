@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import { readHelmActivitySessionIds, readHermesSessionTruth, readPendingWizardAssistantAdmissions, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -1251,8 +1251,8 @@ export function createWizardServer(options = {}) {
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
 
-  const readExternalAssistantRuns = async (sessionIds) => {
-    const references = readWizardAssistantRunReferences(inboxDbPath, sessionIds)
+  const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
+    const references = suppliedReferences ?? readWizardAssistantRunReferences(inboxDbPath, sessionIds)
     const projected = await Promise.all(references.map(async ({ sessionId, runId, status: pendingStatus }) => {
       if (!runId && pendingStatus === 'running') return { sessionId, runId: '', status: 'running' }
       const terminal = terminalExternalRuns.get(runId)
@@ -2200,13 +2200,14 @@ export function createWizardServer(options = {}) {
             : mergeArchivedSessions(result, archivedSessionReader())
           const listedSessionIds = sessionIdsInList(result)
           const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
+          const recentExternalReferences = canonicalPage
+            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds, Date.now() / 1000, 300)
+            : undefined
           const [helmActivities, externalRuns] = operator
             ? [[], []]
             : await Promise.all([
                 readHelmActivities(),
-                canonicalPage
-                  ? readPendingWizardAssistantAdmissions(inboxDbPath, listedSessionIds)
-                  : readExternalAssistantRuns(listedSessionIds),
+                readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
           result = filterSessionList(

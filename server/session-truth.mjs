@@ -122,7 +122,7 @@ export function readHelmActivitySessionIds(path, activityIds) {
 
 const PENDING_ASSISTANT_ADMISSION_SECONDS = 120
 
-export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = Date.now() / 1000) {
+export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = Date.now() / 1000, boundWindowSeconds = Number.POSITIVE_INFINITY) {
   const ids = boundedIds(sessionIds)
   const latestBySession = new Map()
   const seenSessions = new Set()
@@ -142,11 +142,12 @@ export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = 
       if (!sessionId || seenSessions.has(sessionId)) continue
       seenSessions.add(sessionId)
       const runId = typeof row.run_id === 'string' ? row.run_id : ''
-      if (/^[A-Za-z0-9._:-]+$/.test(runId)) {
+      const createdAt = Number(row.created_at) || 0
+      const boundIsRecent = createdAt >= nowSeconds - boundWindowSeconds && createdAt <= nowSeconds + 5
+      if (/^[A-Za-z0-9._:-]+$/.test(runId) && boundIsRecent) {
         latestBySession.set(sessionId, { sessionId, runId })
         continue
       }
-      const createdAt = Number(row.created_at) || 0
       if (row.run_id === null && row.admission_status === null
         && createdAt >= nowSeconds - PENDING_ASSISTANT_ADMISSION_SECONDS && createdAt <= nowSeconds + 5) {
         latestBySession.set(sessionId, { sessionId, runId: '', status: 'running' })
