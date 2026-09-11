@@ -2,14 +2,25 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writ
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, extname, resolve, sep } from 'node:path'
+import { cpus, homedir, loadavg } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
-const WIZARD_FILE_LIMIT = 8
+export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
+// Eight composer files plus the retained microphone recording.
+const WIZARD_FILE_LIMIT = 9
+const SESSION_LIST_PREVIEW_LIMIT = 24
+const CANONICAL_SESSION_LIMIT = 2_000
+const CANONICAL_SESSION_CACHE_MS = 30_000
 const PROXY_PREFIX = '/wizard/hermes'
 const OPERATOR_PROXY_PREFIX = '/wizard/operator'
 const OPERATOR_UPSTREAM_PREFIX = ''
@@ -20,6 +31,7 @@ const OPERATOR_MODEL = 'glm-5-3-flash'
 const OPERATOR_PRESET = 'private-operator-v1'
 const OPERATOR_ACK = 'Delegated to GLM-5.3. I’ll bring the result back here; you can keep talking to me while it runs.'
 const ID = '[A-Za-z0-9._:-]+'
+const HELM_ACTIVITY_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 
 export const PRIVATE_OPERATOR_PROMPT = `You are the Private Operator in Wizard's bounded capability experiment. You run through Tinfoil GLM-5.3 Flash. Stay present, concise, and responsive while full GLM-5.3 does the thinking.
 
@@ -42,11 +54,11 @@ Finish with one self-contained, user-facing response that states what is now tru
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
-  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order']) },
+  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order', 'limit', 'offset', 'include_compacted', 'view']) },
   { method: 'POST', pattern: new RegExp(`^/api/sessions/${ID}/model$`), query: new Set() },
   { method: 'POST', pattern: /^\/v1\/runs$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/v1/runs/${ID}$`), query: new Set() },
@@ -65,7 +77,13 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
-  if (/\/messages$/.test(pathname) && searchParams.has('order') && searchParams.get('order') !== 'latest') return false
+  if (/\/messages$/.test(pathname)) {
+    if (searchParams.has('order') && !['latest', 'oldest'].includes(searchParams.get('order'))) return false
+    for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
+    if (searchParams.has('limit') && Number(searchParams.get('limit')) > 500) return false
+    if (searchParams.has('include_compacted') && !['true', 'false'].includes(searchParams.get('include_compacted'))) return false
+    if (searchParams.has('view') && searchParams.get('view') !== 'wizard') return false
+  }
   return true
 }
 
@@ -124,8 +142,12 @@ function operatorBody(method, pathname, body) {
   }
   if (method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(pathname)) {
     const title = boundedTitle(value.title)
-    if (!title) throw Object.assign(new Error('invalid operator session patch'), { status: 400 })
-    return Buffer.from(JSON.stringify({ title }))
+    const archived = typeof value.archived === 'boolean' ? value.archived : undefined
+    const changes = {}
+    if (title) changes.title = title
+    if (archived !== undefined) changes.archived = archived
+    if (!Object.keys(changes).length) throw Object.assign(new Error('invalid operator session patch'), { status: 400 })
+    return Buffer.from(JSON.stringify(changes))
   }
   return body
 }
@@ -153,6 +175,118 @@ function directBody(method, pathname, body) {
 }
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
+const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
+const CANONICAL_SESSION_READER = fileURLToPath(new URL('./read-human-sessions.py', import.meta.url))
+
+function isDirectHumanSessionIdentity(id, source) {
+  return HUMAN_SESSION_SOURCES.has(String(source ?? '').toLowerCase())
+    || id.startsWith('wizard_')
+    || id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
+}
+
+export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now()) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    const now = currentTime / 1000
+    const rows = database.prepare(`
+      SELECT DISTINCT sessions.id, sessions.source
+        FROM sessions
+        LEFT JOIN session_turn_leases
+          ON session_turn_leases.conversation_id = sessions.id
+         AND session_turn_leases.expires_at > ?
+       WHERE sessions.hidden = 0
+         AND sessions.parent_session_id IS NULL
+         AND sessions.message_count > 0
+         AND (
+           session_turn_leases.conversation_id IS NOT NULL
+           OR (
+             COALESCE(sessions.last_activity_description, '') <> ''
+             AND COALESCE(sessions.last_activity_at, 0) >= ?
+           )
+         )
+    `).all(now, now - 150)
+    return rows
+      .filter((row) => {
+        const id = String(row.id ?? '')
+        return isDirectHumanSessionIdentity(id, row.source) || id.startsWith(OPERATOR_USER_SESSION_PREFIX)
+      })
+      .map((row) => String(row.id))
+  } finally {
+    database.close()
+  }
+}
+
+export function wizardDispatchHealthy({ cpuCount = cpus().length, oneMinuteLoad = loadavg()[0], pressureText } = {}) {
+  let cpuPressure = 0
+  try {
+    const source = typeof pressureText === 'string' ? pressureText : readFileSync('/proc/pressure/cpu', 'utf8')
+    cpuPressure = Number(source.match(/some\s+avg10=([0-9.]+)/)?.[1] ?? 0)
+  } catch { cpuPressure = 0 }
+  return oneMinuteLoad < Math.max(2, cpuCount * 1.5) && cpuPressure < 60
+}
+
+export function readArchivedSessions(sessionDbPath) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    return database.prepare(`
+      SELECT id, source, model, title, started_at, ended_at, end_reason,
+             message_count, parent_session_id, last_activity_at AS last_active,
+             pinned, archived, hidden
+        FROM sessions
+       WHERE archived = 1
+         AND hidden = 0
+         AND parent_session_id IS NULL
+         AND message_count > 0
+       ORDER BY COALESCE(last_activity_at, started_at) DESC
+       LIMIT 100
+    `).all().map((session) => ({
+      ...session,
+      pinned: Boolean(session.pinned),
+      archived: Boolean(session.archived),
+      hidden: Boolean(session.hidden),
+    }))
+  } finally {
+    database.close()
+  }
+}
+
+export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) return null
+  const raw = await new Promise((resolvePromise) => {
+    execFile('python3', [CANONICAL_SESSION_READER, sessionDbPath, helmDbPath, String(CANONICAL_SESSION_LIMIT)], {
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 5_000,
+    }, (error, stdout) => resolvePromise(error ? null : stdout))
+  })
+  if (raw === null) return null
+  try {
+    const sessions = JSON.parse(raw)
+    return Array.isArray(sessions) ? sessions : null
+  } catch {
+    return null
+  }
+}
+
+function mergeArchivedSessions(result, archivedSessions) {
+  if (!archivedSessions.length) return result
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    const collections = ['data', 'sessions'].filter((key) => payload && Array.isArray(payload[key]))
+    for (const key of collections) {
+      const known = new Set(payload[key].map((session) => session?.id).filter(Boolean))
+      payload[key] = [...payload[key], ...archivedSessions.filter((session) => !known.has(session.id))]
+    }
+    return collections.length ? Buffer.from(JSON.stringify(payload)) : result
+  } catch {
+    return result
+  }
+}
 
 function isHumanSession(session, operator) {
   if (!session || typeof session.id !== 'string') return false
@@ -160,8 +294,7 @@ function isHumanSession(session, operator) {
   if (operatorSession !== operator || session.hidden === true) return false
   if (typeof session.message_count === 'number' && session.message_count <= 0) return false
   if (operator) return session.id.startsWith(OPERATOR_USER_SESSION_PREFIX)
-  const source = typeof session.source === 'string' ? session.source.toLowerCase() : ''
-  return HUMAN_SESSION_SOURCES.has(source) || session.id.startsWith('wizard_')
+  return isDirectHumanSessionIdentity(session.id, session.source)
 }
 
 function operatorCompletionStatus(completion) {
@@ -174,22 +307,91 @@ function operatorCompletionStatus(completion) {
   return 'completed'
 }
 
-function filterSessionList(result, operator, records = []) {
+function sessionIdsInList(result) {
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    const values = ['data', 'sessions'].flatMap((key) => Array.isArray(payload?.[key]) ? payload[key] : [])
+    return values.map((session) => typeof session?.id === 'string' ? session.id : '').filter(Boolean)
+  } catch { return [] }
+}
+
+function newestActiveRun(runs, sessionId) {
+  return runs
+    .filter((run) => run.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(run.status))
+    .sort((left, right) => Number(right.createdAt ?? right.updatedAt ?? 0) - Number(left.createdAt ?? left.updatedAt ?? 0))[0]
+}
+
+function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
+  const startedAt = Number(run?.createdAt ?? 0)
+  const terminalAt = Number(truth?.lastAssistantAt ?? 0)
+  const latestRequestAt = Number(truth?.lastUserAt ?? 0)
+  return Boolean(trustActiveTruth && truth && !truth.active && startedAt > 0 && terminalAt >= startedAt && terminalAt > latestRequestAt)
+}
+
+function filterSessionList(result, operator, records = [], directRuns = [], externalRuns = [], sessionTruth = new Map(), helmActivities = [], trustActiveTruth = false) {
   try {
     const payload = JSON.parse(result.toString('utf8'))
     const collections = ['data', 'sessions'].filter((key) => payload && Array.isArray(payload[key]))
     if (collections.length) {
       for (const key of collections) payload[key] = payload[key]
         .filter((session) => isHumanSession(session, operator))
-        .map((session) => {
-          if (!operator) return session
-          const worker = records.filter((record) => record.operatorSessionId === session.id).sort((a, b) => b.startedAt - a.startedAt)[0]
-          if (worker?.completion?.content) return { ...session, preview: worker.completion.content, status: operatorCompletionStatus(worker.completion) }
-          if (worker) return { ...session, preview: 'Full GLM-5.3 is working in the background.', status: 'running' }
-          if (typeof session.preview === 'string' && session.preview.startsWith('[WIZARD_OPERATOR_ACK_V1:')) {
-            return { ...session, preview: 'Private Operator request' }
+        .map((rawSession) => {
+          const session = sanitizeSessionRuntimePreview(rawSession)
+          const truth = sessionTruth.get(session.id)
+          const projected = { ...session }
+          delete projected.wizard_run_id
+          if (truth?.lastUserAt) projected.wizard_last_user_at = truth.lastUserAt
+          if (truth?.lastAssistantAt) projected.wizard_last_assistant_at = truth.lastAssistantAt
+          if (truth?.activityAt) projected.wizard_activity_at = truth.activityAt
+          if (truth?.requestPreview) projected.wizard_request_preview = truth.requestPreview
+          if (truth?.startedAt) projected.wizard_started_at = truth.startedAt
+          if (!operator) {
+            const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
+            const directCandidate = newestActiveRun(directRuns, session.id)
+            const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
+            const external = externalRuns.find((run) => run.sessionId === session.id && PROJECTED_RUN_STATUSES.has(run.status))
+            const helm = helmActivities
+              .filter((activity) => activity.sessionId === session.id)
+              .sort((left, right) => right.createdAt - left.createdAt)[0]
+            if (ACTIVE_RUN_STATUSES.has(projected.status)) delete projected.status
+            if (direct) {
+              projected.status = direct.status
+              projected.wizard_run_id = direct.publicRunId ?? direct.runId
+              if (!projected.preview && direct.preview) projected.preview = direct.preview
+              if (direct.queuePosition) projected.queue_position = direct.queuePosition
+              if (direct.queueReason) projected.queue_reason = direct.queueReason
+            } else if (external) {
+              projected.status = external.status
+              if (ACTIVE_RUN_STATUSES.has(external.status)) projected.wizard_run_id = external.runId
+            } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
+              projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
+            } else if (helm?.status === 'failed') projected.status = 'failed'
+            return projected
           }
-          return session
+          if (ACTIVE_RUN_STATUSES.has(projected.status)) delete projected.status
+          const queuedOperator = directRuns.find((run) =>
+            run === newestActiveRun(directRuns, session.id)
+            && typeof run.publicRunId === 'string'
+            && /^wizardq_[0-9a-f]{32}$/.test(run.publicRunId),
+          )
+          if (queuedOperator) return {
+            ...projected,
+            status: queuedOperator.status,
+            wizard_run_id: queuedOperator.publicRunId,
+            preview: projected.preview || queuedOperator.preview || '',
+            ...(queuedOperator.queuePosition ? { queue_position: queuedOperator.queuePosition } : {}),
+            ...(queuedOperator.queueReason ? { queue_reason: queuedOperator.queueReason } : {}),
+          }
+          const worker = records.filter((record) => record.operatorSessionId === session.id).sort((a, b) => b.startedAt - a.startedAt)[0]
+          const completionAt = Number(worker?.completion?.timestamp) || 0
+          if (completionAt > Number(projected.wizard_activity_at ?? 0)) projected.wizard_activity_at = completionAt
+          if (worker?.completion?.content) return { ...projected, preview: worker.completion.content, status: operatorCompletionStatus(worker.completion) }
+          if (worker) return { ...projected, preview: 'Full GLM-5.3 is working in the background.', status: 'running' }
+          if (truth?.active) return { ...projected, status: 'running' }
+          if (typeof projected.preview === 'string' && projected.preview.startsWith('[WIZARD_OPERATOR_ACK_V1:')) {
+            return { ...projected, preview: 'Private Operator request' }
+          }
+          return projected
         })
       return Buffer.from(JSON.stringify(payload))
     }
@@ -379,6 +581,322 @@ function projectWizardFileMarkers(result, userMessagesOnly = false) {
   }
 }
 
+function safeHistoryText(value, max = 96) {
+  return typeof value === 'string' ? value.replace(/[<>\p{Cc}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : ''
+}
+
+function historyBasename(value) {
+  const parts = safeHistoryText(value, 1024).split(/[\\/]/).filter(Boolean)
+  return safeHistoryText(parts.at(-1) ?? '', 64)
+}
+
+function historyArguments(call) {
+  const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
+  const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
+  const raw = fn.arguments ?? item.arguments ?? item.args
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw
+  if (typeof raw !== 'string' || raw.length > 128 * 1024) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch { return {} }
+}
+
+function historyToolLabel(call) {
+  const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
+  const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
+  const name = safeHistoryText(fn.name ?? item.name, 80).replace(/^functions\./, '')
+  const args = historyArguments(call)
+  const file = historyBasename(args.path ?? args.image_url ?? args.file_path)
+  if (name === 'read_file') return file ? `Read ${file}` : 'Read a file'
+  if (name === 'write_file') return file ? `Wrote ${file}` : 'Wrote a file'
+  if (name === 'patch') return file ? `Updated ${file}` : 'Updated files'
+  if (name === 'vision_analyze') return file ? `Inspected ${file}` : 'Inspected an image'
+  if (name === 'skill_view') {
+    const skill = safeHistoryText(args.name, 64)
+    return skill ? `Loaded ${skill} guidance` : 'Loaded guidance'
+  }
+  if (name === 'search_files') {
+    const area = historyBasename(args.path)
+    return area ? `Searched ${area}` : 'Searched files'
+  }
+  if (name === 'conversation_evidence_search') return 'Reviewed prior conversation decisions'
+  if (name === 'web_search') {
+    const query = safeHistoryText(args.query, 62)
+    return query ? `Searched the web for “${query}”` : 'Searched the web'
+  }
+  if (name === 'web_extract') {
+    try {
+      const first = Array.isArray(args.urls) ? args.urls[0] : args.url
+      const host = new URL(String(first)).hostname.replace(/^www\./, '')
+      return host ? `Read ${host}` : 'Read a web page'
+    } catch { return 'Read a web page' }
+  }
+  if (name === 'browser_exec') {
+    const firstLine = typeof args.code === 'string' ? args.code.split(/\r?\n/, 1)[0] : ''
+    const heading = /^\s*#\s+/.test(firstLine) ? firstLine.replace(/^\s*#\s+/, '') : ''
+    return safeHistoryText(heading, 84) || 'Used the browser'
+  }
+  if (name === 'terminal') {
+    const command = typeof args.command === 'string' ? args.command : ''
+    if (/build:android|gradlew|assembleRelease/i.test(command)) return 'Built the Android app'
+    if (/test:browser|playwright/i.test(command)) return 'Ran mobile browser QA'
+    if (/npm\s+(run\s+)?test|vitest/i.test(command)) return 'Ran automated tests'
+    if (/build:web|vite\s+build|npm\s+run\s+build/i.test(command)) return 'Built the web app'
+    if (/git\s+(status|log|diff|show|worktree)/i.test(command)) return 'Checked the release state'
+    if (/\/health|systemctl\s+.*status/i.test(command)) return 'Checked the live service'
+    return 'Ran a command'
+  }
+  const labels = {
+    clarify: 'Asked for clarification', delegate_task: 'Consulted another agent', execute_code: 'Ran an analysis',
+    memory: 'Updated memory', skill_manage: 'Updated guidance', text_to_speech: 'Generated audio',
+    tool_search: 'Found the right integration', tool_describe: 'Loaded integration details', tool_call: 'Used an integration',
+    parallel: 'Ran parallel checks',
+  }
+  return labels[name] ?? 'Used a tool'
+}
+
+const HISTORY_WORKSPACE_PREFIX = /^(?:\[Workspace::v1: [^\]\r\n]+\]|\[Workspace:[^\]\r\n]+\])\s*/
+const HISTORY_PROCESS_COMPLETION = /^\[IMPORTANT: Background process ([^\n]+?) completed \((?:exit_code=|exit code )([^)\n]+)\)\.\nCommand: ([^\n]*)\nOutput:\n/
+const HISTORY_PROCESS_WATCH = /^\[IMPORTANT: Background process ([^\n]+?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n/
+
+function historyBackgroundAction(command) {
+  if (/gradlew|assemble(?:debug|release)|build:android/i.test(command)) return 'Android build'
+  if (/pytest|vitest|npm\s+(?:run\s+)?test|testDebug/i.test(command)) return 'Automated tests'
+  if (/publish|deploy|release/i.test(command)) return 'Release job'
+  return 'Background job'
+}
+
+function historyContentStrings(value, depth = 0) {
+  if (depth > 4) return []
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.slice(0, 32).flatMap((item) => historyContentStrings(item, depth + 1))
+  if (!value || typeof value !== 'object') return []
+  return ['text', 'content', 'output_text', 'display_content']
+    .filter((key) => Object.hasOwn(value, key))
+    .flatMap((key) => historyContentStrings(value[key], depth + 1))
+}
+
+function historyValueIsProcessWakeup(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (value._source === 'process_wakeup') return true
+    if (typeof value.display_kind === 'string' && value.display_kind.startsWith('process_wakeup')) return true
+  }
+  return historyContentStrings(value).some((candidate) =>
+    candidate.replace(HISTORY_WORKSPACE_PREFIX, '').trimStart().startsWith('[IMPORTANT: Background process '),
+  )
+}
+
+function sanitizeSessionRuntimePreview(session) {
+  const runtimeFields = ['preview', 'summary', 'last_message', 'lastMessage', 'latest_message', 'latestMessage', 'content', 'text', 'display_content']
+  const processWakeup = historyValueIsProcessWakeup(session) || runtimeFields.some((key) => historyValueIsProcessWakeup(session[key]))
+  const projected = { ...session }
+  for (const key of runtimeFields) {
+    if (!historyValueIsProcessWakeup(projected[key])) continue
+    projected[key] = typeof projected[key] === 'string' ? '' : null
+  }
+  if (processWakeup) {
+    projected.display_content = ''
+    delete projected.display_metadata
+    delete projected._wakeup_meta
+  }
+  return projected
+}
+
+function historyProcessWakeup(message, content) {
+  const role = message.role ?? message.author
+  if (role !== 'user' && role !== 'system') return null
+  const displayKind = typeof message.display_kind === 'string' ? message.display_kind : ''
+  const displayMeta = message.display_metadata && typeof message.display_metadata === 'object' && !Array.isArray(message.display_metadata)
+    ? message.display_metadata
+    : {}
+  const nestedDisplayMeta = displayMeta.process_wakeup && typeof displayMeta.process_wakeup === 'object' && !Array.isArray(displayMeta.process_wakeup)
+    ? displayMeta.process_wakeup
+    : displayMeta.wakeup && typeof displayMeta.wakeup === 'object' && !Array.isArray(displayMeta.wakeup)
+      ? displayMeta.wakeup
+      : displayMeta
+  const sourceMeta = message._wakeup_meta && typeof message._wakeup_meta === 'object' && !Array.isArray(message._wakeup_meta)
+    ? message._wakeup_meta
+    : nestedDisplayMeta
+  const candidates = historyContentStrings([content, message.content, message.text, message.display_content])
+    .map((value) => value.replace(HISTORY_WORKSPACE_PREFIX, '').trimStart())
+  let completion = null
+  let watch = null
+  for (const text of candidates) {
+    completion ||= text.match(HISTORY_PROCESS_COMPLETION)
+    watch ||= text.match(HISTORY_PROCESS_WATCH)
+  }
+  const source = safeHistoryText(message._source, 80)
+  if (source !== 'process_wakeup' && !displayKind.startsWith('process_wakeup') && !completion && !watch) return null
+
+  const sourceType = safeHistoryText(sourceMeta.type ?? sourceMeta.event_type, 40).toLowerCase()
+  const type = watch || sourceType.includes('watch') || displayKind.includes('watch') ? 'watch_match' : 'completion'
+  const taskId = safeHistoryText(
+    sourceMeta.task_id ?? sourceMeta.session_id ?? sourceMeta.process_id ?? completion?.[1] ?? watch?.[1] ?? message.id ?? message.message_id,
+    120,
+  )
+  const command = typeof sourceMeta.command === 'string' ? sourceMeta.command : completion?.[3] ?? watch?.[3] ?? ''
+  const exitCode = Number(sourceMeta.exit_code ?? sourceMeta.exitCode ?? completion?.[2])
+  const sourceStatus = safeHistoryText(sourceMeta.status, 40).toLowerCase()
+  const failed = typeof sourceMeta.failed === 'boolean'
+    ? sourceMeta.failed
+    : type === 'completion' && ((Number.isFinite(exitCode) && exitCode !== 0) || ['failed', 'error'].includes(sourceStatus))
+  const suppliedAction = safeHistoryText(sourceMeta.action_label ?? sourceMeta.actionLabel, 80)
+  const actionLabel = ['Android build', 'Automated tests', 'Release job', 'Background job'].includes(suppliedAction)
+    ? suppliedAction
+    : historyBackgroundAction(command)
+  return {
+    role: 'system',
+    author: 'system',
+    display_kind: 'process_wakeup',
+    display_content: '',
+    content: '',
+    _wakeup_meta: {
+      type,
+      task_id: taskId,
+      action_label: actionLabel,
+      failed,
+    },
+  }
+}
+
+function legacyInternalHistoryMessage(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return false
+  const role = message.role ?? message.author
+  if (typeof role !== 'string') return false
+  const content = message.content ?? message.text ?? message.output ?? ''
+  if (typeof content !== 'string') return false
+  if (historyProcessWakeup(message, content)) return false
+  const trimmed = content.trimStart().replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '').trimStart()
+  return [
+    '[ASYNC DELEGATION BATCH COMPLETE',
+    '[CONTEXT COMPACTION — REFERENCE ONLY]',
+    '[CONTEXT SUMMARY]:',
+    '[PRIOR CONTEXT — for reference only; not a new message]',
+    '[Your active task list was preserved across context compression]',
+    '[Your previous agent loop was paused',
+    '[James requested recovery of this interrupted Helm card.]',
+    '[STILL IN PROGRESS',
+    '[IMPORTANT: Background process ',
+    'Workline browser QA found a concrete regression in ',
+  ].some((prefix) => trimmed.startsWith(prefix))
+}
+
+function sessionMessageRows(value) {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+  for (const key of ['data', 'messages', 'items']) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+  return []
+}
+
+function sessionMessageTimeValue(message) {
+  return message?.created_at ?? message?.timestamp ?? message?.updated_at ?? null
+}
+
+function sessionAttachmentLabel(content) {
+  const counts = { images: 0, files: 0 }
+  const visit = (value) => {
+    if (typeof value === 'string') {
+      counts.images += (value.match(/\[Image attached at:/gi) ?? []).length
+      counts.files += (value.match(/\[WIZARD_(?:FILES_V1|FILE_CHIPS_V1)\]/gi) ?? []).length
+      counts.files += (value.match(/<\s*helm_attachments\s*>/gi) ?? []).length
+      return
+    }
+    if (Array.isArray(value)) { value.forEach(visit); return }
+    if (!value || typeof value !== 'object') return
+    const type = typeof value.type === 'string' ? value.type.toLowerCase() : ''
+    const mimeType = typeof value.mime === 'string' ? value.mime.toLowerCase() : ''
+    if (['image_url', 'input_image', 'image'].includes(type) || mimeType.startsWith('image/')) { counts.images++; return }
+    if (['input_file', 'file', 'audio', 'video'].includes(type) || mimeType) { counts.files++; return }
+    Object.values(value).forEach(visit)
+  }
+  visit(content)
+  const { images, files } = counts
+  if (images && !files) return images === 1 ? 'Photo attached' : 'Photos attached'
+  if (files && !images) return files === 1 ? 'File attached' : 'Files attached'
+  return images || files ? 'Attachments sent' : ''
+}
+
+function sessionPreviewText(content) {
+  const raw = historyContentStrings(content).join('\n')
+  let projected = raw
+    .replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '')
+    .replace(/\[WIZARD_FILES_V1\][\s\S]*?\[\/WIZARD_FILES_V1\]/gi, '')
+    .replace(/\[WIZARD_FILE_CHIPS_V1\][\s\S]*?\[\/WIZARD_FILE_CHIPS_V1\]/gi, '')
+    .replace(/\[WIZARD_CLOSE_AND_FILE_V1\][\s\S]*?\[\/WIZARD_CLOSE_AND_FILE_V1\]/gi, '')
+    .replace(/<\s*helm_attachments\s*>[\s\S]*?<\s*\/\s*helm_attachments\s*>/gi, '')
+    .replace(/\s*\[Image attached at:[^\]]*\](?:\s*\[[^\]]*\])?/gi, '')
+  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1)\]/i)
+  if (incompleteMarker >= 0) projected = projected.slice(0, incompleteMarker)
+  const visible = safeHistoryText(projected, 1_000)
+  if (visible && !legacyInternalHistoryMessage({ role: 'user', content: visible })) {
+    const attachment = sessionAttachmentLabel(content)
+    return attachment && /^Please use the attached (?:photo|photos|file|files)\.$/u.test(visible) ? attachment : visible
+  }
+  return sessionAttachmentLabel(content)
+}
+
+export function latestVisibleSessionMessages(payload, operator = false, completions = [], records = []) {
+  let projected = Buffer.from(JSON.stringify({ data: sessionMessageRows(payload) }))
+  if (operator) projected = projectOperatorMessages(projected, completions, records)
+  let rows = []
+  try { rows = sessionMessageRows(JSON.parse(projected.toString('utf8'))) } catch { return { latest: null, lastUser: null } }
+  const visible = rows.flatMap((message) => {
+    const role = message?.role ?? message?.author
+    const displayKind = String(message?.display_kind ?? '')
+    if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
+    const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
+    if (!content) return []
+    const at = sessionMessageTimeValue(message)
+    return [{ role, content, ...(at !== null ? { created_at: at } : {}) }]
+  }).reverse()
+  return {
+    latest: visible[0] ?? null,
+    lastUser: visible.find((message) => message.role === 'user') ?? null,
+  }
+}
+
+function projectWizardMessageHistory(result) {
+  const slimCall = (call, index) => {
+    const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
+    const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
+    const name = safeHistoryText(fn.name ?? item.name, 80)
+    return {
+      id: safeHistoryText(item.id ?? item.call_id, 120) || `tool-${index}`,
+      type: 'function',
+      function: { name },
+      display_label: historyToolLabel(call),
+    }
+  }
+  const slimMessage = (message) => {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return message
+    const role = message.role ?? message.author
+    if (typeof role !== 'string') return message
+    const projected = {}
+    for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id']) {
+      if (Object.hasOwn(message, key)) projected[key] = message[key]
+    }
+    projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
+    const wakeup = historyProcessWakeup(message, projected.content)
+    if (wakeup) Object.assign(projected, wakeup)
+    if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
+    return projected
+  }
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.filter((item) => !legacyInternalHistoryMessage(item)).map(visit)
+    if (!value || typeof value !== 'object') return value
+    if (legacyInternalHistoryMessage(value)) return null
+    if (typeof (value.role ?? value.author) === 'string') return slimMessage(value)
+    const projected = { ...value }
+    for (const key of Object.keys(projected)) projected[key] = visit(projected[key])
+    return projected
+  }
+  try { return Buffer.from(JSON.stringify(visit(JSON.parse(result.toString('utf8'))))) }
+  catch { throw Object.assign(new Error('invalid message history'), { status: 502 }) }
+}
+
 function inputContainsMarker(input) {
   const strings = []
   const collect = (value) => {
@@ -434,12 +952,18 @@ function safeHeader(value, fallback, max) {
   return (text || fallback).slice(0, max)
 }
 
-const PASSIVE_INLINE_MIME = new Set(['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+const PASSIVE_INLINE_MIME = new Set([
+  'text/plain', 'text/markdown', 'text/x-markdown',
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/wav', 'audio/x-m4a', 'audio/mpeg',
+  'video/mp4', 'video/webm', 'video/quicktime',
+])
 
 function safeContentHeaders(file, upstream) {
   const upstreamType = safeHeader(upstream.headers.get('content-type'), file.mime, 160)
   const canonicalType = upstreamType.split(';', 1)[0].trim().toLowerCase()
-  const passive = PASSIVE_INLINE_MIME.has(canonicalType)
+  const declaredType = safeHeader(file.mime, 'application/octet-stream', 160).split(';', 1)[0].trim().toLowerCase()
+  const passive = canonicalType === declaredType && PASSIVE_INLINE_MIME.has(canonicalType)
   const backendDisposition = safeHeader(upstream.headers.get('content-disposition'), '', 512).toLowerCase()
   const disposition = !passive || backendDisposition.startsWith('attachment') ? 'attachment' : 'inline'
   return {
@@ -450,13 +974,40 @@ function safeContentHeaders(file, upstream) {
   }
 }
 
-function sendJson(response, status, value) {
+function safeHelmDispositionFilename(value, fallback) {
+  const header = safeHeader(value, '', 512)
+  const extended = header.match(/filename\*=UTF-8''([^;]{1,400})/i)?.[1]
+  const quoted = header.match(/filename="([^"]{1,400})"/i)?.[1]
+  let candidate = quoted ?? ''
+  if (extended) {
+    try { candidate = decodeURIComponent(extended) } catch { candidate = '' }
+  }
+  candidate = candidate.replace(/[\\/\p{Cc}]/gu, '_').trim().slice(0, 240)
+  if (!candidate || candidate === '.' || candidate === '..') candidate = fallback
+  return encodeURIComponent(candidate)
+}
+
+function safeHelmContentHeaders(attachmentId, upstream) {
+  const upstreamType = safeHeader(upstream.headers.get('content-type'), 'application/octet-stream', 160)
+  const canonicalType = upstreamType.split(';', 1)[0].trim().toLowerCase()
+  const passive = PASSIVE_INLINE_MIME.has(canonicalType)
+  const encodedName = safeHelmDispositionFilename(upstream.headers.get('content-disposition'), `attachment-${attachmentId}`)
+  return {
+    'Content-Type': passive ? upstreamType : 'application/octet-stream',
+    'Content-Disposition': `${passive ? 'inline' : 'attachment'}; filename*=UTF-8''${encodedName}`,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  }
+}
+
+function sendJson(response, status, value, headers = {}) {
   const body = Buffer.from(JSON.stringify(value))
   response.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': body.length,
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
+    ...headers,
   })
   response.end(body)
 }
@@ -489,22 +1040,34 @@ function staticHeaders(path) {
     'Content-Type': mime(path),
     'Cache-Control': path.endsWith('.html') ? 'no-store' : 'public, max-age=3600',
     'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
-    'Permissions-Policy': 'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
+    'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self), payment=(), usb=()',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
   }
 }
 
-async function accessVerified(request, verifier) {
+async function verifiedAccess(request, verifier) {
   const assertion = request.headers['cf-access-jwt-assertion']
-  if (typeof assertion !== 'string' || !assertion || assertion.length > 16_384) return false
+  if (typeof assertion !== 'string' || !assertion || assertion.length > 16_384) return null
   try {
-    await verifier(assertion)
-    return true
+    return { claims: await verifier(assertion) }
   } catch {
-    return false
+    return null
   }
+}
+
+async function accessVerified(request, verifier) {
+  return Boolean(await verifiedAccess(request, verifier))
+}
+
+function wizardAccountScope(claims) {
+  const identity = typeof claims?.email === 'string' && claims.email.trim()
+    ? `email:${claims.email.trim().toLowerCase()}`
+    : typeof claims?.sub === 'string' && claims.sub.trim()
+      ? `sub:${claims.sub.trim()}`
+      : `protected:${JSON.stringify([claims?.iss ?? '', claims?.aud ?? ''])}`
+  return `wizard-account-${createHash('sha256').update(identity).digest('base64url').slice(0, 32)}`
 }
 
 export function createCloudflareAccessVerifier({ teamDomain, audience, jwksUrl, keyResolver } = {}) {
@@ -580,19 +1143,80 @@ function secretGuard(secrets) {
   })
 }
 
+function replaceLiteral(from, to) {
+  const needle = Buffer.from(from)
+  const replacement = Buffer.from(to)
+  let carry = Buffer.alloc(0)
+  const replaceBuffer = (value) => {
+    const chunks = []
+    let offset = 0
+    while (offset < value.length) {
+      const index = value.indexOf(needle, offset)
+      if (index < 0) { chunks.push(value.subarray(offset)); break }
+      chunks.push(value.subarray(offset, index), replacement)
+      offset = index + needle.length
+    }
+    return Buffer.concat(chunks)
+  }
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      const value = Buffer.concat([carry, chunk])
+      let held = 0
+      for (let size = Math.min(Math.max(needle.length - 1, 0), value.length); size > 0; size -= 1) {
+        if (value.subarray(value.length - size).equals(needle.subarray(0, size))) { held = size; break }
+      }
+      if (value.length > held) this.push(replaceBuffer(value.subarray(0, value.length - held)))
+      carry = value.subarray(value.length - held)
+      callback()
+    },
+    flush(callback) {
+      this.push(replaceBuffer(carry))
+      callback()
+    },
+  })
+}
+
+function replacePrivateControlIdentities(result, replacements) {
+  let projected = result.toString('utf8')
+  const ordered = replacements
+    .filter(([privateValue, publicValue]) => typeof privateValue === 'string' && privateValue && typeof publicValue === 'string' && publicValue)
+    .sort(([left], [right]) => right.length - left.length)
+  for (const [privateValue, publicValue] of ordered) projected = projected.replaceAll(privateValue, publicValue)
+  return Buffer.from(projected)
+}
+
 export function createWizardServer(options = {}) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
+  const sttOrigin = confinedUpstream(options.sttOrigin ?? 'http://127.0.0.1:8864')
+  const helmOrigin = options.helmOrigin ? confinedUpstream(options.helmOrigin) : ''
+  const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
+  const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const requireAccess = options.requireAccess ?? true
   const accessVerifier = options.accessVerifier
   if (requireAccess && typeof accessVerifier !== 'function') throw new Error('A Cloudflare Access verifier is required')
   const fetchImpl = options.fetchImpl ?? fetch
+  const sessionMessageCache = new Map()
+  const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
+  const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
+  const canonicalSessionReader = options.canonicalSessionReader
+    ?? (options.canonicalSessionListing ? () => readCanonicalSessions(sessionDbPath, helmDbPath) : null)
+  const canonicalSessionSnapshots = new Map()
+  let canonicalSessionCache = { sessions: null, expiresAt: 0 }
+  let canonicalSessionInFlight = null
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
+  const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
   const runTrustedPaths = new Map()
+  const directRuns = new Map()
+  const terminalExternalRuns = new Map()
+  let helmActivityEpoch = 0
+  let helmActivityCache = { at: 0, activities: [], epoch: helmActivityEpoch }
+  let helmActivityInFlight = null
+  const resolvedHelmActivityIds = new Set()
   const operatorWorkerModel = String(options.operatorWorkerModel ?? '').trim()
   const operatorWorkers = new Map()
   const operatorWorkerStatePath = options.operatorWorkerStatePath ? resolve(String(options.operatorWorkerStatePath)) : ''
@@ -627,6 +1251,106 @@ export function createWizardServer(options = {}) {
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
 
+  const readExternalAssistantRuns = async (sessionIds) => {
+    const references = readWizardAssistantRunReferences(inboxDbPath, sessionIds)
+    const projected = await Promise.all(references.map(async ({ sessionId, runId }) => {
+      const terminal = terminalExternalRuns.get(runId)
+      if (terminal) return terminal
+      try {
+        const payload = await hermesJson(`/v1/runs/${encodeURIComponent(runId)}`)
+        const aliases = { started: 'running', accepted: 'queued', pending: 'queued', waiting: 'waiting_for_approval' }
+        if (typeof payload?.session_id === 'string' && payload.session_id !== sessionId) return null
+        const rawStatus = typeof payload?.status === 'string' ? payload.status : ''
+        const status = aliases[rawStatus] ?? rawStatus
+        if (!PROJECTED_RUN_STATUSES.has(status)) return null
+        const projection = { sessionId, runId, status }
+        if (TERMINAL_RUN_STATUSES.has(status)) terminalExternalRuns.set(runId, projection)
+        return projection
+      } catch { return null }
+    }))
+    return projected.filter(Boolean)
+  }
+
+  const readHelmActivities = async () => {
+    if (!helmOrigin) return []
+    const epoch = helmActivityEpoch
+    let inFlight = helmActivityInFlight?.epoch === epoch ? helmActivityInFlight : null
+    if (!inFlight) {
+      const promise = (async () => {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 650)
+        try {
+          const result = await fetchImpl(`${helmOrigin}/helm/api/activity`, { redirect: 'manual', signal: controller.signal })
+          if (!result.ok) throw new Error('Helm activity unavailable')
+          const payload = await result.json()
+          const rows = (Array.isArray(payload?.activity) ? payload.activity : [])
+            .filter((activity) => ['queued', 'running', 'failed'].includes(String(activity?.status ?? '')))
+            .slice(0, 128)
+          if (epoch !== helmActivityEpoch) return
+          for (const id of resolvedHelmActivityIds) {
+            const current = rows.find((activity) => activity?.activity_id === id)
+            if (!current || current.status !== 'failed') resolvedHelmActivityIds.delete(id)
+          }
+          const activitySessions = readHelmActivitySessionIds(helmDbPath, rows.map((row) => String(row?.activity_id ?? '')))
+          const activities = rows
+            .filter((activity) => activity?.status !== 'failed' || !resolvedHelmActivityIds.has(activity?.activity_id))
+            .map((activity) => ({
+              activityId: safeHistoryText(activity?.activity_id, 100),
+              threadId: safeHistoryText(activity?.thread_id, 100),
+              sessionId: safeHistoryText(activity?.session_id, 100) || activitySessions.get(String(activity?.activity_id ?? '')) || '',
+              kind: safeHistoryText(activity?.kind, 30),
+              status: safeHistoryText(activity?.status, 30),
+              title: safeHistoryText(activity?.title, 200) || 'Wizard work',
+              detail: safeHistoryText(activity?.error, 300),
+              createdAt: Number(activity?.created_at) || 0,
+              failedAt: Number(activity?.finished_at) || Number(activity?.created_at) || 0,
+              canRetry: activity?.can_retry === true,
+            }))
+          helmActivityCache = { at: Date.now(), activities, epoch }
+        } finally {
+          clearTimeout(timer)
+        }
+      })()
+      inFlight = { epoch, promise }
+      helmActivityInFlight = inFlight
+    }
+    try { await inFlight.promise }
+    catch { /* stale Helm activity is safer than blocking Wizard */ }
+    finally { if (helmActivityInFlight === inFlight) helmActivityInFlight = null }
+    return helmActivityCache.epoch === helmActivityEpoch && Date.now() - helmActivityCache.at < 30_000 ? helmActivityCache.activities : []
+  }
+
+  const mutateHelmActivity = async (activityId, action) => {
+    if (!helmOrigin) throw Object.assign(new Error('Helm unavailable'), { status: 503 })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 2_000)
+    try {
+      const result = await fetchImpl(`${helmOrigin}/helm/api/activity/${activityId}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+        redirect: 'manual',
+        signal: controller.signal,
+      })
+      void result.body?.cancel().catch(() => undefined)
+      if (!result.ok) {
+        const status = [400, 404, 409, 503].includes(result.status) ? result.status : 502
+        throw Object.assign(new Error('Helm activity action failed'), { status })
+      }
+      resolvedHelmActivityIds.add(activityId)
+      helmActivityEpoch += 1
+      helmActivityCache = {
+        at: Date.now(),
+        activities: helmActivityCache.activities.filter((activity) => activity.activityId !== activityId),
+        epoch: helmActivityEpoch,
+      }
+      await readHelmActivities()
+      return result.status
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   const inputText = (input) => {
     if (typeof input === 'string') return input
     if (!Array.isArray(input)) return ''
@@ -639,23 +1363,33 @@ export function createWizardServer(options = {}) {
 
   const isInlineOperatorRequest = (input) => /^(?:hi|hello|hey|thanks|thank you|good (?:morning|afternoon|evening)|status\b|what(?:'s| is).*(?:running|status)|stop\b|cancel\b|steer\b)/i.test(inputText(input).trim())
 
-  const startOperatorWorker = async (operatorSessionId, input) => {
+  const startOperatorWorker = async (operatorSessionId, input, durableIdentity = '') => {
     if (typeof operatorSessionId !== 'string' || !operatorSessionId.startsWith(OPERATOR_USER_SESSION_PREFIX)) {
       throw Object.assign(new Error('invalid operator session'), { status: 400 })
     }
-    const workerSessionId = `${OPERATOR_WORKER_SESSION_PREFIX}${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 8)}`
-    await hermesJson('/api/sessions', {
-      method: 'POST',
-      body: JSON.stringify({
-        id: workerSessionId,
-        source: 'api_server',
-        title: `[Operator worker] ${Date.now()}-${randomUUID().slice(0, 8)}`,
-        model: operatorWorkerModel,
-        provider: 'custom:tinfoil-operator',
-        require_model_lock: true,
-        system_prompt: 'You are the full private GLM-5.3 worker for Wizard. Complete the user request accurately, use tools and profile context when useful, verify factual claims, and return one self-contained final answer for the user.',
-      }),
+    const durableSuffix = String(durableIdentity).replace(/[^A-Za-z0-9_-]/g, '').slice(-72)
+    const workerSessionId = durableSuffix
+      ? `${OPERATOR_WORKER_SESSION_PREFIX}queue_${durableSuffix}`
+      : `${OPERATOR_WORKER_SESSION_PREFIX}${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 8)}`
+    const sessionBody = JSON.stringify({
+      id: workerSessionId,
+      source: 'api_server',
+      title: durableSuffix ? `[Operator worker] ${durableSuffix}` : `[Operator worker] ${Date.now()}-${randomUUID().slice(0, 8)}`,
+      model: operatorWorkerModel,
+      provider: 'custom:tinfoil-operator',
+      require_model_lock: true,
+      system_prompt: 'You are the full private GLM-5.3 worker for Wizard. Complete the user request accurately, use tools and profile context when useful, verify factual claims, and return one self-contained final answer for the user.',
     })
+    if (durableSuffix) {
+      try {
+        await hermesJson(`/api/sessions/${encodeURIComponent(workerSessionId)}`)
+      } catch {
+        try { await hermesJson('/api/sessions', { method: 'POST', body: sessionBody }) }
+        catch { await hermesJson(`/api/sessions/${encodeURIComponent(workerSessionId)}`) }
+      }
+    } else {
+      await hermesJson('/api/sessions', { method: 'POST', body: sessionBody })
+    }
     await hermesJson(`/api/sessions/${encodeURIComponent(workerSessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
     const admission = await hermesJson('/v1/runs', {
       method: 'POST',
@@ -669,7 +1403,7 @@ export function createWizardServer(options = {}) {
         instructions: WIZARD_RUN_INSTRUCTIONS,
         delegation_delivery: 'join',
       }),
-      headers: { 'Idempotency-Key': `worker-${workerSessionId}` },
+      headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
     })
     const workerRunId = typeof admission.run_id === 'string' ? admission.run_id : typeof admission.id === 'string' ? admission.id : ''
     if (!workerRunId) throw Object.assign(new Error('Hermes worker admission was invalid'), { status: 502 })
@@ -700,6 +1434,253 @@ export function createWizardServer(options = {}) {
     }
     persistOperatorWorkers()
     return record.completion
+  }
+
+  const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
+  let runQueue = null
+  let runQueueReady = Promise.resolve()
+  if (runQueueStatePath) {
+    const queueHermesAdmission = async (record) => {
+      let queuedBody = Buffer.from(record.body, 'utf8')
+      let pendingWorker = null
+      if (record.runtime === 'operator') {
+        const value = parseJsonBody(queuedBody)
+        if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
+        queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody)
+      const headers = new Headers({
+        'Content-Type': 'application/json',
+        'Idempotency-Key': record.idempotencyKey,
+      })
+      headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
+      const raw = Buffer.from(await result.arrayBuffer())
+      if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
+      let payload
+      try { payload = JSON.parse(raw.toString('utf8')) }
+      catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
+      const upstreamRunId = typeof payload.run_id === 'string' ? payload.run_id : typeof payload.id === 'string' ? payload.id : ''
+      if (!upstreamRunId || !new RegExp(`^${ID}$`).test(upstreamRunId)) throw Object.assign(new Error('Hermes queued admission identity was invalid'), { status: 502 })
+      if (record.trustedPaths.length) {
+        runTrustedPaths.set(upstreamRunId, record.trustedPaths)
+        runTrustedPaths.set(record.publicRunId, record.trustedPaths)
+        if (pendingWorker?.workerRunId) runTrustedPaths.set(pendingWorker.workerRunId, record.trustedPaths)
+      }
+      if (pendingWorker) {
+        operatorWorkers.set(upstreamRunId, { ...pendingWorker, ackRunId: upstreamRunId })
+        persistOperatorWorkers()
+      }
+      return {
+        upstreamRunId,
+        workerRunId: pendingWorker?.workerRunId ?? '',
+        capacityStatus: pendingWorker ? 'running' : payload.status,
+        payload,
+        trustedPaths: record.trustedPaths,
+      }
+    }
+    const lookupQueuedRun = async (record) => {
+      const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+      let capacityStatus = payload.status
+      let workerRunId = record.workerRunId
+      if (record.runtime === 'operator' && workerRunId) {
+        const operatorRecord = operatorWorkers.get(record.upstreamRunId)
+        if (operatorRecord) {
+          const completion = await workerCompletion(operatorRecord)
+          capacityStatus = completion ? completion.status : 'running'
+          if (completion && ['completed', 'failed', 'cancelled', 'interrupted'].includes(payload.status)) {
+            payload.last_event = 'subagent.complete'
+            payload.operator_worker_status = completion.status
+          }
+        } else {
+          const worker = await hermesJson(`/v1/runs/${encodeURIComponent(workerRunId)}`)
+          capacityStatus = worker.status
+        }
+      }
+      return { payload, capacityStatus, workerRunId }
+    }
+    const maxActive = Number(options.runQueueMaxActive ?? 8)
+    const activeSessionReader = options.activeSessionReader ?? (() => readActiveHumanSessionIds(hermesStatePath || sessionDbPath))
+    const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
+    runQueue = new DurableRunQueue({
+      statePath: runQueueStatePath,
+      maxActive,
+      pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
+      retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
+      activeSessionIds: activeSessionReader,
+      canDispatch: dispatchHealthReader,
+      launch: queueHermesAdmission,
+      lookup: lookupQueuedRun,
+    })
+    runQueueReady = runQueue.initialize()
+  }
+
+  const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
+  const refreshCanonicalSessions = () => {
+    if (!canonicalSessionReader) return Promise.resolve(null)
+    if (!canonicalSessionInFlight) {
+      canonicalSessionInFlight = Promise.resolve()
+        .then(() => canonicalSessionReader())
+        .then((sessions) => {
+          if (!Array.isArray(sessions)) throw new Error('canonical session listing unavailable')
+          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS) }
+          return sessions
+        })
+        .finally(() => { canonicalSessionInFlight = null })
+    }
+    return canonicalSessionInFlight
+  }
+  const loadCanonicalSessions = async () => {
+    const now = Date.now()
+    if (Array.isArray(canonicalSessionCache.sessions)) {
+      if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
+      return canonicalSessionCache.sessions
+    }
+    return refreshCanonicalSessions()
+  }
+  if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
+
+  const canonicalSessionPage = async (operator, searchParams) => {
+    if (!canonicalSessionReader) return null
+    const now = Date.now()
+    const requestedOffset = Number(searchParams.get('offset'))
+    const offset = Number.isSafeInteger(requestedOffset) ? Math.max(0, requestedOffset) : 0
+    const requestedSnapshot = searchParams.get('snapshot') ?? ''
+    let snapshot = offset > 0 ? canonicalSessionSnapshots.get(requestedSnapshot) : null
+    if (offset > 0 && requestedSnapshot && (!snapshot || snapshot.expiresAt < now)) {
+      throw Object.assign(new Error('session listing snapshot expired'), { status: 409 })
+    }
+    if (!snapshot || snapshot.expiresAt < now) {
+      const sessions = await loadCanonicalSessions()
+      if (!Array.isArray(sessions)) throw Object.assign(new Error('canonical session listing unavailable'), { status: 503 })
+      const id = randomUUID()
+      snapshot = { id, sessions, expiresAt: now + 30_000 }
+      canonicalSessionSnapshots.set(id, snapshot)
+      for (const [candidateId, candidate] of canonicalSessionSnapshots) {
+        if (candidate.expiresAt < now || canonicalSessionSnapshots.size > 8) canonicalSessionSnapshots.delete(candidateId)
+      }
+    }
+    const requestedLimit = Number(searchParams.get('limit'))
+    const limit = Number.isSafeInteger(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 100
+    const sessions = snapshot.sessions.filter((session) => isHumanSession(session, operator))
+    const data = sessions.slice(offset, offset + limit)
+    return {
+      object: 'list',
+      data,
+      limit,
+      offset,
+      has_more: offset + data.length < sessions.length,
+      snapshot: snapshot.id,
+    }
+  }
+  const sessionListSignature = (session, records = []) => JSON.stringify([
+    session.message_count ?? null,
+    session.updated_at ?? session.last_activity_at ?? session.last_active ?? session.wizard_activity_at ?? session.wizard_last_user_at ?? null,
+    session.status ?? null,
+    ...records.map((record) => [record.workerRunId, record.completion?.timestamp ?? null, record.completion?.content ?? null]),
+  ])
+  const enrichSessionListMessages = async (result, operator) => {
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      const collections = sessionListCollections(payload)
+      for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
+        try {
+          if (index >= SESSION_LIST_PREVIEW_LIMIT) return session
+          const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
+          if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
+          const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
+          const completions = operator ? (await Promise.all(records.map(workerCompletion))).filter(Boolean) : []
+          const signature = sessionListSignature(session, records)
+          const cacheKey = `${operator ? 'operator' : 'direct'}:${session.id}`
+          const cached = sessionMessageCache.get(cacheKey)
+          let messages = cached?.signature === signature ? cached.messages : null
+          if (!messages) {
+            const historyUrl = `${upstreamOrigin}${operator ? OPERATOR_UPSTREAM_PREFIX : ''}/api/sessions/${encodeURIComponent(session.id)}/messages?order=latest&limit=100&offset=0&include_compacted=false`
+            const headers = new Headers({ Accept: 'application/json' })
+            if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+            const response = await fetchImpl(historyUrl, { method: 'GET', headers, signal: AbortSignal.timeout(1_500) })
+            if (!response.ok) return session
+            messages = latestVisibleSessionMessages(await response.json(), operator, completions, records)
+            sessionMessageCache.set(cacheKey, { signature, messages })
+            if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
+          }
+          return {
+            ...session,
+            ...(messages.latest ? { latest_message: messages.latest } : {}),
+            ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
+          }
+        } catch {
+          return session
+        }
+      }))
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
+
+  const safeQueueValue = (value, record) => {
+    let result = Buffer.from(JSON.stringify(value))
+    result = projectWizardFileMarkers(result)
+    const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
+    if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
+      throw Object.assign(new Error('unsafe queued run response'), { status: 502 })
+    }
+    return JSON.parse(result.toString('utf8'))
+  }
+
+  const safeQueuedRunPayload = (record) => safeQueueValue(runQueue.publicPayload(record), record)
+  const sendQueuedRun = (response, status, record, headers = {}) => sendJson(response, status, safeQueuedRunPayload(record), headers)
+
+  const streamQueuedRunEvents = async (initialRecord, operator, request, response) => {
+    const queuedPayload = safeQueuedRunPayload(initialRecord)
+    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' })
+    response.write(`event: run.queued\ndata: ${JSON.stringify(queuedPayload)}\n\n`)
+    const keepalive = setInterval(() => { if (!response.destroyed) response.write(': waiting for Wizard capacity\n\n') }, 15_000)
+    keepalive.unref?.()
+    try {
+      let record = initialRecord
+      while (!response.destroyed && !record.upstreamRunId && !['completed', 'failed', 'cancelled', 'interrupted'].includes(record.status)) {
+        await runQueue.tick(true)
+        record = runQueue.get(record.publicRunId)
+        if (!record?.upstreamRunId) await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
+      }
+      if (response.destroyed || !record) return
+      if (!record.upstreamRunId) {
+        const status = ['failed', 'cancelled', 'interrupted'].includes(record.status) ? record.status : 'failed'
+        response.end(`event: run.${status}\ndata: ${JSON.stringify({ run_id: record.publicRunId, status })}\n\n`)
+        return
+      }
+      if (operator) {
+        let run = null
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline && !response.destroyed) {
+          run = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+          if (['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) break
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+        }
+        if (response.destroyed) return
+        const status = ['completed', 'failed', 'cancelled', 'interrupted'].includes(run?.status) ? run.status : 'failed'
+        const output = status === 'completed' ? OPERATOR_ACK : 'The Operator acknowledgement failed.'
+        const data = JSON.stringify({ run_id: record.publicRunId, status, output })
+        response.end(`event: message.delta\ndata: ${JSON.stringify({ delta: output })}\n\nevent: run.${status}\ndata: ${data}\n\n`)
+        return
+      }
+      const headers = new Headers({ Accept: 'text/event-stream' })
+      headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      const controller = new AbortController()
+      request.once('aborted', () => controller.abort())
+      response.once('close', () => { if (!response.writableEnded) controller.abort() })
+      const upstream = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(record.upstreamRunId)}/events`, { headers, redirect: 'manual', signal: controller.signal })
+      if (!upstream.ok || !upstream.body) {
+        await upstream.body?.cancel().catch(() => undefined)
+        response.end()
+        return
+      }
+      await pipeline(
+        Readable.fromWeb(upstream.body),
+        replaceLiteral(record.upstreamRunId, record.publicRunId),
+        secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
+        response,
+      )
+    } finally { clearInterval(keepalive) }
   }
 
   const inboxRequest = async (path, init = {}) => {
@@ -734,7 +1715,7 @@ export function createWizardServer(options = {}) {
     return file
   }))
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       if (url.pathname === '/wizard/health' && request.method === 'GET') {
@@ -747,7 +1728,90 @@ export function createWizardServer(options = {}) {
           await upstream.body?.cancel().catch(() => undefined)
         } catch { reachable = false }
         finally { clearTimeout(timer) }
-        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable })
+        const queue = runQueue ? await runQueue.summary() : undefined
+        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
+        return
+      }
+
+      if (url.pathname === '/wizard/voice/status' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 2000)
+        try {
+          const upstream = await fetchImpl(`${sttOrigin}/health`, { signal: controller.signal, redirect: 'error' })
+          const raw = Buffer.from(await upstream.arrayBuffer())
+          if (!upstream.ok || raw.length > 64 * 1024) throw new Error('voice unavailable')
+          const value = JSON.parse(raw.toString('utf8'))
+          const provider = typeof value.provider === 'string' ? value.provider.slice(0, 80) : ''
+          const model = typeof value.model === 'string' ? value.model.slice(0, 120) : ''
+          const names = { tinfoil: 'Tinfoil', 'openai-compatible': 'OpenAI', local: 'Local model' }
+          sendJson(response, 200, {
+            ready: value.status === 'ok' && Boolean(provider),
+            provider,
+            name: names[provider] ?? 'Managed by Wizard',
+            model,
+            attested: value.attested === true,
+          })
+        } catch { sendJson(response, 503, { ready: false, provider: '', name: 'Voice unavailable', model: '', attested: false }) }
+        finally { clearTimeout(timer) }
+        return
+      }
+
+      if (url.pathname === '/wizard/voice/transcribe' && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const contentType = String(request.headers['content-type'] ?? '').toLowerCase()
+        if (!/^audio\/(webm|ogg|mp4|wav|x-m4a)(?:;|$)/.test(contentType)) { sendJson(response, 415, { error: 'audio_required' }); return }
+        const data = await readBoundedBody(request, WIZARD_VOICE_UPLOAD_LIMIT)
+        if (!data.length) { sendJson(response, 400, { error: 'empty_audio' }); return }
+        const filename = safeHeader(request.headers['x-wizard-filename'], 'wizard-voice.webm', 120).replaceAll('/', '_').replaceAll('\\', '_')
+        const form = new FormData()
+        form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
+        form.append('language', 'en')
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 180_000)
+        request.once('aborted', () => controller.abort())
+        try {
+          const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal })
+          const raw = Buffer.from(await upstream.arrayBuffer())
+          if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
+          const value = JSON.parse(raw.toString('utf8'))
+          const text = typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : ''
+          if (!text) throw Object.assign(new Error('blank transcription'), { status: 400 })
+          sendJson(response, 200, {
+            text,
+            provider: typeof value.provider === 'string' ? value.provider.slice(0, 80) : '',
+            model: typeof value.model === 'string' ? value.model.slice(0, 120) : '',
+          })
+        } finally { clearTimeout(timer) }
+        return
+      }
+
+      const helmAttachmentMatch = url.pathname.match(/^\/wizard\/attachments\/([0-9a-f]{32})$/)
+      if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!helmOrigin) { sendJson(response, 503, { error: 'attachment_unavailable' }); return }
+        const headers = new Headers()
+        if (typeof request.headers.range === 'string') headers.set('Range', request.headers.range)
+        const controller = new AbortController()
+        request.once('aborted', () => controller.abort())
+        response.once('close', () => { if (!response.writableEnded) controller.abort() })
+        const upstream = await fetchImpl(`${helmOrigin}/helm/api/attachments/${helmAttachmentMatch[1]}`, { headers, redirect: 'manual', signal: controller.signal })
+        if (![200, 206, 416].includes(upstream.status)) {
+          await upstream.body?.cancel().catch(() => undefined)
+          sendJson(response, upstream.status === 404 ? 404 : 502, { error: upstream.status === 404 ? 'attachment_not_found' : 'attachment_unavailable' })
+          return
+        }
+        const responseHeaders = safeHelmContentHeaders(helmAttachmentMatch[1], upstream)
+        for (const name of ['accept-ranges', 'content-range', 'content-length']) {
+          const value = upstream.headers.get(name)
+          if (value) responseHeaders[name] = value
+        }
+        response.writeHead(upstream.status, responseHeaders)
+        if (request.method === 'HEAD') {
+          await upstream.body?.cancel().catch(() => undefined)
+          response.end()
+        } else if (!upstream.body) response.end()
+        else await pipeline(Readable.fromWeb(upstream.body), response)
         return
       }
 
@@ -761,14 +1825,15 @@ export function createWizardServer(options = {}) {
       }
 
       const fileContentMatch = url.pathname.match(/^\/wizard\/files\/([A-Za-z0-9._:-]+)\/content$/)
-      if (fileContentMatch && request.method === 'GET') {
+      if (fileContentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const id = fileContentMatch[1]
         const detail = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`)
         const file = safeFile(detail.file)
         if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
-        const content = await inboxRequest(`/v1/internal/files/${encodeURIComponent(id)}/content`)
-        if (!content.ok || !content.body) {
+        const range = typeof request.headers.range === 'string' ? request.headers.range : ''
+        const content = await inboxRequest(`/v1/internal/files/${encodeURIComponent(id)}/content`, range ? { headers: { Range: range } } : {})
+        if (![200, 206, 416].includes(content.status) || (content.status !== 416 && !content.body)) {
           await content.body?.cancel().catch(() => undefined)
           sendJson(response, content.status === 404 ? 404 : 502, { error: content.status === 404 ? 'not_found' : 'upstream_unavailable' })
           return
@@ -778,8 +1843,15 @@ export function createWizardServer(options = {}) {
           ...safeContentHeaders(file, content),
           ...(Number.isSafeInteger(contentLength) && contentLength >= 0 ? { 'Content-Length': contentLength } : {}),
         }
-        response.writeHead(200, headers)
-        await pipeline(Readable.fromWeb(content.body), secretGuard([inboxToken]), response)
+        for (const name of ['accept-ranges', 'content-range']) {
+          const value = content.headers.get(name)
+          if (value) headers[name] = value
+        }
+        response.writeHead(content.status, headers)
+        if (content.status === 416 || request.method === 'HEAD') {
+          await content.body?.cancel().catch(() => undefined)
+          response.end()
+        } else await pipeline(Readable.fromWeb(content.body), secretGuard([inboxToken]), response)
         return
       }
 
@@ -853,15 +1925,74 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      if (url.pathname === '/wizard/attention' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const attention = (await readHelmActivities())
+          .filter((activity) => activity.status === 'failed')
+          .map((activity) => ({
+            id: activity.activityId,
+            thread_id: activity.threadId,
+            session_id: activity.sessionId,
+            title: activity.title,
+            detail: activity.kind === 'create'
+              ? `Thread creation failed before work started${activity.canRetry ? ' · Use Recover in Wizard' : ''}`
+              : activity.detail || `Wizard work failed${activity.canRetry ? ' · Use Recover in Wizard' : ''}`,
+            failed_at: activity.failedAt,
+            can_retry: activity.canRetry,
+          }))
+        sendJson(response, 200, { attention })
+        return
+      }
+
+      const attentionAction = url.pathname.match(/^\/wizard\/attention\/([^/]+)\/(retry|dismiss)$/)
+      if (attentionAction && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (url.search || !HELM_ACTIVITY_ID.test(attentionAction[1])) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if ((await readBoundedBody(request, 2)).length) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const status = await mutateHelmActivity(attentionAction[1], attentionAction[2])
+        sendJson(response, status, { ok: true, action: attentionAction[2] })
+        return
+      }
+
       const proxyPrefix = url.pathname.startsWith(OPERATOR_PROXY_PREFIX)
         ? OPERATOR_PROXY_PREFIX
         : url.pathname.startsWith(PROXY_PREFIX) ? PROXY_PREFIX : ''
       if (proxyPrefix) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+        if (runQueue) await runQueueReady
+        const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval))?$/) : null
+        let queuedProxyRecord = queuedPath ? runQueue.get(queuedPath[1]) : null
+        if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
+          await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
+          return
+        }
+        if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
+          await runQueue.tick(true)
+          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId))
+          return
+        }
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop' && !queuedProxyRecord.upstreamRunId) {
+          const cancelled = await runQueue.cancel(queuedProxyRecord.publicRunId)
+          sendQueuedRun(response, 202, cancelled)
+          return
+        }
+        if (queuedProxyRecord?.upstreamRunId) {
+          const controlRunId = operator
+            && queuedProxyRecord.runtime === 'operator'
+            && queuedPath?.[2] === 'steer'
+            && queuedProxyRecord.workerRunId
+            ? queuedProxyRecord.workerRunId
+            : queuedProxyRecord.upstreamRunId
+          upstreamPath = upstreamPath.replace(queuedProxyRecord.publicRunId, controlRunId)
+        } else if (queuedProxyRecord && queuedPath[2] !== 'steer') {
+          sendJson(response, 409, { error: 'run_queued' })
+          return
+        }
         const eventRunId = operator && request.method === 'GET' ? upstreamPath.match(/^\/v1\/runs\/([^/]+)\/events$/)?.[1] : ''
         const eventRecord = eventRunId ? operatorWorkers.get(eventRunId) : null
         if (eventRecord) {
@@ -883,12 +2014,45 @@ export function createWizardServer(options = {}) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? await readBoundedBody(request) : undefined
+        if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
+          const guidance = parseJsonBody(body).input
+          const updated = await runQueue.appendGuidance(queuedProxyRecord.publicRunId, guidance)
+          sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
+          return
+        }
+        let queuedAdmission = null
+        let directAdmissionSessionId = ''
+        if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
+          const requested = parseJsonBody(body)
+          if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
+          const runtime = operator ? 'operator' : 'direct'
+          const substantive = !operator || !isInlineOperatorRequest(requested.input)
+          if (runQueue && substantive) {
+            if (operator) operatorBody('POST', '/v1/runs', body)
+            else directBody('POST', '/v1/runs', body)
+            const sessionId = typeof requested.session_id === 'string' ? requested.session_id : ''
+            const idempotencyKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
+            const requestHash = queueRequestHash(runtime, body.toString('utf8'))
+            const replay = runQueue.replay(runtime, sessionId, idempotencyKey, requestHash)
+            if (replay) {
+              sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
+              return
+            }
+            queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash }
+          }
+        }
         let pendingWorker = null
         let trustedPaths = []
-        if (body && upstreamPath === '/v1/runs') {
+        const steerPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)\/steer$/)?.[1] ?? ''
+        if (body && (upstreamPath === '/v1/runs' || steerPathId)) {
           const prepared = await prepareRunBody(body, resolveFiles)
           body = prepared.body
           trustedPaths = prepared.trustedPaths
+        }
+        if (queuedAdmission) {
+          const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
+          sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
+          return
         }
         if (body && operator && operatorWorkerModel && request.method === 'POST' && upstreamPath === '/v1/runs') {
           const value = parseJsonBody(body)
@@ -909,13 +2073,22 @@ export function createWizardServer(options = {}) {
         const controller = new AbortController()
         request.once('aborted', () => controller.abort())
         response.once('close', () => { if (!response.writableEnded) controller.abort() })
-        const upstream = await fetchImpl(`${upstreamOrigin}${operator ? OPERATOR_UPSTREAM_PREFIX : ''}${upstreamPath}${url.search}`, {
-          method: request.method,
-          headers,
-          body,
-          redirect: 'manual',
-          signal: controller.signal,
-        })
+        const upstreamQuery = new URLSearchParams(url.searchParams)
+        upstreamQuery.delete('view')
+        upstreamQuery.delete('snapshot')
+        const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
+        const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
+          ? await canonicalSessionPage(operator, url.searchParams)
+          : null
+        const upstream = canonicalPage
+          ? new Response(JSON.stringify(canonicalPage), { status: 200, headers: { 'Content-Type': 'application/json' } })
+          : await fetchImpl(`${upstreamOrigin}${operator ? OPERATOR_UPSTREAM_PREFIX : ''}${upstreamPath}${upstreamSearch}`, {
+              method: request.method,
+              headers,
+              body,
+              redirect: 'manual',
+              signal: controller.signal,
+            })
         const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
         const responseHeaders = {
           'Content-Type': contentType,
@@ -925,7 +2098,7 @@ export function createWizardServer(options = {}) {
         const replayed = upstream.headers.get('idempotency-replayed')
         if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
         const runPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)/)?.[1]
-        const responseTrustedPaths = runPathId ? runTrustedPaths.get(runPathId) ?? [] : []
+        const responseTrustedPaths = runPathId ? runTrustedPaths.get(runPathId) ?? queuedProxyRecord?.trustedPaths ?? [] : []
         if (contentType.includes('text/event-stream') && upstream.body) {
           response.writeHead(upstream.status, { ...responseHeaders, Connection: 'keep-alive' })
           void pipeline(Readable.fromWeb(upstream.body), secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...responseTrustedPaths]), response).catch(() => {
@@ -934,6 +2107,45 @@ export function createWizardServer(options = {}) {
           return
         }
         let result = Buffer.from(await upstream.arrayBuffer())
+        if (queuedProxyRecord && contentType.includes('application/json')) {
+          const operatorRecord = queuedProxyRecord.runtime === 'operator'
+            ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
+            : null
+          result = replacePrivateControlIdentities(result, [
+            [queuedProxyRecord.upstreamRunId, queuedProxyRecord.publicRunId],
+            [queuedProxyRecord.workerRunId, queuedProxyRecord.publicRunId],
+            [operatorRecord?.workerSessionId, queuedProxyRecord.sessionId],
+          ])
+        }
+        if (upstream.ok && !operator && request.method === 'POST' && upstreamPath === '/v1/runs') {
+          try {
+            const admission = JSON.parse(result.toString('utf8'))
+            const runId = typeof admission.run_id === 'string' ? admission.run_id : typeof admission.id === 'string' ? admission.id : ''
+            const status = String(admission.status ?? 'queued')
+            if (runId && directAdmissionSessionId && ACTIVE_RUN_STATUSES.has(status)) {
+              if (directRuns.size >= 128) directRuns.delete(directRuns.keys().next().value)
+              for (const [trackedRunId, tracked] of directRuns) {
+                if (tracked.sessionId === directAdmissionSessionId) directRuns.delete(trackedRunId)
+              }
+              directRuns.set(runId, {
+                sessionId: directAdmissionSessionId,
+                runId,
+                status,
+                createdAt: Number(admission.created_at) || Date.now() / 1000,
+                updatedAt: Number(admission.updated_at) || Date.now() / 1000,
+              })
+            }
+          } catch { /* the browser still validates the admission response */ }
+        }
+        if (upstream.ok && !operator && request.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) {
+          try {
+            const runId = upstreamPath.split('/').at(-1)
+            const tracked = directRuns.get(runId)
+            const status = JSON.parse(result.toString('utf8')).status
+            if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
+            else if (tracked) directRuns.delete(runId)
+          } catch { /* status projection is best effort */ }
+        }
         if (upstream.ok && operator && request.method === 'POST' && upstreamPath === '/v1/runs' && pendingWorker) {
           const admission = JSON.parse(result.toString('utf8'))
           const ackRunId = typeof admission.run_id === 'string' ? admission.run_id : typeof admission.id === 'string' ? admission.id : ''
@@ -967,8 +2179,39 @@ export function createWizardServer(options = {}) {
             }
           } catch { /* admission validation remains the browser client's job */ }
         }
+        if (upstream.ok && steerPathId && request.method === 'POST' && trustedPaths.length) {
+          const existing = runTrustedPaths.get(steerPathId) ?? []
+          runTrustedPaths.set(steerPathId, [...new Set([...existing, ...trustedPaths])])
+          if (runTrustedPaths.size > 100) runTrustedPaths.delete(runTrustedPaths.keys().next().value)
+        }
+        if (upstream.ok && canonicalSessionReader && (
+          request.method === 'POST' && upstreamPath === '/api/sessions'
+          || request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)
+        )) {
+          canonicalSessionCache.expiresAt = 0
+          void refreshCanonicalSessions().catch(() => undefined)
+        }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
-          result = filterSessionList(result, operator, [...operatorWorkers.values()])
+          result = canonicalPage
+            ? result
+            : mergeArchivedSessions(result, archivedSessionReader())
+          const listedSessionIds = sessionIdsInList(result)
+          const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
+          const [helmActivities, externalRuns] = operator
+            ? [[], []]
+            : await Promise.all([readHelmActivities(), canonicalPage ? [] : readExternalAssistantRuns(listedSessionIds)])
+          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          result = filterSessionList(
+            result,
+            operator,
+            [...operatorWorkers.values()],
+            [...(runQueue?.projections() ?? []), ...directRuns.values()],
+            externalRuns,
+            sessionTruth,
+            helmActivities,
+            Boolean(canonicalPage),
+          )
+          if (firstPage) result = await enrichSessionListMessages(result, operator)
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
@@ -979,6 +2222,7 @@ export function createWizardServer(options = {}) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           result = projectWizardFileMarkers(result, messageHistory)
+          if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
         const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
@@ -989,8 +2233,12 @@ export function createWizardServer(options = {}) {
 
       if (url.pathname === '/') { response.writeHead(302, { Location: '/wizard', 'Cache-Control': 'no-store' }); response.end(); return }
       if (url.pathname === '/wizard' || url.pathname === '/wizard/') {
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const index = await readFile(resolve(distDir, 'index.html'))
+        const access = requireAccess ? await verifiedAccess(request, accessVerifier) : null
+        if (requireAccess && !access) { sendJson(response, 403, { error: 'access_required' }); return }
+        const source = await readFile(resolve(distDir, 'index.html'))
+        const index = access
+          ? Buffer.from(source.toString('utf8').replace('wizard-account-local', wizardAccountScope(access.claims)))
+          : source
         response.writeHead(200, { ...staticHeaders('index.html'), 'Content-Length': index.length })
         response.end(index)
         return
@@ -1008,13 +2256,15 @@ export function createWizardServer(options = {}) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
-      if ([400, 404, 413, 415, 503].includes(error?.status) && !response.headersSent) {
-        const names = { 400: 'invalid_request', 404: 'not_found', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
+      if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
+        const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
     }
   })
+  if (runQueue) server.once('close', () => runQueue.close())
+  return server
 }
 
 export async function listen(server, host = '127.0.0.1', port = 0) {

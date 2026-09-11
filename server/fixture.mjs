@@ -22,6 +22,12 @@ export function createHermesFixture(options = {}) {
   const runs = new Map()
   const clients = new Map()
   const timers = new Set()
+  const media = new Map([
+    ['1'.repeat(32), { name: 'weekend.png', mime: 'image/png', bytes: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64') }],
+    ['2'.repeat(32), { name: 'weekend-voice.webm', mime: 'audio/webm', bytes: Buffer.from('fixture-audio') }],
+    ['3'.repeat(32), { name: 'weekend.mp4', mime: 'video/mp4', bytes: Buffer.from('fixture-video') }],
+    ['4'.repeat(32), { name: 'weekend-notes.md', mime: 'text/markdown', bytes: Buffer.from('# Weekend notes\n\n- Keep Saturday quiet.\n- Walk after lunch.') }],
+  ])
   const longMessages = Array.from({ length: 180 }, (_, index) => ({
     id: `long-${index}`,
     role: index % 2 ? 'assistant' : 'user',
@@ -29,16 +35,28 @@ export function createHermesFixture(options = {}) {
     created_at: iso(-180000 + index * 1000),
   }))
   const sessions = options.empty ? [] : [
-    { id: 'chat-recent', title: 'Plan the quiet weekend', source: 'wizard-mobile', preview: '[Your active task list was preserved across context compression]\n- [>] private task', updated_at: iso(-60_000), model: 'fixture-capable' },
-    { id: 'chat-long', title: 'Long project notes', source: 'webui', preview: 'The complete working history', updated_at: iso(-3_600_000), model: 'fixture-fast' },
+    { id: 'chat-recent', title: 'Plan the quiet weekend', source: 'wizard-mobile', preview: '[Your active task list was preserved across context compression]\n- [>] private task', updated_at: iso(-60_000), wizard_last_user_at: iso(-60_000), model: 'fixture-capable' },
+    { id: 'chat-long', title: 'Long project notes', source: 'webui', preview: 'The complete working history', updated_at: iso(-3_600_000), wizard_last_user_at: iso(-3_600_000), model: 'fixture-fast' },
   ]
   const messages = new Map([
     ['chat-recent', [
       { id: 'm-1', role: 'user', content: 'Help me plan a quiet weekend.', created_at: iso(-120_000) },
       { id: 'm-2', role: 'assistant', content: 'I found three gentle options close to home.', created_at: iso(-60_000) },
+      {
+        id: 'm-helm-media',
+        role: 'user',
+        content: `[Workspace::v1: /home/telos]\nHere are the reference files.\n\n<helm_attachments>${JSON.stringify({ instruction: 'private attachment handling', items: [
+          { id: '1'.repeat(32), name: 'weekend.png', mime: 'image/png', path: '/private/weekend.png' },
+          { id: '2'.repeat(32), name: 'weekend-voice.webm', mime: 'audio/webm', transcript: 'Keep Saturday quiet.', path: '/private/weekend-voice.webm' },
+          { id: '3'.repeat(32), name: 'weekend.mp4', mime: 'video/mp4', kind: 'video', path: '/private/weekend.mp4' },
+          { id: '4'.repeat(32), name: 'weekend-notes.md', mime: 'text/markdown', kind: 'file', path: '/private/weekend-notes.md' },
+        ] })}</helm_attachments>`,
+        created_at: iso(-50_000),
+      },
       { id: 'm-hidden', role: 'user', content: '', display_kind: 'hidden', created_at: iso(-40_000) },
       { id: 'm-delegation', role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_fixture]\nInternal worker transcript', display_kind: 'async_delegation_complete', created_at: iso(-30_000) },
       { id: 'm-task-restore', role: 'user', content: '[Your active task list was preserved across context compression]\n- [>] private task', created_at: iso(-20_000) },
+      { id: 'm-process-wakeup', role: 'user', content: '[IMPORTANT: Background process proc_fixture completed (exit_code=1).\nCommand: ./gradlew assembleDebug\nOutput:\nBUILD FAILED\n]', created_at: iso(-10_000) },
     ]],
     ['chat-long', longMessages],
   ])
@@ -49,7 +67,7 @@ export function createHermesFixture(options = {}) {
       const callId = `call-${run.id}-${(run.toolSequence ?? 0) + 1}`
       run.toolSequence = (run.toolSequence ?? 0) + 1
       run.activeToolCallId = callId
-      list.push({ id: `assistant-${callId}`, role: 'assistant', content: '', tool_calls: [{ call_id: callId, function: { name: 'read_file', arguments: '{}' } }], created_at: iso() })
+      list.push({ id: `assistant-${callId}`, role: 'assistant', content: '', tool_calls: [{ call_id: callId, function: { name: typeof data.tool === 'string' ? data.tool : 'read_file', arguments: '{}' } }], created_at: iso() })
       messages.set(run.sessionId, list)
     }
     if ((event === 'tool.completed' || event === 'tool.failed') && run.activeToolCallId) {
@@ -86,6 +104,11 @@ export function createHermesFixture(options = {}) {
       later(() => complete(run, '## Markdown result\n\n- **Bold** item\n- `code` item\n\n[Safe link](https://example.com)\n\n<script>window.fixtureUnsafe = true</script>'), 140)
       return
     }
+    if (run.scenario === 'plain') {
+      later(() => emit(run, 'message.delta', { delta: 'A plain reply with no private work.' }), 40)
+      later(() => complete(run, 'A plain reply with no private work.'), 500)
+      return
+    }
     if (run.scenario === 'approval') {
       later(() => emit(run, 'tool.started', { summary: 'Checking the selected backup' }), 30)
       later(() => {
@@ -96,14 +119,42 @@ export function createHermesFixture(options = {}) {
       }, 90)
       return
     }
-    later(() => emit(run, 'tool.started', { summary: 'Reading the helpful notes' }), 30)
-    later(() => emit(run, 'message.delta', { delta: 'I checked the details. ' }), 70)
-    later(() => emit(run, 'tool.completed', { summary: 'Checked the helpful notes' }), 350)
-    if (run.scenario !== 'hold') later(() => complete(run), 1600)
+    const phases = ['Comparing possible approaches', 'Reading the strongest source', 'Checking the current implementation', 'Tracing the live state', 'Confirming the edge case', 'Cross-checking the source', 'Reviewing the mobile path', 'Checking recovery behavior', 'Verifying the final constraint', 'Confirming source fidelity', 'Running the focused checks', 'Preparing the verified result']
+    const tools = ['web_search', 'web_search', 'web_extract', 'read_file', 'read_file', 'read_file', 'web_search', 'web_extract', 'read_file', 'read_file', 'web_extract', 'read_file']
+    tools.forEach((tool, index) => {
+      const stepId = `phase-${run.id}-${index + 1}`
+      later(() => emit(run, 'reasoning.available', { id: `summary-${stepId}`, summary: phases[index], detail: `${phases[index]} without exposing private arguments.` }), 24 + index * 50)
+      later(() => emit(run, 'tool.started', { step_id: stepId, tool }), 30 + index * 50)
+      later(() => emit(run, 'tool.completed', { step_id: stepId, tool }), 50 + index * 50)
+    })
+    later(() => emit(run, 'message.delta', { delta: 'I checked the details. ' }), 700)
+    if (run.scenario !== 'hold') later(() => complete(run), 4000)
   }
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://fixture')
+    const attachment = url.pathname.match(/^\/helm\/api\/attachments\/([0-9a-f]{32})$/)
+    if (attachment && ['GET', 'HEAD'].includes(request.method ?? '')) {
+      const item = media.get(attachment[1])
+      if (!item) { json(response, 404, { error: 'not found' }); return }
+      const range = typeof request.headers.range === 'string' ? request.headers.range.match(/^bytes=(\d+)-(\d*)$/) : null
+      const start = range ? Number(range[1]) : 0
+      const end = range && range[2] ? Math.min(Number(range[2]), item.bytes.length - 1) : item.bytes.length - 1
+      if (range && (start >= item.bytes.length || end < start)) {
+        response.writeHead(416, { 'Content-Range': `bytes */${item.bytes.length}`, 'Accept-Ranges': 'bytes' }); response.end(); return
+      }
+      const selected = item.bytes.subarray(start, end + 1)
+      response.writeHead(range ? 206 : 200, {
+        'Content-Type': item.mime,
+        'Content-Length': selected.length,
+        'Accept-Ranges': 'bytes',
+        ...(range ? { 'Content-Range': `bytes ${start}-${end}/${item.bytes.length}` } : {}),
+        'Content-Disposition': `inline; filename="${item.name}"`,
+      })
+      if (request.method === 'HEAD') response.end()
+      else response.end(selected)
+      return
+    }
     if (request.headers.authorization !== `Bearer ${options.expectedKey ?? 'fixture-secret'}`) { json(response, 401, { error: 'missing bearer' }); return }
     if (request.method === 'GET' && url.pathname === '/v1/capabilities') { json(response, 200, { capabilities: { sessions: true, runs: true, events: true, approvals: true, steer: true, stop: true, multimodal: true } }); return }
     if (request.method === 'GET' && url.pathname === '/api/model/options') { json(response, 200, { options: [{ value: 'fixture-fast', name: 'Swift', description: 'fastest' }, { value: 'fixture-capable', name: 'Sage', description: 'most capable' }] }); return }
@@ -117,7 +168,13 @@ export function createHermesFixture(options = {}) {
     if (sessionMatch && request.method === 'GET') { const session = sessions.find((item) => item.id === sessionMatch[1]); json(response, session ? 200 : 404, session ?? { error: 'not found' }); return }
     if (sessionMatch && request.method === 'PATCH') { const session = sessions.find((item) => item.id === sessionMatch[1]); if (!session) { json(response, 404, {}); return } Object.assign(session, await body(request)); json(response, 200, session); return }
     const messageMatch = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9._:-]+)\/messages$/)
-    if (messageMatch && request.method === 'GET') { json(response, messages.has(messageMatch[1]) ? 200 : 404, { messages: messages.get(messageMatch[1]) ?? [] }); return }
+    if (messageMatch && request.method === 'GET') {
+      const reply = () => json(response, messages.has(messageMatch[1]) ? 200 : 404, { messages: messages.get(messageMatch[1]) ?? [] })
+      const delay = Number(server.fixture?.messageDelayMs ?? options.messageDelayMs ?? 0)
+      if (delay > 0) later(reply, delay)
+      else reply()
+      return
+    }
     const modelMatch = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9._:-]+)\/model$/)
     if (modelMatch && request.method === 'POST') { const session = sessions.find((item) => item.id === modelMatch[1]); if (!session) { json(response, 404, {}); return } const input = await body(request); session.model = input.model; session.provider = input.provider; json(response, 200, session); return }
     if (request.method === 'POST' && url.pathname === '/v1/runs') {
@@ -133,7 +190,7 @@ export function createHermesFixture(options = {}) {
           ? input.input[0].content
           : input.input
       const text = inputText(admittedContent)
-      const run = { id: `work-${++runSequence}`, sessionId: input.session_id, input: input.input, status: 'running', output: '', events: [], scenario: /markdown/i.test(text) ? 'markdown' : /approval/i.test(text) ? 'approval' : /hold|stop|steer/i.test(text) ? 'hold' : 'normal', approval: null }
+      const run = { id: `work-${++runSequence}`, sessionId: input.session_id, input: input.input, status: 'running', output: '', events: [], scenario: /markdown/i.test(text) ? 'markdown' : /plain reply/i.test(text) ? 'plain' : /approval/i.test(text) ? 'approval' : /hold|stop|steer/i.test(text) ? 'hold' : 'normal', approval: null }
       admissions.set(admissionKey, run); runs.set(run.id, run)
       const list = messages.get(run.sessionId) ?? []
       list.push({ id: `user-${admissionKey}`, role: 'user', content: admittedContent, created_at: iso() }); messages.set(run.sessionId, list)
@@ -164,7 +221,15 @@ export function createHermesFixture(options = {}) {
     if (steerMatch && request.method === 'POST') {
       const run = runs.get(steerMatch[1]); const input = await body(request)
       if (!run || !['running', 'waiting_for_approval'].includes(run.status)) { json(response, 409, { accepted: false, status: 'rejected' }); return }
-      emit(run, 'run.steered', { accepted: true }); json(response, 200, { accepted: true }); later(() => complete(run, `I followed your guidance: ${String(input.input).slice(0, 80)}`), 120); return
+      if (/decline steer/i.test(String(input.input))) { json(response, 200, { accepted: false, status: 'rejected' }); return }
+      if (/reject steer/i.test(String(input.input))) { json(response, 409, { accepted: false, status: 'rejected' }); return }
+      run.steers = [...(run.steers ?? []), input.input]
+      const list = messages.get(run.sessionId) ?? []
+      list.push({ id: `steer-${run.id}-${run.steers.length}`, role: 'user', content: input.input, created_at: iso() })
+      messages.set(run.sessionId, list)
+      emit(run, 'run.steered', { accepted: true }); json(response, 200, { accepted: true })
+      if (!/continue holding|Please use the attached file/i.test(String(input.input))) later(() => complete(run, `I followed your guidance: ${String(input.input).slice(0, 80)}`), 120)
+      return
     }
     const stopMatch = url.pathname.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)\/stop$/)
     if (stopMatch && request.method === 'POST') {
@@ -174,7 +239,7 @@ export function createHermesFixture(options = {}) {
     json(response, 404, { error: 'not found' })
   })
 
-  server.fixture = { sessions, messages, runs, admissions }
+  server.fixture = { sessions, messages, runs, admissions, messageDelayMs: Number(options.messageDelayMs ?? 0) }
   server.closeFixture = async () => {
     for (const timer of timers) clearTimeout(timer)
     for (const set of clients.values()) for (const response of set) response.destroy()
