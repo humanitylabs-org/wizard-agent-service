@@ -120,7 +120,9 @@ export function readHelmActivitySessionIds(path, activityIds) {
   return sessions
 }
 
-export function readWizardAssistantRunReferences(path, sessionIds) {
+const PENDING_ASSISTANT_ADMISSION_SECONDS = 120
+
+export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
   const latestBySession = new Map()
   if (!ids.length) return []
@@ -129,17 +131,23 @@ export function readWizardAssistantRunReferences(path, sessionIds) {
   try {
     const placeholders = ids.map(() => '?').join(',')
     const rows = db.prepare(`
-      SELECT session_id, run_id
+      SELECT session_id, run_id, admission_status, created_at
       FROM assistant_requests
       WHERE session_id IN (${placeholders})
-        AND run_id IS NOT NULL
       ORDER BY updated_at DESC, created_at DESC, rowid DESC
     `).all(...ids)
     for (const row of rows) {
       const sessionId = String(row.session_id || '')
       const runId = String(row.run_id || '')
-      if (!sessionId || latestBySession.has(sessionId) || !/^[A-Za-z0-9._:-]+$/.test(runId)) continue
-      latestBySession.set(sessionId, { sessionId, runId })
+      if (!sessionId || latestBySession.has(sessionId)) continue
+      if (/^[A-Za-z0-9._:-]+$/.test(runId)) {
+        latestBySession.set(sessionId, { sessionId, runId })
+        continue
+      }
+      const createdAt = Number(row.created_at) || 0
+      if (!runId && createdAt > 0 && createdAt + PENDING_ASSISTANT_ADMISSION_SECONDS >= nowSeconds) {
+        latestBySession.set(sessionId, { sessionId, runId: '', status: 'running' })
+      }
     }
   } catch {
     return []

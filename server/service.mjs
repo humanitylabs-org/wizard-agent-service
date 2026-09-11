@@ -362,7 +362,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (direct.queueReason) projected.queue_reason = direct.queueReason
             } else if (external) {
               projected.status = external.status
-              if (ACTIVE_RUN_STATUSES.has(external.status)) projected.wizard_run_id = external.runId
+              if (ACTIVE_RUN_STATUSES.has(external.status) && external.runId) projected.wizard_run_id = external.runId
             } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
               projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
             } else if (helm?.status === 'failed') projected.status = 'failed'
@@ -1253,7 +1253,8 @@ export function createWizardServer(options = {}) {
 
   const readExternalAssistantRuns = async (sessionIds) => {
     const references = readWizardAssistantRunReferences(inboxDbPath, sessionIds)
-    const projected = await Promise.all(references.map(async ({ sessionId, runId }) => {
+    const projected = await Promise.all(references.map(async ({ sessionId, runId, status: pendingStatus }) => {
+      if (!runId && pendingStatus === 'running') return { sessionId, runId: '', status: 'running' }
       const terminal = terminalExternalRuns.get(runId)
       if (terminal) return terminal
       try {
