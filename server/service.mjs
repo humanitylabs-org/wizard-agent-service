@@ -33,6 +33,12 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving James through Wizard, his first-party mobile Hermes client. Apply the same intelligence, depth, tool use, source grounding, and verification you would in Helm. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown.
+
+The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify James is progress only.
+
+Finish with one self-contained, user-facing response that states what is now true, what is ready to use, and any real next action. If progress genuinely requires James, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.`
+
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
@@ -138,7 +144,12 @@ function directBody(method, pathname, body) {
   if (typeof sessionId === 'string' && sessionId.startsWith(OPERATOR_SESSION_PREFIX)) {
     throw Object.assign(new Error('operator namespace is reserved'), { status: 400 })
   }
-  return body
+  if (!isRunCreate) return body
+  return Buffer.from(JSON.stringify({
+    ...value,
+    instructions: WIZARD_RUN_INSTRUCTIONS,
+    delegation_delivery: 'join',
+  }))
 }
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
@@ -655,6 +666,8 @@ export function createWizardServer(options = {}) {
         provider: 'custom:tinfoil-operator',
         require_model_lock: true,
         model_options: { reasoning_effort: 'max' },
+        instructions: WIZARD_RUN_INSTRUCTIONS,
+        delegation_delivery: 'join',
       }),
       headers: { 'Idempotency-Key': `worker-${workerSessionId}` },
     })
