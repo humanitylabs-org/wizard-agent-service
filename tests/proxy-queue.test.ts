@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen, readActiveHumanSessionIds, wizardDispatchHealthy } from '../server/service.mjs'
+import { createWizardServer, listen, readActiveHumanSessionIds, WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
 
 const servers: ReturnType<typeof createServer>[] = []
 const temporaryDirectories: string[] = []
@@ -60,7 +60,7 @@ describe('Wizard proxy capacity queue', () => {
       archived: false,
       updated_at: new Date().toISOString(),
     }))
-    const upstreamRuns = new Map<string, { sessionId: string; status: string; input: string; output?: string }>()
+    const upstreamRuns = new Map<string, { sessionId: string; status: string; input: string; instructions: string; delegationDelivery: string; output?: string }>()
     let admissions = 0
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')
@@ -70,7 +70,13 @@ describe('Wizard proxy capacity queue', () => {
         const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         admissions += 1
         const runId = `actual_${admissions}`
-        upstreamRuns.set(runId, { sessionId: value.session_id, status: 'running', input: value.input })
+        upstreamRuns.set(runId, {
+          sessionId: value.session_id,
+          status: 'running',
+          input: value.input,
+          instructions: value.instructions,
+          delegationDelivery: value.delegation_delivery,
+        })
         res.writeHead(202, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ object: 'run', run_id: runId, session_id: value.session_id, status: 'running' }))
         return
@@ -207,6 +213,10 @@ describe('Wizard proxy capacity queue', () => {
     expect(thirdStatus.status).toBe('running')
     expect(admissions).toBe(3)
     expect(upstreamRuns.get('actual_3')?.input).toContain('Guidance added while queued:\nUse the compact implementation.')
+    expect(upstreamRuns.get('actual_3')).toMatchObject({
+      instructions: WIZARD_RUN_INSTRUCTIONS,
+      delegationDelivery: 'join',
+    })
 
     const health = await request(origin, '/wizard/health')
     expect(health.json.queue).toMatchObject({ max_active: 2, active: 2, queued: 0, dispatch_paused: false })

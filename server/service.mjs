@@ -172,6 +172,7 @@ function directBody(method, pathname, body) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
+    instructions: WIZARD_RUN_INSTRUCTIONS,
     delegation_delivery: 'join',
   }))
 }

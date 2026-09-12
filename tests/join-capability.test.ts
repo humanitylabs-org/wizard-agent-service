@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { createWizardServer, listen, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
 
 const servers: Server[] = []
 
@@ -65,7 +65,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admissions()).toBe(0)
   })
 
-  it('admits only after Hermes proves join support and injects only the mechanical ownership contract', async () => {
+  it('admits only after Hermes proves join support and injects the full Wizard response contract', async () => {
     const upstream = await startUpstream(true)
     const wizard = await startWizard(upstream.origin)
 
@@ -80,9 +80,9 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admittedBody()).toMatchObject({
       session_id: 'wizard-parity',
       input: 'finish this',
+      instructions: WIZARD_RUN_INSTRUCTIONS,
       delegation_delivery: 'join',
     })
-    expect(upstream.admittedBody()).not.toHaveProperty('instructions')
 
     const instructed = await fetch(`${wizard}/wizard/hermes/v1/runs`, {
       method: 'POST',
@@ -93,7 +93,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admittedBody()).toMatchObject({
       session_id: 'wizard-parity-2',
       input: 'finish this too',
-      instructions: 'client-owned instruction',
+      instructions: WIZARD_RUN_INSTRUCTIONS,
       delegation_delivery: 'join',
     })
   })
