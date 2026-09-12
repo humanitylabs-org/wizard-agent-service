@@ -65,7 +65,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admissions()).toBe(0)
   })
 
-  it('admits only after Hermes proves join support and injects the ownership contract', async () => {
+  it('admits only after Hermes proves join support and injects only the mechanical ownership contract', async () => {
     const upstream = await startUpstream(true)
     const wizard = await startWizard(upstream.origin)
 
@@ -82,6 +82,19 @@ describe('Wizard delegated-work ownership contract', () => {
       input: 'finish this',
       delegation_delivery: 'join',
     })
-    expect(String(upstream.admittedBody()?.instructions)).toContain('owns the requested outcome through verified completion')
+    expect(upstream.admittedBody()).not.toHaveProperty('instructions')
+
+    const instructed = await fetch(`${wizard}/wizard/hermes/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 'wizard-parity-2', input: 'finish this too', instructions: 'client-owned instruction' }),
+    })
+    expect(instructed.status).toBe(202)
+    expect(upstream.admittedBody()).toMatchObject({
+      session_id: 'wizard-parity-2',
+      input: 'finish this too',
+      instructions: 'client-owned instruction',
+      delegation_delivery: 'join',
+    })
   })
 })
