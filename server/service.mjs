@@ -1,7 +1,7 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { dirname, extname, resolve, sep } from 'node:path'
+import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
@@ -18,6 +18,9 @@ export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
 export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
 // Eight composer files plus the retained microphone recording.
 const WIZARD_FILE_LIMIT = 9
+const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
+const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
+const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
 const SESSION_LIST_PREVIEW_LIMIT = 24
 const CANONICAL_SESSION_LIMIT = 2_000
 const CANONICAL_SESSION_CACHE_MS = 30_000
@@ -1000,6 +1003,97 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   }
 }
 
+function imageMime(bytes) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif'
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+  if (bytes.length >= 2 && bytes.subarray(0, 2).toString('ascii') === 'BM') return 'image/bmp'
+  return ''
+}
+
+function canonicalArtifactRoots(values) {
+  const roots = Array.isArray(values) ? values : typeof values === 'string' ? values.split(':') : []
+  return [...new Set(roots.map((value) => String(value).trim()).filter(Boolean).flatMap((value) => {
+    try { return [realpathSync(resolve(value))] } catch { return [] }
+  }))]
+}
+
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
+  if (!artifactDir || !artifactRoots.length) return null
+  let source
+  try { source = realpathSync(resolve(sourcePath.trim())) } catch { return null }
+  if (!artifactRoots.some((root) => source.startsWith(`${root}${sep}`))) return null
+  let details
+  try { details = statSync(source) } catch { return null }
+  if (!details.isFile() || details.size < 1 || details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  let bytes
+  try { bytes = readFileSync(source) } catch { return null }
+  const mime = imageMime(bytes)
+  if (!mime) return null
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const id = sha256.slice(0, 32)
+  const cleanName = basename(source).replace(/[\\/\p{Cc}]/gu, '_').trim().slice(-120) || `wizard-image.${mime.split('/')[1]}`
+  mkdirSync(artifactDir, { recursive: true, mode: 0o700 })
+  const contentPath = resolve(artifactDir, `${id}.bin`)
+  const metadataPath = resolve(artifactDir, `${id}.json`)
+  if (!existsSync(contentPath)) {
+    const temporary = resolve(artifactDir, `.${id}.${randomUUID()}.tmp`)
+    writeFileSync(temporary, bytes, { mode: 0o600 })
+    renameSync(temporary, contentPath)
+  }
+  const metadata = { id, name: cleanName, mime, kind: 'image', bytes: bytes.length, sha256 }
+  const metadataTemporary = resolve(artifactDir, `.${id}.${randomUUID()}.json.tmp`)
+  writeFileSync(metadataTemporary, JSON.stringify(metadata), { mode: 0o600 })
+  renameSync(metadataTemporary, metadataPath)
+  return metadata
+}
+
+function readAgentArtifact(id, artifactDir) {
+  if (!artifactDir || !AGENT_ARTIFACT_ID.test(id)) return null
+  try {
+    const metadata = JSON.parse(readFileSync(resolve(artifactDir, `${id}.json`), 'utf8'))
+    const contentPath = resolve(artifactDir, `${id}.bin`)
+    const details = statSync(contentPath)
+    if (metadata.id !== id || metadata.kind !== 'image' || !String(metadata.mime).startsWith('image/')
+        || metadata.bytes !== details.size || details.size < 1 || details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+    return { ...metadata, contentPath }
+  } catch { return null }
+}
+
+function projectAgentMedia(result, artifactDir, artifactRoots) {
+  if (!artifactDir || !artifactRoots.length) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  const projectText = (value) => {
+    const artifacts = []
+    const text = value.replace(AGENT_MEDIA_LINE, (_line, sourcePath) => {
+      const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots)
+      if (artifact && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
+      return ''
+    }).replace(/\n{3,}/g, '\n\n').trim()
+    if (!artifacts.length) return text
+    const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
+    return text ? `${text}\n\n${envelope}` : envelope
+  }
+  const visit = (value, assistant = false) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, assistant)
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    const role = typeof value.role === 'string' ? value.role.toLowerCase() : ''
+    const assistantValue = assistant || role === 'assistant'
+    for (const [key, child] of Object.entries(value)) {
+      const resultField = key === 'output' || key === 'response'
+      if (typeof child === 'string' && (resultField || assistantValue && (key === 'content' || key === 'text'))) value[key] = projectText(child)
+      else visit(child, assistantValue)
+    }
+  }
+  visit(payload)
+  return Buffer.from(JSON.stringify(payload))
+}
+
 function sendJson(response, status, value, headers = {}) {
   const body = Buffer.from(JSON.stringify(value))
   response.writeHead(status, {
@@ -1210,6 +1304,8 @@ export function createWizardServer(options = {}) {
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
+  const agentArtifactDir = options.agentArtifactDir ? resolve(String(options.agentArtifactDir)) : ''
+  const agentArtifactRoots = canonicalArtifactRoots(options.agentArtifactRoots)
   const runTrustedPaths = new Map()
   const directRuns = new Map()
   const terminalExternalRuns = new Map()
@@ -1792,6 +1888,19 @@ export function createWizardServer(options = {}) {
       const helmAttachmentMatch = url.pathname.match(/^\/wizard\/attachments\/([0-9a-f]{32})$/)
       if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir)
+        if (artifact) {
+          response.writeHead(200, {
+            'Content-Type': artifact.mime,
+            'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            'Content-Length': artifact.bytes,
+            'Cache-Control': 'private, no-store',
+            'X-Content-Type-Options': 'nosniff',
+          })
+          if (request.method === 'HEAD') response.end()
+          else createReadStream(artifact.contentPath).pipe(response)
+          return
+        }
         if (!helmOrigin) { sendJson(response, 503, { error: 'attachment_unavailable' }); return }
         const headers = new Headers()
         if (typeof request.headers.range === 'string') headers.set('Range', request.headers.range)
@@ -2231,6 +2340,7 @@ export function createWizardServer(options = {}) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           result = projectWizardFileMarkers(result, messageHistory)
+          result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
         const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths].filter(Boolean).map((value) => Buffer.from(value))

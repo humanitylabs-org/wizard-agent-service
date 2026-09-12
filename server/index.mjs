@@ -17,6 +17,7 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
 const port = Number(process.env.WIZARD_PORT || 8787)
 const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/state.db') : '')
+const hermesHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
 const accessVerifier = requireAccess ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
@@ -35,7 +36,11 @@ const server = createWizardServer({
   inboxOrigin: process.env.WIZARD_INBOX_ORIGIN || 'http://127.0.0.1:8941',
   inboxToken: process.env.WIZARD_INBOX_INTERNAL_TOKEN || '',
   inboxTrustedRoot: process.env.WIZARD_INBOX_TRUSTED_ROOT || '',
-  inboxDbPath: process.env.WIZARD_INBOX_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'data/apps/wizard-inbox/inbox.sqlite3'),
+  inboxDbPath: process.env.WIZARD_INBOX_DB_PATH || resolve(hermesHome, 'data/apps/wizard-inbox/inbox.sqlite3'),
+  agentArtifactDir: process.env.WIZARD_AGENT_ARTIFACT_DIR || resolve(hermesHome, 'data/apps/wizard-mobile/agent-artifacts'),
+  agentArtifactRoots: process.env.WIZARD_AGENT_ARTIFACT_ROOTS
+    ? process.env.WIZARD_AGENT_ARTIFACT_ROOTS.split(':')
+    : [resolve(hermesHome, 'cache/images'), resolve(hermesHome, 'media/images'), resolve(hermesHome, 'workspace')],
   operatorWorkerStatePath: process.env.WIZARD_OPERATOR_STATE_PATH || '',
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
