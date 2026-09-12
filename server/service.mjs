@@ -177,6 +177,13 @@ function directBody(method, pathname, body) {
   }))
 }
 
+export function supportsJoinedDelegation(payload) {
+  const capability = payload?.features?.delegation_delivery
+  return capability?.supported === true
+    && Array.isArray(capability.modes)
+    && capability.modes.includes('join')
+}
+
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
@@ -1291,6 +1298,7 @@ export function createWizardServer(options = {}) {
   const accessVerifier = options.accessVerifier
   if (requireAccess && typeof accessVerifier !== 'function') throw new Error('A Cloudflare Access verifier is required')
   const fetchImpl = options.fetchImpl ?? fetch
+  const requireJoinedDelegationCapability = options.requireJoinedDelegationCapability ?? true
   const sessionMessageCache = new Map()
   const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
   const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
@@ -1345,6 +1353,24 @@ export function createWizardServer(options = {}) {
     if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: 502 })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
+  }
+
+  let joinedDelegationCapability = { ok: false, expiresAt: 0 }
+  let joinedDelegationCapabilityInFlight = null
+  const assertJoinedDelegationCapability = async () => {
+    if (!requireJoinedDelegationCapability) return
+    if (joinedDelegationCapability.ok && Date.now() < joinedDelegationCapability.expiresAt) return
+    if (!joinedDelegationCapabilityInFlight) {
+      joinedDelegationCapabilityInFlight = (async () => {
+        const payload = await hermesJson('/v1/capabilities')
+        if (!supportsJoinedDelegation(payload)) {
+          throw Object.assign(new Error('Hermes cannot keep delegated Wizard work inside its originating run'), { status: 503 })
+        }
+        joinedDelegationCapability = { ok: true, expiresAt: Date.now() + 30_000 }
+      })().finally(() => { joinedDelegationCapabilityInFlight = null })
+    }
+    try { await joinedDelegationCapabilityInFlight }
+    catch { throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 }) }
   }
 
   const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
@@ -2135,6 +2161,7 @@ export function createWizardServer(options = {}) {
         let queuedAdmission = null
         let directAdmissionSessionId = ''
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
+          await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'

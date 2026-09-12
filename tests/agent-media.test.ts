@@ -30,6 +30,7 @@ beforeAll(async () => {
   })
   const upstreamAddress = await listen(upstream)
   wizard = createWizardServer({
+    requireJoinedDelegationCapability: false,
     upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
     hermesKey: 'fixture',
     requireAccess: false,

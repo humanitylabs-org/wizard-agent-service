@@ -28,6 +28,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -61,6 +62,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -90,6 +92,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -116,6 +119,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -142,6 +146,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -169,6 +174,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -212,6 +218,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -291,6 +298,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
@@ -386,6 +394,7 @@ describe('Wizard thread history marker projection', () => {
     servers.push(upstream)
     const upstreamAddress = await listen(upstream)
     const proxy = createWizardServer({
+    requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'server-only-secret',
       requireAccess: false,
