@@ -186,6 +186,7 @@ export function supportsJoinedDelegation(payload) {
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
+const EXTERNAL_RUN_LEASE_HANDOFF_SECONDS = 120
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
@@ -360,7 +361,20 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const directCandidate = newestActiveRun(directRuns, session.id)
             const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
-            const external = externalRuns.find((run) => run.sessionId === session.id && PROJECTED_RUN_STATUSES.has(run.status))
+            const external = externalRuns.find((run) =>
+              run.sessionId === session.id
+              && PROJECTED_RUN_STATUSES.has(run.status)
+              // Durable run receipts can survive after an in-process runner disappears.
+              // Canonical session truth distinguishes those zombies from legitimate
+              // long-running work: active runs retain a turn lease. A bounded grace keeps
+              // brand-new admissions visible while Hermes acquires that lease.
+              && (
+                !trustActiveTruth
+                || !ACTIVE_RUN_STATUSES.has(run.status)
+                || truth?.active
+                || Number(run.createdAt) >= Date.now() / 1000 - EXTERNAL_RUN_LEASE_HANDOFF_SECONDS
+              ),
+            )
             const helm = helmActivities
               .filter((activity) => activity.sessionId === session.id)
               .sort((left, right) => right.createdAt - left.createdAt)[0]
@@ -1378,8 +1392,8 @@ export function createWizardServer(options = {}) {
 
   const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
     const references = suppliedReferences ?? readWizardAssistantRunReferences(inboxDbPath, sessionIds)
-    const projected = await Promise.all(references.map(async ({ sessionId, runId, status: pendingStatus }) => {
-      if (!runId && pendingStatus === 'running') return { sessionId, runId: '', status: 'running' }
+    const projected = await Promise.all(references.map(async ({ sessionId, runId, status: pendingStatus, createdAt }) => {
+      if (!runId && pendingStatus === 'running') return { sessionId, runId: '', status: 'running', createdAt }
       const terminal = terminalExternalRuns.get(runId)
       if (terminal) return terminal
       try {
@@ -1389,7 +1403,7 @@ export function createWizardServer(options = {}) {
         const rawStatus = typeof payload?.status === 'string' ? payload.status : ''
         const status = aliases[rawStatus] ?? rawStatus
         if (!PROJECTED_RUN_STATUSES.has(status)) return null
-        const projection = { sessionId, runId, status }
+        const projection = { sessionId, runId, status, createdAt }
         if (TERMINAL_RUN_STATUSES.has(status)) terminalExternalRuns.set(runId, projection)
         return projection
       } catch { return null }

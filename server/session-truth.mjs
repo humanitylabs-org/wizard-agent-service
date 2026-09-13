@@ -145,12 +145,12 @@ export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = 
       const createdAt = Number(row.created_at) || 0
       const boundIsRecent = createdAt >= nowSeconds - boundWindowSeconds && createdAt <= nowSeconds + 5
       if (/^[A-Za-z0-9._:-]+$/.test(runId) && boundIsRecent) {
-        latestBySession.set(sessionId, { sessionId, runId })
+        latestBySession.set(sessionId, { sessionId, runId, createdAt })
         continue
       }
       if (row.run_id === null && row.admission_status === null
         && createdAt >= nowSeconds - PENDING_ASSISTANT_ADMISSION_SECONDS && createdAt <= nowSeconds + 5) {
-        latestBySession.set(sessionId, { sessionId, runId: '', status: 'running' })
+        latestBySession.set(sessionId, { sessionId, runId: '', status: 'running', createdAt })
       }
     }
   } catch {
