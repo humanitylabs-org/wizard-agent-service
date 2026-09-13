@@ -186,7 +186,6 @@ export function supportsJoinedDelegation(payload) {
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
-const EXTERNAL_RUN_LEASE_HANDOFF_SECONDS = 120
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
@@ -361,20 +360,13 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const directCandidate = newestActiveRun(directRuns, session.id)
             const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
-            const external = externalRuns.find((run) =>
-              run.sessionId === session.id
-              && PROJECTED_RUN_STATUSES.has(run.status)
-              // Durable run receipts can survive after an in-process runner disappears.
-              // Canonical session truth distinguishes those zombies from legitimate
-              // long-running work: active runs retain a turn lease. A bounded grace keeps
-              // brand-new admissions visible while Hermes acquires that lease.
-              && (
-                !trustActiveTruth
-                || !ACTIVE_RUN_STATUSES.has(run.status)
-                || truth?.active
-                || Number(run.createdAt) >= Date.now() / 1000 - EXTERNAL_RUN_LEASE_HANDOFF_SECONDS
-              ),
-            )
+            // /v1/runs owns execution lifecycle truth. Turn leases fence transcript
+            // writes; they are not guaranteed to remain present for every live API run.
+            const externalCandidate = externalRuns.find((run) =>
+              run.sessionId === session.id && PROJECTED_RUN_STATUSES.has(run.status))
+            const external = staleAgainstCanonicalReply(externalCandidate, truth, trustActiveTruth)
+              ? undefined
+              : externalCandidate
             const helm = helmActivities
               .filter((activity) => activity.sessionId === session.id)
               .sort((left, right) => right.createdAt - left.createdAt)[0]
