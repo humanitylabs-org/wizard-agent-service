@@ -846,20 +846,23 @@ function sessionAttachmentLabel(content) {
 
 function sessionPreviewText(content) {
   const raw = historyContentStrings(content).join('\n')
+  const imageOnlyIntent = /\[WIZARD_IMAGE_INTENT_V1\]/i.test(raw)
   let projected = raw
     .replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '')
     .replace(/\[WIZARD_FILES_V1\][\s\S]*?\[\/WIZARD_FILES_V1\]/gi, '')
     .replace(/\[WIZARD_FILE_CHIPS_V1\][\s\S]*?\[\/WIZARD_FILE_CHIPS_V1\]/gi, '')
     .replace(/\[WIZARD_CLOSE_AND_FILE_V1\][\s\S]*?\[\/WIZARD_CLOSE_AND_FILE_V1\]/gi, '')
+    .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     .replace(/<\s*helm_attachments\s*>[\s\S]*?<\s*\/\s*helm_attachments\s*>/gi, '')
     .replace(/\s*\[Image attached at:[^\]]*\](?:\s*\[[^\]]*\])?/gi, '')
-  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1)\]/i)
+  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1|WIZARD_IMAGE_INTENT_V1)\]/i)
   if (incompleteMarker >= 0) projected = projected.slice(0, incompleteMarker)
   const visible = safeHistoryText(projected, 1_000)
   if (visible && !legacyInternalHistoryMessage({ role: 'user', content: visible })) {
     const attachment = sessionAttachmentLabel(content)
     return attachment && /^Please use the attached (?:photo|photos|file|files)\.$/u.test(visible) ? attachment : visible
   }
+  if (imageOnlyIntent && sessionAttachmentLabel(content)) return 'Photo attached'
   return sessionAttachmentLabel(content)
 }
 
