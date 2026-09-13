@@ -190,6 +190,7 @@ const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'inte
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
 const CANONICAL_SESSION_READER = fileURLToPath(new URL('./read-human-sessions.py', import.meta.url))
+const HELM_THREAD_ID_READER = fileURLToPath(new URL('./helm-thread-id.py', import.meta.url))
 
 function isDirectHumanSessionIdentity(id, source) {
   return HUMAN_SESSION_SOURCES.has(String(source ?? '').toLowerCase())
@@ -1476,6 +1477,170 @@ export function createWizardServer(options = {}) {
     }
   }
 
+  const helmJson = async (path, init = {}) => {
+    if (!helmOrigin) throw Object.assign(new Error('Helm filing is not configured'), { status: 503 })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5_000)
+    let result
+    let raw
+    try {
+      result = await fetchImpl(`${helmOrigin}${path}`, { ...init, signal: controller.signal, redirect: 'manual' })
+      raw = Buffer.from(await result.arrayBuffer())
+    } catch {
+      throw Object.assign(new Error('Helm filing request timed out'), { status: 503 })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (raw.length > 4 * 1024 * 1024) throw Object.assign(new Error('Helm filing response is too large'), { status: 502 })
+    let payload = {}
+    try { payload = raw.length ? JSON.parse(raw.toString('utf8')) : {} }
+    catch { throw Object.assign(new Error('Helm filing returned invalid JSON'), { status: 502 }) }
+    if (!result.ok) {
+      const message = typeof payload?.error === 'string' ? payload.error : 'Helm filing failed'
+      const status = result.status === 404 ? 404 : result.status === 400 || result.status === 409 ? 409 : 502
+      throw Object.assign(new Error(message), { status })
+    }
+    return payload
+  }
+
+  const helmThreadId = async (sessionId) => new Promise((resolvePromise, rejectPromise) => {
+    execFile('python3', [HELM_THREAD_ID_READER, sessionId], { timeout: 2_000, windowsHide: true }, (error, stdout) => {
+      const value = String(stdout ?? '').trim()
+      if (error || !/^t-[0-9a-f]{12}$/.test(value)) {
+        rejectPromise(Object.assign(new Error('Helm thread identity could not be resolved'), { status: 502 }))
+        return
+      }
+      resolvePromise(value)
+    })
+  })
+
+  const filingAdmissions = new Map()
+  const filingCommands = new Map()
+  const withFilingAdmissionLock = async (sessionId, runtime, work) => {
+    const lockId = `${runtime}:${sessionId}`
+    const existing = filingAdmissions.get(lockId)
+    if (existing) return existing
+    const promise = Promise.resolve().then(work).finally(() => {
+      if (filingAdmissions.get(lockId) === promise) filingAdmissions.delete(lockId)
+    })
+    filingAdmissions.set(lockId, promise)
+    return promise
+  }
+
+  const registerFilingCommand = (commandId, sessionId) => {
+    const existing = filingCommands.get(commandId)
+    if (existing && existing !== sessionId) throw Object.assign(new Error('filing command belongs to another session'), { status: 409 })
+    filingCommands.set(commandId, sessionId)
+    if (filingCommands.size > 256) filingCommands.delete(filingCommands.keys().next().value)
+  }
+
+  const filingReceipt = async (threadId) => {
+    const state = await helmJson('/helm/api/state?fresh=1')
+    const archived = Array.isArray(state?.archived_threads)
+      ? state.archived_threads.find((item) => item?.id === threadId && item?.status === 'processed')
+      : null
+    if (!archived) return null
+    const card = Array.isArray(state?.threads)
+      ? state.threads.find((item) => item?.source_thread_id === threadId && item?.status === 'next-step')
+      : null
+    return { source_thread_id: threadId, card_id: typeof card?.id === 'string' ? card.id : null }
+  }
+
+  const archiveHermesSession = async (sessionId) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5_000)
+    let result
+    try {
+      result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${hermesKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: true }),
+        signal: controller.signal,
+        redirect: 'manual',
+      })
+      await result.body?.cancel().catch(() => undefined)
+    } catch {
+      throw Object.assign(new Error('Hermes session archive timed out after filing'), { status: 503 })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (!result.ok) throw Object.assign(new Error('Hermes session archive failed after filing'), { status: 502 })
+  }
+
+  const readFilingSession = async (sessionId, runtime) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5_000)
+    let result
+    let payload
+    try {
+      result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        headers: { Authorization: `Bearer ${hermesKey}` },
+        signal: controller.signal,
+        redirect: 'manual',
+      })
+      const raw = Buffer.from(await result.arrayBuffer())
+      if (raw.length > 1024 * 1024) throw new Error('Hermes session response is too large')
+      payload = raw.length ? JSON.parse(raw.toString('utf8')) : {}
+    } catch {
+      throw Object.assign(new Error('Hermes session ownership could not be verified'), { status: 503 })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (!result.ok) throw Object.assign(new Error('Hermes session was not found'), { status: result.status === 404 ? 404 : 502 })
+    const session = payload?.data && !Array.isArray(payload.data) ? payload.data : payload?.session ?? payload
+    if (session?.id !== sessionId) throw Object.assign(new Error('Hermes session identity did not match'), { status: 404 })
+    const operatorSession = sessionId.startsWith(OPERATOR_USER_SESSION_PREFIX)
+    if (runtime === 'operator' ? !operatorSession : operatorSession || !isDirectHumanSessionIdentity(sessionId, session?.source)) {
+      throw Object.assign(new Error('Hermes session is outside this Wizard runtime'), { status: 404 })
+    }
+    return session
+  }
+
+  const filingActivity = async (threadId) => {
+    const payload = await helmJson('/helm/api/activity')
+    return Array.isArray(payload?.activity)
+      ? payload.activity.find((item) => item?.thread_id === threadId && item?.kind === 'process') ?? null
+      : null
+  }
+
+  const canonicalFileSession = async (sessionId, runtime, admit) => {
+    await readFilingSession(sessionId, runtime)
+    const threadId = await helmThreadId(sessionId)
+    const receipt = await filingReceipt(threadId)
+    if (receipt) {
+      try { await archiveHermesSession(sessionId) }
+      catch { return { status: 202, receipt: { ...receipt, archive_pending: true } } }
+      return { status: 200, receipt }
+    }
+
+    let activity = await filingActivity(threadId)
+    if (activity && ['queued', 'running'].includes(activity?.status)) {
+      return { status: 202, receipt: { source_thread_id: threadId, activity_id: activity.activity_id } }
+    }
+    if (activity?.status === 'completed') {
+      return { status: 202, receipt: { source_thread_id: threadId, activity_id: activity.activity_id } }
+    }
+    if (!admit) {
+      if (activity && ['failed', 'cancelled', 'interrupted'].includes(activity?.status)) {
+        throw Object.assign(new Error('Helm filing did not complete'), { status: 502 })
+      }
+      throw Object.assign(new Error('Helm filing is not active'), { status: 409 })
+    }
+
+    const bootstrap = await helmJson('/helm/api/bootstrap')
+    if (typeof bootstrap?.csrf_token !== 'string' || !bootstrap.csrf_token) throw Object.assign(new Error('Helm filing authorization unavailable'), { status: 502 })
+    activity = await helmJson(`/helm/api/threads/${threadId}/process`, {
+      method: 'POST',
+      headers: { Origin: new URL(helmOrigin).origin, 'X-Helm-CSRF': bootstrap.csrf_token, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const activityId = typeof activity?.activity_id === 'string'
+      ? activity.activity_id
+      : typeof activity?.job_id === 'string' ? activity.job_id : ''
+    if (!HELM_ACTIVITY_ID.test(activityId)) throw Object.assign(new Error('Helm filing returned no durable receipt'), { status: 502 })
+    return { status: 202, receipt: { source_thread_id: threadId, activity_id: activityId } }
+  }
+
   const inputText = (input) => {
     if (typeof input === 'string') return input
     if (!Array.isArray(input)) return ''
@@ -2081,6 +2246,38 @@ export function createWizardServer(options = {}) {
             can_retry: activity.canRetry,
           }))
         sendJson(response, 200, { attention })
+        return
+      }
+
+      if (url.pathname === '/wizard/filings' && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const body = parseJsonBody(await readBoundedBody(request, 4 * 1024))
+        const sessionId = typeof body.session_id === 'string' ? body.session_id : ''
+        const commandId = typeof body.client_command_id === 'string' ? body.client_command_id : ''
+        const runtime = body.runtime ?? 'direct'
+        if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId) || !/^[A-Za-z0-9-]{1,200}$/.test(commandId) || !['direct', 'operator'].includes(runtime)) {
+          sendJson(response, 400, { error: 'invalid_request' }); return
+        }
+        registerFilingCommand(commandId, sessionId)
+        const result = await withFilingAdmissionLock(sessionId, runtime, () => canonicalFileSession(sessionId, runtime, true))
+        sendJson(response, result.status, { ok: true, ...result.receipt })
+        return
+      }
+
+      const filingStatus = url.pathname.match(/^\/wizard\/filings\/([^/]+)\/status$/)
+      if (filingStatus && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        let sessionId
+        try { sessionId = decodeURIComponent(filingStatus[1]) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const body = parseJsonBody(await readBoundedBody(request, 1024))
+        const runtime = body.runtime ?? 'direct'
+        if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId) || !['direct', 'operator'].includes(runtime)) {
+          sendJson(response, 400, { error: 'invalid_request' }); return
+        }
+        const result = await canonicalFileSession(sessionId, runtime, false)
+        sendJson(response, result.status, { ok: true, ...result.receipt })
         return
       }
 
