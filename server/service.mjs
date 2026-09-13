@@ -2536,7 +2536,10 @@ export function createWizardServer(options = {}) {
           const listedSessionIds = sessionIdsInList(result)
           const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
           const recentExternalReferences = canonicalPage
-            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds, Date.now() / 1000, 300)
+            // A Wizard run may legitimately remain active for hours. The run endpoint is
+            // authoritative and terminal results are cached, so never age an admitted run
+            // out of Working merely because its request is more than five minutes old.
+            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
             : undefined
           const [helmActivities, externalRuns] = operator
             ? [[], []]
