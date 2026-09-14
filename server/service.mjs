@@ -375,15 +375,20 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             if (direct) {
               projected.status = direct.status
               projected.wizard_run_id = direct.publicRunId ?? direct.runId
+              if (direct.createdAt) projected.wizard_assigned_at = direct.createdAt
               if (!projected.preview && direct.preview) projected.preview = direct.preview
               if (direct.queuePosition) projected.queue_position = direct.queuePosition
               if (direct.queueReason) projected.queue_reason = direct.queueReason
             } else if (external) {
               projected.status = external.status
               if (ACTIVE_RUN_STATUSES.has(external.status) && external.runId) projected.wizard_run_id = external.runId
+              if (external.createdAt) projected.wizard_assigned_at = external.createdAt
             } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
               projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
             } else if (helm?.status === 'failed') projected.status = 'failed'
+            if (ACTIVE_RUN_STATUSES.has(projected.status) && !projected.wizard_assigned_at) {
+              projected.wizard_assigned_at = Number(projected.wizard_last_user_at) || Number(truth?.lastUserAt) || undefined
+            }
             return projected
           }
           if (ACTIVE_RUN_STATUSES.has(projected.status)) delete projected.status
@@ -396,6 +401,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             ...projected,
             status: queuedOperator.status,
             wizard_run_id: queuedOperator.publicRunId,
+            ...(queuedOperator.createdAt ? { wizard_assigned_at: queuedOperator.createdAt } : {}),
             preview: projected.preview || queuedOperator.preview || '',
             ...(queuedOperator.queuePosition ? { queue_position: queuedOperator.queuePosition } : {}),
             ...(queuedOperator.queueReason ? { queue_reason: queuedOperator.queueReason } : {}),
