@@ -174,6 +174,7 @@ function directBody(method, pathname, body) {
     ...value,
     instructions: WIZARD_RUN_INSTRUCTIONS,
     delegation_delivery: 'join',
+    response_rendering: 'markdown',
   }))
 }
 
@@ -1701,6 +1702,7 @@ export function createWizardServer(options = {}) {
         model_options: { reasoning_effort: 'max' },
         instructions: WIZARD_RUN_INSTRUCTIONS,
         delegation_delivery: 'join',
+        response_rendering: 'markdown',
       }),
       headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
     })

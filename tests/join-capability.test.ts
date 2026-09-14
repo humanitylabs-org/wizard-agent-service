@@ -82,6 +82,7 @@ describe('Wizard delegated-work ownership contract', () => {
       input: 'finish this',
       instructions: WIZARD_RUN_INSTRUCTIONS,
       delegation_delivery: 'join',
+      response_rendering: 'markdown',
     })
 
     const instructed = await fetch(`${wizard}/wizard/hermes/v1/runs`, {
@@ -95,6 +96,7 @@ describe('Wizard delegated-work ownership contract', () => {
       input: 'finish this too',
       instructions: WIZARD_RUN_INSTRUCTIONS,
       delegation_delivery: 'join',
+      response_rendering: 'markdown',
     })
   })
 })
