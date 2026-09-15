@@ -228,6 +228,29 @@ export class DurableRunQueue {
     }))
   }
 
+  latestProjections() {
+    return this.database.prepare(`
+      SELECT current.*
+      FROM wizard_run_queue current
+      WHERE NOT EXISTS (
+        SELECT 1 FROM wizard_run_queue newer
+        WHERE newer.session_id = current.session_id
+          AND (newer.created_at > current.created_at
+            OR (newer.created_at = current.created_at AND newer.public_run_id > current.public_run_id))
+      )
+      ORDER BY current.created_at, current.public_run_id
+    `).all().map((row) => this._record(row)).map((record) => ({
+      sessionId: record.sessionId,
+      status: record.status === 'queued' || record.status === 'launching' ? 'queued' : record.status,
+      queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
+      queueReason: record.waitingReason,
+      preview: queuedInputPreview(record.body),
+      publicRunId: record.publicRunId,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    }))
+  }
+
   async summary() {
     await this.tick(false)
     let external = []

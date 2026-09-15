@@ -333,6 +333,12 @@ function newestActiveRun(runs, sessionId) {
     .sort((left, right) => Number(right.createdAt ?? right.updatedAt ?? 0) - Number(left.createdAt ?? left.updatedAt ?? 0))[0]
 }
 
+function newestRun(runs, sessionId) {
+  return runs
+    .filter((run) => run.sessionId === sessionId)
+    .sort((left, right) => Number(right.createdAt ?? right.updatedAt ?? 0) - Number(left.createdAt ?? left.updatedAt ?? 0))[0]
+}
+
 function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
   const startedAt = Number(run?.createdAt ?? 0)
   const terminalAt = Number(truth?.lastAssistantAt ?? 0)
@@ -359,6 +365,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           if (truth?.startedAt) projected.wizard_started_at = truth.startedAt
           if (!operator) {
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
+            const latestDirect = newestRun(directRuns, session.id)
             const directCandidate = newestActiveRun(directRuns, session.id)
             const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
             // /v1/runs owns execution lifecycle truth. Turn leases fence transcript
@@ -371,6 +378,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             const helm = helmActivities
               .filter((activity) => activity.sessionId === session.id)
               .sort((left, right) => right.createdAt - left.createdAt)[0]
+            if (latestDirect?.publicRunId && latestDirect.status) {
+              projected.wizard_last_run_id = latestDirect.publicRunId
+              projected.wizard_last_run_status = latestDirect.status
+            }
             if (ACTIVE_RUN_STATUSES.has(projected.status)) delete projected.status
             if (direct) {
               projected.status = direct.status
@@ -2569,7 +2580,7 @@ export function createWizardServer(options = {}) {
             result,
             operator,
             [...operatorWorkers.values()],
-            [...(runQueue?.projections() ?? []), ...directRuns.values()],
+            [...(runQueue?.latestProjections() ?? []), ...directRuns.values()],
             externalRuns,
             sessionTruth,
             helmActivities,

@@ -228,6 +228,12 @@ describe('Wizard proxy capacity queue', () => {
     expect(blockedSecret.json).toEqual({ error: 'upstream_unavailable' })
     const blockedSse = await request(origin, `/wizard/hermes/v1/runs/${encodeURIComponent(second.json.run_id)}/events`)
     expect(blockedSse.response.status).toBe(502)
+    const terminalProjection = await request(origin, '/wizard/hermes/api/sessions?limit=20&offset=0&include_children=false')
+    expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')).toMatchObject({
+      wizard_last_run_id: second.json.run_id,
+      wizard_last_run_status: 'completed',
+    })
+    expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.wizard_run_id).toBeUndefined()
     expect(blockedSse.json).toEqual({ error: 'upstream_unavailable' })
   })
 
