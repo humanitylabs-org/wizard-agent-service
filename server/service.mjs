@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { ThreadSeenStore } from './thread-seen.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1356,6 +1357,7 @@ export function createWizardServer(options = {}) {
   const operatorWorkerModel = String(options.operatorWorkerModel ?? '').trim()
   const operatorWorkers = new Map()
   const operatorWorkerStatePath = options.operatorWorkerStatePath ? resolve(String(options.operatorWorkerStatePath)) : ''
+  const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     try {
       const records = JSON.parse(readFileSync(operatorWorkerStatePath, 'utf8'))
@@ -2276,6 +2278,23 @@ export function createWizardServer(options = {}) {
             can_retry: activity.canRetry,
           }))
         sendJson(response, 200, { attention })
+        return
+      }
+
+      if (url.pathname === '/wizard/thread-seen' && ['GET', 'PUT'].includes(request.method ?? '')) {
+        if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+        if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
+        const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+        if (request.method === 'GET') {
+          sendJson(response, 200, { state: threadSeenStore.get(scope) })
+          return
+        }
+        if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+          sendJson(response, 415, { error: 'json_required' }); return
+        }
+        const state = parseJsonBody(await readBoundedBody(request, 256 * 1024))
+        sendJson(response, 200, { state: threadSeenStore.merge(scope, state) })
         return
       }
 

@@ -42,6 +42,7 @@ const server = createWizardServer({
     ? process.env.WIZARD_AGENT_ARTIFACT_ROOTS.split(':')
     : [resolve(hermesHome, 'cache/images'), resolve(hermesHome, 'media/images'), resolve(hermesHome, 'workspace')],
   operatorWorkerStatePath: process.env.WIZARD_OPERATOR_STATE_PATH || '',
+  threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   requireAccess,
