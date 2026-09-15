@@ -141,6 +141,7 @@ function operatorBody(method, pathname, body) {
       provider: 'custom:tinfoil-operator',
       require_model_lock: true,
       model_options: { reasoning_effort: 'low' },
+      response_rendering: 'markdown',
     }))
   }
   if (method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(pathname)) {
