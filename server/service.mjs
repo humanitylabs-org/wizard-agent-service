@@ -382,6 +382,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             if (latestDirect?.publicRunId && latestDirect.status) {
               projected.wizard_last_run_id = latestDirect.publicRunId
               projected.wizard_last_run_status = latestDirect.status
+              if (latestDirect.idempotencyKey) projected.wizard_last_run_idempotency_key = latestDirect.idempotencyKey
             }
             if (ACTIVE_RUN_STATUSES.has(projected.status)) delete projected.status
             if (direct) {

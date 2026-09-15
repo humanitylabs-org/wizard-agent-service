@@ -223,6 +223,7 @@ export class DurableRunQueue {
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
       publicRunId: record.publicRunId,
+      idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     }))
@@ -246,6 +247,7 @@ export class DurableRunQueue {
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
       publicRunId: record.publicRunId,
+      idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     }))

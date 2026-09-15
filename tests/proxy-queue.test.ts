@@ -232,6 +232,7 @@ describe('Wizard proxy capacity queue', () => {
     expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')).toMatchObject({
       wizard_last_run_id: second.json.run_id,
       wizard_last_run_status: 'completed',
+      wizard_last_run_idempotency_key: 'queue-two',
     })
     expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.wizard_run_id).toBeUndefined()
     expect(blockedSse.json).toEqual({ error: 'upstream_unavailable' })
