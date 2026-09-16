@@ -191,6 +191,17 @@ describe('durable Wizard run queue', () => {
     await queue.cancel(cancelled.record!.publicRunId)
     const updated = await queue.appendGuidance(guided.record!.publicRunId, 'Keep it compact.')
     expect(JSON.parse(updated!.body).input).toContain('Guidance added while queued:\nKeep it compact.')
+    const withImage = await queue.appendGuidance(guided.record!.publicRunId, [{ role: 'user', content: [
+      { type: 'text', text: 'Inspect this.' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ] }], ['/private/image.png'])
+    const queuedInput = JSON.parse(withImage!.body).input
+    expect(queuedInput[0].content.at(-1)).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } })
+    expect(withImage!.trustedPaths).toContain('/private/image.png')
+    await expect(queue.appendGuidance(guided.record!.publicRunId, [{ role: 'user', content: [
+      { type: 'text', text: 'Too many.' },
+      ...Array.from({ length: 9 }, () => ({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } })),
+    ] }])).rejects.toMatchObject({ status: 413 })
     expect(launches).toHaveLength(0)
     await queue.tick(true)
     expect(launches).toEqual(['guide-me'])

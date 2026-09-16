@@ -8,6 +8,9 @@ const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stoppin
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
+const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
+const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
+const MAX_QUEUED_IMAGES = 9
 
 const nowSeconds = () => Date.now() / 1000
 const safeStatus = (value) => {
@@ -317,27 +320,60 @@ export class DurableRunQueue {
     return this._update(publicRunId, { status: 'cancelled', waitingReason: '', terminalAt: nowSeconds() })
   }
 
-  async appendGuidance(publicRunId, guidance) {
+  async appendGuidance(publicRunId, guidance, trustedPaths = []) {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
     if (record.status !== 'queued') throw requestError('queued run already started', 409)
-    const text = typeof guidance === 'string' ? guidance.trim() : ''
+    let guidanceContent = guidance
+    if (Array.isArray(guidance) && guidance.length === 1 && guidance[0]?.role === 'user') guidanceContent = guidance[0].content
+    const guidanceParts = Array.isArray(guidanceContent) ? guidanceContent : []
+    const text = typeof guidanceContent === 'string'
+      ? guidanceContent.trim()
+      : guidanceParts.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text).join('\n').trim()
+    const mediaParts = guidanceParts.filter((part) => part?.type === 'image_url' && typeof part.image_url?.url === 'string')
     if (!text || text.length > 64_000) throw requestError('invalid queued guidance', 400)
     const value = parseJson(record.body, null)
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw requestError('invalid queued body', 500)
     const marker = `\n\nGuidance added while queued:\n${text}`
-    if (typeof value.input === 'string') value.input += marker
+    if (typeof value.input === 'string') {
+      value.input = mediaParts.length
+        ? [{ role: 'user', content: [{ type: 'text', text: value.input + marker }, ...mediaParts] }]
+        : value.input + marker
+    }
     else if (Array.isArray(value.input) && value.input.length === 1 && value.input[0] && typeof value.input[0] === 'object') {
       const message = { ...value.input[0] }
-      if (typeof message.content === 'string') message.content += marker
+      if (typeof message.content === 'string') {
+        message.content = mediaParts.length
+          ? [{ type: 'text', text: message.content + marker }, ...mediaParts]
+          : message.content + marker
+      }
       else if (Array.isArray(message.content)) {
         const index = message.content.findIndex((part) => part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')
         if (index < 0) throw requestError('queued text is unavailable', 409)
         message.content = message.content.map((part, partIndex) => partIndex === index ? { ...part, text: part.text + marker } : part)
+        if (mediaParts.length) message.content.push(...mediaParts)
       } else throw requestError('queued text is unavailable', 409)
       value.input = [message]
     } else throw requestError('queued text is unavailable', 409)
-    return this._update(publicRunId, { body: JSON.stringify(value) })
+    const allMediaParts = Array.isArray(value.input)
+      ? value.input.flatMap((message) => Array.isArray(message?.content)
+        ? message.content.filter((part) => part?.type === 'image_url' && typeof part.image_url?.url === 'string')
+        : [])
+      : []
+    const inlineBytes = allMediaParts.reduce((sum, part) => {
+      const url = part.image_url.url
+      const comma = url.indexOf(',')
+      return sum + (url.startsWith('data:image/') && comma >= 0
+        ? Buffer.from(url.slice(comma + 1).replace(/\s+/g, ''), 'base64').length
+        : 0)
+    }, 0)
+    const mergedBody = JSON.stringify(value)
+    if (allMediaParts.length > MAX_QUEUED_IMAGES || inlineBytes > MAX_QUEUED_IMAGE_BYTES
+        || Buffer.byteLength(mergedBody) > MAX_QUEUED_BODY_BYTES) {
+      throw requestError('queued guidance exceeds the attachment limit', 413)
+    }
+    const nextPaths = [...new Set([...(record.trustedPaths ?? []), ...trustedPaths.filter((path) => typeof path === 'string')])]
+    return this._update(publicRunId, { body: mergedBody, trustedPaths: nextPaths })
   }
 
   async tick(force = false) {

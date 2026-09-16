@@ -21,6 +21,7 @@ export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
 const WIZARD_FILE_LIMIT = 9
 const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
+const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
 const SESSION_LIST_PREVIEW_LIMIT = 24
 const CANONICAL_SESSION_LIMIT = 2_000
@@ -456,6 +457,16 @@ function workerCompletionSummary(content) {
   return summary
 }
 
+function visibleInputText(input) {
+  if (typeof input === 'string') return input
+  if (!Array.isArray(input)) return ''
+  return input.flatMap((item) => {
+    if (typeof item?.text === 'string' && ['text', 'input_text', 'output_text'].includes(item.type)) return [item.text]
+    if (typeof item?.content === 'string') return [item.content]
+    return Array.isArray(item?.content) ? [visibleInputText(item.content)] : []
+  }).filter(Boolean).join('\n')
+}
+
 function projectOperatorMessages(result, completions = [], records = []) {
   try {
     const payload = JSON.parse(result.toString('utf8'))
@@ -478,7 +489,7 @@ function projectOperatorMessages(result, completions = [], records = []) {
       const projected = []
       let suppressWorkerDraft = false
       for (const message of payload[key]) {
-        const content = typeof message?.content === 'string' ? message.content : ''
+        const content = visibleInputText(message?.content)
         const legacyMarker = message?.role === 'user' && /^\[WIZARD_OPERATOR_ACK_V1:[^\]]+\]/.test(content)
         if (message?.role === 'user' && message?.display_kind !== 'async_delegation_complete') {
           suppressWorkerDraft = false
@@ -496,6 +507,12 @@ function projectOperatorMessages(result, completions = [], records = []) {
               role: 'assistant',
               content: OPERATOR_ACK,
               timestamp: record.startedAt / 1000,
+            })
+            for (const steer of Array.isArray(record.steers) ? record.steers : []) projected.push({
+              id: steer.id,
+              role: 'user',
+              content: steer.content,
+              timestamp: steer.at / 1000,
             })
             if (record.completion) {
               projected.push(record.completion)
@@ -550,7 +567,7 @@ function safeFile(value, trusted = false) {
 
 function safeAttachment(value) {
   const file = safeFile(value)
-  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes }
+  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256 }
 }
 
 function projectWizardFileMarkers(result, userMessagesOnly = false) {
@@ -969,23 +986,61 @@ function inputContainsMarker(input) {
     || normalized.includes('[WIZARDFILECHIPSV1]') || normalized.includes('[/WIZARDFILECHIPSV1]')
 }
 
-function appendFileMarker(input, files) {
-  const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files)}\n[/WIZARD_FILES_V1]`
-  if (typeof input === 'string') return input + marker
+function imageMimeFromMagic(bytes) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'binary'))) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif'
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+  if (bytes.length >= 2 && bytes.subarray(0, 2).toString('ascii') === 'BM') return 'image/bmp'
+  return ''
+}
+
+function nativeImageParts(files) {
+  const parts = []
+  let totalBytes = 0
+  for (const file of files) {
+    const mime = file.mime.toLowerCase() === 'image/jpg' ? 'image/jpeg' : file.mime.toLowerCase()
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) continue
+    if (file.bytes < 1 || file.bytes > WIZARD_AGENT_IMAGE_LIMIT || totalBytes + file.bytes > WIZARD_AGENT_IMAGE_LIMIT) continue
+    let bytes
+    try { bytes = readFileSync(file.trusted_path) } catch { continue }
+    if (bytes.length !== file.bytes || file.sha256 && createHash('sha256').update(bytes).digest('hex') !== file.sha256) continue
+    if (imageMimeFromMagic(bytes) !== mime) continue
+    parts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } })
+    totalBytes += bytes.length
+  }
+  return parts
+}
+
+function appendFileMarker(input, files, includeNativeImages = false) {
+  const images = includeNativeImages ? nativeImageParts(files) : []
+  const imageFiles = files.filter((file) => file.mime.toLowerCase().startsWith('image/'))
+  const toolInspection = imageFiles.length > images.length
+    ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect every image listed in WIZARD_FILES_V1 with vision_analyze using its trusted_path before answering.\n[/WIZARD_IMAGE_INTENT_V1]'
+    : ''
+  const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files)}\n[/WIZARD_FILES_V1]${toolInspection}`
+  if (typeof input === 'string') {
+    const text = input + marker
+    return images.length ? [{ role: 'user', content: [{ type: 'text', text }, ...images] }] : text
+  }
   if (!Array.isArray(input) || input.length !== 1 || !input[0] || typeof input[0] !== 'object' || input[0].role !== 'user') {
     throw Object.assign(new Error('invalid run input'), { status: 400 })
   }
   const message = { ...input[0] }
-  if (typeof message.content === 'string') message.content += marker
+  if (typeof message.content === 'string') {
+    const text = message.content + marker
+    message.content = images.length ? [{ type: 'text', text }, ...images] : text
+  }
   else if (Array.isArray(message.content)) {
     const index = message.content.findIndex((part) => part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')
     if (index < 0) throw Object.assign(new Error('run text is required'), { status: 400 })
     message.content = message.content.map((part, partIndex) => partIndex === index ? { ...part, text: part.text + marker } : part)
+    if (images.length) message.content.push(...images)
   } else throw Object.assign(new Error('invalid run input'), { status: 400 })
   return [message]
 }
 
-async function prepareRunBody(body, resolveFiles) {
+async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   const value = parseJsonBody(body)
   if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
   if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
@@ -999,7 +1054,7 @@ async function prepareRunBody(body, resolveFiles) {
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
   const files = await resolveFiles(ids)
-  value.input = appendFileMarker(value.input, files)
+  value.input = appendFileMarker(value.input, files, includeNativeImages)
   return { body: Buffer.from(JSON.stringify(value)), trustedPaths: files.map((file) => file.trusted_path) }
 }
 
@@ -1118,13 +1173,33 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
-  const projectText = (value) => {
+  const projectText = (value, userImageReferences = false) => {
     const artifacts = []
-    const text = value.replace(AGENT_MEDIA_LINE, (_line, sourcePath) => {
+    const durableImageHashes = new Set()
+    if (userImageReferences) value.replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/gi, (_marker, raw) => {
+      try {
+        for (const file of JSON.parse(raw)) {
+          if (String(file?.mime ?? '').startsWith('image/') && /^[0-9a-f]{64}$/.test(file?.sha256 ?? '')) durableImageHashes.add(file.sha256)
+        }
+      } catch {}
+      return _marker
+    })
+    const register = (_line, sourcePath) => {
       const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots)
       if (artifact && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
       return ''
-    }).replace(/\n{3,}/g, '\n\n').trim()
+    }
+    let text = value.replace(AGENT_MEDIA_LINE, register)
+    if (userImageReferences) {
+      text = text.replace(AGENT_IMAGE_REFERENCE_LINE, (_line, backtick, doubleQuote, singleQuote, bare) => {
+        const artifact = registerAgentArtifact(backtick || doubleQuote || singleQuote || bare, artifactDir, artifactRoots)
+        if (artifact && !durableImageHashes.has(artifact.sha256)
+            && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
+        return ''
+      })
+    }
+    if ((artifacts.length || durableImageHashes.size) && userImageReferences) text = text.replace(/^\s*\[screenshot\]\s*$/gmi, '')
+    text = text.replace(/\n{3,}/g, '\n\n').trim()
     if (!artifacts.length) return text
     const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
     return text ? `${text}\n\n${envelope}` : envelope
@@ -1139,7 +1214,9 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
     const assistantValue = assistant || role === 'assistant'
     for (const [key, child] of Object.entries(value)) {
       const resultField = key === 'output' || key === 'response'
-      if (typeof child === 'string' && (resultField || assistantValue && (key === 'content' || key === 'text'))) value[key] = projectText(child)
+      const messageText = key === 'content' || key === 'text'
+      if (typeof child === 'string' && (resultField || assistantValue && messageText)) value[key] = projectText(child)
+      else if (typeof child === 'string' && role === 'user' && messageText) value[key] = projectText(child, true)
       else visit(child, assistantValue)
     }
   }
@@ -1687,15 +1764,7 @@ export function createWizardServer(options = {}) {
     return { status: 202, receipt: { source_thread_id: threadId, activity_id: activityId } }
   }
 
-  const inputText = (input) => {
-    if (typeof input === 'string') return input
-    if (!Array.isArray(input)) return ''
-    return input.flatMap((item) => {
-      if (typeof item?.content === 'string') return [item.content]
-      if (!Array.isArray(item?.content)) return []
-      return item.content.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text)
-    }).join('\n')
-  }
+  const inputText = visibleInputText
 
   const isInlineOperatorRequest = (input) => /^(?:hi|hello|hey|thanks|thank you|good (?:morning|afternoon|evening)|status\b|what(?:'s| is).*(?:running|status)|stop\b|cancel\b|steer\b)/i.test(inputText(input).trim())
 
@@ -2367,6 +2436,9 @@ export function createWizardServer(options = {}) {
         if (runQueue) await runQueueReady
         const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval))?$/) : null
         let queuedProxyRecord = queuedPath ? runQueue.get(queuedPath[1]) : null
+        const operatorSteerRecord = operator && queuedProxyRecord?.upstreamRunId && queuedPath?.[2] === 'steer'
+          ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
+          : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
@@ -2416,8 +2488,10 @@ export function createWizardServer(options = {}) {
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? await readBoundedBody(request) : undefined
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
-          const guidance = parseJsonBody(body).input
-          const updated = await runQueue.appendGuidance(queuedProxyRecord.publicRunId, guidance)
+          const prepared = await prepareRunBody(body, resolveFiles, true)
+          const guidance = parseJsonBody(prepared.body).input
+          const updated = await runQueue.appendGuidance(
+            queuedProxyRecord.publicRunId, guidance, prepared.trustedPaths)
           sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
           return
         }
@@ -2447,7 +2521,7 @@ export function createWizardServer(options = {}) {
         let trustedPaths = []
         const steerPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)\/steer$/)?.[1] ?? ''
         if (body && (upstreamPath === '/v1/runs' || steerPathId)) {
-          const prepared = await prepareRunBody(body, resolveFiles)
+          const prepared = await prepareRunBody(body, resolveFiles, upstreamPath === '/v1/runs')
           body = prepared.body
           trustedPaths = prepared.trustedPaths
         }
@@ -2554,6 +2628,16 @@ export function createWizardServer(options = {}) {
           if (!ackRunId) throw Object.assign(new Error('Operator acknowledgement admission was invalid'), { status: 502 })
           operatorWorkers.set(ackRunId, { ...pendingWorker, ackRunId })
           persistOperatorWorkers()
+        }
+        if (upstream.ok && operatorSteerRecord && request.method === 'POST' && upstreamPath.endsWith('/steer')) {
+          const steerContent = inputText(parseJsonBody(body).input)
+          if (steerContent) {
+            operatorSteerRecord.steers = [
+              ...(Array.isArray(operatorSteerRecord.steers) ? operatorSteerRecord.steers : []),
+              { id: `operator-steer-${randomUUID()}`, content: steerContent, at: Date.now() },
+            ]
+            persistOperatorWorkers()
+          }
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) {
           const ackRunId = upstreamPath.split('/').at(-1)

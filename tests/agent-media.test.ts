@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,9 +8,10 @@ import { createWizardServer, listen } from '../server/service.mjs'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
 const root = mkdtempSync(join(tmpdir(), 'wizard-agent-media-'))
-const sourceRoot = join(root, 'source')
+const sourceRoot = join(root, 'source images')
 const artifactDir = join(root, 'artifacts')
 const source = join(sourceRoot, 'poster.png')
+const secondSource = join(sourceRoot, 'second.png')
 let upstream: ReturnType<typeof createServer>
 let wizard: ReturnType<typeof createWizardServer>
 let base = ''
@@ -17,12 +19,16 @@ let base = ''
 beforeAll(async () => {
   mkdirSync(sourceRoot)
   writeFileSync(source, png)
+  writeFileSync(secondSource, Buffer.concat([png, Buffer.from([0])]))
   upstream = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.url?.includes('/messages')) {
       response.end(JSON.stringify({ data: [
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
+        { id: 'user-image', role: 'user', content: `Review this\n\n@image:\`${source}\`\n[screenshot]`, timestamp: 3 },
+        { id: 'user-image-file', role: 'user', content: `Review durable file\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n@image:\`${source}\`\n[screenshot]`, timestamp: 4 },
+        { id: 'user-image-mixed', role: 'user', content: `Review both\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n@image:\`${source}\`\n@image:\`${secondSource}\`\n[screenshot]`, timestamp: 5 },
       ] }))
       return
     }
@@ -72,5 +78,32 @@ describe('agent image delivery', () => {
     const body = await (await fetch(`${base}/wizard/hermes/v1/runs/run-one`)).text()
     expect(body).toContain('<helm_attachments>')
     expect(body).not.toContain(sourceRoot)
+  })
+
+  it('restores persisted user image references as attachments instead of screenshot text', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'user-image')?.content ?? ''
+    expect(content).toContain('Review this')
+    expect(content).toContain('<helm_attachments>')
+    expect(content).not.toContain('[screenshot]')
+    expect(content).not.toContain(sourceRoot)
+  })
+
+  it('deduplicates a persisted image reference beside its durable file chip', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'user-image-file')?.content ?? ''
+    expect(content).toContain('[WIZARD_FILE_CHIPS_V1]')
+    expect(content).not.toContain('<helm_attachments>')
+    expect(content).not.toContain('[screenshot]')
+    expect(content).not.toContain(sourceRoot)
+  })
+
+  it('keeps a distinct browser photo beside a durable image file', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'user-image-mixed')?.content ?? ''
+    expect(content).toContain('[WIZARD_FILE_CHIPS_V1]')
+    expect(content).toContain('<helm_attachments>')
+    expect(content).not.toContain('[screenshot]')
+    expect(content).not.toContain(sourceRoot)
   })
 })

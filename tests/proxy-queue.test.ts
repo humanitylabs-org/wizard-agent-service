@@ -281,6 +281,12 @@ describe('Wizard proxy capacity queue', () => {
           wizard_run_id: ackRunId,
         }] })); return
       }
+      if (req.method === 'GET' && url.pathname === `/api/sessions/${operatorSessionId}/messages`) {
+        res.end(JSON.stringify({ data: [{ id: 'original', role: 'user', content: [
+          { type: 'text', text: 'Research this fully.' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,fixture' } },
+        ], timestamp: 1 }] })); return
+      }
       if (req.method === 'POST' && url.pathname === `/v1/runs/${workerRunId}/steer`) {
         steers.push({ url: url.pathname, body })
         if (workerStatus !== 'running') {
@@ -354,6 +360,10 @@ describe('Wizard proxy capacity queue', () => {
     expect(JSON.stringify(steers[0]?.body)).toContain(trustedPath)
     expect(JSON.stringify(steered.json)).not.toMatch(/private-(?:ack|worker)-run|wizardopw_/)
     expect(admissions).toBe(2)
+    const history = await request(origin, `/wizard/operator/api/sessions/${operatorSessionId}/messages?view=wizard`)
+    expect(JSON.stringify(history.json)).toContain('Use this new evidence.')
+    expect(JSON.stringify(history.json)).toContain('[WIZARD_FILE_CHIPS_V1]')
+    expect(JSON.stringify(history.json)).not.toContain(trustedPath)
 
     workerStatus = 'completed'
     const terminal = await request(origin, `/wizard/operator/v1/runs/${encodeURIComponent(publicRunId)}/steer`, {
