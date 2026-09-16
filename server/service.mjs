@@ -697,6 +697,8 @@ function historyToolLabel(call) {
 const HISTORY_WORKSPACE_PREFIX = /^(?:\[Workspace::v1: [^\]\r\n]+\]|\[Workspace:[^\]\r\n]+\])\s*/
 const HISTORY_PROCESS_COMPLETION = /^\[IMPORTANT: Background process ([^\n]+?) completed \((?:exit_code=|exit code )([^)\n]+)\)\.\nCommand: ([^\n]*)\nOutput:\n/
 const HISTORY_PROCESS_WATCH = /^\[IMPORTANT: Background process ([^\n]+?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n/
+const EMPTY_ASSISTANT_SENTINEL = '(empty)'
+const EMPTY_TOOL_RESPONSE_NUDGE = 'You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.'
 
 function historyBackgroundAction(command) {
   if (/gradlew|assemble(?:debug|release)|build:android/i.test(command)) return 'Android build'
@@ -725,12 +727,22 @@ function historyValueIsProcessWakeup(value) {
   )
 }
 
+function historyValueIsEmptyRecovery(value, fallbackRole = '') {
+  const role = value && typeof value === 'object' && !Array.isArray(value)
+    ? String(value.role ?? value.author ?? fallbackRole)
+    : String(fallbackRole)
+  const candidates = historyContentStrings(value).map((candidate) => candidate.trim())
+  if (candidates.some((candidate) => candidate === EMPTY_TOOL_RESPONSE_NUDGE)) return role === '' || role === 'user'
+  return role === 'assistant' && candidates.some((candidate) => candidate === EMPTY_ASSISTANT_SENTINEL)
+}
+
 function sanitizeSessionRuntimePreview(session) {
   const runtimeFields = ['preview', 'summary', 'last_message', 'lastMessage', 'latest_message', 'latestMessage', 'content', 'text', 'display_content']
   const processWakeup = historyValueIsProcessWakeup(session) || runtimeFields.some((key) => historyValueIsProcessWakeup(session[key]))
+  const previewRole = String(session.preview_role ?? session.previewRole ?? session.last_message?.role ?? session.lastMessage?.role ?? '')
   const projected = { ...session }
   for (const key of runtimeFields) {
-    if (!historyValueIsProcessWakeup(projected[key])) continue
+    if (!historyValueIsProcessWakeup(projected[key]) && !historyValueIsEmptyRecovery(projected[key], previewRole)) continue
     projected[key] = typeof projected[key] === 'string' ? '' : null
   }
   if (processWakeup) {
@@ -806,6 +818,9 @@ function legacyInternalHistoryMessage(message) {
   if (typeof content !== 'string') return false
   if (historyProcessWakeup(message, content)) return false
   const trimmed = content.trimStart().replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '').trimStart()
+  const normalized = trimmed.trim()
+  if (role === 'assistant' && normalized === EMPTY_ASSISTANT_SENTINEL) return true
+  if (role === 'user' && normalized === EMPTY_TOOL_RESPONSE_NUDGE) return true
   return [
     '[ASYNC DELEGATION BATCH COMPLETE',
     '[CONTEXT COMPACTION — REFERENCE ONLY]',

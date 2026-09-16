@@ -9,6 +9,37 @@ afterEach(async () => {
 })
 
 describe('Wizard thread history marker projection', () => {
+  it('hides Hermes empty-response recovery scaffolding without hiding genuine text', async () => {
+    const recoveryNudge = 'You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.'
+    const upstream = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ data: [
+        { id: 'request', role: 'user', content: 'Finish the upload.' },
+        { id: 'empty-sentinel', role: 'assistant', content: '(empty)', finish_reason: 'stop' },
+        { id: 'recovery-nudge', role: 'user', content: recoveryNudge },
+        { id: 'literal-user', role: 'user', content: '(empty)' },
+        { id: 'literal-assistant', role: 'assistant', content: 'The source field literally contains (empty).', finish_reason: 'stop' },
+      ] }))
+    })
+    servers.push(upstream)
+    const upstreamAddress = await listen(upstream)
+    const proxy = createWizardServer({
+      requireJoinedDelegationCapability: false,
+      upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+      hermesKey: 'server-only-secret',
+      requireAccess: false,
+    })
+    servers.push(proxy)
+    const proxyAddress = await listen(proxy)
+
+    const response = await fetch(`http://127.0.0.1:${proxyAddress.port}/wizard/hermes/api/sessions/chat-one/messages?order=latest&view=wizard`)
+    expect(response.status).toBe(200)
+    const payload = await response.json() as { data: Array<{ id: string; content: string }> }
+    expect(payload.data.map((message) => message.id)).toEqual(['request', 'literal-user', 'literal-assistant'])
+    expect(payload.data.find((message) => message.id === 'literal-user')?.content).toBe('(empty)')
+    expect(JSON.stringify(payload)).not.toContain(recoveryNudge)
+  })
+
   it('keeps source-code marker text in tool history from locking the thread', async () => {
     const sourceExcerpt = [
       "const TRUSTED_FILE_MARKER = /\\[WIZARD_FILES_V1\\]/g",
@@ -411,5 +442,49 @@ describe('Wizard thread history marker projection', () => {
     expect(wire).not.toContain('PRIVATE SESSION OUTPUT')
     expect(wire).not.toContain('/private/workspace')
     expect(wire).not.toContain('IMPORTANT: Background process')
+  })
+
+  it('removes empty-response recovery previews when history enrichment is unavailable', async () => {
+    const recoveryNudge = 'You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.'
+    const upstream = createServer((request, response) => {
+      response.setHeader('Content-Type', 'application/json')
+      if (request.url?.includes('/messages')) {
+        response.writeHead(503)
+        response.end(JSON.stringify({ error: 'history unavailable' }))
+        return
+      }
+      response.end(JSON.stringify({ data: [
+        {
+          id: 'recovery-preview', source: 'webui', message_count: 3,
+          preview: recoveryNudge, last_message: { role: 'user', content: recoveryNudge },
+        },
+        {
+          id: 'assistant-empty', source: 'webui', message_count: 2,
+          preview: '(empty)', preview_role: 'assistant', last_message: { role: 'assistant', content: '(empty)' },
+        },
+        {
+          id: 'genuine-user-empty', source: 'webui', message_count: 1,
+          preview: '(empty)', preview_role: 'user', last_message: { role: 'user', content: '(empty)' },
+        },
+      ] }))
+    })
+    servers.push(upstream)
+    const upstreamAddress = await listen(upstream)
+    const proxy = createWizardServer({
+      requireJoinedDelegationCapability: false,
+      upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+      hermesKey: 'server-only-secret',
+      requireAccess: false,
+      archivedSessionReader: () => [],
+    })
+    servers.push(proxy)
+    const proxyAddress = await listen(proxy)
+
+    const response = await fetch(`http://127.0.0.1:${proxyAddress.port}/wizard/hermes/api/sessions?limit=100&offset=0`)
+    expect(response.status).toBe(200)
+    const payload = await response.json() as { data: Array<{ id: string; preview: string; last_message: unknown }> }
+    expect(payload.data.find((session) => session.id === 'recovery-preview')).toMatchObject({ preview: '', last_message: null })
+    expect(payload.data.find((session) => session.id === 'assistant-empty')).toMatchObject({ preview: '', last_message: null })
+    expect(payload.data.find((session) => session.id === 'genuine-user-empty')).toMatchObject({ preview: '(empty)', last_message: { role: 'user', content: '(empty)' } })
   })
 })

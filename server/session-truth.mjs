@@ -15,6 +15,7 @@ const INTERNAL_USER_PREFIXES = [
   '[STILL IN PROGRESS',
   'Workline browser QA found a concrete regression in ',
 ]
+const EMPTY_TOOL_RESPONSE_NUDGE = 'You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.'
 
 function boundedIds(values, limit = 200) {
   return [...new Set(values.filter((value) => typeof value === 'string' && /^[A-Za-z0-9._:-]+$/.test(value)).slice(0, limit))]
@@ -29,7 +30,7 @@ function openReadOnly(path) {
 function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
-  if (!text || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
+  if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
@@ -38,7 +39,7 @@ function visibleAssistantReply(content, displayKind, finishReason) {
   const kind = String(displayKind || '')
   const completion = String(finishReason || '')
   const completed = kind === 'final' || Boolean(completion && !['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(completion))
-  if (!text || !completed || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
+  if (!text || text === '(empty)' || !completed || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 

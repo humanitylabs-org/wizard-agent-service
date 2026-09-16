@@ -26,6 +26,10 @@ INTERNAL_USER_PREFIXES = (
     "[STILL IN PROGRESS",
     "Workline browser QA found a concrete regression in ",
 )
+EMPTY_TOOL_RESPONSE_NUDGE = (
+    "You just executed tool calls but returned an empty response. "
+    "Please process the tool results above and continue with the task."
+)
 
 
 def read_only(path: str) -> sqlite3.Connection:
@@ -60,6 +64,7 @@ def latest_visible_users(
     targets = ",".join("(?)" for _ in session_ids)
     prefix_clauses = "\n".join("AND substr(content, 1, ?) <> ?" for _ in INTERNAL_USER_PREFIXES)
     parameters: list[Any] = [*session_ids, *USER_EVENT_KINDS]
+    parameters.append(EMPTY_TOOL_RESPONSE_NUDGE)
     for prefix in INTERNAL_USER_PREFIXES:
         parameters.extend((len(prefix), prefix))
     rows = database.execute(
@@ -74,6 +79,7 @@ def latest_visible_users(
                    AND trim(COALESCE(content, '')) <> ''
                    AND COALESCE({display_kind}, '') NOT IN ({','.join('?' for _ in USER_EVENT_KINDS)})
                    AND COALESCE({display_kind}, '') NOT LIKE 'process_wakeup%'
+                   AND trim(content) <> ?
                    {prefix_clauses}
                  ORDER BY timestamp DESC
                  LIMIT 1) AS timestamp
