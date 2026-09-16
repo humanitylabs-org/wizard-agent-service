@@ -45,15 +45,24 @@ export function normalizeThreadSeenState(value) {
 
 function laterRecord(left, right) {
   if (!left) return right
-  if (typeof left.messageCount === 'number' && typeof right.messageCount === 'number' && left.messageCount !== right.messageCount) {
-    return right.messageCount > left.messageCount ? right : left
-  }
   const leftUpdatedAt = Date.parse(left.updatedAt)
   const rightUpdatedAt = Date.parse(right.updatedAt)
+  // updatedAt is the canonical session revision. message_count is only a
+  // tie-breaker because compaction can reduce it across later revisions.
   if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt > leftUpdatedAt ? right : left
+  const leftCount = left.messageCount ?? -1
+  const rightCount = right.messageCount ?? -1
+  if (leftCount !== rightCount) {
+    return rightCount > leftCount ? right : left
+  }
   const leftReady = Boolean(left.status && READY_OR_ATTENTION_STATUSES.has(left.status))
   const rightReady = Boolean(right.status && READY_OR_ATTENTION_STATUSES.has(right.status))
   if (leftReady !== rightReady) return rightReady ? right : left
+  const leftStatus = left.status ?? ''
+  const rightStatus = right.status ?? ''
+  if (leftStatus !== rightStatus) return rightStatus > leftStatus ? right : left
+  if (left.previewFingerprint !== right.previewFingerprint) return right.previewFingerprint > left.previewFingerprint ? right : left
+  if (left.updatedAt !== right.updatedAt) return right.updatedAt > left.updatedAt ? right : left
   return right.seenAt > left.seenAt ? right : left
 }
 
