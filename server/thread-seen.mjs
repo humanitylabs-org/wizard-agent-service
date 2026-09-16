@@ -13,17 +13,20 @@ function validRecord(value) {
   const status = value.status
   const updatedAt = value.updatedAt
   const previewFingerprint = value.previewFingerprint
+  const assistantActivityAt = value.assistantActivityAt
   const seenAt = value.seenAt
   if (messageCount !== undefined && (!Number.isSafeInteger(messageCount) || messageCount < 0)) return null
   if (status !== undefined && !RUN_STATUSES.has(status)) return null
   if (typeof updatedAt !== 'string' || updatedAt.length > 100 || !Number.isFinite(Date.parse(updatedAt))) return null
   if (typeof previewFingerprint !== 'string' || !/^[a-z0-9]{1,32}$/.test(previewFingerprint)) return null
+  if (assistantActivityAt !== undefined && (typeof assistantActivityAt !== 'string' || assistantActivityAt.length > 100 || !Number.isFinite(Date.parse(assistantActivityAt)))) return null
   if (!Number.isFinite(seenAt) || seenAt < 0) return null
   return {
     ...(messageCount !== undefined ? { messageCount } : {}),
     ...(status !== undefined ? { status } : {}),
     updatedAt,
     previewFingerprint,
+    ...(assistantActivityAt !== undefined ? { assistantActivityAt } : {}),
     seenAt,
   }
 }
@@ -49,21 +52,39 @@ function laterRecord(left, right) {
   const rightUpdatedAt = Date.parse(right.updatedAt)
   // updatedAt is the canonical session revision. message_count is only a
   // tie-breaker because compaction can reduce it across later revisions.
-  if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt > leftUpdatedAt ? right : left
-  const leftCount = left.messageCount ?? -1
-  const rightCount = right.messageCount ?? -1
-  if (leftCount !== rightCount) {
-    return rightCount > leftCount ? right : left
+  let selected
+  if (leftUpdatedAt !== rightUpdatedAt) selected = rightUpdatedAt > leftUpdatedAt ? right : left
+  else {
+    const leftCount = left.messageCount ?? -1
+    const rightCount = right.messageCount ?? -1
+    if (leftCount !== rightCount) selected = rightCount > leftCount ? right : left
+    else {
+      const leftReady = Boolean(left.status && READY_OR_ATTENTION_STATUSES.has(left.status))
+      const rightReady = Boolean(right.status && READY_OR_ATTENTION_STATUSES.has(right.status))
+      if (leftReady !== rightReady) selected = rightReady ? right : left
+      else {
+        const leftStatus = left.status ?? ''
+        const rightStatus = right.status ?? ''
+        if (leftStatus !== rightStatus) selected = rightStatus > leftStatus ? right : left
+        else if (left.previewFingerprint !== right.previewFingerprint) selected = right.previewFingerprint > left.previewFingerprint ? right : left
+        else if (left.updatedAt !== right.updatedAt) selected = right.updatedAt > left.updatedAt ? right : left
+        else selected = right.seenAt > left.seenAt ? right : left
+      }
+    }
   }
-  const leftReady = Boolean(left.status && READY_OR_ATTENTION_STATUSES.has(left.status))
-  const rightReady = Boolean(right.status && READY_OR_ATTENTION_STATUSES.has(right.status))
-  if (leftReady !== rightReady) return rightReady ? right : left
-  const leftStatus = left.status ?? ''
-  const rightStatus = right.status ?? ''
-  if (leftStatus !== rightStatus) return rightStatus > leftStatus ? right : left
-  if (left.previewFingerprint !== right.previewFingerprint) return right.previewFingerprint > left.previewFingerprint ? right : left
-  if (left.updatedAt !== right.updatedAt) return right.updatedAt > left.updatedAt ? right : left
-  return right.seenAt > left.seenAt ? right : left
+  const seenAt = Math.max(left.seenAt, right.seenAt)
+  const leftAssistantAt = Date.parse(left.assistantActivityAt ?? '')
+  const rightAssistantAt = Date.parse(right.assistantActivityAt ?? '')
+  const assistantActivityAt = !Number.isFinite(leftAssistantAt)
+    ? right.assistantActivityAt
+    : !Number.isFinite(rightAssistantAt)
+      ? left.assistantActivityAt
+      : rightAssistantAt !== leftAssistantAt
+        ? rightAssistantAt > leftAssistantAt ? right.assistantActivityAt : left.assistantActivityAt
+        : (right.assistantActivityAt ?? '') > (left.assistantActivityAt ?? '') ? right.assistantActivityAt : left.assistantActivityAt
+  return selected.seenAt === seenAt && selected.assistantActivityAt === assistantActivityAt
+    ? selected
+    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt }
 }
 
 export function mergeThreadSeenStates(left, right) {
@@ -79,7 +100,7 @@ export function mergeThreadSeenStates(left, right) {
     }
   }
   if (!changed) return left
-  const entries = Object.entries(threads).sort((a, b) => b[1].seenAt - a[1].seenAt).slice(0, MAX_THREAD_RECORDS)
+  const entries = Object.entries(threads).sort((a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])).slice(0, MAX_THREAD_RECORDS)
   return { initializedAt: Math.min(left.initializedAt, right.initializedAt), threads: Object.fromEntries(entries) }
 }
 
