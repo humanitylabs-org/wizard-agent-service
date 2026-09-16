@@ -144,3 +144,58 @@ export class ThreadSeenStore {
     renameSync(temporary, this.statePath)
   }
 }
+
+// Durable record of thread failures James explicitly dismissed from the app.
+// A dismissal suppresses the "Needs retry" projection for one bound failure
+// identity; a newer request or run supersedes it automatically.
+const MAX_DISMISSED_FAILURES = 500
+const SESSION_KEY = /^[A-Za-z0-9._:-]{1,200}$/
+
+export class DismissedFailureStore {
+  constructor(statePath = '') {
+    this.statePath = statePath
+    this.dismissals = new Map()
+    if (!statePath || !existsSync(statePath)) return
+    let payload
+    try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
+    catch { throw new Error('Wizard dismissed failure state is invalid') }
+    if (payload?.schema !== 1 || !payload.dismissals || typeof payload.dismissals !== 'object' || Array.isArray(payload.dismissals)) {
+      throw new Error('Wizard dismissed failure state is invalid')
+    }
+    for (const [sessionId, record] of Object.entries(payload.dismissals).slice(0, MAX_DISMISSED_FAILURES)) {
+      if (!SESSION_KEY.test(sessionId)) continue
+      if (!record || typeof record !== 'object' || Array.isArray(record)) continue
+      const failureKey = typeof record.failureKey === 'string' ? record.failureKey : ''
+      const dismissedAt = Number(record.dismissedAt)
+      if (!failureKey || !Number.isFinite(dismissedAt) || dismissedAt < 0) continue
+      this.dismissals.set(sessionId, { failureKey, dismissedAt })
+    }
+  }
+
+  isDismissed(sessionId, failureKey = '') {
+    const record = this.dismissals.get(sessionId)
+    if (!record) return false
+    return failureKey === '' || record.failureKey === failureKey
+  }
+
+  dismiss(sessionId, failureKey) {
+    if (!SESSION_KEY.test(sessionId) || typeof failureKey !== 'string' || !failureKey) {
+      throw Object.assign(new Error('invalid dismissal'), { status: 400 })
+    }
+    this.dismissals.set(sessionId, { failureKey, dismissedAt: Date.now() })
+    while (this.dismissals.size > MAX_DISMISSED_FAILURES) {
+      const oldest = [...this.dismissals.entries()].sort((left, right) => left[1].dismissedAt - right[1].dismissedAt)[0]
+      if (!oldest) break
+      this.dismissals.delete(oldest[0])
+    }
+    this.persist()
+  }
+
+  persist() {
+    if (!this.statePath) return
+    mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
+    const temporary = `${this.statePath}.${process.pid}.tmp`
+    writeFileSync(temporary, JSON.stringify({ schema: 1, dismissals: Object.fromEntries(this.dismissals) }), { mode: 0o600 })
+    renameSync(temporary, this.statePath)
+  }
+}

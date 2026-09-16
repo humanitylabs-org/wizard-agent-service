@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
-import { ThreadSeenStore } from './thread-seen.mjs'
+import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -349,7 +349,7 @@ function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
   return Boolean(trustActiveTruth && truth && !truth.active && startedAt > 0 && terminalAt >= startedAt && terminalAt > latestRequestAt)
 }
 
-function filterSessionList(result, operator, records = [], directRuns = [], externalRuns = [], sessionTruth = new Map(), helmActivities = [], trustActiveTruth = false) {
+function filterSessionList(result, operator, records = [], directRuns = [], externalRuns = [], sessionTruth = new Map(), helmActivities = [], trustActiveTruth = false, dismissedFailures = null) {
   try {
     const payload = JSON.parse(result.toString('utf8'))
     const collections = ['data', 'sessions'].filter((key) => payload && Array.isArray(payload[key]))
@@ -401,6 +401,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
               projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
             } else if (helm?.status === 'failed') projected.status = 'failed'
+            // A failure James explicitly dismissed stops demanding attention
+            // until a newer request or run changes the failure identity.
+            if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
+              const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
+              if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) delete projected.status
+            }
             if (ACTIVE_RUN_STATUSES.has(projected.status) && !projected.wizard_assigned_at) {
               projected.wizard_assigned_at = Number(projected.wizard_last_user_at) || Number(truth?.lastUserAt) || undefined
             }
@@ -1452,6 +1458,7 @@ export function createWizardServer(options = {}) {
   const operatorWorkers = new Map()
   const operatorWorkerStatePath = options.operatorWorkerStatePath ? resolve(String(options.operatorWorkerStatePath)) : ''
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
+  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     try {
       const records = JSON.parse(readFileSync(operatorWorkerStatePath, 'utf8'))
@@ -2384,6 +2391,31 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      const failureDismissal = url.pathname.match(/^\/wizard\/session-failure\/([^/]+)\/dismiss$/)
+      if (failureDismissal && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        let sessionId
+        try { sessionId = decodeURIComponent(failureDismissal[1]) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if ((await readBoundedBody(request, 2)).length) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Resolve the failure identity the way the session list projects it:
+        // the newest bound external run, the newest Helm activity, else the
+        // canonical session revision.
+        let failureKey = ''
+        try {
+          const [reference] = readWizardAssistantRunReferences(inboxDbPath, [sessionId])
+          failureKey = reference?.runId || ''
+        } catch { /* read-only projection; the dismissal can still persist */ }
+        if (!failureKey) {
+          try { failureKey = String((await readHelmActivities()).find((activity) => activity.sessionId === sessionId)?.activityId ?? '') } catch { /* optional */ }
+        }
+        try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
+        catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        sendJson(response, 200, { ok: true, dismissed: true, session_id: sessionId })
+        return
+      }
+
       if (url.pathname === '/wizard/filings' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
@@ -2707,6 +2739,7 @@ export function createWizardServer(options = {}) {
             sessionTruth,
             helmActivities,
             Boolean(canonicalPage),
+            dismissedFailureStore,
           )
           if (firstPage) result = await enrichSessionListMessages(result, operator)
         }
