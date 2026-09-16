@@ -587,7 +587,8 @@ function projectWizardFileMarkers(result, userMessagesOnly = false) {
           return `[WIZARD_FILE_CHIPS_V1]\n${JSON.stringify(safe)}\n[/WIZARD_FILE_CHIPS_V1]`
         } catch { return '' }
       })
-      const incompleteMarker = projected.indexOf('[WIZARD_FILES_V1]')
+      projected = projected.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
+      const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_IMAGE_INTENT_V1)\]/)
       if (incompleteMarker >= 0) projected = projected.slice(0, incompleteMarker)
       return projected.replaceAll('[/WIZARD_FILES_V1]', '')
     }
@@ -1199,6 +1200,7 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
       })
     }
     if ((artifacts.length || durableImageHashes.size) && userImageReferences) text = text.replace(/^\s*\[screenshot\]\s*$/gmi, '')
+    if (userImageReferences) text = text.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     text = text.replace(/\n{3,}/g, '\n\n').trim()
     if (!artifacts.length) return text
     const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`

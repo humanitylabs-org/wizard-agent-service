@@ -27,7 +27,7 @@ beforeAll(async () => {
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
         { id: 'user-image', role: 'user', content: `Review this\n\n@image:\`${source}\`\n[screenshot]`, timestamp: 3 },
-        { id: 'user-image-file', role: 'user', content: `Review durable file\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n@image:\`${source}\`\n[screenshot]`, timestamp: 4 },
+        { id: 'user-image-file', role: 'user', content: `Review durable file\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n\n[WIZARD_IMAGE_INTENT_V1]\nInspect the trusted image path before answering.\n[/WIZARD_IMAGE_INTENT_V1]\n@image:\`${source}\`\n[screenshot]`, timestamp: 4 },
         { id: 'user-image-mixed', role: 'user', content: `Review both\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n@image:\`${source}\`\n@image:\`${secondSource}\`\n[screenshot]`, timestamp: 5 },
       ] }))
       return
@@ -95,6 +95,7 @@ describe('agent image delivery', () => {
     expect(content).toContain('[WIZARD_FILE_CHIPS_V1]')
     expect(content).not.toContain('<helm_attachments>')
     expect(content).not.toContain('[screenshot]')
+    expect(content).not.toContain('[WIZARD_IMAGE_INTENT_V1]')
     expect(content).not.toContain(sourceRoot)
   })
 

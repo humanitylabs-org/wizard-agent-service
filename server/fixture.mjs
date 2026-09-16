@@ -228,7 +228,10 @@ export function createHermesFixture(options = {}) {
       list.push({ id: `steer-${run.id}-${run.steers.length}`, role: 'user', content: input.input, created_at: iso() })
       messages.set(run.sessionId, list)
       emit(run, 'run.steered', { accepted: true }); json(response, 200, { accepted: true })
-      if (!/continue holding|Please use the attached file|WIZARD_IMAGE_INTENT_V1/i.test(String(input.input))) later(() => complete(run, `I followed your guidance: ${String(input.input).slice(0, 80)}`), 120)
+      const steerText = String(input.input)
+      const hold = /continue holding|Please use the attached file|WIZARD_IMAGE_INTENT_V1/i.test(steerText)
+        && !/Spoken fixture request/i.test(steerText)
+      if (!hold) later(() => complete(run, `I followed your guidance: ${steerText.slice(0, 80)}`), 120)
       return
     }
     const stopMatch = url.pathname.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)\/stop$/)
