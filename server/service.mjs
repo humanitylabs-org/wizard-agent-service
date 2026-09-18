@@ -1104,13 +1104,17 @@ const PASSIVE_INLINE_MIME = new Set([
   'video/mp4', 'video/webm', 'video/quicktime',
 ])
 
+function isMarkdownDownload(name, mime) {
+  return /\.(?:md|markdown)$/i.test(name) || /^text\/(?:x-)?markdown(?:;|$)/i.test(mime)
+}
+
 function safeContentHeaders(file, upstream) {
   const upstreamType = safeHeader(upstream.headers.get('content-type'), file.mime, 160)
   const canonicalType = upstreamType.split(';', 1)[0].trim().toLowerCase()
   const declaredType = safeHeader(file.mime, 'application/octet-stream', 160).split(';', 1)[0].trim().toLowerCase()
   const passive = canonicalType === declaredType && PASSIVE_INLINE_MIME.has(canonicalType)
   const backendDisposition = safeHeader(upstream.headers.get('content-disposition'), '', 512).toLowerCase()
-  const disposition = !passive || backendDisposition.startsWith('attachment') ? 'attachment' : 'inline'
+  const disposition = !passive || isMarkdownDownload(file.filename, canonicalType) || backendDisposition.startsWith('attachment') ? 'attachment' : 'inline'
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': `${disposition}; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
@@ -1139,7 +1143,7 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   const encodedName = safeHelmDispositionFilename(upstream.headers.get('content-disposition'), `attachment-${attachmentId}`)
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
-    'Content-Disposition': `${passive ? 'inline' : 'attachment'}; filename*=UTF-8''${encodedName}`,
+    'Content-Disposition': `${passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodedName}`,
     'Cache-Control': 'private, no-store',
     'X-Content-Type-Options': 'nosniff',
   }
@@ -2237,7 +2241,7 @@ export function createWizardServer(options = {}) {
         if (artifact) {
           response.writeHead(200, {
             'Content-Type': artifact.mime,
-            'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            'Content-Disposition': `${isMarkdownDownload(artifact.name, artifact.mime) ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
             'Content-Length': artifact.bytes,
             'Cache-Control': 'private, no-store',
             'X-Content-Type-Options': 'nosniff',
