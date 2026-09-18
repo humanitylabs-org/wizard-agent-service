@@ -1310,7 +1310,7 @@ function staticHeaders(path) {
   return {
     'Content-Type': mime(path),
     'Cache-Control': path.endsWith('.html') || mutableManifest ? 'private, no-store' : 'public, max-age=3600',
-    'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+    'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self' blob: data:; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
     'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self), payment=(), usb=()',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
