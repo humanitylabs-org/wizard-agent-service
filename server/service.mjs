@@ -10,6 +10,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -1117,7 +1118,7 @@ function safeContentHeaders(file, upstream) {
   const disposition = !passive || isMarkdownDownload(file.filename, canonicalType) || backendDisposition.startsWith('attachment') ? 'attachment' : 'inline'
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
-    'Content-Disposition': `${disposition}; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+    'Content-Disposition': contentDisposition(disposition, file.filename),
     'Cache-Control': 'private, no-store',
     'X-Content-Type-Options': 'nosniff',
   }
@@ -1143,7 +1144,7 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   const encodedName = safeHelmDispositionFilename(upstream.headers.get('content-disposition'), `attachment-${attachmentId}`)
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
-    'Content-Disposition': `${passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodedName}`,
+    'Content-Disposition': contentDisposition(passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment', decodeURIComponent(encodedName)),
     'Cache-Control': 'private, no-store',
     'X-Content-Type-Options': 'nosniff',
   }
@@ -2241,7 +2242,7 @@ export function createWizardServer(options = {}) {
         if (artifact) {
           response.writeHead(200, {
             'Content-Type': artifact.mime,
-            'Content-Disposition': `${isMarkdownDownload(artifact.name, artifact.mime) ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            'Content-Disposition': contentDisposition(isMarkdownDownload(artifact.name, artifact.mime) ? 'attachment' : 'inline', artifact.name),
             'Content-Length': artifact.bytes,
             'Cache-Control': 'private, no-store',
             'X-Content-Type-Options': 'nosniff',

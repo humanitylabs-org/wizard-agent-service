@@ -90,7 +90,7 @@ describe('agent image delivery', () => {
     const image = await fetch(`${base}/wizard/attachments/${id}`)
     expect(image.status).toBe(200)
     expect(image.headers.get('content-type')).toBe('image/png')
-    expect(image.headers.get('content-disposition')).toContain("inline; filename*=UTF-8''poster.png")
+    expect(image.headers.get('content-disposition')).toContain('inline; filename="poster.png"')
     expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
     const head = await fetch(`${base}/wizard/attachments/${id}`, { method: 'HEAD' })
     expect(head.status).toBe(200)
