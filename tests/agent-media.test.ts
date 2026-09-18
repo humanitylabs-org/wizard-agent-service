@@ -26,6 +26,17 @@ beforeAll(async () => {
       response.end(JSON.stringify({ data: [
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
+        ...['user', 'assistant'].map(role => ({ id: `${role}-inline-file`, role, content: [
+          { type: 'text', text: `Review screenshot\n\n[WIZARD_FILES_V1]\n${JSON.stringify([
+            { id: 'drop_screen', filename: 'screen.png', mime: 'image/png', bytes: png.length, sha256: createHash('sha256').update(png).digest('hex') },
+            { id: 'drop_voice', filename: 'voice.wav', mime: 'audio/wav', bytes: 44 },
+          ])}\n[/WIZARD_FILES_V1]` },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.concat([png, Buffer.from([0])]).toString('base64')}` } },
+        ], timestamp: 6 })),
+        { id: 'user-inline-only', role: 'user', content: [
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } },
+        ], timestamp: 7 },
         { id: 'user-image', role: 'user', content: `Review this\n\n@image:\`${source}\`\n[screenshot]`, timestamp: 3 },
         { id: 'user-image-file', role: 'user', content: `Review durable file\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n\n[WIZARD_IMAGE_INTENT_V1]\nInspect the trusted image path before answering.\n[/WIZARD_IMAGE_INTENT_V1]\n@image:\`${source}\`\n[screenshot]`, timestamp: 4 },
         { id: 'user-image-mixed', role: 'user', content: `Review both\n\n[WIZARD_FILES_V1]\n[{"id":"drop_screen","filename":"screen.png","mime":"image/png","bytes":${png.length},"sha256":"${createHash('sha256').update(png).digest('hex')}"}]\n[/WIZARD_FILES_V1]\n@image:\`${source}\`\n@image:\`${secondSource}\`\n[screenshot]`, timestamp: 5 },
@@ -53,6 +64,18 @@ afterAll(async () => {
 })
 
 describe('agent image delivery', () => {
+  it('renders the durable screenshot once while keeping distinct photos and audio', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json()
+    const parts = payload.data.find((message: { id: string }) => message.id === 'user-inline-file').content
+    expect(parts.filter((part: { type: string }) => part.type === 'image_url')).toEqual([
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.concat([png, Buffer.from([0])]).toString('base64')}` } },
+    ])
+    expect(parts[0].text).toContain('drop_screen')
+    expect(parts[0].text).toContain('drop_voice')
+    expect(payload.data.find((message: { id: string }) => message.id === 'user-inline-only').content).toHaveLength(1)
+    expect(payload.data.find((message: { id: string }) => message.id === 'assistant-inline-file').content).toHaveLength(3)
+  })
+
   it('projects trusted MEDIA paths into openable private image attachments', async () => {
     const response = await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)
     expect(response.status).toBe(200)

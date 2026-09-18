@@ -623,6 +623,33 @@ function projectWizardFileMarkers(result, userMessagesOnly = false) {
     const projectMessage = (message) => {
       if (!message || typeof message !== 'object' || (message.role ?? message.author) !== 'user') return message
       const projected = visitContent(message)
+      // History carries both the durable attachment and the inline model input.
+      // Keep the durable chip as the single display image, but never alter the
+      // stored turn or outbound model input. Match bytes, not names or counts.
+      for (const field of ['content', 'display_content']) {
+        const parts = projected[field]
+        if (!Array.isArray(parts)) continue
+        const hashes = new Set()
+        for (const part of parts) {
+          if (part?.type !== 'text' || typeof part.text !== 'string') continue
+          for (const match of part.text.matchAll(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g)) {
+            try {
+              const files = JSON.parse(match[1])
+              if (Array.isArray(files)) for (const file of files) {
+                if (String(file?.mime ?? '').startsWith('image/') && /^[0-9a-f]{64}$/.test(file?.sha256 ?? '')) hashes.add(file.sha256)
+              }
+            } catch {}
+          }
+        }
+        if (!hashes.size) continue
+        projected[field] = parts.filter((part) => {
+          if (part?.type !== 'image_url' || typeof part.image_url?.url !== 'string') return true
+          const encoded = part.image_url.url.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})$/)?.[1]
+          if (!encoded) return true
+          const hash = createHash('sha256').update(Buffer.from(encoded, 'base64')).digest('hex')
+          return !hashes.has(hash)
+        })
+      }
       collect(projected)
       return projected
     }
