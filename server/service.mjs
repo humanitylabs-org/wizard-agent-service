@@ -395,6 +395,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (!projected.preview && direct.preview) projected.preview = direct.preview
               if (direct.queuePosition) projected.queue_position = direct.queuePosition
               if (direct.queueReason) projected.queue_reason = direct.queueReason
+            } else if (truth?.active && external && TERMINAL_RUN_STATUSES.has(external.status)) {
+              // A notification/recovery turn can resume this session outside the
+              // original admission. Its live lease outranks that old terminal
+              // receipt, whose run ID must never become the new turn's controls.
+              projected.status = 'running'
             } else if (external) {
               projected.status = external.status
               if (ACTIVE_RUN_STATUSES.has(external.status) && external.runId) projected.wizard_run_id = external.runId
