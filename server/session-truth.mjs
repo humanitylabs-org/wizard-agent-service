@@ -4,6 +4,12 @@ import { DatabaseSync } from 'node:sqlite'
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
 const INTERNAL_USER_PREFIXES = [
+  '[System: Your previous response contained only internal reasoning and never produced a ',
+  '[System: Continue now. Execute the required tool calls ',
+  '[System: The previous response was cut off by a network error mid-stream.',
+  '[System: Your previous response was truncated by the output length limit.',
+  'Your previous turn indicated a tool call but none was included.',
+  'You just executed tool calls but returned an empty response.',
   '[IMPORTANT: Background process ',
   '[ASYNC DELEGATION BATCH COMPLETE',
   '[CONTEXT COMPACTION — REFERENCE ONLY]',
@@ -31,7 +37,7 @@ function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
   if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
-  return !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
+  return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
 function visibleAssistantReply(content, displayKind, finishReason) {
@@ -40,7 +46,7 @@ function visibleAssistantReply(content, displayKind, finishReason) {
   const completion = String(finishReason || '')
   const completed = kind === 'final' || Boolean(completion && !['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(completion))
   if (!text || text === '(empty)' || !completed || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
-  return !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
+  return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
 export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
