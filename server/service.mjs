@@ -971,7 +971,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   }
 }
 
-function projectWizardMessageHistory(result) {
+export function projectWizardMessageHistory(result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
     const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
@@ -992,6 +992,14 @@ function projectWizardMessageHistory(result) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
+    // Completion is authoritative; visible text alone may be commentary or a partial.
+    const kind = String(message.display_kind ?? '')
+    projected.shareable = role === 'assistant'
+      && (!kind || kind === 'final')
+      && message.finish_reason === 'stop'
+      && !(Array.isArray(message.tool_calls) && message.tool_calls.length)
+      && Boolean(safeHistoryText(projected.content, 1_000).trim())
+      && !legacyInternalHistoryMessage(message)
     const wakeup = historyProcessWakeup(message, projected.content)
     if (wakeup) Object.assign(projected, wakeup)
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
