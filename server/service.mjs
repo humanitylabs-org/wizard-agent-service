@@ -13,6 +13,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
+import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 
@@ -2193,6 +2194,23 @@ export function createWizardServer(options = {}) {
         finally { clearTimeout(timer) }
         const queue = runQueue ? await runQueue.summary() : undefined
         sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
+        return
+      }
+
+      if (url.pathname === '/wizard/voice/recovery-receipt' && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        try {
+          const input = JSON.parse((await readBoundedBody(request, 2048)).toString('utf8'))
+          const receipt = await resolveVoiceRecoveryReceipt({ request: input,
+            manifestPath: options.voiceRecoveryManifestPath,
+            queueDbPath: options.voiceRecoveryQueueDbPath ?? options.runQueueStatePath,
+            inboxDbPath,
+            blobRoot: options.voiceRecoveryBlobRoot ?? inboxTrustedRoots[0],
+          })
+          sendJson(response, 200, { receipt })
+        } catch (error) {
+          sendJson(response, error.status === 409 ? 409 : error.status === 413 ? 413 : 400, { error: 'voice_recovery_unverified' })
+        }
         return
       }
 
