@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 
@@ -2800,7 +2801,17 @@ export function createWizardServer(options = {}) {
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
-        const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths].filter(Boolean).map((value) => Buffer.from(value))
+        const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
+        // Recovery notes can contain a raw attachment location outside a file
+        // marker. Keep history/listing readable without exposing that location.
+        // Credentials still fail closed, including before any path redaction.
+        const credentials = [hermesKey, inboxToken].filter(Boolean).map((value) => Buffer.from(value))
+        if (credentials.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
+        if (contentType.includes('application/json') && request.method === 'GET'
+          && /^\/api\/sessions(?:\/[^/]+(?:\/messages)?)?$/.test(upstreamPath)) {
+          result = projectPrivateFilePaths(result, privatePaths)
+        }
+        const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
