@@ -2289,7 +2289,17 @@ export function createWizardServer(options = {}) {
         const controller = new AbortController()
         request.once('aborted', () => controller.abort())
         response.once('close', () => { if (!response.writableEnded) controller.abort() })
-        const upstream = await fetchImpl(`${helmOrigin}/helm/api/attachments/${helmAttachmentMatch[1]}`, { method: request.method, headers, redirect: 'manual', signal: controller.signal })
+        const attachmentUrl = `${helmOrigin}/helm/api/attachments/${helmAttachmentMatch[1]}`
+        let upstream = await fetchImpl(attachmentUrl, { method: request.method, headers, redirect: 'manual', signal: controller.signal })
+        let metadataFallback = false
+        // Older Helm servers implement GET + Range but return 501 for HEAD.
+        if (request.method === 'HEAD' && [405, 501].includes(upstream.status)) {
+          await upstream.body?.cancel().catch(() => undefined)
+          const metadataHeaders = new Headers(headers)
+          metadataHeaders.set('Range', 'bytes=0-0')
+          upstream = await fetchImpl(attachmentUrl, { method: 'GET', headers: metadataHeaders, redirect: 'manual', signal: controller.signal })
+          metadataFallback = true
+        }
         if (![200, 206, 416].includes(upstream.status)) {
           await upstream.body?.cancel().catch(() => undefined)
           sendJson(response, upstream.status === 404 ? 404 : 502, { error: upstream.status === 404 ? 'attachment_not_found' : 'attachment_unavailable' })
@@ -2300,7 +2310,13 @@ export function createWizardServer(options = {}) {
           const value = upstream.headers.get(name)
           if (value) responseHeaders[name] = value
         }
-        response.writeHead(upstream.status, responseHeaders)
+        const fullSize = metadataFallback && upstream.status === 206
+          ? /^bytes 0-0\/(\d+)$/.exec(upstream.headers.get('content-range') ?? '')?.[1] : null
+        if (fullSize) {
+          responseHeaders['content-length'] = fullSize
+          delete responseHeaders['content-range']
+        }
+        response.writeHead(fullSize ? 200 : upstream.status, responseHeaders)
         if (request.method === 'HEAD') {
           await upstream.body?.cancel().catch(() => undefined)
           response.end()
