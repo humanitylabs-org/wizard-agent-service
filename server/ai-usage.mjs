@@ -417,6 +417,9 @@ function codexAccountSource(account, options) {
   return {
     id: identity.id,
     name: identity.name,
+    // Carried on the source so a thrown provider failure still says which
+    // subscription needs attention, exactly as a signed-out one does.
+    accountTag: identity.accountTag,
     async read({ fetchImpl, now, timeoutMs }) {
       const credential = account.credential
       if (!credential?.token) return unavailable(identity, SIGNED_OUT, `${identity.name} is not signed in on the Wizard host.`)

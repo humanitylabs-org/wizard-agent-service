@@ -242,6 +242,10 @@ describe('ChatGPT subscriptions in the credential pool', () => {
     const snapshot = await usage.read() as never
 
     expect(provider(snapshot, 'codex')).toMatchObject({ name: 'ChatGPT 1', status: 'unavailable', limits: [], error: { code: 'expired' } })
+    // The failing one keeps its stable tag: that is the pointer to which real
+    // subscription has to be signed in again.
+    expect(provider(snapshot, 'codex').accountTag).toMatch(/^[0-9a-f]{6}$/)
+    expect(provider(snapshot, 'codex').accountTag).not.toBe(provider(snapshot, 'codex-2').accountTag)
     expect(provider(snapshot, 'codex-2')).toMatchObject({ name: 'ChatGPT 2', status: 'ok' })
     expect(provider(snapshot, 'codex-2').limits[0].remainingPercent).toBe(48)
     expect(provider(snapshot, 'claude').status).toBe('ok')
