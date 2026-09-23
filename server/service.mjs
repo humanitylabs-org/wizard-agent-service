@@ -16,6 +16,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
+import { createAiUsageReader } from './ai-usage.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1504,6 +1505,15 @@ export function createWizardServer(options = {}) {
   const operatorWorkerModel = String(options.operatorWorkerModel ?? '').trim()
   const operatorWorkers = new Map()
   const operatorWorkerStatePath = options.operatorWorkerStatePath ? resolve(String(options.operatorWorkerStatePath)) : ''
+  // Subscription quota reads use the host's own provider sign-ins. Paths and
+  // endpoints are fixed here; no request may influence either.
+  const aiUsageReader = options.aiUsageReader ?? createAiUsageReader({
+    fetchImpl,
+    claudeCredentialsPath: options.claudeCredentialsPath,
+    codexAuthPath: options.codexAuthPath,
+    anthropicUsageUrl: options.anthropicUsageUrl,
+    codexUsageUrl: options.codexUsageUrl,
+  })
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -2235,6 +2245,12 @@ export function createWizardServer(options = {}) {
           })
         } catch { sendJson(response, 503, { ready: false, provider: '', name: 'Voice unavailable', model: '', attested: false }) }
         finally { clearTimeout(timer) }
+        return
+      }
+
+      if (url.pathname === '/wizard/ai-usage' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        sendJson(response, 200, await aiUsageReader.read())
         return
       }
 
