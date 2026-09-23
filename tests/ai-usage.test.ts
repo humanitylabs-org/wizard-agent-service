@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,9 +6,24 @@ import { createAiUsageReader } from '../server/ai-usage.mjs'
 import { createWizardServer } from '../server/service.mjs'
 
 const CLAUDE_TOKEN = 'sk-ant-oat-FIXTURE-CLAUDE-TOKEN'
-const CODEX_TOKEN = `header.${Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString('base64url')}.signature`
-const EXPIRED_CODEX_TOKEN = `header.${Buffer.from(JSON.stringify({ exp: 1_000 })).toString('base64url')}.signature`
 const NOW = Date.parse('2026-09-23T07:11:00.000Z')
+
+// Disposable ChatGPT tokens shaped like the real ones: the account identity a
+// pool row, the auth store and the CLI all agree on lives in the claims.
+function codexToken({ account = '', plan = 'pro', issued = NOW - 60_000, expires = 4_102_444_800_000 } = {}) {
+  const claims = {
+    sub: account ? `sub-${account}` : undefined,
+    iat: Math.floor(issued / 1000),
+    exp: Math.floor(expires / 1000),
+    ...(account ? { 'https://api.openai.com/auth': { chatgpt_account_id: account, chatgpt_plan_type: plan } } : {}),
+  }
+  return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`
+}
+
+const CODEX_TOKEN = codexToken()
+const EXPIRED_CODEX_TOKEN = codexToken({ expires: 1_000_000 })
+const FIRST_TOKEN = codexToken({ account: 'acct-first' })
+const SECOND_TOKEN = codexToken({ account: 'acct-second', plan: 'plus' })
 
 // Field-for-field shape of the live Anthropic OAuth usage response, with the
 // numbers replaced. Legacy model windows are null while limits[] carries a
@@ -43,16 +58,31 @@ const codexPayload = {
   rate_limit_reset_credits: { available_count: 1 },
 }
 
-function credentialFixture(overrides: { claude?: unknown; codex?: unknown } = {}) {
+// Every fixture writes its own Hermes auth store, so a test never reads (or
+// depends on) the credentials of whoever runs it.
+function credentialFixture(overrides: { claude?: unknown; codex?: unknown; pool?: unknown[]; store?: unknown } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-ai-usage-'))
   const claudePath = join(dir, 'claude-credentials.json')
   const codexPath = join(dir, 'codex-auth.json')
+  const hermesPath = join(dir, 'hermes-auth.json')
   writeFileSync(claudePath, JSON.stringify(overrides.claude ?? {
     claudeAiOauth: { accessToken: CLAUDE_TOKEN, expiresAt: NOW + 3_600_000, subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' },
   }))
   writeFileSync(codexPath, JSON.stringify(overrides.codex ?? { tokens: { access_token: CODEX_TOKEN, account_id: 'account-fixture' } }))
-  return { claudeCredentialsPath: claudePath, codexAuthPath: codexPath }
+  writeFileSync(hermesPath, JSON.stringify({
+    version: 1,
+    credential_pool: overrides.pool ? { 'openai-codex': overrides.pool } : {},
+    providers: overrides.store ? { 'openai-codex': { tokens: overrides.store } } : {},
+  }))
+  return { claudeCredentialsPath: claudePath, codexAuthPath: codexPath, hermesAuthPath: hermesPath, hermesGlobalAuthPath: '' }
 }
+
+const poolRow = (token: string, extra: Record<string, unknown> = {}) => ({
+  id: `row-${String(extra.priority ?? 0)}`, label: 'device_code', auth_type: 'oauth', source: 'device_code',
+  priority: 0, access_token: token, base_url: 'https://chatgpt.com/backend-api/codex', ...extra,
+})
+
+const bearer = (call: unknown[]) => String((call[1] as { headers: Record<string, string> }).headers.Authorization)
 
 const jsonResponse = (payload: unknown, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
 
@@ -146,6 +176,142 @@ describe('AI usage provider reads', () => {
     const serialized = JSON.stringify(await usage.read())
 
     for (const secret of [CLAUDE_TOKEN, CODEX_TOKEN, 'account-fixture', 'someone@example.com', 'user-fixture']) {
+      expect(serialized).not.toContain(secret)
+    }
+  })
+})
+
+describe('ChatGPT subscriptions in the credential pool', () => {
+  const codexPayloadFor = (remaining: number, resetAt: number, plan: string) => ({
+    plan_type: plan,
+    rate_limit: { primary_window: { used_percent: 100 - remaining, limit_window_seconds: 604_800, reset_at: resetAt } },
+  })
+
+  // Answers by the credential that asked, so a test can tell one subscription's
+  // numbers from the other's.
+  function poolFetcher(byToken: Record<string, unknown>) {
+    return vi.fn(async (url: string, init: { headers: Record<string, string> }) => {
+      if (String(url).includes('anthropic')) return jsonResponse(claudePayload)
+      const token = String(init.headers.Authorization).replace('Bearer ', '')
+      const payload = byToken[token]
+      return payload === undefined ? jsonResponse({ error: 'unauthorized' }, 401) : jsonResponse(payload)
+    })
+  }
+
+  const twoAccounts = {
+    [FIRST_TOKEN]: codexPayloadFor(5, 1_790_411_263, 'pro'),
+    [SECOND_TOKEN]: codexPayloadFor(48, 1_790_267_723, 'plus'),
+  }
+
+  it('reads both pooled subscriptions as separate accounts, each with its own windows', async () => {
+    const fetcher = poolFetcher(twoAccounts)
+    const { usage } = reader({ ...credentialFixture({ pool: [poolRow(FIRST_TOKEN), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1, label: 'openai-codex-oauth-2' })] }) }, fetcher)
+    const snapshot = await usage.read() as never
+
+    expect((snapshot as { providers: Array<Record<string, unknown>> }).providers.map((entry) => entry.id)).toEqual(['claude', 'codex', 'codex-2'])
+    expect(provider(snapshot, 'codex')).toMatchObject({ name: 'ChatGPT 1', plan: 'Pro', status: 'ok' })
+    expect(provider(snapshot, 'codex-2')).toMatchObject({ name: 'ChatGPT 2', plan: 'Plus', status: 'ok' })
+    expect(provider(snapshot, 'codex').limits[0]).toMatchObject({ remainingPercent: 5, resetsAt: '2026-09-26T08:27:43.000Z' })
+    expect(provider(snapshot, 'codex-2').limits[0]).toMatchObject({ remainingPercent: 48, resetsAt: '2026-09-24T16:35:23.000Z' })
+    // Distinguishable without naming anyone: a tag, never an account id.
+    expect(provider(snapshot, 'codex').accountTag).not.toBe(provider(snapshot, 'codex-2').accountTag)
+    expect(fetcher.mock.calls.filter((call) => !String(call[0]).includes('anthropic')).map(bearer))
+      .toEqual([`Bearer ${FIRST_TOKEN}`, `Bearer ${SECOND_TOKEN}`])
+  })
+
+  it('folds a CLI sign-in into the pooled account it belongs to, preferring the freshest copy', async () => {
+    const stalePoolCopy = codexToken({ account: 'acct-first', issued: NOW - 86_400_000 })
+    const fetcher = poolFetcher(twoAccounts)
+    const fixture = credentialFixture({
+      pool: [poolRow(stalePoolCopy), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })],
+      codex: { tokens: { access_token: FIRST_TOKEN, account_id: 'acct-first' } },
+      store: { access_token: stalePoolCopy },
+    })
+    const { usage } = reader({ ...fixture }, fetcher)
+    const snapshot = await usage.read() as never
+
+    expect((snapshot as { providers: unknown[] }).providers).toHaveLength(3)
+    expect(provider(snapshot, 'codex')).toMatchObject({ status: 'ok', limits: [expect.objectContaining({ remainingPercent: 5 })] })
+    expect(fetcher.mock.calls.map(bearer)).toContain(`Bearer ${FIRST_TOKEN}`)
+    expect(fetcher.mock.calls.map(bearer)).not.toContain(`Bearer ${stalePoolCopy}`)
+  })
+
+  it('keeps one subscription readable when another one fails', async () => {
+    const fetcher = poolFetcher({ [SECOND_TOKEN]: twoAccounts[SECOND_TOKEN] })
+    const { usage } = reader({ ...credentialFixture({ pool: [poolRow(FIRST_TOKEN), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })] }) }, fetcher)
+    const snapshot = await usage.read() as never
+
+    expect(provider(snapshot, 'codex')).toMatchObject({ name: 'ChatGPT 1', status: 'unavailable', limits: [], error: { code: 'expired' } })
+    expect(provider(snapshot, 'codex-2')).toMatchObject({ name: 'ChatGPT 2', status: 'ok' })
+    expect(provider(snapshot, 'codex-2').limits[0].remainingPercent).toBe(48)
+    expect(provider(snapshot, 'claude').status).toBe('ok')
+  })
+
+  it('never drops a configured subscription it cannot read', async () => {
+    const fetcher = poolFetcher(twoAccounts)
+    const { usage } = reader({ ...credentialFixture({ pool: [poolRow(''), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })] }) }, fetcher)
+    const snapshot = await usage.read() as never
+
+    expect((snapshot as { providers: unknown[] }).providers).toHaveLength(3)
+    expect(provider(snapshot, 'codex')).toMatchObject({ status: 'unavailable', error: { code: 'signed_out' } })
+    expect(provider(snapshot, 'codex-2').status).toBe('ok')
+    expect(fetcher.mock.calls.map(bearer)).toEqual([`Bearer ${CLAUDE_TOKEN}`, `Bearer ${SECOND_TOKEN}`])
+  })
+
+  it('reads an expired pooled sign-in as expired without refreshing it', async () => {
+    const fetcher = poolFetcher(twoAccounts)
+    const expired = codexToken({ account: 'acct-first', expires: NOW - 1 })
+    const fixture = credentialFixture({ pool: [poolRow(expired), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })] })
+    const { usage } = reader({ ...fixture }, fetcher)
+    const snapshot = await usage.read() as never
+
+    expect(provider(snapshot, 'codex')).toMatchObject({ status: 'unavailable', error: { code: 'expired' } })
+    expect(fetcher.mock.calls.map(bearer)).not.toContain(`Bearer ${expired}`)
+    expect(JSON.parse(readFileSync(fixture.hermesAuthPath, 'utf8')).credential_pool['openai-codex'][0].access_token).toBe(expired)
+  })
+
+  it('picks up a subscription added to the pool, once the cache window passes', async () => {
+    let clock = NOW
+    const fetcher = poolFetcher(twoAccounts)
+    const fixture = credentialFixture({ pool: [poolRow(FIRST_TOKEN)] })
+    const { usage } = reader({ ...fixture, cacheMs: 60_000, now: () => clock }, fetcher)
+
+    expect(((await usage.read()) as { providers: unknown[] }).providers).toHaveLength(2)
+
+    const store = JSON.parse(readFileSync(fixture.hermesAuthPath, 'utf8'))
+    store.credential_pool['openai-codex'].push(poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 }))
+    writeFileSync(fixture.hermesAuthPath, JSON.stringify(store))
+    expect(((await usage.read()) as { providers: unknown[] }).providers).toHaveLength(2)
+
+    clock += 60_001
+    const later = await usage.read() as never
+    expect((later as { providers: unknown[] }).providers).toHaveLength(3)
+    expect(provider(later, 'codex-2')).toMatchObject({ name: 'ChatGPT 2', status: 'ok' })
+  })
+
+  it('falls back to the Codex CLI sign-in when no pool is configured', async () => {
+    const { usage } = reader({ ...credentialFixture() })
+    const snapshot = await usage.read() as never
+
+    expect((snapshot as { providers: Array<Record<string, unknown>> }).providers.map((entry) => entry.id)).toEqual(['claude', 'codex'])
+    expect(provider(snapshot, 'codex').name).toBe('ChatGPT')
+  })
+
+  it('caches per account and coalesces the reads behind one window', async () => {
+    const fetcher = poolFetcher(twoAccounts)
+    const { usage } = reader({ ...credentialFixture({ pool: [poolRow(FIRST_TOKEN), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })] }), cacheMs: 60_000 }, fetcher)
+    await Promise.all([usage.read(), usage.read()])
+    await usage.read()
+
+    expect(fetcher).toHaveBeenCalledTimes(3)
+  })
+
+  it('never exposes a pooled credential or account id to the client shape', async () => {
+    const fetcher = poolFetcher(twoAccounts)
+    const { usage } = reader({ ...credentialFixture({ pool: [poolRow(FIRST_TOKEN), poolRow(SECOND_TOKEN, { id: 'row-1', priority: 1 })] }) }, fetcher)
+    const serialized = JSON.stringify(await usage.read())
+
+    for (const secret of [FIRST_TOKEN, SECOND_TOKEN, 'acct-first', 'acct-second', 'sub-acct-first']) {
       expect(serialized).not.toContain(secret)
     }
   })

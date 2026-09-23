@@ -1511,6 +1511,9 @@ export function createWizardServer(options = {}) {
     fetchImpl,
     claudeCredentialsPath: options.claudeCredentialsPath,
     codexAuthPath: options.codexAuthPath,
+    // Where the host's own Hermes profile keeps its ChatGPT subscriptions.
+    hermesHome: options.hermesHome,
+    hermesAuthPath: options.hermesAuthPath,
     anthropicUsageUrl: options.anthropicUsageUrl,
     codexUsageUrl: options.codexUsageUrl,
   })

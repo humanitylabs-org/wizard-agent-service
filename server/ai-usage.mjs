@@ -8,9 +8,10 @@
 // Percentages describe rate-limit windows. They are not token counts and not a
 // prediction of how much work fits in the remaining allowance.
 
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 
 export const AI_USAGE_CACHE_MS = 60_000
 // Beyond this a failing provider stops showing its last good numbers at all:
@@ -208,15 +209,6 @@ function claudeSource(options) {
 
 /* ChatGPT / Codex ------------------------------------------------------ */
 
-function jwtExpiry(token) {
-  const segment = String(token).split('.')[1]
-  if (!segment) return null
-  try {
-    const claims = JSON.parse(Buffer.from(segment.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8'))
-    return isFiniteNumber(claims?.exp) ? claims.exp * 1000 : null
-  } catch { return null }
-}
-
 // The Codex payload names its windows primary/secondary, not by duration: the
 // primary window is weekly on some plans and a 5h session on others. The label
 // comes from limit_window_seconds so a weekly window is never called a session.
@@ -260,32 +252,195 @@ function codexPaid(payload) {
   }
 }
 
-function codexSource(options) {
-  const authPath = resolve(String(options.codexAuthPath ?? resolve(homedir(), '.codex/auth.json')))
-  const usageUrl = String(options.codexUsageUrl ?? CODEX_USAGE_URL)
-  const identity = { id: 'codex', name: 'ChatGPT' }
+/* ChatGPT accounts ------------------------------------------------------
+ *
+ * The host may hold more than one ChatGPT subscription: Hermes keeps them as
+ * `credential_pool["openai-codex"]` rows in the active profile's auth store,
+ * and the Codex CLI keeps its own copy of whichever account it signed in with.
+ * Every configured account is read on its own, so one subscription's quota,
+ * outage or expiry can never stand in for another's.
+ *
+ * Nothing here is imported from Hermes: this reads the same files read-only
+ * and never refreshes a token, rotates a pool entry or writes the store back.
+ */
+
+const CODEX_POOL_PROVIDER = 'openai-codex'
+// Token claim namespace used by ChatGPT OAuth tokens, per the Codex CLI.
+const OPENAI_AUTH_CLAIM = 'https://api.openai.com/auth'
+// Only the provider's own hosts may be read, whatever a store happens to say.
+const CODEX_USAGE_HOSTS = new Set(['chatgpt.com', 'api.openai.com', 'openai.com'])
+const CREDENTIAL_ORIGIN_RANK = new Map([['pool', 0], ['store', 1], ['cli', 2]])
+
+const digest = (value) => createHash('sha256').update(String(value)).digest('hex')
+const trimmed = (value) => typeof value === 'string' ? value.trim() : ''
+const arrayOf = (value) => Array.isArray(value) ? value : []
+
+function jwtClaims(token) {
+  const segment = String(token).split('.')[1]
+  if (!segment) return {}
+  try {
+    const claims = JSON.parse(Buffer.from(segment.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8'))
+    return claims && typeof claims === 'object' ? claims : {}
+  } catch { return {} }
+}
+
+// Mirrors get_default_hermes_root(): a profile home <root>/profiles/<name>
+// falls back to <root>'s store, which is exactly what Hermes itself reads. No
+// other profile's store is ever opened.
+function hermesStorePaths(options) {
+  const explicitHome = trimmed(options.hermesHome) || trimmed(process.env.HERMES_HOME)
+  const nativeRoot = resolve(homedir(), '.hermes')
+  const home = explicitHome ? resolve(explicitHome) : nativeRoot
+  const root = home === nativeRoot || home.startsWith(`${nativeRoot}/`) ? nativeRoot
+    : basename(dirname(home)) === 'profiles' ? dirname(dirname(home))
+    : home
+  const store = options.hermesAuthPath ? resolve(String(options.hermesAuthPath)) : resolve(home, 'auth.json')
+  const fallback = options.hermesGlobalAuthPath ? resolve(String(options.hermesGlobalAuthPath))
+    : root === home ? '' : resolve(root, 'auth.json')
+  return { store, fallback: fallback === store ? '' : fallback }
+}
+
+// Same precedence as Hermes' read_credential_pool(): the active profile wins
+// whenever it has any row of its own; the root store is a read-only fallback.
+function codexPoolRows(options) {
+  const { store, fallback } = hermesStorePaths(options)
+  const active = readJsonFile(store)
+  const rows = arrayOf(active?.credential_pool?.[CODEX_POOL_PROVIDER]).filter((row) => row && typeof row === 'object')
+  if (rows.length) return { rows, storeTokens: active?.providers?.[CODEX_POOL_PROVIDER]?.tokens ?? null }
+  const shared = fallback ? readJsonFile(fallback) : null
+  return {
+    rows: arrayOf(shared?.credential_pool?.[CODEX_POOL_PROVIDER]).filter((row) => row && typeof row === 'object'),
+    storeTokens: active?.providers?.[CODEX_POOL_PROVIDER]?.tokens ?? null,
+  }
+}
+
+// Account identity comes from the token's own claims, so the same subscription
+// reached through a pool row, the auth store and the CLI collapses into one
+// account while separate subscriptions stay separate.
+function codexCandidate({ token, accountId = '', origin, priority, fallbackKey, label = '' }) {
+  const claims = jwtClaims(token)
+  const auth = claims[OPENAI_AUTH_CLAIM] && typeof claims[OPENAI_AUTH_CLAIM] === 'object' ? claims[OPENAI_AUTH_CLAIM] : {}
+  const account = trimmed(auth.chatgpt_account_id) || trimmed(accountId) || trimmed(claims.sub)
+  return {
+    token: trimmed(token),
+    origin,
+    priority,
+    label,
+    // An unidentifiable credential keys on itself rather than merging with
+    // another one whose account is equally unknown.
+    accountKey: digest(account ? `account:${account}` : `credential:${fallbackKey}`),
+    accountId: trimmed(auth.chatgpt_account_id) || trimmed(accountId),
+    issuedAt: isFiniteNumber(claims.iat) ? claims.iat * 1000 : 0,
+    expiresAt: isFiniteNumber(claims.exp) ? claims.exp * 1000 : null,
+    baseUrl: '',
+  }
+}
+
+function codexCandidates(options) {
+  const { rows, storeTokens } = codexPoolRows(options)
+  const candidates = rows.map((row, index) => ({
+    ...codexCandidate({
+      token: row.access_token,
+      origin: 'pool',
+      priority: isFiniteNumber(row.priority) ? row.priority : index,
+      fallbackKey: `pool:${trimmed(row.id) || index}`,
+      label: trimmed(row.label),
+    }),
+    baseUrl: trimmed(row.base_url),
+  }))
+  const extras = []
+  const cliTokens = readJsonFile(resolve(String(options.codexAuthPath ?? resolve(homedir(), '.codex/auth.json'))))?.tokens
+  if (trimmed(storeTokens?.access_token)) {
+    extras.push(codexCandidate({ token: storeTokens.access_token, accountId: storeTokens.account_id, origin: 'store', priority: Number.MAX_SAFE_INTEGER, fallbackKey: 'store' }))
+  }
+  if (trimmed(cliTokens?.access_token)) {
+    extras.push(codexCandidate({ token: cliTokens.access_token, accountId: cliTokens.account_id, origin: 'cli', priority: Number.MAX_SAFE_INTEGER, fallbackKey: 'cli' }))
+  }
+  if (!candidates.length) return extras
+  // With a configured pool, the pool is the list of subscriptions. A CLI or
+  // singleton copy only joins the account it already belongs to, where it may
+  // still win on freshness; it never invents an extra account.
+  const known = new Set(candidates.map((candidate) => candidate.accountKey))
+  return candidates.concat(extras.filter((extra) => known.has(extra.accountKey)))
+}
+
+// Freshest usable credential per account: an unexpired token always beats an
+// expired one, then the most recently issued. Wizard never refreshes, so the
+// newest copy on disk is the best this process may do.
+function preferredCandidate(group, now) {
+  const usable = group.filter((candidate) => candidate.token && (candidate.expiresAt === null || candidate.expiresAt > now))
+  const ranked = (usable.length ? usable : group).slice().sort((a, b) =>
+    b.issuedAt - a.issuedAt || (CREDENTIAL_ORIGIN_RANK.get(a.origin) ?? 9) - (CREDENTIAL_ORIGIN_RANK.get(b.origin) ?? 9))
+  return ranked[0]
+}
+
+function codexAccounts(options, now) {
+  const grouped = new Map()
+  for (const candidate of codexCandidates(options)) {
+    const group = grouped.get(candidate.accountKey)
+    if (group) { group.push(candidate); continue }
+    grouped.set(candidate.accountKey, [candidate])
+  }
+  const accounts = [...grouped.entries()]
+    .map(([accountKey, group]) => ({
+      accountKey,
+      priority: Math.min(...group.map((candidate) => candidate.priority)),
+      credential: preferredCandidate(group, now),
+    }))
+    .sort((a, b) => a.priority - b.priority || a.accountKey.localeCompare(b.accountKey))
+  const single = accounts.length <= 1
+  return accounts.map((account, index) => ({
+    ...account,
+    // Stable, safe and human-orderable: never a raw account id, token or email.
+    id: index === 0 ? 'codex' : `codex-${index + 1}`,
+    name: single ? 'ChatGPT' : `ChatGPT ${index + 1}`,
+    accountTag: account.accountKey.slice(0, 6),
+  }))
+}
+
+function codexUsageUrl(options, baseUrl) {
+  const configured = trimmed(options.codexUsageUrl)
+  if (configured) return configured
+  // Mirrors the Codex CLI PathStyle split, but only for the provider's own
+  // hosts: a store value can never point this read somewhere else.
+  try {
+    const parsed = new URL(baseUrl)
+    if (parsed.protocol !== 'https:' || !CODEX_USAGE_HOSTS.has(parsed.hostname)) return CODEX_USAGE_URL
+    const path = parsed.pathname.replace(/\/+$/, '').replace(/\/codex$/, '')
+    return `${parsed.origin}${path}${path.includes('/backend-api') ? '/wham' : '/api/codex'}/usage`
+  } catch { return CODEX_USAGE_URL }
+}
+
+function codexAccountSource(account, options) {
+  const identity = { id: account.id, name: account.name, accountTag: account.accountTag }
+  const usageUrl = codexUsageUrl(options, account.credential?.baseUrl ?? '')
   return {
     id: identity.id,
+    name: identity.name,
     async read({ fetchImpl, now, timeoutMs }) {
-      const tokens = readJsonFile(authPath)?.tokens
-      const token = typeof tokens?.access_token === 'string' ? tokens.access_token.trim() : ''
-      if (!token) return unavailable(identity, SIGNED_OUT, 'ChatGPT is not signed in on the Wizard host.')
-      const expiresAt = jwtExpiry(token)
+      const credential = account.credential
+      if (!credential?.token) return unavailable(identity, SIGNED_OUT, `${identity.name} is not signed in on the Wizard host.`)
       // Wizard reads the existing sign-in; it never refreshes or rewrites it.
-      if (expiresAt !== null && expiresAt <= now()) {
-        return unavailable(identity, EXPIRED, 'ChatGPT sign-in on the Wizard host has expired.')
+      if (credential.expiresAt !== null && credential.expiresAt <= now()) {
+        return unavailable(identity, EXPIRED, `${identity.name} sign-in on the Wizard host has expired.`)
       }
-      const accountId = typeof tokens.account_id === 'string' ? tokens.account_id.trim() : ''
       const payload = await getJson(fetchImpl, usageUrl, {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${credential.token}`,
         Accept: 'application/json',
         'User-Agent': 'codex-cli',
-        ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
+        ...(credential.accountId ? { 'ChatGPT-Account-Id': credential.accountId } : {}),
       }, timeoutMs)
       const plan = titleFromSlug(payload?.plan_type) || null
       return { ...identity, status: 'ok', plan, fetchedAt: new Date(now()).toISOString(), limits: codexLimits(payload, now), paid: codexPaid(payload), error: null }
     },
   }
+}
+
+// No pool and no sign-in at all is still one honest ChatGPT row.
+function codexSources(options, now) {
+  const accounts = codexAccounts(options, now)
+  if (!accounts.length) return [codexAccountSource({ id: 'codex', name: 'ChatGPT', accountTag: null, credential: null }, options)]
+  return accounts.map((account) => codexAccountSource(account, options))
 }
 
 /* Reader --------------------------------------------------------------- */
@@ -296,19 +451,43 @@ export function createAiUsageReader(options = {}) {
   const cacheMs = isFiniteNumber(options.cacheMs) ? options.cacheMs : AI_USAGE_CACHE_MS
   const staleLimitMs = isFiniteNumber(options.staleLimitMs) ? options.staleLimitMs : AI_USAGE_STALE_LIMIT_MS
   const timeoutMs = isFiniteNumber(options.timeoutMs) ? options.timeoutMs : REQUEST_TIMEOUT_MS
-  const sources = [claudeSource(options), codexSource(options)]
-  const cells = new Map(sources.map((source) => [source.id, { snapshot: null, at: 0, lastGood: null, lastGoodAt: 0, inflight: null }]))
+  const claude = claudeSource(options)
+  const cells = new Map()
+  // Accounts are re-enumerated once per cache window, not pinned at startup:
+  // a subscription added to the pool appears on the next refresh, and one
+  // removed stops being read, without restarting Wizard or re-reading the
+  // store on every request.
+  let enumerated = { sources: [], at: 0 }
+
+  const sourcesNow = () => {
+    if (enumerated.sources.length && now() - enumerated.at < cacheMs) return enumerated.sources
+    enumerated = { sources: [claude, ...codexSources(options, now())], at: now() }
+    const live = new Set(enumerated.sources.map((source) => source.id))
+    for (const id of [...cells.keys()]) if (!live.has(id)) cells.delete(id)
+    return enumerated.sources
+  }
+
+  const cellFor = (source) => {
+    const existing = cells.get(source.id)
+    if (existing) return existing
+    const created = { snapshot: null, at: 0, lastGood: null, lastGoodAt: 0, inflight: null }
+    cells.set(source.id, created)
+    return created
+  }
 
   const attempt = async (source, cell) => {
     let snapshot
     try {
       snapshot = await source.read({ fetchImpl, now, timeoutMs })
     } catch (error) {
+      // One account's failure is its own: it never replaces another account's
+      // numbers and never removes it from the list.
       const code = error?.name === 'AbortError' || error?.name === 'TimeoutError' ? UNREACHABLE : (error?.code ?? UNREACHABLE)
+      const name = source.name ?? 'Claude'
       const message = code === EXPIRED
-        ? `${source.id === 'claude' ? 'Claude' : 'ChatGPT'} sign-in on the Wizard host has expired.`
-        : `Couldn't reach ${source.id === 'claude' ? 'Claude' : 'ChatGPT'}.`
-      snapshot = unavailable({ id: source.id, name: source.id === 'claude' ? 'Claude' : 'ChatGPT' }, code, message)
+        ? `${name} sign-in on the Wizard host has expired.`
+        : `Couldn't reach ${name}.`
+      snapshot = unavailable({ id: source.id, name, accountTag: source.accountTag ?? null }, code, message)
     }
     if (snapshot.status === 'ok') {
       cell.lastGood = snapshot
@@ -326,7 +505,7 @@ export function createAiUsageReader(options = {}) {
   }
 
   const readSource = (source) => {
-    const cell = cells.get(source.id)
+    const cell = cellFor(source)
     if (cell.snapshot && now() - cell.at < cacheMs) return Promise.resolve(cell.snapshot)
     // One provider request in flight at a time; concurrent views share it.
     if (!cell.inflight) cell.inflight = attempt(source, cell).finally(() => { cell.inflight = null })
@@ -335,7 +514,7 @@ export function createAiUsageReader(options = {}) {
 
   return {
     async read() {
-      const providers = await Promise.all(sources.map(readSource))
+      const providers = await Promise.all(sourcesNow().map(readSource))
       return { fetchedAt: new Date(now()).toISOString(), providers }
     },
   }
