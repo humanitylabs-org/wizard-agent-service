@@ -16,6 +16,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
+import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -1517,6 +1518,7 @@ export function createWizardServer(options = {}) {
     anthropicUsageUrl: options.anthropicUsageUrl,
     codexUsageUrl: options.codexUsageUrl,
   })
+  const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -1757,6 +1759,7 @@ export function createWizardServer(options = {}) {
       clearTimeout(timer)
     }
     if (!result.ok) throw Object.assign(new Error('Hermes session archive failed after filing'), { status: 502 })
+    threadDispositionStore.clearSession(sessionId.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', sessionId)
   }
 
   const readFilingSession = async (sessionId, runtime) => {
@@ -2473,7 +2476,32 @@ export function createWizardServer(options = {}) {
         return
       }
 
-      if (url.pathname === '/wizard/thread-seen' && ['GET', 'PUT'].includes(request.method ?? '')) {
+      if (url.pathname === '/wizard/thread-dispositions' && ['GET', 'PUT'].includes(request.method ?? '')) {
+        if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+        if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
+        const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+        if (request.method === 'GET') {
+          sendJson(response, 200, { state: threadDispositionStore.get(scope) }); return
+        }
+        if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+          sendJson(response, 415, { error: 'json_required' }); return
+        }
+        // The app server is loopback-only; the trusted preview proxy forwards
+        // the browser-facing Host. Keep browser writes same-origin at both hops.
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let originHost
+          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          const publicHost = request.headers['x-forwarded-host'] || request.headers.host
+          if (originHost !== publicHost) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        const body = parseJsonBody(await readBoundedBody(request, 1024))
+        const record = threadDispositionStore.set(scope, body.runtime, body.sessionId, body.deferred)
+        sendJson(response, 200, { record }); return
+      }
+
+      if (url.pathname === '/wizard/thread-seen'  && ['GET', 'PUT'].includes(request.method ?? '')) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -2660,6 +2688,7 @@ export function createWizardServer(options = {}) {
         }
         if (queuedAdmission) {
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
+          threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
           return
         }
@@ -2802,6 +2831,15 @@ export function createWizardServer(options = {}) {
           const existing = runTrustedPaths.get(steerPathId) ?? []
           runTrustedPaths.set(steerPathId, [...new Set([...existing, ...trustedPaths])])
           if (runTrustedPaths.size > 100) runTrustedPaths.delete(runTrustedPaths.keys().next().value)
+        }
+        if (upstream.ok && body) {
+          // Both Close and explicit Restore supersede parking; Restore must also
+          // repair a stale client that observes archived + deferred together.
+          if (request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath) && typeof parseJsonBody(body).archived === 'boolean') {
+            threadDispositionStore.clearSession(operator ? 'operator' : 'direct', decodeURIComponent(upstreamPath.split('/')[3]))
+          } else if (request.method === 'POST' && upstreamPath === '/v1/runs') {
+            threadDispositionStore.clearSession(operator ? 'operator' : 'direct', parseJsonBody(body).session_id)
+          }
         }
         if (upstream.ok && canonicalSessionReader && (
           request.method === 'POST' && upstreamPath === '/api/sessions'
