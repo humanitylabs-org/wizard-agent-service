@@ -13,6 +13,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
+import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -934,7 +935,7 @@ function sessionAttachmentLabel(content) {
 }
 
 function sessionPreviewText(content) {
-  const raw = historyContentStrings(content).join('\n')
+  const raw = visibleMemoryText(historyContentStrings(content).join('\n'))
   const imageOnlyIntent = /\[WIZARD_IMAGE_INTENT_V1\]/i.test(raw)
   let projected = raw
     .replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '')
@@ -996,6 +997,10 @@ export function projectWizardMessageHistory(result) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
+    if (role === 'user') {
+      projected.content = projectMemoryContent(projected.content)
+      if (Object.hasOwn(projected, 'display_content')) projected.display_content = projectMemoryContent(projected.display_content)
+    }
     // Completion is authoritative; visible text alone may be commentary or a partial.
     const kind = String(message.display_kind ?? '')
     projected.shareable = role === 'assistant'
