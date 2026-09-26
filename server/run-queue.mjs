@@ -156,6 +156,19 @@ export class DurableRunQueue {
     return existing
   }
 
+  admittedVoiceRun(runtime, sessionId, audioPaths) {
+    const paths = new Set((Array.isArray(audioPaths) ? audioPaths : []).filter((path) => typeof path === 'string' && path))
+    if (!paths.size || typeof sessionId !== 'string' || !sessionId) return null
+    const rows = this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime = ? AND session_id = ? AND status NOT IN ('failed', 'cancelled', 'interrupted')
+      ORDER BY created_at DESC, public_run_id DESC`).all(runtime, sessionId)
+    for (const row of rows) {
+      const record = this._record(row)
+      if (Array.isArray(record.trustedPaths) && record.trustedPaths.some((path) => paths.has(path))) return record
+    }
+    return null
+  }
+
   _rows(where = '1=1') {
     return this.database.prepare(`SELECT * FROM wizard_run_queue WHERE ${where} ORDER BY created_at, public_run_id`).all().map((row) => this._record(row))
   }

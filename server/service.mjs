@@ -1113,7 +1113,11 @@ async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
   const files = await resolveFiles(ids)
   value.input = appendFileMarker(value.input, files, includeNativeImages)
-  return { body: Buffer.from(JSON.stringify(value)), trustedPaths: files.map((file) => file.trusted_path) }
+  return {
+    body: Buffer.from(JSON.stringify(value)),
+    trustedPaths: files.map((file) => file.trusted_path),
+    audioPaths: files.filter((file) => String(file.mime ?? '').toLowerCase().startsWith('audio/')).map((file) => file.trusted_path),
+  }
 }
 
 function safeHeader(value, fallback, max) {
@@ -2686,13 +2690,26 @@ export function createWizardServer(options = {}) {
         }
         let pendingWorker = null
         let trustedPaths = []
+        let audioPaths = []
         const steerPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)\/steer$/)?.[1] ?? ''
         if (body && (upstreamPath === '/v1/runs' || steerPathId)) {
           const prepared = await prepareRunBody(body, resolveFiles, upstreamPath === '/v1/runs')
           body = prepared.body
           trustedPaths = prepared.trustedPaths
+          audioPaths = prepared.audioPaths ?? []
         }
         if (queuedAdmission) {
+          // Android retains a voice note until it is acknowledged and re-uploads the
+          // same bytes on every retry, under a new file id. Inbox blobs are
+          // content-addressed, so the same recording already admitted to this thread
+          // (including an operator recovery) is the same message: replay it.
+          const retainedVoice = queuedAdmission.runtime === 'direct' && queuedAdmission.idempotencyKey.startsWith('voice-')
+            ? runQueue.admittedVoiceRun(queuedAdmission.runtime, queuedAdmission.sessionId, audioPaths)
+            : null
+          if (retainedVoice) {
+            sendQueuedRun(response, 202, retainedVoice, { 'Idempotency-Replayed': 'true' })
+            return
+          }
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
