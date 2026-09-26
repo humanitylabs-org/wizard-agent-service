@@ -49,6 +49,18 @@ function visibleAssistantReply(content, displayKind, finishReason) {
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
+const ROUTE_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[[0-9a-z]{1,8}\])?(?![\s\S])/
+
+function lockedRoute(modelConfig) {
+  if (typeof modelConfig !== 'string' || !modelConfig) return null
+  try {
+    const lock = JSON.parse(modelConfig)?.browser_model_lock
+    const model = typeof lock?.model === 'string' ? lock.model : ''
+    const provider = typeof lock?.provider === 'string' ? lock.provider : ''
+    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider } : null
+  } catch { return null }
+}
+
 export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
   const truth = new Map()
@@ -66,6 +78,16 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       requestPreview: '',
       active: false,
     })
+    // Hermes' session API omits provider. A thread's exact model lock is the only
+    // trustworthy route; billing_provider can name a different account.
+    try {
+      const routeRows = db.prepare(`SELECT id, model, model_config FROM sessions WHERE id IN (${placeholders})`).all(...ids)
+      for (const row of routeRows) {
+        const current = truth.get(String(row.id))
+        const lock = lockedRoute(row.model_config)
+        if (current && lock && lock.model === row.model) current.route = lock
+      }
+    } catch { /* older state schemas carry no model lock */ }
     const messageRows = db.prepare(`
       SELECT session_id, role, finish_reason, timestamp, content, display_kind
       FROM messages

@@ -372,6 +372,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           if (truth?.activityAt) projected.wizard_activity_at = truth.activityAt
           if (truth?.requestPreview) projected.wizard_request_preview = truth.requestPreview
           if (truth?.startedAt) projected.wizard_started_at = truth.startedAt
+          if (!operator && !projected.provider && truth?.route && truth.route.model === projected.model) projected.provider = truth.route.provider
           if (!operator) {
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const latestDirect = newestRun(directRuns, session.id)
