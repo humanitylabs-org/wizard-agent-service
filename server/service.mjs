@@ -749,7 +749,7 @@ function historyToolLabel(call) {
     return 'Ran a command'
   }
   const labels = {
-    clarify: 'Asked for clarification', delegate_task: 'Consulted another agent', execute_code: 'Ran an analysis',
+    clarify: 'Asked for clarification', todo: 'Updated the plan', todo_list: 'Updated the plan', delegate_task: 'Consulted another agent', execute_code: 'Ran an analysis',
     memory: 'Updated memory', skill_manage: 'Updated guidance', text_to_speech: 'Generated audio',
     tool_search: 'Found the right integration', tool_describe: 'Loaded integration details', tool_call: 'Used an integration',
     parallel: 'Ran parallel checks',
@@ -977,16 +977,66 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   }
 }
 
+const PLAN_TOOLS = new Set(['todo', 'todo_list'])
+const PLAN_STATUSES = new Set(['pending', 'in_progress', 'completed', 'cancelled'])
+
+function parsedHistoryObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim().startsWith('{') || value.length > 256 * 1024) return null
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch { return null }
+}
+
+// The agent's own task list, reduced to short labels and statuses for the Workline.
+export function historyPlan(content) {
+  const parsed = parsedHistoryObject(content)
+  if (!parsed || !Array.isArray(parsed.todos)) return null
+  const items = parsed.todos.slice(0, 40).flatMap((todo, index) => {
+    if (!todo || typeof todo !== 'object' || Array.isArray(todo)) return []
+    const text = safeHistoryText(todo.content, 160)
+    if (!text) return []
+    const status = PLAN_STATUSES.has(todo.status) ? todo.status : 'pending'
+    return [{ id: safeHistoryText(String(todo.id ?? ''), 64) || `item-${index}`, content: text, status }]
+  })
+  return items.length ? items : null
+}
+
+function historyQuestionChoices(value) {
+  return Array.isArray(value) ? value.slice(0, 4).map((choice) => safeHistoryText(choice, 120)).filter(Boolean) : []
+}
+
+// First clarify question as asked (call arguments) or as resolved (tool result).
+export function historyQuestion(args, content) {
+  const result = parsedHistoryObject(content)
+  if (result) {
+    const first = Array.isArray(result.responses) ? result.responses[0] : result
+    if (!first || typeof first !== 'object') return null
+    const text = safeHistoryText(first.question, 400)
+    if (!text) return null
+    const raw = Array.isArray(first.user_response) ? first.user_response.join(', ') : first.user_response
+    const answer = safeHistoryText(raw, 200)
+    return { text, choices: historyQuestionChoices(first.choices_offered), state: answer ? 'answered' : 'unanswered', ...(answer ? { answer } : {}) }
+  }
+  const first = Array.isArray(args.questions) && args.questions.length ? args.questions[0] : args
+  if (!first || typeof first !== 'object') return null
+  const text = safeHistoryText(first.question, 400)
+  return text ? { text, choices: historyQuestionChoices(first.choices), state: 'waiting' } : null
+}
+
 export function projectWizardMessageHistory(result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
     const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
     const name = safeHistoryText(fn.name ?? item.name, 80)
+    const question = name.replace(/^functions\./, '') === 'clarify' ? historyQuestion(historyArguments(call), null) : null
     return {
       id: safeHistoryText(item.id ?? item.call_id, 120) || `tool-${index}`,
       type: 'function',
       function: { name },
       display_label: historyToolLabel(call),
+      ...(question ? { question } : {}),
     }
   }
   const slimMessage = (message) => {
@@ -998,6 +1048,13 @@ export function projectWizardMessageHistory(result) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
+    if (role === 'tool') {
+      const toolName = safeHistoryText(message.tool_name, 80).replace(/^functions\./, '')
+      const plan = PLAN_TOOLS.has(toolName) ? historyPlan(message.content) : null
+      const question = toolName === 'clarify' ? historyQuestion({}, message.content) : null
+      if (plan) projected.plan = plan
+      if (question) projected.question = question
+    }
     if (role === 'user') {
       projected.content = projectMemoryContent(projected.content)
       if (Object.hasOwn(projected, 'display_content')) projected.display_content = projectMemoryContent(projected.display_content)
