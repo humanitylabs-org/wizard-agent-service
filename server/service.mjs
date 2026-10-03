@@ -554,6 +554,101 @@ function projectOperatorMessages(result, completions = [], records = []) {
 
 const FILE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const TRUSTED_FILE_MARKER = /\[WIZARD_FILES_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILES_V1\]/g
+const DURABLE_SCREENSHOT_MARKER = '[screenshot]'
+const SCREENSHOT_REPAIR_WINDOW_SECONDS = 120
+
+function historyTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return numeric
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed / 1000
+  }
+  return null
+}
+
+function durableInlineImage(part) {
+  if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
+  const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
+  if (!match || !match[2]) return null
+  const declaredMime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
+  if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(declaredMime)) return null
+  const bytes = Buffer.from(match[2], 'base64')
+  if (!bytes.length || bytes.length > WIZARD_AGENT_IMAGE_LIMIT || imageMime(bytes) !== declaredMime) return null
+  return { type: 'image_url', image_url: { url: `data:${declaredMime};base64,${match[2]}` }, bytes: bytes.length }
+}
+
+function durableScreenshotCandidate(record) {
+  let request
+  try { request = JSON.parse(record.body) } catch { return null }
+  const messages = request?.input
+  if (!Array.isArray(messages) || messages.length !== 1 || !messages[0] || typeof messages[0] !== 'object'
+      || messages[0].role !== 'user' || !Array.isArray(messages[0].content)) return null
+  const text = []
+  const images = []
+  let totalBytes = 0
+  for (const part of messages[0].content) {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return null
+    if (part.type === 'text' && typeof part.text === 'string') {
+      text.push(part.text)
+      continue
+    }
+    const image = durableInlineImage(part)
+    if (!image || images.length >= WIZARD_FILE_LIMIT || totalBytes + image.bytes > WIZARD_AGENT_IMAGE_LIMIT) return null
+    images.push({ type: image.type, image_url: image.image_url })
+    text.push(DURABLE_SCREENSHOT_MARKER)
+    totalBytes += image.bytes
+  }
+  const flattened = text.join('\n')
+  if (!images.length || !flattened.includes(DURABLE_SCREENSHOT_MARKER)
+      || flattened.split(DURABLE_SCREENSHOT_MARKER).length - 1 !== images.length) return null
+  const admittedAt = historyTimestamp(record.payload?.created_at) ?? historyTimestamp(record.createdAt)
+  if (admittedAt === null) return null
+  return { visibleText: visibleMemoryText(flattened), images, admittedAt }
+}
+
+function restoreDurableScreenshots(result, runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  const candidates = runQueue.admittedForSession('direct', sessionId).map(durableScreenshotCandidate).filter(Boolean)
+  if (!candidates.length) return result
+  const restore = (value, timestamp) => {
+    if (typeof value !== 'string' || !value.includes(DURABLE_SCREENSHOT_MARKER)) return value
+    const visible = visibleMemoryText(value)
+    const at = historyTimestamp(timestamp)
+    if (at === null) return value
+    const matches = candidates.filter((candidate) => candidate.visibleText === visible
+      && Math.abs(candidate.admittedAt - at) <= SCREENSHOT_REPAIR_WINDOW_SECONDS)
+    if (matches.length !== 1) return value
+    const segments = visible.split(DURABLE_SCREENSHOT_MARKER)
+    if (segments.length - 1 !== matches[0].images.length) return value
+    const content = []
+    for (let index = 0; index < segments.length; index += 1) {
+      if (segments[index]) content.push({ type: 'text', text: segments[index] })
+      if (index < matches[0].images.length) content.push(matches[0].images[index])
+    }
+    return content
+  }
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.map(visit)
+    if (!value || typeof value !== 'object') return value
+    const role = value.role ?? value.author
+    if (role === 'user') {
+      const projected = { ...value }
+      const timestamp = projected.timestamp ?? projected.created_at
+      for (const field of ['content', 'display_content']) {
+        if (Object.hasOwn(projected, field)) projected[field] = restore(projected[field], timestamp)
+      }
+      return projected
+    }
+    const projected = { ...value }
+    for (const key of Object.keys(projected)) projected[key] = visit(projected[key])
+    return projected
+  }
+  return Buffer.from(JSON.stringify(visit(payload)))
+}
 
 function safeFile(value, trusted = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('invalid file'), { status: 502 })
@@ -2968,6 +3063,9 @@ export function createWizardServer(options = {}) {
         }
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
+          if (messageHistory && url.searchParams.get('view') === 'wizard') {
+            result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
+          }
           result = projectWizardFileMarkers(result, messageHistory)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)

@@ -144,6 +144,13 @@ export class DurableRunQueue {
     return this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE public_run_id = ?').get(publicRunId))
   }
 
+  admittedForSession(runtime, sessionId) {
+    if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
+    return this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime = ? AND session_id = ? AND upstream_run_id <> ''
+      ORDER BY created_at, public_run_id`).all(runtime, sessionId).map((row) => this._record(row))
+  }
+
   _existing(runtime, idempotencyKey) {
     return this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE runtime = ? AND idempotency_key = ?').get(runtime, idempotencyKey))
   }

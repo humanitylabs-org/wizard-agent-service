@@ -1,14 +1,117 @@
 import { createServer } from 'node:http'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const servers: Array<ReturnType<typeof createServer>> = []
+const directories: string[] = []
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
 describe('Wizard thread history marker projection', () => {
+  it('restores a uniquely matched flattened screenshot only in the Wizard history display', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wizard-history-screenshot-repair-'))
+    directories.push(directory)
+    const queuePath = join(directory, 'queue.sqlite3')
+    const at = Date.now() / 1000
+    const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh6wAAAABJRU5ErkJggg=='
+    const flattened = 'Compare these\n[screenshot]\n[audio attached]'
+    const source = {
+      data: [
+        { id: 'recover', role: 'user', timestamp: at, content: flattened, display_content: flattened },
+        { id: 'assistant', role: 'assistant', timestamp: at, content: flattened },
+        { id: 'already-structured', role: 'user', timestamp: at, content: [{ type: 'text', text: 'Already structured' }, { type: 'audio', audio_url: { url: 'data:audio/mp4;base64,AA==' } }] },
+        { id: 'ambiguous', role: 'user', timestamp: at, content: 'Ambiguous\n[screenshot]' },
+        { id: 'late', role: 'user', timestamp: at + 121, content: 'Late\n[screenshot]' },
+        { id: 'cross-session', role: 'user', timestamp: at, content: 'Other session\n[screenshot]' },
+        { id: 'unrecognized', role: 'user', timestamp: at, content: 'Unknown part\n[screenshot]' },
+        { id: 'mismatched', role: 'user', timestamp: at, content: 'Mismatch\n[screenshot]\n[screenshot]' },
+        { id: 'invalid-image', role: 'user', timestamp: at, content: 'Invalid image\n[screenshot]' },
+        { id: 'pending', role: 'user', timestamp: at, content: 'Pending\n[screenshot]' },
+      ],
+    }
+    const sourceBefore = JSON.parse(JSON.stringify(source))
+    const upstream = createServer(async (request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      if (request.method === 'POST' && request.url === '/v1/runs') {
+        for await (const _chunk of request) { /* drain */ }
+        response.end(JSON.stringify({ run_id: 'admitted-screenshot', session_id: 'chat-one', status: 'running', created_at: at }))
+        return
+      }
+      if (request.method === 'GET' && request.url?.startsWith('/api/sessions/chat-one/messages')) {
+        response.end(JSON.stringify(source))
+        return
+      }
+      response.end('{}')
+    })
+    servers.push(upstream)
+    const upstreamAddress = await listen(upstream)
+    const proxy = createWizardServer({
+      requireJoinedDelegationCapability: false,
+      upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+      hermesKey: 'server-only-secret',
+      requireAccess: false,
+      runQueueStatePath: queuePath,
+      runQueuePollIntervalMs: 0,
+      activeSessionReader: async () => [],
+      dispatchHealthReader: () => true,
+    })
+    servers.push(proxy)
+    const proxyAddress = await listen(proxy)
+    const admit = async (key: string, sessionId: string, content: Array<Record<string, unknown>>) => fetch(`http://127.0.0.1:${proxyAddress.port}/wizard/hermes/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify({ session_id: sessionId, input: [{ role: 'user', content }] }),
+    })
+    const admission = await admit('restore-screenshot', 'chat-one', [
+      { type: 'text', text: 'Compare these' },
+      { type: 'image_url', image_url: { url: image } },
+      { type: 'text', text: '[audio attached]' },
+    ])
+    expect(admission.status).toBe(202)
+    for (const key of ['ambiguous-one', 'ambiguous-two']) {
+      expect((await admit(key, 'chat-one', [{ type: 'text', text: 'Ambiguous' }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    }
+    expect((await admit('late-screenshot', 'chat-one', [{ type: 'text', text: 'Late' }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    expect((await admit('other-session-screenshot', 'other-session', [{ type: 'text', text: 'Other session' }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    expect((await admit('unknown-screenshot', 'chat-one', [{ type: 'text', text: 'Unknown part' }, { type: 'audio', audio_url: { url: 'data:audio/mp4;base64,AA==' } }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    expect((await admit('mismatched-screenshot', 'chat-one', [{ type: 'text', text: 'Mismatch' }, { type: 'text', text: '[screenshot]' }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    expect((await admit('invalid-image-screenshot', 'chat-one', [{ type: 'text', text: 'Invalid image' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }])).status).toBe(202)
+    expect((await admit('pending-screenshot', 'chat-one', [{ type: 'text', text: 'Pending' }, { type: 'image_url', image_url: { url: image } }])).status).toBe(202)
+    const database = new DatabaseSync(queuePath)
+    database.prepare("UPDATE wizard_run_queue SET upstream_run_id = '' WHERE idempotency_key = 'pending-screenshot'").run()
+    const rowsBefore = database.prepare('SELECT public_run_id, body FROM wizard_run_queue ORDER BY public_run_id').all()
+    database.close()
+
+    const response = await fetch(`http://127.0.0.1:${proxyAddress.port}/wizard/hermes/api/sessions/chat-one/messages?order=oldest&view=wizard`)
+    expect(response.status).toBe(200)
+    const payload = await response.json() as { data: Array<Record<string, unknown>> }
+    const recovered = payload.data.find((message) => message.id === 'recover')!
+    expect(recovered.content).toEqual([
+      { type: 'text', text: 'Compare these\n' },
+      { type: 'image_url', image_url: { url: image } },
+      { type: 'text', text: '\n[audio attached]' },
+    ])
+    expect(recovered.display_content).toEqual(recovered.content)
+    expect(payload.data.find((message) => message.id === 'assistant')?.content).toBe(flattened)
+    expect(payload.data.find((message) => message.id === 'already-structured')?.content).toEqual(source.data[2].content)
+    for (const id of ['ambiguous', 'late', 'cross-session', 'unrecognized', 'mismatched', 'invalid-image', 'pending']) {
+      expect(payload.data.find((message) => message.id === id)?.content).toBe(source.data.find((message) => message.id === id)?.content)
+    }
+    const nonWizard = await fetch(`http://127.0.0.1:${proxyAddress.port}/wizard/hermes/api/sessions/chat-one/messages?order=oldest`)
+    expect((await nonWizard.json() as { data: Array<Record<string, unknown>> }).data.find((message) => message.id === 'recover')?.content).toBe(flattened)
+    const after = new DatabaseSync(queuePath)
+    expect(after.prepare('SELECT public_run_id, body FROM wizard_run_queue ORDER BY public_run_id').all()).toEqual(rowsBefore)
+    after.close()
+    expect(source).toEqual(sourceBefore)
+  })
+
   it('hides Hermes empty-response recovery scaffolding without hiding genuine text', async () => {
     const recoveryNudge = 'You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.'
     const upstream = createServer((_request, response) => {
