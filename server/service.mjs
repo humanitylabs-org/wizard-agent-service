@@ -609,7 +609,7 @@ function durableScreenshotCandidate(record) {
 }
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
-  if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const candidates = runQueue.admittedForSession('direct', sessionId).map(durableScreenshotCandidate).filter(Boolean)
@@ -635,7 +635,9 @@ function restoreDurableScreenshots(result, runQueue, sessionId) {
     if (Array.isArray(value)) return value.map(visit)
     if (!value || typeof value !== 'object') return value
     const role = value.role ?? value.author
+    if (role && role !== 'user') return value
     if (role === 'user') {
+      if (value.session_id && value.session_id !== sessionId) return value
       const projected = { ...value }
       const timestamp = projected.timestamp ?? projected.created_at
       for (const field of ['content', 'display_content']) {
@@ -3063,7 +3065,7 @@ export function createWizardServer(options = {}) {
         }
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
-          if (messageHistory && url.searchParams.get('view') === 'wizard') {
+          if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           result = projectWizardFileMarkers(result, messageHistory)

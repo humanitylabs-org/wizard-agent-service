@@ -26,6 +26,7 @@ describe('Wizard thread history marker projection', () => {
       data: [
         { id: 'recover', role: 'user', timestamp: at, content: flattened, display_content: flattened },
         { id: 'assistant', role: 'assistant', timestamp: at, content: flattened },
+        { id: 'wrong-message-session', session_id: 'other-session', role: 'user', timestamp: at, content: flattened },
         { id: 'already-structured', role: 'user', timestamp: at, content: [{ type: 'text', text: 'Already structured' }, { type: 'audio', audio_url: { url: 'data:audio/mp4;base64,AA==' } }] },
         { id: 'ambiguous', role: 'user', timestamp: at, content: 'Ambiguous\n[screenshot]' },
         { id: 'late', role: 'user', timestamp: at + 121, content: 'Late\n[screenshot]' },
@@ -100,7 +101,8 @@ describe('Wizard thread history marker projection', () => {
     ])
     expect(recovered.display_content).toEqual(recovered.content)
     expect(payload.data.find((message) => message.id === 'assistant')?.content).toBe(flattened)
-    expect(payload.data.find((message) => message.id === 'already-structured')?.content).toEqual(source.data[2].content)
+    expect(payload.data.find((message) => message.id === 'already-structured')?.content).toEqual(source.data.find((message) => message.id === 'already-structured')?.content)
+    expect(payload.data.find((message) => message.id === 'wrong-message-session')?.content).toBe(flattened)
     for (const id of ['ambiguous', 'late', 'cross-session', 'unrecognized', 'mismatched', 'invalid-image', 'pending']) {
       expect(payload.data.find((message) => message.id === id)?.content).toBe(source.data.find((message) => message.id === id)?.content)
     }
