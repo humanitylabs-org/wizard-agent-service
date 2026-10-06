@@ -88,28 +88,31 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         if (current && lock && lock.model === row.model) current.route = lock
       }
     } catch { /* older state schemas carry no model lock */ }
-    const messageRows = db.prepare(`
-      SELECT session_id, role, finish_reason, timestamp, content, display_kind
+    // Seek newest-first within each session's existing indexed range. Loading
+    // every historical body for a whole Work page blocks the shared HTTP loop;
+    // only the newest visible request and completed reply determine this view.
+    const recentMessages = db.prepare(`
+      SELECT role, finish_reason, timestamp, content, display_kind
       FROM messages
-      WHERE session_id IN (${placeholders})
+      WHERE session_id = ?
         AND role IN ('user', 'assistant')
         AND active = 1
         AND trim(COALESCE(content, '')) <> ''
       ORDER BY timestamp DESC
-    `).all(...ids)
-    for (const row of messageRows) {
-      const id = String(row.session_id || '')
-      const current = truth.get(id)
-      if (!current) continue
-      const timestamp = Number(row.timestamp) || 0
-      const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
-      const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
-      if (!current.activityAt && (visibleUser || visibleAssistant)) current.activityAt = timestamp
-      if (!current.lastUserAt && visibleUser) {
-        current.lastUserAt = timestamp
-        current.requestPreview = row.content.trim()
+    `)
+    for (const [id, current] of truth) {
+      for (const row of recentMessages.iterate(id)) {
+        const timestamp = Number(row.timestamp) || 0
+        const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
+        const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+        if (!current.activityAt && (visibleUser || visibleAssistant)) current.activityAt = timestamp
+        if (!current.lastUserAt && visibleUser) {
+          current.lastUserAt = timestamp
+          current.requestPreview = row.content.trim()
+        }
+        if (!current.lastAssistantAt && visibleAssistant) current.lastAssistantAt = timestamp
+        if (current.lastUserAt && current.lastAssistantAt) break
       }
-      if (!current.lastAssistantAt && visibleAssistant) current.lastAssistantAt = timestamp
     }
     const leaseRows = db.prepare(`
       SELECT conversation_id
