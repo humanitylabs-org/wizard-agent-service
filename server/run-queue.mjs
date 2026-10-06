@@ -252,18 +252,26 @@ export class DurableRunQueue {
     }))
   }
 
-  latestProjections() {
+  latestProjections(sessionIds) {
+    const ids = Array.isArray(sessionIds) ? [...new Set(sessionIds)] : null
+    if (ids && !ids.length) return []
+    // Rank narrow identities once. A correlated anti-join used to scan the
+    // body-heavy queue for every row, blocking foreground reads on this loop.
     return this.database.prepare(`
-      SELECT current.*
-      FROM wizard_run_queue current
-      WHERE NOT EXISTS (
-        SELECT 1 FROM wizard_run_queue newer
-        WHERE newer.session_id = current.session_id
-          AND (newer.created_at > current.created_at
-            OR (newer.created_at = current.created_at AND newer.public_run_id > current.public_run_id))
+      WITH ranked AS (
+        SELECT public_run_id, ROW_NUMBER() OVER (
+          PARTITION BY session_id ORDER BY created_at DESC, public_run_id DESC
+        ) AS position
+        FROM wizard_run_queue
+        ${ids ? `WHERE session_id IN (${ids.map(() => '?').join(',')})` : ''}
       )
+      SELECT current.public_run_id, current.session_id, current.status,
+        current.waiting_reason, current.body, current.idempotency_key,
+        current.created_at, current.updated_at
+      FROM ranked JOIN wizard_run_queue current USING (public_run_id)
+      WHERE ranked.position = 1
       ORDER BY current.created_at, current.public_run_id
-    `).all().map((row) => this._record(row)).map((record) => ({
+    `).all(...(ids ?? [])).map((row) => this._record(row)).map((record) => ({
       sessionId: record.sessionId,
       status: record.status === 'queued' || record.status === 'launching' ? 'queued' : record.status,
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,

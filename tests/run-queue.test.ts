@@ -31,6 +31,23 @@ function request(sessionId: string, key: string, text = sessionId) {
 }
 
 describe('durable Wizard run queue', () => {
+  it('projects only requested sessions with the same latest and timestamp tie ordering', async () => {
+    const queue = new DurableRunQueue({ statePath: await statePath(), pollIntervalMs: 0, canDispatch: () => false,
+      launch: async () => { throw new Error('must not launch') }, lookup: async () => ({}) })
+    queues.push(queue)
+    const insert = queue.database.prepare(`INSERT INTO wizard_run_queue
+      (public_run_id,runtime,session_id,idempotency_key,request_hash,body,status,created_at,updated_at)
+      VALUES (?,'direct',?,?, 'hash',?,'completed',?,?)`)
+    insert.run('wq_a', 'one', 'key-a', JSON.stringify({ input: 'old' }), 1, 1)
+    insert.run('wq_b', 'one', 'key-b', JSON.stringify({ input: 'new' }), 2, 2)
+    insert.run('wq_c', 'one', 'key-c', JSON.stringify({ input: 'tie winner' }), 2, 2)
+    insert.run('wq_d', 'two', 'key-d', JSON.stringify({ input: 'other' }), 3, 3)
+    expect(queue.latestProjections().map(row => row.publicRunId)).toEqual(['wq_c', 'wq_d'])
+    expect(queue.latestProjections(['one', 'one'])).toEqual([expect.objectContaining({ sessionId: 'one', publicRunId: 'wq_c', preview: 'tie winner' })])
+    expect(queue.latestProjections([])).toEqual([])
+    expect(queue.latestProjections(['missing'])).toEqual([])
+  })
+
   it('starts at most the configured number of threads and drains queued work FIFO', async () => {
     const statuses = new Map<string, string>()
     const launches: string[] = []

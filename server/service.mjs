@@ -3048,7 +3048,7 @@ export function createWizardServer(options = {}) {
             result,
             operator,
             [...operatorWorkers.values()],
-            [...(runQueue?.latestProjections() ?? []), ...directRuns.values()],
+            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
             externalRuns,
             sessionTruth,
             helmActivities,
