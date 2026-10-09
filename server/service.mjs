@@ -1341,7 +1341,7 @@ function safeHeader(value, fallback, max) {
 const PASSIVE_INLINE_MIME = new Set([
   'text/plain', 'text/markdown', 'text/x-markdown',
   'image/png', 'image/jpeg', 'image/gif', 'image/webp',
-  'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/wav', 'audio/x-m4a', 'audio/mpeg',
+  'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/wav', 'audio/x-m4a', 'audio/mpeg', 'audio/aac',
   'video/mp4', 'video/webm', 'video/quicktime',
 ])
 
@@ -2677,10 +2677,15 @@ export function createWizardServer(options = {}) {
       if (url.pathname === '/wizard/voice/transcribe' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const contentType = String(request.headers['content-type'] ?? '').toLowerCase()
-        if (!/^audio\/(webm|ogg|mp4|wav|x-m4a)(?:;|$)/.test(contentType)) { sendJson(response, 415, { error: 'audio_required' }); return }
+        // The native Wizard OS orb records AAC ADTS (crash-safe on disk) and labels it audio/aac.
+        const audioType = /^audio\/(webm|ogg|mp4|wav|x-m4a|aac|x-aac|mpeg)(?:;|$)/.exec(contentType)
+        if (!audioType) { sendJson(response, 415, { error: 'audio_required' }); return }
         const data = await readBoundedBody(request, WIZARD_VOICE_UPLOAD_LIMIT)
         if (!data.length) { sendJson(response, 400, { error: 'empty_audio' }); return }
-        const filename = safeHeader(request.headers['x-wizard-filename'], 'wizard-voice.webm', 120).replaceAll('/', '_').replaceAll('\\', '_')
+        const voiceExt = { webm: 'webm', ogg: 'ogg', mp4: 'm4a', wav: 'wav', 'x-m4a': 'm4a', aac: 'aac', 'x-aac': 'aac', mpeg: 'mp3' }[audioType[1]]
+        const named = safeHeader(request.headers['x-wizard-filename'], `wizard-voice.${voiceExt}`, 120).replaceAll('/', '_').replaceAll('\\', '_')
+        // Older shells name every non-mp4/ogg take voice.webm; the transcriber trusts the extension, so match it to the bytes' declared type.
+        const filename = named.replace(/\.[a-z0-9]{1,5}$/i, '') + `.${voiceExt}`
         const form = new FormData()
         form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
         {
