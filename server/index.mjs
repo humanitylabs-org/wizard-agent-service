@@ -1,6 +1,7 @@
 import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
+import { wizardOsHome } from './wizard-os-settings.mjs'
 
 const key = process.env.WIZARD_HERMES_API_KEY
 if (!key) {
@@ -18,6 +19,11 @@ const port = Number(process.env.WIZARD_PORT || 8787)
 const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/state.db') : '')
 const hermesHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
+const osHome = wizardOsHome()
+const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
+const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL ? {
+  url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
+} : null
 const accessVerifier = requireAccess ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
@@ -51,5 +57,13 @@ const server = createWizardServer({
   requireAccess,
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
+  joinedDelegation,
+  settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
+  appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
+  uxDir: process.env.WIZARD_UX_DIR || '',
+  uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
+  ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
+  router,
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))

@@ -19,6 +19,9 @@ import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
+import { bootstrapPayload, readApps, readSettings, validTimeZone } from './wizard-os-settings.mjs'
+import { routeUtterance } from './voice-router.mjs'
+import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -164,7 +167,7 @@ function operatorBody(method, pathname, body) {
   return body
 }
 
-function directBody(method, pathname, body) {
+function directBody(method, pathname, body, contract) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -182,9 +185,22 @@ function directBody(method, pathname, body) {
   return Buffer.from(JSON.stringify({
     ...value,
     instructions: WIZARD_RUN_INSTRUCTIONS,
-    delegation_delivery: 'join',
-    response_rendering: 'markdown',
+    ...runContractFields(contract),
   }))
+}
+
+// Fields Wizard adds to every run, limited to what this Hermes advertises in /v1/capabilities.
+// A stock Hermes advertises neither, so it receives a plain run it fully understands.
+function runContractFields(contract = { join: true, markdown: true }) {
+  return {
+    ...(contract.join ? { delegation_delivery: 'join' } : {}),
+    ...(contract.markdown ? { response_rendering: 'markdown' } : {}),
+  }
+}
+
+export function supportsMarkdownRendering(payload) {
+  const modes = payload?.features?.response_rendering?.modes
+  return Array.isArray(modes) && modes.includes('markdown')
 }
 
 export function supportsJoinedDelegation(payload) {
@@ -1644,7 +1660,37 @@ export function createWizardServer(options = {}) {
   const accessVerifier = options.accessVerifier
   if (requireAccess && typeof accessVerifier !== 'function') throw new Error('A Cloudflare Access verifier is required')
   const fetchImpl = options.fetchImpl ?? fetch
-  const requireJoinedDelegationCapability = options.requireJoinedDelegationCapability ?? true
+  // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
+  const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
+  const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
+  const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
+  const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
+  const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
+  // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
+  // without one shows no mic instead of a mic that fails. Tests can pin it with sttConfigured.
+  let sttProbe = { ok: options.sttConfigured ?? false, at: options.sttConfigured === undefined ? 0 : Infinity }
+  const sttAvailable = async () => {
+    if (Date.now() - sttProbe.at < 30_000) return sttProbe.ok
+    let ok = false
+    for (const path of ['/health', '/v1/models']) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 800)
+      try {
+        const r = await fetchImpl(`${sttOrigin}${path}`, { signal: controller.signal, redirect: 'error' })
+        await r.body?.cancel().catch(() => undefined)
+        if (r.ok) { ok = true; break }
+      } catch { /* not reachable */ } finally { clearTimeout(timer) }
+    }
+    sttProbe = { ok, at: Date.now() }
+    return ok
+  }
+  const router = options.router && options.router.url && options.router.model ? options.router : null
+  // 'require' (default, today's live behaviour): Hermes must advertise join; every run asks for
+  //   join + Markdown exactly as before. 'prefer': ask only for what Hermes advertises, so a stock
+  //   Hermes works. 'unchecked': legacy test option, no capability call, both fields sent.
+  const joinedDelegation = options.joinedDelegation
+    ?? (options.requireJoinedDelegationCapability === false ? 'unchecked' : 'require')
+  if (!['require', 'prefer', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer or unchecked')
   const sessionMessageCache = new Map()
   const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
   const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
@@ -1716,22 +1762,41 @@ export function createWizardServer(options = {}) {
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
 
-  let joinedDelegationCapability = { ok: false, expiresAt: 0 }
-  let joinedDelegationCapabilityInFlight = null
-  const assertJoinedDelegationCapability = async () => {
-    if (!requireJoinedDelegationCapability) return
-    if (joinedDelegationCapability.ok && Date.now() < joinedDelegationCapability.expiresAt) return
-    if (!joinedDelegationCapabilityInFlight) {
-      joinedDelegationCapabilityInFlight = (async () => {
+  // What this Hermes supports, read from /v1/capabilities and cached for 30 s.
+  //   joinedDelegation 'require': refuse runs unless Hermes keeps delegated work inside the run
+  //                               (a Hermes build that advertises delegation_delivery: join).
+  //   joinedDelegation 'prefer':  use join when advertised; otherwise send a plain run, so stock
+  //                               Hermes works. Delegated results then arrive on the next turn.
+  let hermesContract = { join: false, markdown: false, checked: false, expiresAt: 0 }
+  let hermesContractInFlight = null
+  const runContract = async () => {
+    if (hermesContract.checked && Date.now() < hermesContract.expiresAt) return hermesContract
+    if (!hermesContractInFlight) {
+      hermesContractInFlight = (async () => {
         const payload = await hermesJson('/v1/capabilities')
-        if (!supportsJoinedDelegation(payload)) {
-          throw Object.assign(new Error('Hermes cannot keep delegated Wizard work inside its originating run'), { status: 503 })
+        hermesContract = {
+          join: supportsJoinedDelegation(payload), markdown: supportsMarkdownRendering(payload),
+          checked: true, expiresAt: Date.now() + 30_000,
         }
-        joinedDelegationCapability = { ok: true, expiresAt: Date.now() + 30_000 }
-      })().finally(() => { joinedDelegationCapabilityInFlight = null })
+        return hermesContract
+      })().finally(() => { hermesContractInFlight = null })
     }
-    try { await joinedDelegationCapabilityInFlight }
-    catch { throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 }) }
+    return hermesContractInFlight
+  }
+  const FULL_CONTRACT = { join: true, markdown: true }
+  const assertJoinedDelegationCapability = async () => {
+    if (joinedDelegation === 'unchecked') return FULL_CONTRACT
+    let contract
+    try { contract = await runContract() }
+    catch {
+      if (joinedDelegation === 'prefer') return { join: false, markdown: false }
+      throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 })
+    }
+    if (joinedDelegation === 'require') {
+      if (!contract.join) throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 })
+      return FULL_CONTRACT
+    }
+    return contract
   }
 
   const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
@@ -2042,8 +2107,7 @@ export function createWizardServer(options = {}) {
         require_model_lock: true,
         model_options: { reasoning_effort: 'max' },
         instructions: WIZARD_RUN_INSTRUCTIONS,
-        delegation_delivery: 'join',
-        response_rendering: 'markdown',
+        ...runContractFields(await assertJoinedDelegationCapability()),
       }),
       headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
     })
@@ -2089,7 +2153,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody)
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability())
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -2362,6 +2426,39 @@ export function createWizardServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const { settings, source } = readSettings(settingsPath)
+        let contract = { join: false, markdown: false }
+        try { contract = await runContract() } catch { /* Hermes down: the UX still boots and shows it */ }
+        sendJson(response, 200, bootstrapPayload({
+          settings, settingsSource: source,
+          capabilities: {
+            voice: await sttAvailable(), router: Boolean(router), files: Boolean(inboxToken),
+            approvals: true, steer: true, joined_delegation: contract.join, markdown: contract.markdown,
+          },
+        }), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/route' && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!router) { sendJson(response, 404, { error: 'router_not_configured' }); return }
+        let input
+        try { input = JSON.parse((await readBoundedBody(request, 8192)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const { settings } = readSettings(settingsPath)
+        try {
+          sendJson(response, 200, await routeUtterance({ input, settings, router, fetchImpl }))
+        } catch (error) {
+          sendJson(response, error?.status === 400 ? 400 : 502, { error: error?.status === 400 ? 'invalid_request' : 'router_unavailable' })
+        }
+        return
+      }
+
       if (url.pathname === '/wizard/health' && request.method === 'GET') {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 800)
@@ -2433,7 +2530,14 @@ export function createWizardServer(options = {}) {
         const filename = safeHeader(request.headers['x-wizard-filename'], 'wizard-voice.webm', 120).replaceAll('/', '_').replaceAll('\\', '_')
         const form = new FormData()
         form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
-        form.append('language', 'en')
+        {
+          // Language and spelling hints come from Wizard OS settings: the agent's name, the user's
+          // own vocabulary. Nothing about any particular user is built in.
+          const { settings } = readSettings(settingsPath)
+          form.append('language', settings.voice.language || 'en')
+          const hints = [settings.agent.name, settings.owner.name, ...settings.voice.vocabulary].filter(Boolean)
+          if (hints.length) form.append('prompt', `Names: ${[...new Set(hints)].join(', ')}.`.slice(0, 800))
+        }
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 180_000)
         request.once('aborted', () => controller.abort())
@@ -2822,15 +2926,16 @@ export function createWizardServer(options = {}) {
         }
         let queuedAdmission = null
         let directAdmissionSessionId = ''
+        let admissionContract
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
-          await assertJoinedDelegationCapability()
+          admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'
           const substantive = !operator || !isInlineOperatorRequest(requested.input)
           if (runQueue && substantive) {
             if (operator) operatorBody('POST', '/v1/runs', body)
-            else directBody('POST', '/v1/runs', body)
+            else directBody('POST', '/v1/runs', body, admissionContract)
             const sessionId = typeof requested.session_id === 'string' ? requested.session_id : ''
             const idempotencyKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
             const requestHash = queueRequestHash(runtime, body.toString('utf8'))
@@ -2879,7 +2984,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -3089,6 +3194,24 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      if (uxDir && (url.pathname === uxPrefix.slice(0, -1) || url.pathname.startsWith(uxPrefix))) {
+        if (url.pathname === uxPrefix.slice(0, -1)) { response.writeHead(308, { Location: uxPrefix }); response.end(); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!['GET', 'HEAD'].includes(request.method ?? '')) { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        let decoded
+        try { decoded = decodeURIComponent(url.pathname.slice(uxPrefix.length)) || 'index.html' } catch { sendJson(response, 400, { error: 'bad_path' }); return }
+        if (decoded.split('/').some((part) => part.startsWith('.'))) { sendJson(response, 404, { error: 'not_found' }); return }
+        const file = resolve(uxDir, decoded)
+        if (!file.startsWith(`${uxDir}${sep}`) || !existsSync(file) || !(await stat(file)).isFile()) { sendJson(response, 404, { error: 'not_found' }); return }
+        const details = await stat(file)
+        const headers = { ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache' }
+        if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
+        response.writeHead(200, headers)
+        if (request.method === 'HEAD') response.end()
+        else createReadStream(file).pipe(response)
+        return
+      }
+      if (url.pathname === '/' && uxDir) { response.writeHead(302, { Location: uxPrefix, 'Cache-Control': 'no-store' }); response.end(); return }
       if (url.pathname === '/') { response.writeHead(302, { Location: '/wizard', 'Cache-Control': 'no-store' }); response.end(); return }
       if (url.pathname === '/wizard' || url.pathname === '/wizard/') {
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : null
@@ -3122,6 +3245,32 @@ export function createWizardServer(options = {}) {
     }
   })
   if (runQueue) server.once('close', () => runQueue.close())
+  // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
+  if (options.followThrough !== false && hermesStatePath) {
+    let selfOrigin = ''
+    server.on('listening', () => {
+      const address = server.address()
+      if (address && typeof address === 'object') selfOrigin = `http://127.0.0.1:${address.port}`
+    })
+    const watcher = startDelegationFollowThrough({
+      sessionDbPath: hermesStatePath,
+      enabled: async () => {
+        if (!selfOrigin || joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
+        try { return !(await runContract()).join } catch { return false }
+      },
+      admit: async (sessionId, input, idempotencyKey) => {
+        const response = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey, 'X-Wizard-Internal': 'follow-through' },
+          body: JSON.stringify({ session_id: sessionId, input }),
+        })
+        await response.body?.cancel().catch(() => undefined)
+        if (!response.ok) throw new Error(`admission ${response.status}`)
+      },
+      log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
+    })
+    server.on('close', () => watcher.stop())
+  }
   return server
 }
 

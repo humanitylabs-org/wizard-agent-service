@@ -1,0 +1,16 @@
+{
+ "schema": 1,
+ "links": [
+  {
+   "id": "notes",
+   "name": "Notes",
+   "icon": "\ud83d\udcdd",
+   "url": "/notes/",
+   "desc": "Example: any private web app on this box",
+   "colors": [
+    "#8f63ff",
+    "#3f6bff"
+   ]
+  }
+ ]
+}

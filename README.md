@@ -64,3 +64,14 @@ Every variable is listed in `server/index.mjs`. `ops/` has a hardened systemd un
 3. **State paths and names.** `~/.hermes/state/wizard-mobile/` and the unit name should become `wizard-agent-service` with a one-time migration.
 4. **API contract.** Write down the `/wizard/...` endpoints Wizard UX uses as the versioned contract (sessions, runs, steer, files, thread-seen, thread-dispositions, voice).
 5. **Cutover.** Point the live service at this repo, then delete `server/` from `wizard-mobile` and make its front end depend on this service.
+
+## Stock Hermes and Wizard OS settings (branch `feature/stock-hermes`)
+
+- **Works with unmodified Hermes.** `WIZARD_JOINED_DELEGATION=prefer|require|off` (default `require` keeps today's strict behaviour; new installs use `prefer`). With `prefer`, the service uses joined delegation and Markdown rendering when Hermes advertises them in `/v1/capabilities`, and sends a plain run otherwise.
+- **Delegation follow-through.** Stock Hermes finishes `delegate_task` work after the run and saves the result into the thread for the next turn. When Hermes does not join delegated work, the service starts that next turn itself (once per result), so the user still gets one finished answer. Off whenever Hermes joins.
+- **Wizard OS settings.** `GET /wizard/v1/bootstrap` returns `~/.wizard-os/settings.json` (owner, agent name, clock, voice vocabulary) and what this box can do; `GET /wizard/v1/apps` merges `apps.json` with the owner's `launcher.json`. Spec: `wizard-os/spec/SETTINGS_AND_BOOTSTRAP.md`.
+- **Optional orb router.** `POST /wizard/v1/route` when `WIZARD_ROUTER_URL` + `WIZARD_ROUTER_MODEL` point at any OpenAI-compatible chat endpoint.
+- **Serves Wizard UX.** `WIZARD_UX_DIR=/path/to/wizard-ux/web` (+ `WIZARD_UX_PREFIX`, default `wizard-os-home`) serves the UX from the same origin as the API: one service, one address.
+- **Voice is honest.** `voice` in bootstrap is true only while the transcription service answers its health check.
+
+Tested 9 Oct 2026 on a fresh Ubuntu 24.04 VM with upstream Hermes `0670ba4524`: UX boots neutral, send → reply, thread listed, delegated work completes through follow-through (`tests/` 166 passing).
