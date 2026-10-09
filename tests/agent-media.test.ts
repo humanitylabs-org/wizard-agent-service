@@ -12,6 +12,9 @@ const sourceRoot = join(root, 'source images')
 const artifactDir = join(root, 'artifacts')
 const source = join(sourceRoot, 'poster.png')
 const secondSource = join(sourceRoot, 'second.png')
+const apkSource = join(sourceRoot, 'wizard-os-0.6.3.apk')
+// A zip local-file header plus padding: big enough to exceed the 5 MB image cap.
+const apk = Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(6 * 1024 * 1024, 7)])
 let upstream: ReturnType<typeof createServer>
 let wizard: ReturnType<typeof createWizardServer>
 let base = ''
@@ -20,12 +23,15 @@ beforeAll(async () => {
   mkdirSync(sourceRoot)
   writeFileSync(source, png)
   writeFileSync(secondSource, Buffer.concat([png, Buffer.from([0])]))
+  writeFileSync(apkSource, apk)
   upstream = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.url?.includes('/messages')) {
       response.end(JSON.stringify({ data: [
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
+        { id: 'assistant-apk', role: 'assistant', content: `Latest build.\n\nMEDIA:${apkSource}\n\nInstall it over the old copy.`, timestamp: 8 },
+        { id: 'assistant-missing', role: 'assistant', content: `Here it is.\n\nMEDIA:${join(sourceRoot, 'gone.pdf')}`, timestamp: 9 },
         ...['user', 'assistant'].map(role => ({ id: `${role}-inline-file`, role, content: [
           { type: 'text', text: `Review screenshot\n\n[WIZARD_FILES_V1]\n${JSON.stringify([
             { id: 'drop_screen', filename: 'screen.png', mime: 'image/png', bytes: png.length, sha256: createHash('sha256').update(png).digest('hex') },
@@ -95,6 +101,36 @@ describe('agent image delivery', () => {
     const head = await fetch(`${base}/wizard/attachments/${id}`, { method: 'HEAD' })
     expect(head.status).toBe(200)
     expect(await head.text()).toBe('')
+  })
+
+  it('projects a MEDIA APK into one downloadable file attachment', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'assistant-apk')?.content ?? ''
+    expect(content).toContain('Latest build.')
+    expect(content).toContain('Install it over the old copy.')
+    expect(content).not.toContain(sourceRoot)
+    const envelope = content.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] ?? '{"items":[]}'
+    const items = JSON.parse(envelope).items
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ name: 'wizard-os-0.6.3.apk', mime: 'application/vnd.android.package-archive', kind: 'file', bytes: apk.length })
+    const file = await fetch(`${base}/wizard/attachments/${items[0].id}`)
+    expect(file.status).toBe(200)
+    expect(file.headers.get('content-type')).toBe('application/vnd.android.package-archive')
+    expect(file.headers.get('content-disposition')).toContain('attachment; filename="wizard-os-0.6.3.apk"')
+    expect(Buffer.from(await file.arrayBuffer()).equals(apk)).toBe(true)
+    const part = await fetch(`${base}/wizard/attachments/${items[0].id}`, { headers: { Range: 'bytes=0-3' } })
+    expect(part.status).toBe(206)
+    expect(part.headers.get('content-range')).toBe(`bytes 0-3/${apk.length}`)
+    expect(Buffer.from(await part.arrayBuffer()).toString('binary')).toBe('PK\x03\x04')
+  })
+
+  it('leaves a visible line when a MEDIA file cannot be shown', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'assistant-missing')?.content ?? ''
+    expect(content).toContain('Here it is.')
+    expect(content).toContain('[file: gone.pdf unavailable]')
+    expect(content).not.toContain(sourceRoot)
+    expect(payload.data.find((message) => message.id === 'unsafe')?.content).toBe('[file: passwd unavailable]')
   })
 
   it('projects completed run output before the client renders it', async () => {

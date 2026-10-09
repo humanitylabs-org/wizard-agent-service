@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
@@ -29,6 +29,29 @@ export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
 // Eight composer files plus the retained microphone recording.
 const WIZARD_FILE_LIMIT = 9
 const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
+// Non-image files the agent sends with MEDIA: (APKs, PDFs, archives, audio, video).
+const WIZARD_AGENT_FILE_LIMIT = 256 * 1024 * 1024
+// Same suffixes Helm shares (_SHARED_FILE_MIMES), minus images, which keep their magic-byte path.
+const AGENT_FILE_MIMES = new Map(Object.entries({
+  '.apk': 'application/vnd.android.package-archive',
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.md': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.wav': 'audio/wav',
+  '.webm': 'audio/webm',
+  '.ogg': 'audio/ogg',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+}))
+const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
@@ -1383,14 +1406,28 @@ function canonicalArtifactRoots(values) {
   }))]
 }
 
-function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
-  if (!artifactDir || !artifactRoots.length) return null
+function writeAgentArtifactMetadata(artifactDir, metadata) {
+  const metadataPath = resolve(artifactDir, `${metadata.id}.json`)
+  const metadataTemporary = resolve(artifactDir, `.${metadata.id}.${randomUUID()}.json.tmp`)
+  writeFileSync(metadataTemporary, JSON.stringify(metadata), { mode: 0o600 })
+  renameSync(metadataTemporary, metadataPath)
+}
+
+function trustedAgentSource(sourcePath, artifactRoots) {
   let source
   try { source = realpathSync(resolve(sourcePath.trim())) } catch { return null }
   if (!artifactRoots.some((root) => source.startsWith(`${root}${sep}`))) return null
   let details
   try { details = statSync(source) } catch { return null }
-  if (!details.isFile() || details.size < 1 || details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  if (!details.isFile() || details.size < 1) return null
+  return { source, details }
+}
+
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
+  if (!artifactDir || !artifactRoots.length) return null
+  const trusted = trustedAgentSource(sourcePath, artifactRoots)
+  if (!trusted || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  const { source } = trusted
   let bytes
   try { bytes = readFileSync(source) } catch { return null }
   const mime = imageMime(bytes)
@@ -1400,17 +1437,72 @@ function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
   const cleanName = basename(source).replace(/[\\/\p{Cc}]/gu, '_').trim().slice(-120) || `wizard-image.${mime.split('/')[1]}`
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 })
   const contentPath = resolve(artifactDir, `${id}.bin`)
-  const metadataPath = resolve(artifactDir, `${id}.json`)
   if (!existsSync(contentPath)) {
     const temporary = resolve(artifactDir, `.${id}.${randomUUID()}.tmp`)
     writeFileSync(temporary, bytes, { mode: 0o600 })
     renameSync(temporary, contentPath)
   }
   const metadata = { id, name: cleanName, mime, kind: 'image', bytes: bytes.length, sha256 }
-  const metadataTemporary = resolve(artifactDir, `.${id}.${randomUUID()}.json.tmp`)
-  writeFileSync(metadataTemporary, JSON.stringify(metadata), { mode: 0o600 })
-  renameSync(metadataTemporary, metadataPath)
+  writeAgentArtifactMetadata(artifactDir, metadata)
   return metadata
+}
+
+function agentFileKind(mime) {
+  return mime.startsWith('audio/') ? 'audio' : mime.startsWith('video/') ? 'video' : 'file'
+}
+
+// History is re-projected on every read; skip re-hashing a large file that has not changed.
+const agentFileRegistrations = new Map()
+
+function hashFileSync(path) {
+  const hash = createHash('sha256')
+  const buffer = Buffer.allocUnsafe(1024 * 1024)
+  const fd = openSync(path, 'r')
+  try {
+    let read
+    while ((read = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read))
+  } finally { closeSync(fd) }
+  return hash.digest('hex')
+}
+
+// A MEDIA: file that is not an image: allowlisted suffix, inside the artifact roots, up to 256 MB.
+function registerAgentFile(sourcePath, artifactDir, artifactRoots) {
+  if (!artifactDir || !artifactRoots.length) return null
+  const trusted = trustedAgentSource(sourcePath, artifactRoots)
+  if (!trusted || trusted.details.size > WIZARD_AGENT_FILE_LIMIT) return null
+  const { source, details } = trusted
+  const mime = AGENT_FILE_MIMES.get(extname(source).toLowerCase())
+  if (!mime) return null
+  const cacheKey = `${artifactDir}\0${source}\0${details.ino}\0${details.size}\0${details.mtimeMs}`
+  const cached = agentFileRegistrations.get(cacheKey)
+  if (cached && existsSync(resolve(artifactDir, `${cached.id}.json`))) return cached
+  try {
+    const sha256 = hashFileSync(source)
+    const id = sha256.slice(0, 32)
+    const cleanName = basename(source).replace(/[\\/\p{Cc}]/gu, '_').trim().slice(-120) || `wizard-file${extname(source).toLowerCase()}`
+    mkdirSync(artifactDir, { recursive: true, mode: 0o700 })
+    const contentPath = resolve(artifactDir, `${id}.bin`)
+    if (!existsSync(contentPath) || statSync(contentPath).size !== details.size) {
+      const temporary = resolve(artifactDir, `.${id}.${randomUUID()}.tmp`)
+      copyFileSync(source, temporary)
+      // The source may change while copying; keep only bytes that match the hash we publish.
+      if (statSync(temporary).size !== details.size || hashFileSync(temporary) !== sha256) {
+        try { rmSync(temporary, { force: true }) } catch {}
+        return null
+      }
+      renameSync(temporary, contentPath)
+    }
+    const metadata = { id, name: cleanName, mime, kind: agentFileKind(mime), bytes: details.size, sha256 }
+    writeAgentArtifactMetadata(artifactDir, metadata)
+    if (agentFileRegistrations.size > 512) agentFileRegistrations.clear()
+    agentFileRegistrations.set(cacheKey, metadata)
+    return metadata
+  } catch { return null }
+}
+
+function unavailableFileLine(sourcePath) {
+  const name = basename(String(sourcePath).trim()).replace(/[\\/\p{Cc}\[\]]/gu, '_').trim().slice(-120) || 'file'
+  return `[file: ${name} unavailable]`
 }
 
 function readAgentArtifact(id, artifactDir) {
@@ -1419,8 +1511,11 @@ function readAgentArtifact(id, artifactDir) {
     const metadata = JSON.parse(readFileSync(resolve(artifactDir, `${id}.json`), 'utf8'))
     const contentPath = resolve(artifactDir, `${id}.bin`)
     const details = statSync(contentPath)
-    if (metadata.id !== id || metadata.kind !== 'image' || !String(metadata.mime).startsWith('image/')
-        || metadata.bytes !== details.size || details.size < 1 || details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+    if (metadata.id !== id || metadata.bytes !== details.size || details.size < 1) return null
+    const image = metadata.kind === 'image' && String(metadata.mime).startsWith('image/') && details.size <= WIZARD_AGENT_IMAGE_LIMIT
+    const file = ['file', 'audio', 'video'].includes(metadata.kind) && AGENT_FILE_MIME_SET.has(metadata.mime)
+      && metadata.kind === agentFileKind(metadata.mime) && details.size <= WIZARD_AGENT_FILE_LIMIT
+    if (!image && !file) return null
     return { ...metadata, contentPath }
   } catch { return null }
 }
@@ -1442,7 +1537,10 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
     })
     const register = (_line, sourcePath) => {
       const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots)
-      if (artifact && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
+        ?? registerAgentFile(sourcePath, artifactDir, artifactRoots)
+      // Never let a sent file vanish: say which one could not be shown.
+      if (!artifact) return unavailableFileLine(sourcePath)
+      if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
       return ''
     }
     let text = value.replace(AGENT_MEDIA_LINE, register)
@@ -2617,15 +2715,36 @@ export function createWizardServer(options = {}) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir)
         if (artifact) {
-          response.writeHead(200, {
+          // Images, audio and video play in place; everything else (APK, PDF, archives, documents)
+          // downloads with its real type so the phone offers the right app, e.g. the APK installer.
+          const canonicalType = String(artifact.mime).split(';', 1)[0].trim().toLowerCase()
+          const inline = PASSIVE_INLINE_MIME.has(canonicalType) && !isMarkdownDownload(artifact.name, artifact.mime)
+          const headers = {
             'Content-Type': artifact.mime,
-            'Content-Disposition': contentDisposition(isMarkdownDownload(artifact.name, artifact.mime) ? 'attachment' : 'inline', artifact.name),
-            'Content-Length': artifact.bytes,
+            'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
+            'Accept-Ranges': 'bytes',
             'Cache-Control': 'private, no-store',
             'X-Content-Type-Options': 'nosniff',
-          })
+          }
+          const range = typeof request.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range.trim()) : null
+          let start = 0
+          let end = artifact.bytes - 1
+          let status = 200
+          if (range && (range[1] || range[2])) {
+            if (range[1]) { start = Number(range[1]); if (range[2]) end = Math.min(Number(range[2]), end) }
+            else start = Math.max(0, artifact.bytes - Number(range[2]))
+            if (start > end || start >= artifact.bytes) {
+              response.writeHead(416, { ...headers, 'Content-Range': `bytes */${artifact.bytes}` })
+              response.end()
+              return
+            }
+            status = 206
+            headers['Content-Range'] = `bytes ${start}-${end}/${artifact.bytes}`
+          }
+          headers['Content-Length'] = end - start + 1
+          response.writeHead(status, headers)
           if (request.method === 'HEAD') response.end()
-          else createReadStream(artifact.contentPath).pipe(response)
+          else createReadStream(artifact.contentPath, { start, end }).pipe(response)
           return
         }
         if (!helmOrigin) { sendJson(response, 503, { error: 'attachment_unavailable' }); return }
