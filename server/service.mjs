@@ -435,6 +435,18 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
               if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) delete projected.status
             }
+            // Internal machine turns (helper results, follow-through nudges) never become the list preview.
+            if (typeof projected.preview === 'string' && /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through)/u.test(projected.preview)) {
+              projected.preview = truth?.requestPreview || ''
+            }
+            // A helper is still working for this thread (or its answer is in but the agent has not replied).
+            // Keep the thread in Working so it reaches Ready only with the real answer.
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered)
+              && !ACTIVE_RUN_STATUSES.has(projected.status)
+              && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
+              projected.status = 'running'
+              projected.wizard_waiting_on = 'helper'
+            }
             if (ACTIVE_RUN_STATUSES.has(projected.status) && !projected.wizard_assigned_at) {
               projected.wizard_assigned_at = Number(projected.wizard_last_user_at) || Number(truth?.lastUserAt) || undefined
             }
@@ -999,6 +1011,7 @@ function legacyInternalHistoryMessage(message) {
   if (role === 'user' && normalized === EMPTY_TOOL_RESPONSE_NUDGE) return true
   return [
     '[ASYNC DELEGATION BATCH COMPLETE',
+    '[Wizard follow-through]',
     '[CONTEXT COMPACTION — REFERENCE ONLY]',
     '[CONTEXT SUMMARY]:',
     '[PRIOR CONTEXT — for reference only; not a new message]',

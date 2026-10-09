@@ -178,3 +178,39 @@ describe('orb router', () => {
     expect(body.cmd).toEqual({ route: 'command', action: 'open_app', app: 'Notes' })
   })
 })
+
+describe('helper wait keeps a thread in Working', () => {
+  it('reports running helpers and an unanswered helper result from Hermes state', async () => {
+    const { DatabaseSync } = await import('node:sqlite')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { readHermesSessionTruth } = await import('../server/session-truth.mjs')
+    const dir = mkdtempSync(join(tmpdir(), 'helper-wait-'))
+    const path = join(dir, 'state.db')
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE sessions (id TEXT, started_at REAL, model TEXT, model_config TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, finish_reason TEXT, timestamp REAL, display_kind TEXT, active INTEGER DEFAULT 1);
+      CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);
+      CREATE TABLE async_delegations (delegation_id TEXT, origin_session_id TEXT, state TEXT, dispatched_at REAL);`)
+    const now = 1_800_000_000
+    for (const id of ['wizard_a', 'wizard_b', 'wizard_c']) db.prepare('INSERT INTO sessions VALUES (?, ?, NULL, NULL)').run(id, now - 100)
+    const msg = db.prepare('INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUES (?, ?, ?, ?, ?)')
+    msg.run('wizard_a', 'user', 'research this', null, now - 90)
+    msg.run('wizard_a', 'assistant', 'I have handed this to a helper.', 'stop', now - 80)
+    db.prepare('INSERT INTO async_delegations VALUES (?, ?, ?, ?)').run('d1', 'wizard_a', 'running', now - 85)
+    msg.run('wizard_b', 'user', 'research that', null, now - 90)
+    msg.run('wizard_b', 'assistant', 'Delegated.', 'stop', now - 80)
+    msg.run('wizard_b', 'user', '[ASYNC DELEGATION BATCH COMPLETE — d2]\nresult', null, now - 10)
+    db.prepare('INSERT INTO async_delegations VALUES (?, ?, ?, ?)').run('d2', 'wizard_b', 'completed', now - 85)
+    msg.run('wizard_c', 'user', 'hi', null, now - 90)
+    msg.run('wizard_c', 'assistant', 'hello', 'stop', now - 80)
+    db.close()
+    const truth = readHermesSessionTruth(path, ['wizard_a', 'wizard_b', 'wizard_c'], now)
+    expect(truth.get('wizard_a')?.helpersRunning).toBe(1)
+    expect(truth.get('wizard_b')?.helperResultUnanswered).toBe(true)
+    expect(truth.get('wizard_b')?.helpersRunning ?? 0).toBe(0)
+    expect(truth.get('wizard_c')?.helpersRunning ?? 0).toBe(0)
+    expect(truth.get('wizard_c')?.helperResultUnanswered).toBeFalsy()
+  })
+})

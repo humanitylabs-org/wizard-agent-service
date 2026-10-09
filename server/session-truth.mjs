@@ -12,6 +12,7 @@ const INTERNAL_USER_PREFIXES = [
   'You just executed tool calls but returned an empty response.',
   '[IMPORTANT: Background process ',
   '[ASYNC DELEGATION BATCH COMPLETE',
+  '[Wizard follow-through]',
   '[CONTEXT COMPACTION — REFERENCE ONLY]',
   '[CONTEXT SUMMARY]:',
   '[PRIOR CONTEXT — for reference only; not a new message]',
@@ -114,6 +115,35 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         if (current.lastUserAt && current.lastAssistantAt) break
       }
     }
+    // Helpers the agent dispatched in the background (stock Hermes delegate_task). While one runs, or its
+    // result is saved but the agent has not answered yet, the thread is still working for the owner: the
+    // "I've delegated this" reply is progress, not something to act on. Capped at 6 h so a lost helper
+    // cannot pin a thread in Working forever.
+    try {
+      const helperRows = db.prepare(`
+        SELECT origin_session_id AS id, COUNT(*) AS n
+        FROM async_delegations
+        WHERE state IN ('running', 'stalling', 'finalizing') AND dispatched_at > ?
+          AND origin_session_id IN (${placeholders})
+        GROUP BY origin_session_id
+      `).all(nowSeconds - 6 * 3600, ...ids)
+      for (const row of helperRows) {
+        const current = truth.get(String(row.id || ''))
+        if (current) current.helpersRunning = Number(row.n) || 0
+      }
+    } catch { /* agents without background delegation */ }
+    try {
+      const newestRow = db.prepare(`
+        SELECT role, content, timestamp FROM messages
+        WHERE session_id = ? AND active = 1
+        ORDER BY timestamp DESC LIMIT 1
+      `)
+      for (const [id, current] of truth) {
+        const row = newestRow.get(id)
+        if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
+          && Number(row.timestamp) > nowSeconds - 6 * 3600) current.helperResultUnanswered = true
+      }
+    } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`
       SELECT conversation_id
       FROM session_turn_leases
