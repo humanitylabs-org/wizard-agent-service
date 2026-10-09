@@ -1,0 +1,21 @@
+{
+  "name": "wizard-agent-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wizard Agent Service: the back end Wizard front ends talk to. Sits in front of Hermes Agent and owns threads, runs, steers, approvals, files, read state and voice recovery.",
+  "type": "module",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "start:local": "node --env-file=.env.local server/index.mjs",
+    "fixture": "node scripts/run-fixture.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "vitest": "^5.0.0"
+  }
+}
