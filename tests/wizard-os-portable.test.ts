@@ -214,3 +214,23 @@ describe('helper wait keeps a thread in Working', () => {
     expect(truth.get('wizard_c')?.helperResultUnanswered).toBeFalsy()
   })
 })
+
+
+describe('fast router and delegation mode settings', () => {
+  it('reads fast_router from settings, never exposing the key', async () => {
+    const { normalizeSettings, resolveFastRouter } = await import('../server/wizard-os-settings.mjs')
+    const s = normalizeSettings({ fast_router: { account: 'claude', model: 'claude-haiku-4-5', endpoint: 'http://127.0.0.1:9/v1/chat/completions', key_env: 'ROUTER_KEY_X', key: 'leak' } })
+    expect(s.fast_router).toEqual({ account: 'claude', model: 'claude-haiku-4-5', endpoint: 'http://127.0.0.1:9/v1/chat/completions', key_env: 'ROUTER_KEY_X' })
+    expect(resolveFastRouter(s, null, { ROUTER_KEY_X: 'k1' })).toMatchObject({ url: 'http://127.0.0.1:9/v1/chat/completions', model: 'claude-haiku-4-5', key: 'k1', account: 'claude' })
+    expect(resolveFastRouter(normalizeSettings({}), { url: 'http://x/v1', model: 'm' })).toMatchObject({ url: 'http://x/v1', model: 'm' })
+    expect(resolveFastRouter(normalizeSettings({}), null)).toBeNull()
+    expect(normalizeSettings({ fast_router: { endpoint: 'file:///etc/passwd', key_env: 'lower' } }).fast_router).toMatchObject({ endpoint: '', key_env: '' })
+  })
+  it('detached instructions replace the join sentence', async () => {
+    const { runInstructions, WIZARD_RUN_INSTRUCTIONS } = await import('../server/service.mjs')
+    expect(runInstructions({ join: true })).toBe(WIZARD_RUN_INSTRUCTIONS)
+    const detached = runInstructions({ join: false })
+    expect(detached).not.toContain('Join any delegated work in this run')
+    expect(detached).toContain('Wizard returns their results to you as a follow-up turn')
+  })
+})

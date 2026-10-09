@@ -19,7 +19,7 @@ import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
-import { bootstrapPayload, readApps, readSettings, validTimeZone } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 
@@ -167,6 +167,13 @@ function operatorBody(method, pathname, body) {
   return body
 }
 
+// Without joined delegation, helpers finish after the run ends and Wizard brings their results back
+// as a follow-up turn; the agent should say what is running and stop, not wait or poll.
+const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
+export function runInstructions(contract = { join: true }) {
+  return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+}
+
 function directBody(method, pathname, body, contract) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
@@ -184,7 +191,7 @@ function directBody(method, pathname, body, contract) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: WIZARD_RUN_INSTRUCTIONS,
+    instructions: runInstructions(contract),
     ...runContractFields(contract),
   }))
 }
@@ -1703,7 +1710,9 @@ export function createWizardServer(options = {}) {
   //   Hermes works. 'unchecked': legacy test option, no capability call, both fields sent.
   const joinedDelegation = options.joinedDelegation
     ?? (options.requireJoinedDelegationCapability === false ? 'unchecked' : 'require')
-  if (!['require', 'prefer', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer or unchecked')
+  // 'off': never ask Hermes to join, even when it can; the service's follow-through takes the next
+  //   turn, exactly as on a stock Hermes. Lets an owner run the stock behaviour on a forked Hermes.
+  if (!['require', 'prefer', 'off', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer, off or unchecked')
   const sessionMessageCache = new Map()
   const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
   const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
@@ -1802,13 +1811,14 @@ export function createWizardServer(options = {}) {
     let contract
     try { contract = await runContract() }
     catch {
-      if (joinedDelegation === 'prefer') return { join: false, markdown: false }
+      if (joinedDelegation === 'prefer' || joinedDelegation === 'off') return { join: false, markdown: false }
       throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 })
     }
     if (joinedDelegation === 'require') {
       if (!contract.join) throw Object.assign(new Error('Wizard outcome-ownership contract is unavailable'), { status: 503 })
       return FULL_CONTRACT
     }
+    if (joinedDelegation === 'off') return { ...contract, join: false }
     return contract
   }
 
@@ -2444,11 +2454,13 @@ export function createWizardServer(options = {}) {
         const { settings, source } = readSettings(settingsPath)
         let contract = { join: false, markdown: false }
         try { contract = await runContract() } catch { /* Hermes down: the UX still boots and shows it */ }
+        // Front ends see which account and model route the orb, never where or with which key.
+        const publicSettings = { ...settings, fast_router: { account: settings.fast_router.account, model: settings.fast_router.model } }
         sendJson(response, 200, bootstrapPayload({
-          settings, settingsSource: source,
+          settings: publicSettings, settingsSource: source,
           capabilities: {
-            voice: await sttAvailable(), router: Boolean(router), files: Boolean(inboxToken),
-            approvals: true, steer: true, joined_delegation: contract.join, markdown: contract.markdown,
+            voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken),
+            approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })
         return
@@ -2460,12 +2472,13 @@ export function createWizardServer(options = {}) {
       }
       if ((url.pathname === '/wizard/v1/route' || (uxDir && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!router) { sendJson(response, 404, { error: 'router_not_configured' }); return }
+        const fast = resolveFastRouter(readSettings(settingsPath).settings, router)
+        if (!fast) { sendJson(response, 404, { error: 'router_not_configured' }); return }
         let input
         try { input = JSON.parse((await readBoundedBody(request, 8192)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         const { settings } = readSettings(settingsPath)
         try {
-          sendJson(response, 200, await routeUtterance({ input, settings, router, fetchImpl }))
+          sendJson(response, 200, await routeUtterance({ input, settings, router: fast, fetchImpl }))
         } catch (error) {
           sendJson(response, error?.status === 400 ? 400 : 502, { error: error?.status === 400 ? 'invalid_request' : 'router_unavailable' })
         }
@@ -3304,6 +3317,7 @@ export function createWizardServer(options = {}) {
       sessionDbPath: hermesStatePath,
       enabled: async () => {
         if (!selfOrigin || joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
+        if (joinedDelegation === 'off') return true
         try { return !(await runContract()).join } catch { return false }
       },
       admit: async (sessionId, input, idempotencyKey) => {

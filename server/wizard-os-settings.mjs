@@ -35,6 +35,7 @@ export function normalizeSettings(raw) {
   const agent = value.agent && typeof value.agent === 'object' ? value.agent : {}
   const clock = value.clock && typeof value.clock === 'object' ? value.clock : {}
   const voice = value.voice && typeof value.voice === 'object' ? value.voice : {}
+  const fastRouter = value.fast_router && typeof value.fast_router === 'object' ? value.fast_router : {}
   const vocabulary = Array.isArray(voice.vocabulary)
     ? voice.vocabulary.map((word) => cleanText(word, 40)).filter(Boolean).slice(0, 80)
     : []
@@ -56,7 +57,24 @@ export function normalizeSettings(raw) {
       language: cleanText(voice.language, 12) || '',
       vocabulary,
     },
+    // The fast model that sorts orb utterances into phone commands vs agent requests. It is not the
+    // agent: these calls never go through Hermes. `account` names which connected account pays for
+    // it (claude, chatgpt, tinfoil, ...); until Wizard OS has a shared accounts service, `endpoint`
+    // + `key_env` say how to reach it. The key itself never lives in this file.
+    fast_router: {
+      account: cleanText(fastRouter.account, 40),
+      model: cleanText(fastRouter.model, 120),
+      endpoint: typeof fastRouter.endpoint === 'string' && /^https?:\/\/[^\s]+$/u.test(fastRouter.endpoint) ? fastRouter.endpoint.slice(0, 300) : '',
+      key_env: typeof fastRouter.key_env === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(fastRouter.key_env) ? fastRouter.key_env : '',
+    },
   }
+}
+
+/** The router to call for this request: settings first, then the service's env defaults. */
+export function resolveFastRouter(settings, fallback = null, env = process.env) {
+  const r = settings?.fast_router
+  if (r?.endpoint && r?.model) return { url: r.endpoint, model: r.model, key: r.key_env ? String(env[r.key_env] || '') : '', account: r.account || '' }
+  return fallback && fallback.url && fallback.model ? { ...fallback, account: fallback.account || '' } : null
 }
 
 /** Read settings.json on every call (it is tiny), so edits apply without a restart. */
