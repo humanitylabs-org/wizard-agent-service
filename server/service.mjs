@@ -2458,7 +2458,7 @@ export function createWizardServer(options = {}) {
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
         return
       }
-      if (url.pathname === '/wizard/v1/route' && request.method === 'POST') {
+      if ((url.pathname === '/wizard/v1/route' || (uxDir && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!router) { sendJson(response, 404, { error: 'router_not_configured' }); return }
         let input
@@ -2534,6 +2534,35 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      // Compatibility for shells and native builds that still post multipart audio to the old
+      // sidecar path (<ux prefix>/api/transcribe), e.g. the Android lock-screen assistant.
+      if (uxDir && url.pathname === `${uxPrefix}api/transcribe` && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let originHost
+          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          if (originHost !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data')) { sendJson(response, 400, { error: 'multipart_required' }); return }
+        const data = await readBoundedBody(request, WIZARD_VOICE_UPLOAD_LIMIT)
+        const started = Date.now()
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 180_000)
+        request.once('aborted', () => controller.abort())
+        try {
+          const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, {
+            method: 'POST', body: data, redirect: 'error', signal: controller.signal,
+            headers: { 'Content-Type': String(request.headers['content-type']) },
+          })
+          const raw = Buffer.from(await upstream.arrayBuffer())
+          if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
+          const value = JSON.parse(raw.toString('utf8'))
+          sendJson(response, 200, { text: typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : '', ms: Date.now() - started, model: typeof value.model === 'string' ? value.model.slice(0, 120) : '' })
+        } catch { sendJson(response, 502, { error: 'transcription_failed' }) }
+        finally { clearTimeout(timer) }
+        return
+      }
       if (url.pathname === '/wizard/voice/transcribe' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const contentType = String(request.headers['content-type'] ?? '').toLowerCase()
@@ -3217,7 +3246,13 @@ export function createWizardServer(options = {}) {
         const file = resolve(uxDir, decoded)
         if (!file.startsWith(`${uxDir}${sep}`) || !existsSync(file) || !(await stat(file)).isFile()) { sendJson(response, 404, { error: 'not_found' }); return }
         const details = await stat(file)
-        const headers = { ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache' }
+        // Wizard UX plays recorded audio and shows blob: images (voice, attachments), so its pages
+        // get the shell's own policy rather than the legacy client's.
+        const headers = {
+          ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'X-Robots-Tag': 'noindex, nofollow',
+        }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
         response.writeHead(200, headers)
         if (request.method === 'HEAD') response.end()
