@@ -93,3 +93,11 @@ describe('status backfill', () => {
     expect(new StatusBackfill('').lookup('t1', 1000)).toBeNull()
   })
 })
+
+describe('needs_you means one clear action', () => {
+  it('tells the agent needs_you is reserved for a specific user action, phrased as that action', () => {
+    expect(STATUS_INSTRUCTIONS).toMatch(/needs_you \(only when the work cannot move until the user does one specific thing/)
+    expect(STATUS_INSTRUCTIONS).toMatch(/optional next step[^.]*is not needs_you, use done or fyi/)
+    expect(STATUS_INSTRUCTIONS).toMatch(/never a vague/)
+  })
+})

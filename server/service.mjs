@@ -2576,7 +2576,6 @@ export function createWizardServer(options = {}) {
       const payload = JSON.parse(result.toString('utf8'))
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
-        const was = threadTitleStore.breadcrumb(session.id, session.title)
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
@@ -2588,7 +2587,6 @@ export function createWizardServer(options = {}) {
         return {
           ...session,
           ...(attention ? { wizard_attention: attention } : {}),
-          ...(was ? { wizard_title_was: was.was, wizard_title_renamed_at: was.at } : {}),
           ...(renames.length ? { wizard_title_renames: renames } : {}),
         }
       })
