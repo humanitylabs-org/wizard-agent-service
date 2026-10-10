@@ -76,5 +76,8 @@ const server = createWizardServer({
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
+  // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
+  // so only one service ever starts automatic follow-through turns on the shared threads.
+  followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
