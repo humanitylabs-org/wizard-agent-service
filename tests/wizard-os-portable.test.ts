@@ -134,6 +134,31 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     ])
   })
 
+  it('every run is told it is inside Wizard OS and which apps are installed, re-read per run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    const appsJson = join(dir, 'apps.json')
+    writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [
+      { id: 'defleur-video', name: 'DeFleur Video', summary: 'Edit a talking-head video into a vertical short.', status: 'running',
+        provides: ['video-editing', 'short-form-video'], mcp: { url: 'http://127.0.0.1:20002/mcp', transport: 'streamable-http' },
+        skill: 'skills/defleur-video/SKILL.md', view: null },
+      { id: 'stopped-app', name: 'Stopped', summary: 'Not running', status: 'stopped', mcp: { url: 'http://127.0.0.1:1/mcp' } },
+    ] }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', appsJsonPath: appsJson })
+    expect((await postRun(wizard)).status).toBe(202)
+    const first = String(hermes.bodies[0].instructions)
+    expect(first).toContain('You are an agent inside Wizard OS')
+    expect(first).toContain('DeFleur Video (`defleur-video`)')
+    expect(first).toContain('Jobs: video-editing, short-form-video.')
+    expect(first).toContain('MCP (streamable-http): http://127.0.0.1:20002/mcp.')
+    expect(first).toContain(`Read its skill first: ${join(dir, 'skills/defleur-video/SKILL.md')}.`)
+    expect(first).toContain('short pointer to the app')
+    expect(first).not.toContain('stopped-app')
+    writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))
+    expect((await postRun(wizard)).status).toBe(202)
+    expect(String(hermes.bodies[1].instructions)).not.toContain('Wizard OS')
+  })
+
   it('serves a Wizard UX build under its prefix and refuses dotfiles and traversal', async () => {
     const ux = mkdtempSync(join(tmpdir(), 'wizard-ux-'))
     writeFileSync(join(ux, 'index.html'), '<title>Wizard UX</title>')

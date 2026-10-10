@@ -19,7 +19,7 @@ import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
-import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter, wizardOsInstructions } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 
@@ -197,7 +197,7 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
-function directBody(method, pathname, body, contract) {
+function directBody(method, pathname, body, contract, osInstructions = '') {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -214,7 +214,7 @@ function directBody(method, pathname, body, contract) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: runInstructions(contract),
+    instructions: runInstructions(contract) + osInstructions,
     ...runContractFields(contract),
   }))
 }
@@ -1782,6 +1782,8 @@ export function createWizardServer(options = {}) {
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
+  // Installed Wizard OS apps, re-read from apps.json for every run (see wizardOsInstructions).
+  const osInstructions = () => appsJsonPath ? wizardOsInstructions({ appsJsonPath }) : ''
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
@@ -2274,7 +2276,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability())
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions())
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -3163,7 +3165,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions())
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
