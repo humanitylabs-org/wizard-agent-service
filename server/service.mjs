@@ -2532,6 +2532,7 @@ export function createWizardServer(options = {}) {
 
   const safeQueueValue = (value, record) => {
     let result = Buffer.from(JSON.stringify(value))
+    result = projectStatusMarkers(result)
     result = projectWizardFileMarkers(result)
     const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
     if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
@@ -3438,7 +3439,7 @@ export function createWizardServer(options = {}) {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           result = projectWizardFileMarkers(result, messageHistory)
-          if (messageHistory) result = projectStatusMarkers(result)
+          if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
