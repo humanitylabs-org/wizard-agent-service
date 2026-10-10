@@ -1,4 +1,4 @@
-import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
@@ -252,6 +252,44 @@ function isDirectHumanSessionIdentity(id, source) {
   return HUMAN_SESSION_SOURCES.has(String(source ?? '').toLowerCase())
     || id.startsWith('wizard_')
     || id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
+}
+
+// Stale-run guard reader: true while Hermes holds an unexpired turn lease anywhere in the
+// session's compression chain (leases key on the chain root), false when none is held.
+export function readSessionTurnHeld(sessionDbPath, sessionId, currentTime = Date.now()) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    const row = database.prepare(`
+      WITH RECURSIVE
+        up(id) AS (SELECT ? UNION SELECT sessions.parent_session_id FROM sessions JOIN up ON sessions.id = up.id
+                   WHERE sessions.parent_session_id IS NOT NULL),
+        chain(id) AS (SELECT id FROM up UNION SELECT sessions.id FROM sessions JOIN chain ON sessions.parent_session_id = chain.id)
+      SELECT 1 AS held FROM session_turn_leases
+       WHERE conversation_id IN (SELECT id FROM chain) AND expires_at > ? LIMIT 1
+    `).get(String(sessionId), currentTime / 1000)
+    return Boolean(row)
+  } finally {
+    database.close()
+  }
+}
+
+// After an abandoned run: `completed` when the thread's last assistant text since the run
+// started is followed only by tool rows (the answer reached James), otherwise `interrupted`.
+export function readAbandonedRunOutcome(sessionDbPath, sessionId, startedAt) {
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    const rows = database.prepare(`SELECT role, content FROM messages
+      WHERE session_id = ? AND timestamp >= ? ORDER BY timestamp DESC, rowid DESC LIMIT 50`).all(String(sessionId), Number(startedAt) || 0)
+    for (const row of rows) {
+      if (row.role === 'tool') continue
+      if (row.role === 'assistant' && !String(row.content ?? '').trim()) continue
+      return row.role === 'assistant' ? 'completed' : 'interrupted'
+    }
+    return 'interrupted'
+  } finally {
+    database.close()
+  }
 }
 
 export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now()) {
@@ -2328,6 +2366,19 @@ export function createWizardServer(options = {}) {
     const maxActive = Number(options.runQueueMaxActive ?? 8)
     const activeSessionReader = options.activeSessionReader ?? (() => readActiveHumanSessionIds(hermesStatePath || sessionDbPath))
     const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
+    const leaseDbPath = hermesStatePath || sessionDbPath
+    const staleRunLogPath = resolve(dirname(runQueueStatePath), 'stale-run-guard.jsonl')
+    // Side-effect-free liveness probe: an empty steer is refused with 400 by a live agent, with
+    // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
+    const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => {
+      const result = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(runId)}/steer`, {
+        method: 'POST', redirect: 'manual',
+        headers: { Authorization: `Bearer ${hermesKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: '' }),
+      })
+      await result.arrayBuffer().catch(() => null)
+      return result.status === 409 || result.status === 404
+    })
     runQueue = new DurableRunQueue({
       statePath: runQueueStatePath,
       maxActive,
@@ -2337,6 +2388,19 @@ export function createWizardServer(options = {}) {
       canDispatch: dispatchHealthReader,
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
+      staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
+      turnHeld: options.turnHeldReader ?? ((record) => readSessionTurnHeld(leaseDbPath, record.sessionId)),
+      confirmAbandoned: async (record) => {
+        if (!await runHasNoAgent(record.upstreamRunId)) return null
+        return { status: (options.abandonedOutcomeReader ?? readAbandonedRunOutcome)(leaseDbPath, record.sessionId, record.createdAt) }
+      },
+      onReconciled: (record, verdict, leaselessSeconds) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record.publicRunId, session_id: record.sessionId,
+          upstream_run_id: record.upstreamRunId, status: verdict.status, run_age_s: Math.round(Date.now() / 1000 - record.createdAt),
+          leaseless_s: Math.round(leaselessSeconds) }
+        console.log(`[stale-run-guard] released ${record.sessionId} run ${record.upstreamRunId} as ${verdict.status}`)
+        try { appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+      },
     })
     runQueueReady = runQueue.initialize()
   }

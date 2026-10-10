@@ -53,6 +53,13 @@ export class DurableRunQueue {
     canDispatch = () => true,
     launch,
     lookup,
+    // Stale-run guard: a run Hermes still calls `running` while no turn holds the session
+    // (turnHeld → false) for `staleAfterSeconds`, and whose owner confirms nothing is
+    // attached (confirmAbandoned → { status }), is closed so later messages can start.
+    turnHeld = null,
+    confirmAbandoned = null,
+    onReconciled = () => {},
+    staleAfterSeconds = 300,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -65,6 +72,11 @@ export class DurableRunQueue {
     this.canDispatch = canDispatch
     this.launch = launch
     this.lookup = lookup
+    this.turnHeld = turnHeld
+    this.confirmAbandoned = confirmAbandoned
+    this.onReconciled = onReconciled
+    this.staleAfterSeconds = Math.max(1, Number(staleAfterSeconds) || 300)
+    this.leaselessSince = new Map()
     this.timer = null
     this.tickPromise = null
     this.closed = false
@@ -456,12 +468,39 @@ export class DurableRunQueue {
     }
   }
 
+  async _reconcileStale() {
+    if (!this.turnHeld || !this.confirmAbandoned) return
+    const now = nowSeconds()
+    const rows = this._rows("status IN ('running','stopping') AND upstream_run_id <> '' AND worker_run_id = ''")
+    const seen = new Set(rows.map((record) => record.publicRunId))
+    for (const id of this.leaselessSince.keys()) if (!seen.has(id)) this.leaselessSince.delete(id)
+    for (const record of rows) {
+      if (now - record.createdAt < this.staleAfterSeconds) continue
+      let held
+      try { held = await this.turnHeld(record) }
+      catch { held = null }
+      if (held !== false) { this.leaselessSince.delete(record.publicRunId); continue }
+      const since = this.leaselessSince.get(record.publicRunId) ?? now
+      this.leaselessSince.set(record.publicRunId, since)
+      if (now - since < this.staleAfterSeconds) continue
+      let verdict
+      try { verdict = await this.confirmAbandoned(record) }
+      catch { verdict = null }
+      if (!verdict || !TERMINAL.has(verdict.status)) continue
+      const payload = { ...(record.payload ?? {}), status: verdict.status, last_event: 'run.reconciled', reconciled_reason: 'no_turn_held' }
+      this._update(record.publicRunId, { status: verdict.status, payload, waitingReason: '', terminalAt: nowSeconds() })
+      this.leaselessSince.delete(record.publicRunId)
+      try { this.onReconciled(record, verdict, now - since) } catch { /* logging only */ }
+    }
+  }
+
   async _tick(force) {
     let activeRows = this._rows("status IN ('launching','running','waiting_for_approval','stopping')")
     for (const record of activeRows) {
       if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
       else await this._refresh(record, force)
     }
+    await this._reconcileStale()
 
     let external
     try { external = await this.activeSessionIds() }
