@@ -51,7 +51,9 @@ const server = createWizardServer({
     ? process.env.WIZARD_AGENT_ARTIFACT_ROOTS.split(':')
     : [resolve(hermesHome, 'cache/images'), resolve(hermesHome, 'media/images'), resolve(hermesHome, 'workspace')],
   operatorWorkerStatePath: process.env.WIZARD_OPERATOR_STATE_PATH || '',
+  threadStatusBackfillPath: process.env.WIZARD_THREAD_STATUS_BACKFILL_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-status-backfill.json'),
   threadDispositionStatePath: process.env.WIZARD_THREAD_DISPOSITION_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-dispositions.json'),
+  threadTitleStatePath: process.env.WIZARD_THREAD_TITLE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-titles.json'),
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
@@ -74,5 +76,8 @@ const server = createWizardServer({
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
+  // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
+  // so only one service ever starts automatic follow-through turns on the shared threads.
+  followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))

@@ -18,6 +18,8 @@ import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
+import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
+import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter, wizardOsInstructions } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -56,7 +58,7 @@ const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
-const SESSION_LIST_PREVIEW_LIMIT = 24
+const SESSION_LIST_PREVIEW_LIMIT = 48
 const CANONICAL_SESSION_LIMIT = 2_000
 const CANONICAL_SESSION_CACHE_MS = 30_000
 const PROXY_PREFIX = '/wizard/hermes'
@@ -87,7 +89,9 @@ export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard,
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
-Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.`
+Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+
+${STATUS_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -198,7 +202,7 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
-function directBody(method, pathname, body, contract, osInstructions = '') {
+function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -215,7 +219,7 @@ function directBody(method, pathname, body, contract, osInstructions = '') {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: runInstructions(contract) + osInstructions,
+    instructions: [runInstructions(contract) + osInstructions, typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -245,6 +249,7 @@ const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
+const FAILED_RUN_STATUSES = new Set(['failed', 'interrupted'])
 const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
 const CANONICAL_SESSION_READER = fileURLToPath(new URL('./read-human-sessions.py', import.meta.url))
 const HELM_THREAD_ID_READER = fileURLToPath(new URL('./helm-thread-id.py', import.meta.url))
@@ -498,6 +503,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
               projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
             } else if (helm?.status === 'failed') projected.status = 'failed'
+            else if (latestDirect && FAILED_RUN_STATUSES.has(latestDirect.status) && !projected.status
+              && Number(latestDirect.createdAt ?? 0) > Number(truth?.lastAssistantAt ?? 0)) {
+              // The newest admitted run failed before any answer landed. Without this the
+              // thread settles like a finished turn (Done/Defer, no reply, no Retry).
+              projected.status = latestDirect.status
+            }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
@@ -1138,10 +1149,11 @@ function sessionPreviewText(content) {
     .replace(/\[WIZARD_FILES_V1\][\s\S]*?\[\/WIZARD_FILES_V1\]/gi, '')
     .replace(/\[WIZARD_FILE_CHIPS_V1\][\s\S]*?\[\/WIZARD_FILE_CHIPS_V1\]/gi, '')
     .replace(/\[WIZARD_CLOSE_AND_FILE_V1\][\s\S]*?\[\/WIZARD_CLOSE_AND_FILE_V1\]/gi, '')
+    .replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gi, '')
     .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     .replace(/<\s*helm_attachments\s*>[\s\S]*?<\s*\/\s*helm_attachments\s*>/gi, '')
     .replace(/\s*\[Image attached at:[^\]]*\](?:\s*\[[^\]]*\])?/gi, '')
-  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1|WIZARD_IMAGE_INTENT_V1)\]/i)
+  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1|WIZARD_IMAGE_INTENT_V1|WIZARD_STATUS_V1)\]/i)
   if (incompleteMarker >= 0) projected = projected.slice(0, incompleteMarker)
   const visible = safeHistoryText(projected, 1_000)
   if (visible && !legacyInternalHistoryMessage({ role: 'user', content: visible })) {
@@ -1161,14 +1173,21 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
+    const status = role === 'assistant' ? parseStatus(historyContentStrings(message.content ?? message.text ?? message.output).join('\n')) : null
     const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
     if (!content) return []
     const at = sessionMessageTimeValue(message)
-    return [{ role, content, ...(at !== null ? { created_at: at } : {}) }]
+    return [{ role, content, ...(at !== null ? { created_at: at } : {}), ...(status ? { status } : {}) }]
   }).reverse()
+  const latest = visible[0] ?? null
+  const latestAssistant = visible.find((message) => message.role === 'assistant') ?? null
+  const status = latest?.role === 'assistant' ? latest.status ?? null : null
+  if (latest) delete latest.status
   return {
-    latest: visible[0] ?? null,
+    latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
+    status,
+    latestAssistantAt: latestAssistant?.created_at ?? null,
   }
 }
 
@@ -1920,7 +1939,9 @@ export function createWizardServer(options = {}) {
     anthropicUsageUrl: options.anthropicUsageUrl,
     codexUsageUrl: options.codexUsageUrl,
   })
+  const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
+  const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -2346,7 +2367,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions())
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions(), runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -2505,13 +2526,100 @@ export function createWizardServer(options = {}) {
     session.status ?? null,
     ...records.map((record) => [record.workerRunId, record.completion?.timestamp ?? null, record.completion?.content ?? null]),
   ])
+  // Threads past the preview window (or on later pages) get no history read, so the backfill is matched
+  // against the list's own wizard_last_assistant_at instead. Applies only when that reply is the thread's
+  // latest turn (no newer user message), exactly like the history path.
+  const backfillFromList = (session, operator) => {
+    if (operator || !session || typeof session.id !== 'string' || session.wizard_attention) return session
+    const assistantAt = Number(session.wizard_last_assistant_at)
+    const userAt = Number(session.wizard_last_user_at)
+    if (!Number.isFinite(assistantAt) || assistantAt <= 0 || (Number.isFinite(userAt) && userAt > assistantAt)) return session
+    const attention = statusBackfill.lookup(session.id, assistantAt)
+    return attention ? { ...session, wizard_attention: attention } : session
+  }
+  const backfillSessionList = (result, operator) => {
+    if (operator) return result
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => backfillFromList(session, operator))
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
+  // ---- Thread titles (thread-titles.mjs): the agent's status-line title renames a thread once per
+  // final reply, only when it names a different project or feature; James's own renames lock it.
+  const titleDbPath = () => hermesStatePath || sessionDbPath
+  const titleLocked = (current, record) => {
+    if (record?.locked) return true
+    if (!current?.title) return false
+    // Hermes's user-authority titles (named in a client, a CLI or by code) are James's unless the
+    // last rename on record was the agent's and still stands.
+    const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
+    return (current.source === 'user' || current.source === null) && !agentOwned
+  }
+  const runTitleNote = (sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId) return ''
+    const current = readSessionTitle(titleDbPath(), sessionId)
+    if (!current) return ''
+    const record = threadTitleStore.get(sessionId)
+    return titleContextLine(current.title, { locked: titleLocked(current, record) })
+  }
+  const patchHermesTitle = async (sessionId, title) => {
+    for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
+      const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
+      if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'PATCH', headers, body: JSON.stringify({ title: candidate }), signal: AbortSignal.timeout(5_000),
+      })
+      if (reply.ok) return candidate
+      const text = await reply.text().catch(() => '')
+      if (reply.status !== 400 || !/already in use/iu.test(text)) return ''
+    }
+    return ''
+  }
+  const titleInFlight = new Set()
+  const applyAgentTitle = async (sessionId, proposed, assistantAt) => {
+    if (titleInFlight.has(sessionId)) return
+    const known = threadTitleStore.get(sessionId)
+    if (known && known.appliedFor === assistantAt) return
+    titleInFlight.add(sessionId)
+    try {
+      const current = readSessionTitle(titleDbPath(), sessionId)
+      if (!current) return
+      const record = known ?? null
+      const next = titleToApply({ currentTitle: current.title, proposed, record: { ...(record ?? {}), locked: titleLocked(current, record) }, assistantAt })
+      if (!next) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
+      const applied = await patchHermesTitle(sessionId, next)
+      if (!applied) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
+      threadTitleStore.recordRename(sessionId, { from: current.title, to: applied, by: 'agent', assistantAt, since: current.startedAt })
+      canonicalSessionCache.expiresAt = 0
+      if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
+    } catch { /* the next final reply proposes again */ }
+    finally { titleInFlight.delete(sessionId) }
+  }
+  const decorateSessionTitles = (result, operator) => {
+    if (operator) return result
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
+        if (!session || typeof session.id !== 'string') return session
+        const was = threadTitleStore.breadcrumb(session.id, session.title)
+        const renames = threadTitleStore.visibleHistory(session.id)
+        return {
+          ...session,
+          ...(was ? { wizard_title_was: was.was, wizard_title_renamed_at: was.at } : {}),
+          ...(renames.length ? { wizard_title_renames: renames } : {}),
+        }
+      })
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
   const enrichSessionListMessages = async (result, operator) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return session
+          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -2525,15 +2633,18 @@ export function createWizardServer(options = {}) {
             const headers = new Headers({ Accept: 'application/json' })
             if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
             const response = await fetchImpl(historyUrl, { method: 'GET', headers, signal: AbortSignal.timeout(1_500) })
-            if (!response.ok) return session
+            if (!response.ok) return backfillFromList(session, operator)
             messages = latestVisibleSessionMessages(await response.json(), operator, completions, records)
             sessionMessageCache.set(cacheKey, { signature, messages })
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
           }
+          const attention = !operator ? (messages.status ?? (messages.latest?.role === 'assistant' ? statusBackfill.lookup(session.id, messages.latestAssistantAt) : null)) : null
+          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null)
           return {
             ...session,
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
+            ...(attention ? { wizard_attention: attention } : {}),
           }
         } catch {
           return session
@@ -2545,6 +2656,7 @@ export function createWizardServer(options = {}) {
 
   const safeQueueValue = (value, record) => {
     let result = Buffer.from(JSON.stringify(value))
+    result = projectStatusMarkers(result)
     result = projectWizardFileMarkers(result)
     const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
     if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
@@ -3297,7 +3409,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions())
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions(), runTitleNote)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -3306,6 +3418,17 @@ export function createWizardServer(options = {}) {
         const controller = new AbortController()
         request.once('aborted', () => controller.abort())
         response.once('close', () => { if (!response.writableEnded) controller.abort() })
+        const titlePatchId = !operator && request.method === 'PATCH' && body ? upstreamPath.match(/^\/api\/sessions\/([^/]+)$/)?.[1] : undefined
+        let titlePatch = null
+        if (titlePatchId) {
+          try {
+            const requested = JSON.parse(body.toString('utf8'))
+            if (typeof requested?.title === 'string' && requested.title.trim()) {
+              const sessionId = decodeURIComponent(titlePatchId)
+              titlePatch = { sessionId, from: readSessionTitle(titleDbPath(), sessionId)?.title ?? '', to: requested.title }
+            }
+          } catch { titlePatch = null }
+        }
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
@@ -3436,6 +3559,12 @@ export function createWizardServer(options = {}) {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', parseJsonBody(body).session_id)
           }
         }
+        if (upstream.ok && titlePatch) {
+          const after = readSessionTitle(titleDbPath(), titlePatch.sessionId)
+          if (after?.title && titleKey(after.title) !== titleKey(titlePatch.from)) {
+            try { threadTitleStore.recordRename(titlePatch.sessionId, { from: titlePatch.from, to: after.title, by: 'you' }) } catch { /* Hermes holds the title */ }
+          }
+        }
         if (upstream.ok && canonicalSessionReader && (
           request.method === 'POST' && upstreamPath === '/api/sessions'
           || request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)
@@ -3473,7 +3602,8 @@ export function createWizardServer(options = {}) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
-          if (firstPage) result = await enrichSessionListMessages(result, operator)
+          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = decorateSessionTitles(result, operator)
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
@@ -3487,6 +3617,7 @@ export function createWizardServer(options = {}) {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           result = projectWizardFileMarkers(result, messageHistory)
+          if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }

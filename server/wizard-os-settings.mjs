@@ -24,6 +24,20 @@ export function validTimeZone(value) {
   try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return value } catch { return '' }
 }
 
+/** One https origin, no path ('https://wizard.example.ts.net'); anything else is ''. Loopback http is allowed for a box with no tailnet yet. */
+export function validOrigin(value) {
+  if (typeof value !== 'string' || !value || value.length > 300) return ''
+  let u
+  try { u = new URL(value) } catch { return '' }
+  const loopback = u.protocol === 'http:' && /^(?:localhost|127\.0\.0\.1|\[::1\])$/u.test(u.hostname)
+  if ((u.protocol !== 'https:' && !loopback) || u.username || u.password || (u.pathname !== '/' && u.pathname !== '') || u.search || u.hash) return ''
+  return u.origin
+}
+
+function validHost(value) {
+  return typeof value === 'string' && /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/iu.test(value) ? value.toLowerCase() : ''
+}
+
 function validDayStart(value) {
   return typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value) ? value : '00:00'
 }
@@ -36,6 +50,7 @@ export function normalizeSettings(raw) {
   const clock = value.clock && typeof value.clock === 'object' ? value.clock : {}
   const voice = value.voice && typeof value.voice === 'object' ? value.voice : {}
   const fastRouter = value.fast_router && typeof value.fast_router === 'object' ? value.fast_router : {}
+  const network = value.network && typeof value.network === 'object' && !Array.isArray(value.network) ? value.network : {}
   const vocabulary = Array.isArray(voice.vocabulary)
     ? voice.vocabulary.map((word) => cleanText(word, 40)).filter(Boolean).slice(0, 80)
     : []
@@ -67,7 +82,25 @@ export function normalizeSettings(raw) {
       endpoint: typeof fastRouter.endpoint === 'string' && /^https?:\/\/[^\s]+$/u.test(fastRouter.endpoint) ? fastRouter.endpoint.slice(0, 300) : '',
       key_env: typeof fastRouter.key_env === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(fastRouter.key_env) ? fastRouter.key_env : '',
     },
+    // How this box is reached. Inside Wizard every link is a path ("/cinequeue/"), so it opens on whatever
+    // address the device already uses (localhost on the Mac, the tailnet name on a phone) and none of this
+    // is needed. base_url is only for links that leave Wizard (a message, an email, a QR code): '' until the
+    // box has a reachable address (e.g. after "Connect your phone" turns on Tailscale), then its https origin.
+    // aliases are this box's former hostnames; front ends fold links to them back into paths.
+    network: {
+      base_url: validOrigin(network.base_url),
+      aliases: Array.isArray(network.aliases) ? [...new Set(network.aliases.map(validHost).filter(Boolean))].slice(0, 8) : [],
+    },
   }
+}
+
+/** An absolute link for use outside Wizard: base_url + path. '' when this box has no outside address yet. */
+export function externalUrl(settings, path = '/') {
+  const base = settings?.network?.base_url || ''
+  if (!base) return ''
+  const p = String(path || '/')
+  if (!p.startsWith('/') || p.startsWith('//') || p.startsWith('/\\')) return ''
+  return base + p
 }
 
 /** The router to call for this request: settings first, then the service's env defaults. */
