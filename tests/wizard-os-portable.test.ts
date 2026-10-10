@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { normalizeSettings } from '../server/wizard-os-settings.mjs'
+import { externalUrl, normalizeSettings } from '../server/wizard-os-settings.mjs'
 import { routerSystemPrompt } from '../server/voice-router.mjs'
 
 const servers: Server[] = []
@@ -117,6 +117,33 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
     expect(body.settings_source).toBe('default')
     expect(body.settings).toMatchObject({ owner: { name: '', place: '' }, agent: { name: 'Wizard' }, clock: { timezone: '', day_starts_at: '00:00' } })
+  })
+
+  it('network: base_url is one https origin (or loopback http); aliases are hostnames', () => {
+    expect(normalizeSettings({}).network).toEqual({ base_url: '', aliases: [] })
+    const n = normalizeSettings({ network: { base_url: 'https://Wizard.Tail1234.ts.net', aliases: ['private.example.com', 'PRIVATE.example.com', 'bad host', 'x'] } }).network
+    expect(n).toEqual({ base_url: 'https://wizard.tail1234.ts.net', aliases: ['private.example.com'] })
+    expect(normalizeSettings({ network: { base_url: 'http://127.0.0.1:8923' } }).network.base_url).toBe('http://127.0.0.1:8923')
+    for (const bad of ['http://wizard.tail1234.ts.net', 'https://wizard.tail1234.ts.net/apps/', 'https://u:p@wizard.ts.net', 'javascript:alert(1)', 'https://w.ts.net/?a=1', 42]) {
+      expect(normalizeSettings({ network: { base_url: bad } }).network.base_url).toBe('')
+    }
+  })
+
+  it('externalUrl joins base_url and a path, and is empty before the box has an outside address', () => {
+    const on = normalizeSettings({ network: { base_url: 'https://wizard.tail1234.ts.net' } })
+    expect(externalUrl(on, '/cinequeue/')).toBe('https://wizard.tail1234.ts.net/cinequeue/')
+    expect(externalUrl(on, '//evil.test/')).toBe('')
+    expect(externalUrl(on, 'cinequeue')).toBe('')
+    expect(externalUrl(normalizeSettings({}), '/cinequeue/')).toBe('')
+  })
+
+  it('bootstrap carries the network block to front ends', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ network: { base_url: 'https://wizard.tail1234.ts.net', aliases: ['private.example.com'] } }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
+    const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
+    expect(body.settings.network).toEqual({ base_url: 'https://wizard.tail1234.ts.net', aliases: ['private.example.com'] })
   })
 
   it('rejects an invalid time zone instead of guessing one', () => {
