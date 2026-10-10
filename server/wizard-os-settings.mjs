@@ -109,6 +109,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
   for (const app of Array.isArray(installed?.apps) ? installed.apps : []) {
     const id = cleanText(app?.id, 64)
     if (!id || seen.has(id)) continue
+    // The shell is the thing drawing the launcher; it never gets a tile of its own.
+    if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
     seen.add(id)
@@ -138,7 +140,10 @@ export function readApps({ appsJsonPath, launcherPath }) {
  * Built from apps.json on each run, so an install or uninstall takes effect on the next message.
  * Returns '' when no app is installed, so a box without the App Manager gets a plain run.
  */
-export function wizardOsInstructions({ appsJsonPath }) {
+// mcpAddress 'internal': the agent runs in a container on the box's private network, so it reaches apps
+// by service name (apps.json mcp.internal). skillsInline: the agent cannot read this service's files, so
+// each app's skill text travels in the instructions instead of a path.
+export function wizardOsInstructions({ appsJsonPath, mcpAddress = 'url', skillsInline = false }) {
   const installed = readJsonFile(appsJsonPath)
   const apps = Array.isArray(installed?.apps) ? installed.apps : []
   const home = appsJsonPath ? dirname(appsJsonPath) : ''
@@ -149,10 +154,17 @@ export function wizardOsInstructions({ appsJsonPath }) {
     const parts = [`- ${cleanText(app.name, 60) || id} (\`${id}\`): ${cleanText(app.summary, 200)}`]
     const provides = Array.isArray(app.provides) ? app.provides.map((v) => cleanText(v, 40)).filter(Boolean) : []
     if (provides.length) parts.push(`Jobs: ${provides.join(', ')}.`)
-    const mcp = cleanText(app.mcp?.url, 300)
+    const mcp = cleanText(mcpAddress === 'internal' ? (app.mcp?.internal || app.mcp?.url) : app.mcp?.url, 300)
     if (mcp) parts.push(`MCP (${cleanText(app.mcp?.transport, 40) || 'streamable-http'}): ${mcp}.`)
     const skill = cleanText(app.skill, 200)
-    if (skill && home && !skill.includes('..')) parts.push(`Read its skill first: ${resolve(home, skill)}.`)
+    if (skill && home && !skill.includes('..')) {
+      if (!skillsInline) parts.push(`Read its skill first: ${resolve(home, skill)}.`)
+      else {
+        let text = ''
+        try { text = readFileSync(resolve(home, skill), 'utf8').slice(0, 6000) } catch { /* skill missing */ }
+        if (text) parts.push(`Its skill:\n<skill app="${id}">\n${text.replace(/<\/skill>/giu, '')}\n</skill>`)
+      }
+    }
     lines.push(parts.join(' '))
   }
   if (!lines.length) return ''

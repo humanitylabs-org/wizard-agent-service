@@ -9,9 +9,12 @@ if (!key) {
   process.exit(1)
 }
 
-const host = process.env.WIZARD_HOST || '127.0.0.1'
-if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
-  process.stderr.write('WIZARD_HOST must be a loopback address.\n')
+// Inside a Wizard OS container (WIZARD_CONTAINER=1) the service listens on the container's own interface;
+// the compose file publishes that port on the box's 127.0.0.1 only. Everywhere else it stays loopback.
+const container = process.env.WIZARD_CONTAINER === '1'
+const host = process.env.WIZARD_HOST || (container ? '0.0.0.0' : '127.0.0.1')
+if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host === '0.0.0.0')) {
+  process.stderr.write('WIZARD_HOST must be a loopback address (0.0.0.0 only inside a Wizard OS container).\n')
   process.exit(1)
 }
 
@@ -65,5 +68,11 @@ const server = createWizardServer({
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,
+  // Wizard OS box: attachments go into the shared user-files folder; the agent sees it at WIZARD_MEDIA_AGENT_ROOT.
+  mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
+  mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
+  mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
+  appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
+  appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
