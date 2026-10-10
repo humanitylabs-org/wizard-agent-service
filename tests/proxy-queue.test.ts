@@ -236,6 +236,29 @@ describe('Wizard proxy capacity queue', () => {
     })
     expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.wizard_run_id).toBeUndefined()
     expect(blockedSse.json).toEqual({ error: 'upstream_unavailable' })
+    // A user-stopped run settles quietly.
+    expect(terminalProjection.json.data.find((item: { id: string }) => item.id === 'wizard_four')?.status).toBeUndefined()
+
+    // A run that fails before answering must surface as failed, never as a quietly finished turn.
+    upstreamRuns.get('actual_3')!.status = 'failed'
+    let failedStatus = thirdStatus
+    for (let attempt = 0; attempt < 8 && failedStatus.status !== 'failed'; attempt += 1) {
+      failedStatus = (await request(origin, `/wizard/hermes/v1/runs/${encodeURIComponent(third.json.run_id)}`)).json
+      if (failedStatus.status !== 'failed') await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    expect(failedStatus.status).toBe('failed')
+    const failedProjection = await request(origin, '/wizard/hermes/api/sessions?limit=20&offset=0&include_children=false')
+    expect(failedProjection.json.data.find((item: { id: string }) => item.id === 'wizard_three')).toMatchObject({
+      status: 'failed',
+      wizard_last_run_status: 'failed',
+    })
+    // Once a real answer lands after the failed run, the failure no longer demands attention.
+    const answered = new DatabaseSync(statePath)
+    answered.prepare("INSERT INTO messages VALUES (?, 'assistant', 'stop', ?, 'final', ?, 1)")
+      .run('wizard_three', 'Recovered answer.', Date.now() / 1000 + 5)
+    answered.close()
+    const answeredProjection = await request(origin, '/wizard/hermes/api/sessions?limit=20&offset=0&include_children=false')
+    expect(answeredProjection.json.data.find((item: { id: string }) => item.id === 'wizard_three')?.status).toBeUndefined()
   })
 
   it('steers a reopened Operator session through its public run identity to the live worker', async () => {
