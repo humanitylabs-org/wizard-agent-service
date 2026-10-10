@@ -18,6 +18,7 @@ import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
+import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -55,7 +56,7 @@ const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
-const SESSION_LIST_PREVIEW_LIMIT = 24
+const SESSION_LIST_PREVIEW_LIMIT = 48
 const CANONICAL_SESSION_LIMIT = 2_000
 const CANONICAL_SESSION_CACHE_MS = 30_000
 const PROXY_PREFIX = '/wizard/hermes'
@@ -86,7 +87,9 @@ export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard,
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
-Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.`
+Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+
+${STATUS_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -1144,10 +1147,11 @@ function sessionPreviewText(content) {
     .replace(/\[WIZARD_FILES_V1\][\s\S]*?\[\/WIZARD_FILES_V1\]/gi, '')
     .replace(/\[WIZARD_FILE_CHIPS_V1\][\s\S]*?\[\/WIZARD_FILE_CHIPS_V1\]/gi, '')
     .replace(/\[WIZARD_CLOSE_AND_FILE_V1\][\s\S]*?\[\/WIZARD_CLOSE_AND_FILE_V1\]/gi, '')
+    .replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gi, '')
     .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     .replace(/<\s*helm_attachments\s*>[\s\S]*?<\s*\/\s*helm_attachments\s*>/gi, '')
     .replace(/\s*\[Image attached at:[^\]]*\](?:\s*\[[^\]]*\])?/gi, '')
-  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1|WIZARD_IMAGE_INTENT_V1)\]/i)
+  const incompleteMarker = projected.search(/\[(?:WIZARD_FILES_V1|WIZARD_FILE_CHIPS_V1|WIZARD_CLOSE_AND_FILE_V1|WIZARD_IMAGE_INTENT_V1|WIZARD_STATUS_V1)\]/i)
   if (incompleteMarker >= 0) projected = projected.slice(0, incompleteMarker)
   const visible = safeHistoryText(projected, 1_000)
   if (visible && !legacyInternalHistoryMessage({ role: 'user', content: visible })) {
@@ -1167,14 +1171,21 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
+    const status = role === 'assistant' ? parseStatus(historyContentStrings(message.content ?? message.text ?? message.output).join('\n')) : null
     const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
     if (!content) return []
     const at = sessionMessageTimeValue(message)
-    return [{ role, content, ...(at !== null ? { created_at: at } : {}) }]
+    return [{ role, content, ...(at !== null ? { created_at: at } : {}), ...(status ? { status } : {}) }]
   }).reverse()
+  const latest = visible[0] ?? null
+  const latestAssistant = visible.find((message) => message.role === 'assistant') ?? null
+  const status = latest?.role === 'assistant' ? latest.status ?? null : null
+  if (latest) delete latest.status
   return {
-    latest: visible[0] ?? null,
+    latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
+    status,
+    latestAssistantAt: latestAssistant?.created_at ?? null,
   }
 }
 
@@ -1893,6 +1904,7 @@ export function createWizardServer(options = {}) {
     anthropicUsageUrl: options.anthropicUsageUrl,
     codexUsageUrl: options.codexUsageUrl,
   })
+  const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
@@ -2503,10 +2515,12 @@ export function createWizardServer(options = {}) {
             sessionMessageCache.set(cacheKey, { signature, messages })
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
           }
+          const attention = !operator ? (messages.status ?? (messages.latest?.role === 'assistant' ? statusBackfill.lookup(session.id, messages.latestAssistantAt) : null)) : null
           return {
             ...session,
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
+            ...(attention ? { wizard_attention: attention } : {}),
           }
         } catch {
           return session
@@ -3424,6 +3438,7 @@ export function createWizardServer(options = {}) {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           result = projectWizardFileMarkers(result, messageHistory)
+          if (messageHistory) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
