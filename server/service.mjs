@@ -20,6 +20,7 @@ import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -1908,6 +1909,9 @@ export function createWizardServer(options = {}) {
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
+  const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
+  // The subject each thread was last served with, so the next run can be told to keep it.
+  const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -2522,12 +2526,16 @@ export function createWizardServer(options = {}) {
     const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
     return (current.source === 'user' || current.source === null) && !agentOwned
   }
-  const runTitleNote = (sessionId) => {
-    if (typeof sessionId !== 'string' || !sessionId) return ''
+  const titleNote = (sessionId) => {
     const current = readSessionTitle(titleDbPath(), sessionId)
     if (!current) return ''
     const record = threadTitleStore.get(sessionId)
     return titleContextLine(current.title, { locked: titleLocked(current, record) })
+  }
+  // Appended to every direct run: the thread's current title and the owner's subject list.
+  const runTitleNote = (sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId) return subjectCatalog.runNote()
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? '')].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -2570,8 +2578,16 @@ export function createWizardServer(options = {}) {
         if (!session || typeof session.id !== 'string') return session
         const was = threadTitleStore.breadcrumb(session.id, session.title)
         const renames = threadTitleStore.visibleHistory(session.id)
+        // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+        const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
+        if (attention?.subject) {
+          servedSubjects.delete(session.id)
+          servedSubjects.set(session.id, attention.subject)
+          if (servedSubjects.size > 2000) servedSubjects.delete(servedSubjects.keys().next().value)
+        }
         return {
           ...session,
+          ...(attention ? { wizard_attention: attention } : {}),
           ...(was ? { wizard_title_was: was.was, wizard_title_renamed_at: was.at } : {}),
           ...(renames.length ? { wizard_title_renames: renames } : {}),
         }

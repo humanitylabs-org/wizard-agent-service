@@ -65,6 +65,10 @@ Every variable is listed in `server/index.mjs`. `ops/` has a hardened systemd un
 4. **API contract.** Write down the `/wizard/...` endpoints Wizard UX uses as the versioned contract (sessions, runs, steer, files, thread-seen, thread-dispositions, voice).
 5. **Cutover.** Point the live service at this repo, then delete `server/` from `wizard-mobile` and make its front end depend on this service.
 
+## Thread subjects (`server/thread-subjects.mjs`)
+
+Ready's *By subject* order groups threads by the `subject` in each reply's hidden status line. Every run is told what a subject is (a product, sustained project or life area; never a single feature, meeting or one-off). An install can pin its own short list in `~/.wizard-os/subjects.json` (override: `WIZARD_SUBJECTS_PATH`): `subjects` (name + one-line about, sent to every run), `aliases` (older or stray names folded into a listed one when the session list is served) and `threads` (a one-off correction for one thread, applied only while the agent's subject is still `from`). The file is re-read on change; no file means subjects pass through as written.
+
 ## Stock Hermes and Wizard OS settings (branch `feature/stock-hermes`)
 
 - **Works with unmodified Hermes.** `WIZARD_JOINED_DELEGATION=prefer|require|off` (default `require` keeps today's strict behaviour; new installs use `prefer`). With `prefer`, the service uses joined delegation and Markdown rendering when Hermes advertises them in `/v1/capabilities`, and sends a plain run otherwise.
