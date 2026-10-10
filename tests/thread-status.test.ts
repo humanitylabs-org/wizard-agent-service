@@ -39,6 +39,16 @@ describe('thread status tag', () => {
     expect(JSON.parse(out).data[0].content).toBe('Hi')
   })
 
+  it('defines done as verified-finished and check as the user\'s judgment call', () => {
+    // James, 10 Oct 2026: "If you've QA'd something and you're 'Yep, the bug you reported is fixed', that should just be
+    // reported as done. The QA ones for me should be like, you need me to see if this is what I meant or if I like it."
+    expect(STATUS_INSTRUCTIONS).toContain('done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check)')
+    expect(STATUS_INSTRUCTIONS).toContain('check (only when the user\'s own judgment is the missing piece')
+    expect(STATUS_INSTRUCTIONS).toContain('whether they like it (look, feel, wording, taste)')
+    expect(STATUS_INSTRUCTIONS).toContain('never "Test that X works"')
+    expect(STATUS_INSTRUCTIONS).not.toMatch(/should try or QA/)
+  })
+
   it('is part of every Wizard run instruction set', () => {
     expect(WIZARD_RUN_INSTRUCTIONS).toContain(STATUS_INSTRUCTIONS)
     expect(runInstructions({ join: false })).toContain('[WIZARD_STATUS_V1]')
