@@ -244,6 +244,7 @@ const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
+const FAILED_RUN_STATUSES = new Set(['failed', 'interrupted'])
 const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
 const CANONICAL_SESSION_READER = fileURLToPath(new URL('./read-human-sessions.py', import.meta.url))
 const HELM_THREAD_ID_READER = fileURLToPath(new URL('./helm-thread-id.py', import.meta.url))
@@ -497,6 +498,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             } else if ((trustActiveTruth || !externallyAdmitted) && (truth?.active || helm && ACTIVE_RUN_STATUSES.has(helm.status))) {
               projected.status = direct?.status ?? (helm && ACTIVE_RUN_STATUSES.has(helm.status) ? helm.status : 'running')
             } else if (helm?.status === 'failed') projected.status = 'failed'
+            else if (latestDirect && FAILED_RUN_STATUSES.has(latestDirect.status) && !projected.status
+              && Number(latestDirect.createdAt ?? 0) > Number(truth?.lastAssistantAt ?? 0)) {
+              // The newest admitted run failed before any answer landed. Without this the
+              // thread settles like a finished turn (Done/Defer, no reply, no Retry).
+              projected.status = latestDirect.status
+            }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
