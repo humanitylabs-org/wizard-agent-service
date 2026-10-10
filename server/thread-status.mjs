@@ -8,12 +8,13 @@
 // one-off backfill record that applies only while that exact reply is still the latest one.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 
 export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
 const OPEN_MARKER = /\[WIZARD_STATUS_V1\][\s\S]*$/u
 
-export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (the work cannot move until the user decides, approves, replies, installs, or does something), check (you shipped something the user should try or QA), done (the request is finished and nothing is required), fyi (an answer, report, or update with no action). ask is one plain sentence under 90 characters: for needs_you and check, start with the verb and name the exact action; for done and fyi, state the outcome. subject is a one-to-three-word project or topic name; reuse the subject this thread or related threads already use. Leave the line out of interim progress messages and when ending a turn to wait for background helpers.'
+export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (the work cannot move until the user decides, approves, replies, installs, or does something), check (you shipped something the user should try or QA), done (the request is finished and nothing is required), fyi (an answer, report, or update with no action). ask is one plain sentence under 90 characters: for needs_you and check, start with the verb and name the exact action; for done and fyi, state the outcome. subject is a one-to-three-word project or topic name; reuse the subject this thread or related threads already use. ' + TITLE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers.'
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -28,7 +29,8 @@ export function normalizeStatus(value) {
   const ask = clip(value.ask ?? value.line ?? value.summary, 140)
   if (!ask) return null
   const subject = clip(value.subject ?? value.project, 40)
-  return { state: mapped, ask, ...(subject ? { subject } : {}) }
+  const title = normalizeTitle(value.title)
+  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}) }
 }
 
 // The last status marker in a reply, or null.

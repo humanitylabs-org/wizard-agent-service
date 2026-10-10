@@ -19,6 +19,7 @@ import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
+import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -200,7 +201,7 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
-function directBody(method, pathname, body, contract) {
+function directBody(method, pathname, body, contract, noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -217,7 +218,7 @@ function directBody(method, pathname, body, contract) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: runInstructions(contract),
+    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -1906,6 +1907,7 @@ export function createWizardServer(options = {}) {
   })
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
+  const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -2331,7 +2333,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability())
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -2509,6 +2511,74 @@ export function createWizardServer(options = {}) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
+  // ---- Thread titles (thread-titles.mjs): the agent's status-line title renames a thread once per
+  // final reply, only when it names a different project or feature; James's own renames lock it.
+  const titleDbPath = () => hermesStatePath || sessionDbPath
+  const titleLocked = (current, record) => {
+    if (record?.locked) return true
+    if (!current?.title) return false
+    // Hermes's user-authority titles (named in a client, a CLI or by code) are James's unless the
+    // last rename on record was the agent's and still stands.
+    const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
+    return (current.source === 'user' || current.source === null) && !agentOwned
+  }
+  const runTitleNote = (sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId) return ''
+    const current = readSessionTitle(titleDbPath(), sessionId)
+    if (!current) return ''
+    const record = threadTitleStore.get(sessionId)
+    return titleContextLine(current.title, { locked: titleLocked(current, record) })
+  }
+  const patchHermesTitle = async (sessionId, title) => {
+    for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
+      const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
+      if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'PATCH', headers, body: JSON.stringify({ title: candidate }), signal: AbortSignal.timeout(5_000),
+      })
+      if (reply.ok) return candidate
+      const text = await reply.text().catch(() => '')
+      if (reply.status !== 400 || !/already in use/iu.test(text)) return ''
+    }
+    return ''
+  }
+  const titleInFlight = new Set()
+  const applyAgentTitle = async (sessionId, proposed, assistantAt) => {
+    if (titleInFlight.has(sessionId)) return
+    const known = threadTitleStore.get(sessionId)
+    if (known && known.appliedFor === assistantAt) return
+    titleInFlight.add(sessionId)
+    try {
+      const current = readSessionTitle(titleDbPath(), sessionId)
+      if (!current) return
+      const record = known ?? null
+      const next = titleToApply({ currentTitle: current.title, proposed, record: { ...(record ?? {}), locked: titleLocked(current, record) }, assistantAt })
+      if (!next) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
+      const applied = await patchHermesTitle(sessionId, next)
+      if (!applied) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
+      threadTitleStore.recordRename(sessionId, { from: current.title, to: applied, by: 'agent', assistantAt, since: current.startedAt })
+      canonicalSessionCache.expiresAt = 0
+      if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
+    } catch { /* the next final reply proposes again */ }
+    finally { titleInFlight.delete(sessionId) }
+  }
+  const decorateSessionTitles = (result, operator) => {
+    if (operator) return result
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
+        if (!session || typeof session.id !== 'string') return session
+        const was = threadTitleStore.breadcrumb(session.id, session.title)
+        const renames = threadTitleStore.visibleHistory(session.id)
+        return {
+          ...session,
+          ...(was ? { wizard_title_was: was.was, wizard_title_renamed_at: was.at } : {}),
+          ...(renames.length ? { wizard_title_renames: renames } : {}),
+        }
+      })
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
   const enrichSessionListMessages = async (result, operator) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
@@ -2535,6 +2605,7 @@ export function createWizardServer(options = {}) {
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
           }
           const attention = !operator ? (messages.status ?? (messages.latest?.role === 'assistant' ? statusBackfill.lookup(session.id, messages.latestAssistantAt) : null)) : null
+          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null)
           return {
             ...session,
             ...(messages.latest ? { latest_message: messages.latest } : {}),
@@ -3268,7 +3339,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, runTitleNote)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -3277,6 +3348,17 @@ export function createWizardServer(options = {}) {
         const controller = new AbortController()
         request.once('aborted', () => controller.abort())
         response.once('close', () => { if (!response.writableEnded) controller.abort() })
+        const titlePatchId = !operator && request.method === 'PATCH' && body ? upstreamPath.match(/^\/api\/sessions\/([^/]+)$/)?.[1] : undefined
+        let titlePatch = null
+        if (titlePatchId) {
+          try {
+            const requested = JSON.parse(body.toString('utf8'))
+            if (typeof requested?.title === 'string' && requested.title.trim()) {
+              const sessionId = decodeURIComponent(titlePatchId)
+              titlePatch = { sessionId, from: readSessionTitle(titleDbPath(), sessionId)?.title ?? '', to: requested.title }
+            }
+          } catch { titlePatch = null }
+        }
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
@@ -3407,6 +3489,12 @@ export function createWizardServer(options = {}) {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', parseJsonBody(body).session_id)
           }
         }
+        if (upstream.ok && titlePatch) {
+          const after = readSessionTitle(titleDbPath(), titlePatch.sessionId)
+          if (after?.title && titleKey(after.title) !== titleKey(titlePatch.from)) {
+            try { threadTitleStore.recordRename(titlePatch.sessionId, { from: titlePatch.from, to: after.title, by: 'you' }) } catch { /* Hermes holds the title */ }
+          }
+        }
         if (upstream.ok && canonicalSessionReader && (
           request.method === 'POST' && upstreamPath === '/api/sessions'
           || request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)
@@ -3445,6 +3533,7 @@ export function createWizardServer(options = {}) {
             dismissedFailureStore,
           )
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = decorateSessionTitles(result, operator)
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
