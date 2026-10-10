@@ -22,6 +22,7 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter, wizardOsInstructions } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
+import { createMediaFiles } from './media-files.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1366,7 +1367,8 @@ async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   value.input = appendFileMarker(value.input, files, includeNativeImages)
   return {
     body: Buffer.from(JSON.stringify(value)),
-    trustedPaths: files.map((file) => file.trusted_path),
+    // Files in the shared user-files folder are the user's own files, not secrets: the agent may name them.
+    trustedPaths: files.filter((file) => !file.userVisible).map((file) => file.trusted_path),
     audioPaths: files.filter((file) => String(file.mime ?? '').toLowerCase().startsWith('audio/')).map((file) => file.trusted_path),
   }
 }
@@ -1718,9 +1720,17 @@ export function createCloudflareAccessVerifier({ teamDomain, audience, jwksUrl, 
   }
 }
 
+// Inside a Wizard OS container the agent and the other apps are reached by their service names on the
+// box's private container network (e.g. http://hermes-agent-engine:8642), never on loopback.
+const PRIVATE_UPSTREAM_HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+function upstreamHostAllowed(hostname) {
+  if (hostname === '127.0.0.1') return true
+  return process.env.WIZARD_CONTAINER === '1' && PRIVATE_UPSTREAM_HOST.test(hostname)
+}
+
 function confinedUpstream(value) {
   const url = new URL(value)
-  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+  if (url.protocol !== 'http:' || !upstreamHostAllowed(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
     throw new Error('Hermes upstream must be an exact loopback HTTP origin')
   }
   return url.origin
@@ -1821,7 +1831,7 @@ export function createWizardServer(options = {}) {
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
   // Installed Wizard OS apps, re-read from apps.json for every run (see wizardOsInstructions).
-  const osInstructions = () => appsJsonPath ? wizardOsInstructions({ appsJsonPath }) : ''
+  const osInstructions = () => appsJsonPath ? wizardOsInstructions({ appsJsonPath, mcpAddress: options.appsMcpAddress, skillsInline: options.appsSkillsInline }) : ''
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
@@ -1841,6 +1851,23 @@ export function createWizardServer(options = {}) {
     }
     sttProbe = { ok, at: Date.now() }
     return ok
+  }
+  // OpenAI-compatible transcribers (e.g. the Speaches-based `transcriber` app) need a `model` field;
+  // Wizard's own STT ignores it. Use the transcriber's first advertised model, cached for 5 minutes.
+  let sttModelCache = { id: '', at: 0 }
+  const sttModel = async () => {
+    if (Date.now() - sttModelCache.at < 300_000) return sttModelCache.id
+    let id = ''
+    try {
+      const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+      if (r.ok) {
+        const value = await r.json()
+        const first = Array.isArray(value?.data) ? value.data.find((m) => typeof m?.id === 'string') : null
+        id = first ? first.id.slice(0, 200) : ''
+      } else await r.body?.cancel().catch(() => undefined)
+    } catch { /* keep '' */ }
+    sttModelCache = { id, at: Date.now() }
+    return id
   }
   const router = options.router && options.router.url && options.router.model ? options.router : null
   // 'require' (default, today's live behaviour): Hermes must advertise join; every run asks for
@@ -1864,6 +1891,11 @@ export function createWizardServer(options = {}) {
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
+  // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
+  // Wizard Inbox service is configured.
+  const mediaFiles = !inboxToken && options.mediaRoot
+    ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
+    : null
   const agentArtifactDir = options.agentArtifactDir ? resolve(String(options.agentArtifactDir)) : ''
   const agentArtifactRoots = canonicalArtifactRoots(options.agentArtifactRoots)
   const runTrustedPaths = new Map()
@@ -2601,6 +2633,13 @@ export function createWizardServer(options = {}) {
   }
 
   const resolveFiles = async (ids) => Promise.all(ids.map(async (id) => {
+    if (mediaFiles) {
+      const record = mediaFiles.get(id, true)
+      if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
+      const file = safeFile(record, true)
+      if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
+      return { ...file, userVisible: true }
+    }
     const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
     const file = safeFile(payload.file, true)
     if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
@@ -2623,7 +2662,7 @@ export function createWizardServer(options = {}) {
         sendJson(response, 200, bootstrapPayload({
           settings: publicSettings, settingsSource: source,
           capabilities: {
-            voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken),
+            voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })
@@ -2728,9 +2767,16 @@ export function createWizardServer(options = {}) {
         const timer = setTimeout(() => controller.abort(), 180_000)
         request.once('aborted', () => controller.abort())
         try {
+          // Add the transcriber's model when the front end didn't name one (OpenAI-compatible servers need it).
+          let body = data
+          let headers = { 'Content-Type': String(request.headers['content-type']) }
+          const model = await sttModel()
+          if (model) {
+            const form = await new Response(data, { headers }).formData().catch(() => null)
+            if (form && !form.has('model')) { form.append('model', model); body = form; headers = {} }
+          }
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, {
-            method: 'POST', body: data, redirect: 'error', signal: controller.signal,
-            headers: { 'Content-Type': String(request.headers['content-type']) },
+            method: 'POST', body, redirect: 'error', signal: controller.signal, headers,
           })
           const raw = Buffer.from(await upstream.arrayBuffer())
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
@@ -2754,6 +2800,7 @@ export function createWizardServer(options = {}) {
         const filename = named.replace(/\.[a-z0-9]{1,5}$/i, '') + `.${voiceExt}`
         const form = new FormData()
         form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
+        { const model = await sttModel(); if (model) form.append('model', model) }
         {
           // Language and spelling hints come from Wizard OS settings: the agent's name, the user's
           // own vocabulary. Nothing about any particular user is built in.
@@ -2862,6 +2909,7 @@ export function createWizardServer(options = {}) {
 
       if (url.pathname === '/wizard/files' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (mediaFiles) { sendJson(response, 200, { files: mediaFiles.list(100).map((file) => safeFile(file)) }); return }
         const payload = await inboxJson('/v1/internal/files?limit=100')
         const files = (Array.isArray(payload.files) ? payload.files : []).map((file) => safeFile(file))
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
@@ -2873,6 +2921,25 @@ export function createWizardServer(options = {}) {
       if (fileContentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const id = fileContentMatch[1]
+        if (mediaFiles) {
+          const record = mediaFiles.get(id)
+          if (!record) { sendJson(response, 404, { error: 'not_found' }); return }
+          const file = safeFile(record)
+          const range = typeof request.headers.range === 'string' ? request.headers.range : ''
+          const opened = mediaFiles.open(id, range || null)
+          const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
+          const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
+          if (opened.status === 416) {
+            response.writeHead(416, { ...headers, 'Content-Range': `bytes */${opened.size}` }); response.end(); return
+          }
+          if (opened.status === 206) {
+            headers['Content-Range'] = `bytes ${opened.start}-${opened.end}/${opened.size}`
+            headers['Content-Length'] = opened.end - opened.start + 1
+          } else headers['Content-Length'] = opened.size
+          response.writeHead(opened.status, headers)
+          if (request.method === 'HEAD') { opened.stream.destroy(); response.end() } else await pipeline(opened.stream, response)
+          return
+        }
         const detail = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`)
         const file = safeFile(detail.file)
         if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
@@ -2906,6 +2973,7 @@ export function createWizardServer(options = {}) {
         const filename = safeHeader(request.headers['x-wizard-filename'], 'uploaded-file', 240).replaceAll('/', '_').replaceAll('\\', '_')
         const mimeType = safeHeader(request.headers['x-wizard-mime'], 'application/octet-stream', 160)
         const data = await readBoundedBody(request, WIZARD_FILE_UPLOAD_LIMIT)
+        if (mediaFiles) { sendJson(response, 201, { file: safeFile(mediaFiles.save(data, { filename, mime: mimeType })) }); return }
         const sha256 = createHash('sha256').update(data).digest('hex')
         const createPayload = {
           client_upload_id: `web-${randomUUID()}`,
