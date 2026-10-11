@@ -25,6 +25,7 @@ import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRou
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 import { createMediaFiles } from './media-files.mjs'
+import { createAppsViewsRoutes } from './wizard-apps-views.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1849,6 +1850,8 @@ export function createWizardServer(options = {}) {
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
+  // Read-only data for the App Manager views (My Apps, App Store, Resources); see wizard-apps-views.mjs.
+  const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: requireAccess ? (request) => accessVerified(request, accessVerifier) : null })
   // Installed Wizard OS apps, re-read from apps.json for every run (see wizardOsInstructions).
   const osInstructions = () => appsJsonPath ? wizardOsInstructions({ appsJsonPath, mcpAddress: options.appsMcpAddress, skillsInline: options.appsSkillsInline }) : ''
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
@@ -2780,6 +2783,7 @@ export function createWizardServer(options = {}) {
         }), { 'Cache-Control': 'no-store' })
         return
       }
+      if (url.pathname.startsWith('/wizard/v1/') && await appsViews(request, response, url)) return
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
