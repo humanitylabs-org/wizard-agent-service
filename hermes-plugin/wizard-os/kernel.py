@@ -114,10 +114,11 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         "Wizard OS: you are the owner's agent on this box. Installed Wizard apps do jobs for the owner.",
         f"The owner's files are in the Files root, {files_root}. App tools take paths relative to it.",
         "When a request matches a wizard-job-<job> skill in your skills list:" if hermes else "When a request matches a job below:",
-        "1. Load that skill with skill_view, then the app skill it names." if hermes else "1. Use the app named for that job.",
+        "1. Load that skill with skill_view. It lists the app's tools and what each does." if hermes else "1. Use the app named for that job.",
         f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`."
         + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
         "3. Never search the disk, read apps.json, run wam or write a client to find or reach an app.",
+        "An installed app beats your built-in tools for its job (its browser, not yours).",
         f'"What apps do I have?": call `{meta}`. If an app tool fails, tell the owner it is not reachable (`wam doctor`).',
         "Save only short pointer skills for app jobs, never a copy of an app's workflow.",
     ]
@@ -135,6 +136,14 @@ def kernel_for_session(home: Path | None = None) -> str:
     return render_kernel(apps, "hermes", os.environ.get("WIZARD_FILES_ROOT") or DEFAULT_FILES_ROOT, job_map)
 
 
+def _tool_entry(tool) -> tuple[str, str]:
+    """Twin of agent-bridge.mjs toolEntry: (name, first sentence of the description, max 100)."""
+    if isinstance(tool, str):
+        return tool, ""
+    first = _clean(re.split(r"(?<=[.!?])\s", str((tool or {}).get("description") or ""), maxsplit=1)[0], 100)
+    return str((tool or {}).get("name") or ""), re.sub(r"\.$", "", first)
+
+
 def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None = None) -> dict:
     """Twin of agent-bridge.mjs pointerSkills: one routing-only skill per job."""
     tools = tools or {}
@@ -144,11 +153,15 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
         names = " or ".join(a["name"] for a in owners)
         lines = []
         for a in owners:
-            known = [f"`{agent_tool_name(a['prefix'], t, harness)}`" for t in (tools.get(a["id"]) or [])[:8]]
-            calls = ", ".join(known) if known else f"`{agent_tool_name(a['prefix'], '*', harness)}`"
+            known = [_tool_entry(t) for t in (tools.get(a["id"]) or [])[:8]]
             down = "" if a["status"] == "running" else f" It is {a['status']} right now: tell the owner (`wam doctor`)."
-            lead = f" Load its skill `{a['id']}` with skill_view, then call" if a["skill"] else " Call"
-            lines.append(f"- {a['name']}.{lead} {calls}.{down}")
+            lines.append(f"- {a['name']}: pick the tool whose purpose matches the request and call it.{down}")
+            if known:
+                lines += [f"  - `{agent_tool_name(a['prefix'], n, harness)}`" + (f": {p}" if p else "") for n, p in known]
+            else:
+                lines.append(f"  - `{agent_tool_name(a['prefix'], '*', harness)}`")
+            if a["skill"]:
+                lines.append(f"  Its skill `{a['id']}` (skill_view) has details for long or unusual jobs; the tools above come first.")
         tail = " If one is not in your tool list, run it with tool_call and that exact name." if harness == "hermes" else ""
         out[job_skill_name(job)] = "\n".join([
             "---",

@@ -108,9 +108,10 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     hermes
       ? 'When a request matches a wizard-job-<job> skill in your skills list:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load that skill with skill_view, then the app skill it names.'] : ['1. Use the app named for that job.']),
+    ...(hermes ? ['1. Load that skill with skill_view. It lists the app\'s tools and what each does.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. Never search the disk, read apps.json, run wam or write a client to find or reach an app.',
+    'An installed app beats your built-in tools for its job (its browser, not yours).',
     `"What apps do I have?": call \`${meta}\`. If an app tool fails, tell the owner it is not reachable (\`wam doctor\`).`,
     'Save only short pointer skills for app jobs, never a copy of an app\'s workflow.',
   ]
@@ -145,16 +146,27 @@ export function renderDelta(apps, { harness = 'hermes' } = {}) {
  * normal skills index. Routing only: which app, its skill, its tool names. `tools` maps app id -> tool
  * names when the gateway knows them; without it the pointer names the app's tool prefix.
  */
+/** A tool as the pointer shows it: name plus the first sentence of its description (max 100 chars). */
+function toolEntry(tool) {
+  if (typeof tool === 'string') return { name: tool, purpose: '' }
+  const first = clean(String(tool?.description || '').split(/(?<=[.!?])\s/u)[0], 100)
+  return { name: String(tool?.name || ''), purpose: first.replace(/\.$/u, '') }
+}
+
 export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
   const out = {}
   for (const [job, owners] of jobsOf(apps)) {
     const words = jobWords(job)
     const names = owners.map((a) => a.name).join(' or ')
-    const lines = owners.map((a) => {
-      const known = (tools[a.id] || []).slice(0, 8).map((t) => `\`${agentToolName(a.prefix, t, harness)}\``)
-      const calls = known.length ? known.join(', ') : `\`${agentToolName(a.prefix, '*', harness)}\``
+    const lines = owners.flatMap((a) => {
+      const known = (tools[a.id] || []).slice(0, 8).map(toolEntry)
       const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
-      return `- ${a.name}.${a.skill ? ` Load its skill \`${a.id}\` with skill_view, then call` : ' Call'} ${calls}.${down}`
+      const head = `- ${a.name}: pick the tool whose purpose matches the request and call it.${down}`
+      const rows = known.length
+        ? known.map((t) => `  - \`${agentToolName(a.prefix, t.name, harness)}\`${t.purpose ? `: ${t.purpose}` : ''}`)
+        : [`  - \`${agentToolName(a.prefix, '*', harness)}\``]
+      const skill = a.skill ? [`  Its skill \`${a.id}\` (skill_view) has details for long or unusual jobs; the tools above come first.`] : []
+      return [head, ...rows, ...skill]
     })
     out[jobSkillName(job)] = [
       '---',
@@ -327,7 +339,7 @@ export function createAgentBridge({
       log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
       // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
       const snapshot = apps
-      collectNames().then((tools) => { if (apps === snapshot) writePointerSkills(osHome, apps, { harness, tools }) }).catch(() => {})
+      collectTools().then((tools) => { if (apps === snapshot) writePointerSkills(osHome, apps, { harness, tools }) }).catch(() => {})
     }
     return true
   }
@@ -366,6 +378,13 @@ export function createAgentBridge({
   async function collectNames() {
     const out = {}
     await Promise.all(apps.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
+    return out
+  }
+
+  /** Name + description per app tool, for the pointer skills. */
+  async function collectTools() {
+    const out = {}
+    await Promise.all(apps.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => ({ name: t.name, description: t.description || '' })) }))
     return out
   }
 

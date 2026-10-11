@@ -97,12 +97,13 @@ describe('agent bridge: kernel', () => {
     const apps = bridgeApps({ apps: [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription'], skill: '' })] })
     mkdirSync(join(dir, 'skills', '_jobs', 'old'), { recursive: true })
     mkdirSync(join(dir, 'skills', 'wizard-job-gone'), { recursive: true })
-    expect(writePointerSkills(dir, apps, { tools: { 'hello-wizard': ['wizard_time'] } })).toEqual(['wizard-job-diagnostics', 'wizard-job-transcription'])
+    const tools = { 'hello-wizard': [{ name: 'wizard_time', description: 'Current UTC time on the Wizard. Second sentence.' }, 'wizard_echo'] }
+    expect(writePointerSkills(dir, apps, { tools })).toEqual(['wizard-job-diagnostics', 'wizard-job-transcription'])
     const diag = readFileSync(join(dir, 'skills', 'wizard-job-diagnostics', 'SKILL.md'), 'utf8')
     expect(diag).toContain('name: wizard-job-diagnostics')
     expect(diag).toContain('description: Use when the owner asks for diagnostics.')
-    expect(diag).toContain('Load its skill `hello-wizard` with skill_view, then call `mcp__wizard__hello_wizard__wizard_time`.')
-    expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber. Call `mcp__wizard__transcriber__*`.')
+    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its skill `hello-wizard` (skill_view)')
+    expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__transcriber__*`')
     expect(existsSync(join(dir, 'skills', '_jobs'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'wizard-job-gone'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true) // app skills untouched
@@ -121,6 +122,8 @@ describe('agent bridge: kernel', () => {
       expect(py("print(kernel.render_kernel(apps, job_map=True), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { jobMap: true }))
       expect(py("print(kernel.render_kernel(apps, 'generic'), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { harness: 'generic' }))
       expect(JSON.parse(py('print(json.dumps(kernel.pointer_skills(apps)))', reg))).toEqual(pointerSkills(bridgeApps(reg)))
+      const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare']]))
+      expect(JSON.parse(py(`print(json.dumps(kernel.pointer_skills(apps, tools=${JSON.stringify(JSON.stringify(tools))} and json.loads(${JSON.stringify(JSON.stringify(tools))}))))`, reg))).toEqual(pointerSkills(bridgeApps(reg), { tools }))
     }
   })
 
