@@ -62,7 +62,7 @@ export function bridgeApps(registry, { mcpAddress = 'url' } = {}) {
     out.push({
       id, prefix: toolPrefix(id), name: clean(app.name, 60) || id, summary: clean(app.summary, 200),
       status: clean(app.status, 24) || 'unknown', jobs: provides.filter((p) => !SKIP_PROVIDES.has(p)),
-      url, transport: clean(mcp?.transport, 40) || 'streamable-http',
+      url, address: url.replace(/^(https?:\/\/[^/]+).*$/u, '$1'), transport: clean(mcp?.transport, 40) || 'streamable-http',
       skill: typeof app.skill === 'string' && app.skill && !app.skill.includes('..') ? app.skill : '',
     })
   }
@@ -166,8 +166,9 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
       const rows = known.length
         ? known.map((t) => `  - \`${agentToolName(a.prefix, t.name, harness)}\`${t.purpose ? `: ${t.purpose}` : ''}`)
         : [`  - \`${agentToolName(a.prefix, '*', harness)}\``]
+      const address = [`  Its address (for files it serves): ${a.address}`]
       const skill = a.skill ? [`  Its skill \`${a.id}\` (skill_view) has details for long or unusual jobs; the tools above come first.`] : []
-      return [head, ...rows, ...skill]
+      return [head, ...rows, ...address, ...skill]
     })
     out[jobSkillName(job)] = [
       '---',

@@ -81,6 +81,7 @@ def bridge_apps(registry: dict | None, mcp_address: str = "url") -> list[dict]:
             "summary": _clean(app.get("summary"), 200), "status": _clean(app.get("status"), 24) or "unknown",
             "jobs": [p for p in provides if p not in SKIP_PROVIDES],
             "skill": skill if isinstance(skill, str) and skill and ".." not in skill else "",
+            "address": re.sub(r"^(https?://[^/]+).*$", r"\1", url),
         })
     return sorted(out, key=lambda a: a["id"])
 
@@ -161,6 +162,7 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
                 lines += [f"  - `{agent_tool_name(a['prefix'], n, harness)}`" + (f": {p}" if p else "") for n, p in known]
             else:
                 lines.append(f"  - `{agent_tool_name(a['prefix'], '*', harness)}`")
+            lines.append(f"  Its address (for files it serves): {a['address']}")
             if a["skill"]:
                 lines.append(f"  Its skill `{a['id']}` (skill_view) has details for long or unusual jobs; the tools above come first.")
         tail = " If one is not in your tool list, run it with tool_call and that exact name." if harness == "hermes" else ""

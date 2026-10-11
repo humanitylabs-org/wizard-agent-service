@@ -102,7 +102,7 @@ describe('agent bridge: kernel', () => {
     const diag = readFileSync(join(dir, 'skills', 'wizard-job-diagnostics', 'SKILL.md'), 'utf8')
     expect(diag).toContain('name: wizard-job-diagnostics')
     expect(diag).toContain('description: Use when the owner asks for diagnostics.')
-    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its skill `hello-wizard` (skill_view)')
+    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n  Its skill `hello-wizard` (skill_view)')
     expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__transcriber__*`')
     expect(existsSync(join(dir, 'skills', '_jobs'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'wizard-job-gone'))).toBe(false)
