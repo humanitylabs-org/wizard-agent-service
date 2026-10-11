@@ -26,8 +26,9 @@ describe('delegation follow-through (stock Hermes)', () => {
     add.run('wizard_c', 'user', `${FOLLOW_THROUGH_PREFIX} — deleg_3] results`, now - 5)
     d.prepare('INSERT INTO session_turn_leases VALUES (?, ?)').run('wizard_c', now + 60)
     add.run('telegram_d', 'user', `${FOLLOW_THROUGH_PREFIX} — deleg_4] results`, now - 5)
+    add.run('wizard-assistant-e', 'user', `${FOLLOW_THROUGH_PREFIX} — deleg_5] results`, now - 5)
     d.close()
-    expect(findPendingFollowThroughs(path).map((p) => p.sessionId)).toEqual(['wizard_a'])
+    expect(findPendingFollowThroughs(path).map((p) => p.sessionId).sort()).toEqual(['wizard-assistant-e', 'wizard_a'])
   })
 
   it('admits exactly one continuation per completion row, and stays off when the agent joins', async () => {
