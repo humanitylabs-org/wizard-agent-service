@@ -10,8 +10,8 @@
     "utilities"
   ],
   "description": "The Wizard front end (Wizard UX) and the Wizard Agent Service in one container. Talks to the hermes-agent app; reads Hermes session history read-only; saves attachments into the shared media folder.",
-  "tipi_version": 1,
-  "version": "0.1.0",
+  "tipi_version": 2,
+  "version": "0.2.0",
   "source": "https://github.com/humanitylabs-org/wizard-agent-service",
   "exposable": false,
   "supported_architectures": [
