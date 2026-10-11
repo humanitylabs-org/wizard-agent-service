@@ -13,10 +13,12 @@ import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
+// Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
+export const FOLLOW_THROUGH_SESSION_PREFIXES = ['wizard_', 'wizard-assistant-']
 export const FOLLOW_THROUGH_INPUT = '[Wizard follow-through] The delegated results above have arrived. Finish the original request now, in one self-contained reply.'
 
 /** Sessions waiting on a follow-through: newest active message is a completion row, no live turn. */
-export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), maxAgeSeconds = 2 * 3600, sessionPrefixes = ['wizard_'] } = {}) {
+export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), maxAgeSeconds = 2 * 3600, sessionPrefixes = FOLLOW_THROUGH_SESSION_PREFIXES } = {}) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
