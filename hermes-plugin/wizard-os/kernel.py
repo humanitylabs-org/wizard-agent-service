@@ -1,7 +1,7 @@
-"""Wizard OS kernel renderer (Python twin of server/agent-bridge.mjs renderKernel).
+"""Wizard OS kernel + pointer skills (Python twin of server/agent-bridge.mjs).
 
-Reads ~/.wizard-os/apps.json directly, so the agent knows the box even when the Agent Service is
-down. Keep this file and agent-bridge.mjs in lockstep: tests/agent-bridge.test.ts renders both
+The kernel is fixed text (no app list); discovery is the wizard-job-* pointer skills, which this
+module can also write from ~/.wizard-os/apps.json when the Agent Service is down. Keep this file and agent-bridge.mjs in lockstep: tests/agent-bridge.test.ts renders both
 from the same fixtures and requires byte-identical output.
 """
 
@@ -10,15 +10,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 MCP_SERVER_NAME = "wizard"
 META_TOOL = "wizard_apps"
-KERNEL_LIMIT = 2500
+KERNEL_LIMIT = 900
+JOB_SKILL_PREFIX = "wizard-job-"
+JOB_MAP_LINES = 12
+DEFAULT_FILES_ROOT = "~/runtipi/media"
+JOB_STAMP = ".wizard-jobs"
 SKIP_PROVIDES = {"shell", "agent-service", "agent"}
 _CTRL = re.compile(r"[\u0000-\u001f\u007f]")
 _WS = re.compile(r"\s+")
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_JOB = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
 def _clean(value, limit: int) -> str:
@@ -84,151 +90,110 @@ def agent_tool_name(prefix: str, tool: str, harness: str = "hermes") -> str:
     return f"mcp__{MCP_SERVER_NAME}__{base}" if harness == "hermes" else base
 
 
-def render_kernel(apps: list[dict], harness: str = "hermes", tools: dict | None = None) -> str:
-    tools = tools or {}
-    meta = f"mcp__{MCP_SERVER_NAME}__{META_TOOL}" if harness == "hermes" else META_TOOL
+def job_skill_name(job: str) -> str:
+    return f"{JOB_SKILL_PREFIX}{job}"
 
-    pattern = f"`mcp__{MCP_SERVER_NAME}__<app>__<tool>`" if harness == "hermes" else "`<app>__<tool>`"
-    head = [
-        "You are the owner's agent on a Wizard OS box. Installed apps do jobs for the owner.",
-        f"Each app's tools are MCP tools on the `{MCP_SERVER_NAME}` server, named {pattern}.",
-        *(["If such a tool is not in your tool list, invoke it with `tool_call` and that exact name; you do not need tool_search for it."] if harness == "hermes" else []),
+
+def _jobs_of(apps: list[dict]) -> list[tuple[str, list[dict]]]:
+    by_job: dict[str, list[dict]] = {}
+    for app in apps:
+        for job in app["jobs"]:
+            if _JOB.match(job):
+                by_job.setdefault(job, []).append(app)
+    return sorted(by_job.items())
+
+
+def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
+                  files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False) -> str:
+    """Twin of agent-bridge.mjs renderKernel: FIXED text, no per-app list unless job_map."""
+    apps = apps or []
+    hermes = harness == "hermes"
+    meta = f"mcp__{MCP_SERVER_NAME}__{META_TOOL}" if hermes else META_TOOL
+    name = f"mcp__{MCP_SERVER_NAME}__<app>__<tool>" if hermes else "<app>__<tool>"
+    text = [
+        "Wizard OS: you are the owner's agent on this box. Installed Wizard apps do jobs for the owner.",
+        f"The owner's files are in the Files root, {files_root}. App tools take paths relative to it.",
+        "When a request matches a wizard-job-<job> skill in your skills list:" if hermes else "When a request matches a job below:",
+        "1. Load that skill with skill_view, then the app skill it names." if hermes else "1. Use the app named for that job.",
+        f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`."
+        + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
+        "3. Never search the disk, read apps.json, run wam or write a client to find or reach an app.",
+        f'"What apps do I have?": call `{meta}`. If an app tool fails, tell the owner it is not reachable (`wam doctor`).',
+        "Save only short pointer skills for app jobs, never a copy of an app's workflow.",
     ]
-    rules = [
-        "Rules:",
-        "1. When a request matches a job in the list above, your first step is that app's tool. Do not search files, read apps.json, run wam or write an MCP client to find out what an app does.",
-        f'2. "What apps do I have?" or "what can you do here?": call `{meta}`.',
-        "3. For a long job, load the app's skill first with skill_view when one is named.",
-        "4. If an app tool fails, tell the owner the app is not reachable and suggest `wam doctor`. Do not work around it.",
-        "5. If you save a skill for one of these jobs, make it a short pointer to the app, never a copy of its workflow.",
-    ]
-
-    def lines(full: bool) -> list[str]:
-        out = []
-        for app in apps:
-            jobs = ", ".join(job_words(j) for j in (app["jobs"] or ["other"]))
-            names = [f"`{agent_tool_name(app['prefix'], t, harness)}`" for t in (tools.get(app["id"]) or [])[: 4 if full else 0]]
-            where = ", ".join(names) if names else f"`{agent_tool_name(app['prefix'], '*', harness)}`"
-            down = "" if app["status"] == "running" else f" ({app['status']})"
-            skill = f"; skill `{app['id']}`" if full and app["skill"] else ""
-            out.append(f"- {jobs} -> {app['name']}{down}: {where}{skill}")
-        return out
-
-    def compose(body: list[str]) -> str:
-        return "\n".join([*head, "", "Apps by job:", *(body or ["- (no apps installed yet)"]), "", *rules])
-
-    full = compose(lines(True))
-    return full if len(full) <= KERNEL_LIMIT else compose(lines(False))[:KERNEL_LIMIT]
-
-
-def tools_from_cache(home: Path | None = None) -> dict:
-    """Tool names the Agent Service last saw (agent-context.json); {} when it never ran."""
-    try:
-        data = json.loads(((home or os_home()) / "agent-context.json").read_text(encoding="utf-8"))
-        return {a["id"]: [t.split("__", 1)[1] for t in a.get("tools") or [] if "__" in t] for a in data.get("apps") or []}
-    except (OSError, ValueError, KeyError, TypeError, IndexError):
-        return {}
-
-
-def gateway_url() -> str:
-    """The `wizard` MCP server URL from the Hermes config (stock loader), or ''."""
-    try:
-        from hermes_cli.config import load_config_readonly
-
-        entry = (load_config_readonly().get("mcp_servers") or {}).get(MCP_SERVER_NAME) or {}
-        return str(entry.get("url") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def refresh_tool_cache(home: Path | None = None, timeout: float = 1.0) -> bool:
-    """Ask the Agent Service for the current tool names (GET /wizard/v1/agent-context) and cache
-    them in <home>/agent-context.json. Best effort: the kernel falls back to `<app>__*`."""
-    import urllib.request
-
-    home = home or os_home()
-    url = gateway_url()
-    if not url or "/wizard/mcp" not in url:
-        return False
-    try:
-        token = ""
-        entry_headers = {}
-        from hermes_cli.config import load_config_readonly
-
-        entry = (load_config_readonly().get("mcp_servers") or {}).get(MCP_SERVER_NAME) or {}
-        entry_headers = {k: os.path.expandvars(str(v)) for k, v in (entry.get("headers") or {}).items()}
-        token = entry_headers.get("Authorization", "")
-        req = urllib.request.Request(url.replace("/wizard/mcp", "/wizard/v1/agent-context?format=json"),
-                                     headers={"Authorization": token} if token else {})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - box-local URL from config
-            data = json.loads(resp.read(512 * 1024))
-        if not isinstance(data, dict) or not isinstance(data.get("apps"), list):
-            return False
-        tmp = home / f".agent-context.json.tmp-{os.getpid()}"
-        tmp.write_text(json.dumps({"apps": data["apps"]}), encoding="utf-8")
-        tmp.replace(home / "agent-context.json")
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    if job_map or not hermes:
+        rows = [f"- {job_words(job)} -> " + ", ".join(f"{a['name']} (`{agent_tool_name(a['prefix'], '*', harness)}`)" for a in owners)
+                for job, owners in _jobs_of(apps)[:JOB_MAP_LINES]]
+        text += ["", "Jobs on this box:", *(rows or ["- (no apps installed yet)"])]
+    return "\n".join(text)
 
 
 def kernel_for_session(home: Path | None = None) -> str:
     home = home or os_home()
-    refresh_tool_cache(home)
-    apps = bridge_apps(read_registry(home / "apps.json"), os.environ.get("WIZARD_APPS_MCP_ADDRESS", "url"))
-    return render_kernel(apps, "hermes", tools_from_cache(home))
+    job_map = os.environ.get("WIZARD_KERNEL_JOB_MAP") == "1"
+    apps = bridge_apps(read_registry(home / "apps.json"), os.environ.get("WIZARD_APPS_MCP_ADDRESS", "url")) if job_map else []
+    return render_kernel(apps, "hermes", os.environ.get("WIZARD_FILES_ROOT") or DEFAULT_FILES_ROOT, job_map)
 
 
-def pointer_skills(apps: list[dict], harness: str = "hermes") -> dict:
-    """One tiny skill per job (twin of agent-bridge.mjs pointerSkills)."""
-    by_job: dict[str, list[dict]] = {}
-    for app in apps:
-        for job in app["jobs"]:
-            if re.match(r"^[a-z0-9][a-z0-9-]{0,39}$", job):
-                by_job.setdefault(job, []).append(app)
+def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None = None) -> dict:
+    """Twin of agent-bridge.mjs pointerSkills: one routing-only skill per job."""
+    tools = tools or {}
     out = {}
-    for job in sorted(by_job):
-        owners = by_job[job]
+    for job, owners in _jobs_of(apps):
         words = job_words(job)
         names = " or ".join(a["name"] for a in owners)
-        body = [
+        lines = []
+        for a in owners:
+            known = [f"`{agent_tool_name(a['prefix'], t, harness)}`" for t in (tools.get(a["id"]) or [])[:8]]
+            calls = ", ".join(known) if known else f"`{agent_tool_name(a['prefix'], '*', harness)}`"
+            down = "" if a["status"] == "running" else f" It is {a['status']} right now: tell the owner (`wam doctor`)."
+            lead = f" Load its skill `{a['id']}` with skill_view, then call" if a["skill"] else " Call"
+            lines.append(f"- {a['name']}.{lead} {calls}.{down}")
+        tail = " If one is not in your tool list, run it with tool_call and that exact name." if harness == "hermes" else ""
+        out[job_skill_name(job)] = "\n".join([
             "---",
-            f"name: wizard-job-{job}",
-            f"description: Use when the owner asks for {words}. Use the installed {names} app's tools; never search files for it.",
+            f"name: {job_skill_name(job)}",
+            f"description: Use when the owner asks for {words}. The installed {names} app does it; call its tools, never search files.",
             "---",
             "",
             f"# {words}",
             "",
-            *[f"- {a['name']}: call `{agent_tool_name(a['prefix'], '*', harness)}`"
-              + (f". Its full skill is `{a['id']}` (skill_view)." if a["skill"] else ".") for a in owners],
+            *lines,
             "",
-            "Pointer written by the Wizard Agent Service from apps.json. It is rebuilt when apps change; edit nothing here.",
+            f"Tools are on the `{MCP_SERVER_NAME}` MCP server.{tail} Paths are relative to the owner's Files root.",
             "",
-        ]
-        out[job] = "\n".join(body)
+            "Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.",
+            "",
+        ])
     return out
 
 
 def refresh_pointer_skills(home: Path | None = None) -> list[str] | None:
-    """Rewrite <home>/skills/_jobs when it is missing or older than apps.json (the Agent Service
-    normally does this; the plugin covers boxes where it is down or cannot write)."""
+    """Write the wizard-job-* pointers when the Agent Service has not (stamp missing or older than
+    apps.json, e.g. the service is down or the App Manager just rewrote the skills folder)."""
     import shutil
 
     home = home or os_home()
-    apps_json, target = home / "apps.json", home / "skills" / "_jobs"
+    apps_json, root = home / "apps.json", home / "skills"
+    stamp = root / JOB_STAMP
     try:
-        if target.is_dir() and target.stat().st_mtime >= apps_json.stat().st_mtime:
+        if stamp.is_file() and stamp.stat().st_mtime >= apps_json.stat().st_mtime:
             return None
         apps = bridge_apps(read_registry(apps_json), os.environ.get("WIZARD_APPS_MCP_ADDRESS", "url"))
-        tmp = home / "skills" / f"._jobs.tmp-{os.getpid()}"
-        shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         skills = pointer_skills(apps)
-        for job, text in skills.items():
-            (tmp / job).mkdir()
-            (tmp / job / "SKILL.md").write_text(text, encoding="utf-8")
-        shutil.rmtree(target, ignore_errors=True)
-        tmp.rename(target)
+        for entry in root.iterdir():
+            if (entry.name.startswith(JOB_SKILL_PREFIX) and entry.name not in skills) or entry.name == "_jobs":
+                shutil.rmtree(entry, ignore_errors=True)
+        for name, text in skills.items():
+            target = root / name / "SKILL.md"
+            if target.is_file() and target.read_text(encoding="utf-8") == text:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".md.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(target)
+        stamp.write_text(f"{int(time.time() * 1000)}\n", encoding="utf-8")
         return sorted(skills)
     except OSError:
         return None

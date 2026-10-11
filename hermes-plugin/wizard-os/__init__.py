@@ -1,10 +1,10 @@
 """Wizard OS plugin for stock Hermes.
 
-Registers one system-prompt section, ``wizard-os.kernel``: the Wizard OS orientation plus the
-installed apps grouped by job, rendered locally from ``$WIZARD_OS_HOME/apps.json`` (default
-``~/.wizard-os/apps.json``) so it works even when the Wizard Agent Service is down. The section is
-frozen per session by Hermes; a new chat picks up newly installed apps, and the Agent Service sends
-mid-thread changes in its per-run instructions. No Hermes core change, no SOUL/memory edit.
+Registers one system-prompt section, ``wizard-os.kernel``: a FIXED Wizard OS orientation (under
+900 characters, the same on every box, no per-app list). Apps are discovered through the
+``wizard-job-<job>`` pointer skills in ``~/.wizard-os/skills`` (``skills.external_dirs``); this
+plugin rewrites them from ``apps.json`` when the Agent Service has not. Mid-thread installs arrive
+as a one-line per-run delta from the Agent Service. No Hermes core change, no SOUL/memory edit.
 """
 
 from __future__ import annotations
@@ -32,4 +32,4 @@ def _section(_session_info) -> str:
 
 
 def register(ctx) -> None:
-    ctx.register_system_prompt_section(SECTION_ID, _section, position="after_memory", max_chars=4000)
+    ctx.register_system_prompt_section(SECTION_ID, _section, position="after_memory", max_chars=2000)

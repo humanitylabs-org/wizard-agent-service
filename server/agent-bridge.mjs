@@ -3,17 +3,22 @@
 // One source, apps.json, turned into what every agent on the box needs:
 //   1. tools:       one MCP gateway (/wizard/mcp) that proxies every running app's tools as <app>__<tool>,
 //                   plus the wizard_apps meta tool, and says tools/list_changed when apps.json changes;
-//   2. orientation: the kernel text (GET /wizard/v1/agent-context), short and plain, for the weakest model;
-//   3. skills:      one tiny pointer skill per job (`provides`) under <WIZARD_OS_HOME>/skills/_jobs/.
-// The Hermes plugin (hermes-plugin/wizard-os) renders the same kernel in Python; tests/agent-bridge.test.ts
-// keeps the two renderers byte-identical.
+//   2. orientation: a FIXED kernel (GET /wizard/v1/agent-context), under 900 characters, no app list;
+//   3. discovery:   one pointer skill per job (`provides`), <WIZARD_OS_HOME>/skills/wizard-job-<job>/SKILL.md,
+//                   which skills.external_dirs puts into the agent's normal skills index.
+// The Hermes plugin (hermes-plugin/wizard-os) renders the same kernel and pointers in Python;
+// tests/agent-bridge.test.ts keeps the two renderers byte-identical.
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
-export const KERNEL_LIMIT = 2500
+export const KERNEL_LIMIT = 900
+export const JOB_SKILL_PREFIX = 'wizard-job-'
+export const JOB_MAP_LINES = 12
+export const DEFAULT_FILES_ROOT = '~/runtipi/media'
+const JOB_STAMP = '.wizard-jobs'
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
 const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
 
@@ -70,37 +75,51 @@ export function agentToolName(prefix, tool, harness = 'hermes') {
   return harness === 'hermes' ? `mcp__${MCP_SERVER_NAME}__${base}` : base
 }
 
+/** The pointer skill name for a job: what the owner's words match in the skills index. */
+export function jobSkillName(job) {
+  return `${JOB_SKILL_PREFIX}${job}`
+}
+
+/** Jobs (provides) the apps offer, each with the apps that do it, sorted (byte-stable). */
+function jobsOf(apps) {
+  const byJob = new Map()
+  for (const app of apps) for (const job of app.jobs) {
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/u.test(job)) continue
+    if (!byJob.has(job)) byJob.set(job, [])
+    byJob.get(job).push(app)
+  }
+  return [...byJob.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+}
+
 /**
- * The kernel: who the agent is on this box, the apps grouped by job, the rules. Keep this function and
- * hermes-plugin/wizard-os/kernel.py in lockstep (the parity test compares them). `tools` maps app id ->
- * tool names when known (the gateway knows them; the plugin reads none and uses the app prefix).
+ * The kernel (spec v2): FIXED and short, the same text on every box, with no per-app list. Discovery
+ * happens through the wizard-job-* pointer skills in the agent's normal skills index. Keep this function
+ * and hermes-plugin/wizard-os/kernel.py in lockstep (the parity test compares them).
+ * `jobMap` adds the fallback job -> app map (max 12 lines); the generic harness, which has no skills index,
+ * always gets it.
  */
-export function renderKernel(apps, { harness = 'hermes', tools = {} } = {}) {
-  const meta = harness === 'hermes' ? `mcp__${MCP_SERVER_NAME}__${META_TOOL}` : META_TOOL
-  const head = [
-    'You are the owner\'s agent on a Wizard OS box. Installed apps do jobs for the owner.',
-    `Each app's tools are MCP tools on the \`${MCP_SERVER_NAME}\` server, named ${harness === 'hermes' ? `\`mcp__${MCP_SERVER_NAME}__<app>__<tool>\`` : '`<app>__<tool>`'}.`,
-    ...(harness === 'hermes' ? ['If such a tool is not in your tool list, invoke it with `tool_call` and that exact name; you do not need tool_search for it.'] : []),
+export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false } = {}) {
+  const hermes = harness === 'hermes'
+  const meta = hermes ? `mcp__${MCP_SERVER_NAME}__${META_TOOL}` : META_TOOL
+  const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
+  const text = [
+    'Wizard OS: you are the owner\'s agent on this box. Installed Wizard apps do jobs for the owner.',
+    `The owner's files are in the Files root, ${filesRoot}. App tools take paths relative to it.`,
+    hermes
+      ? 'When a request matches a wizard-job-<job> skill in your skills list:'
+      : 'When a request matches a job below:',
+    ...(hermes ? ['1. Load that skill with skill_view, then the app skill it names.'] : ['1. Use the app named for that job.']),
+    `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
+    '3. Never search the disk, read apps.json, run wam or write a client to find or reach an app.',
+    `"What apps do I have?": call \`${meta}\`. If an app tool fails, tell the owner it is not reachable (\`wam doctor\`).`,
+    'Save only short pointer skills for app jobs, never a copy of an app\'s workflow.',
   ]
-  const rules = [
-    'Rules:',
-    '1. When a request matches a job in the list above, your first step is that app\'s tool. Do not search files, read apps.json, run wam or write an MCP client to find out what an app does.',
-    `2. "What apps do I have?" or "what can you do here?": call \`${meta}\`.`,
-    '3. For a long job, load the app\'s skill first with skill_view when one is named.',
-    '4. If an app tool fails, tell the owner the app is not reachable and suggest `wam doctor`. Do not work around it.',
-    '5. If you save a skill for one of these jobs, make it a short pointer to the app, never a copy of its workflow.',
-  ]
-  const lines = (full) => apps.map((app) => {
-    const jobs = (app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')
-    const names = (tools[app.id] || []).slice(0, full ? 4 : 0).map((t) => `\`${agentToolName(app.prefix, t, harness)}\``)
-    const where = names.length ? names.join(', ') : `\`${agentToolName(app.prefix, '*', harness)}\``
-    const down = app.status === 'running' ? '' : ` (${app.status})`
-    const skill = full && app.skill ? `; skill \`${app.id}\`` : ''
-    return `- ${jobs} -> ${app.name}${down}: ${where}${skill}`
-  })
-  const compose = (body) => [...head, '', 'Apps by job:', ...(body.length ? body : ['- (no apps installed yet)']), '', ...rules].join('\n')
-  const full = compose(lines(true))
-  return full.length <= KERNEL_LIMIT ? full : compose(lines(false)).slice(0, KERNEL_LIMIT)
+  if (jobMap || !hermes) {
+    const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
+      `- ${jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
+    text.push('', 'Jobs on this box:', ...(rows.length ? rows : ['- (no apps installed yet)']))
+  }
+  return text.join('\n')
 }
 
 /** Apps installed or changed since `before` (a map id -> status), for the per-run delta. */
@@ -108,66 +127,79 @@ export function appsDelta(apps, before) {
   return apps.filter((app) => before?.[app.id] !== app.status)
 }
 
+/** Mid-thread installs: one line per new or changed app, pointing at its wizard-job skill. */
 export function renderDelta(apps, { harness = 'hermes' } = {}) {
   if (!apps.length) return ''
-  const body = apps.map((app) => {
-    const jobs = (app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')
-    return `- ${jobs} -> ${app.name}${app.status === 'running' ? '' : ` (${app.status})`}: \`${agentToolName(app.prefix, '*', harness)}\``
-  })
-  return ['Wizard OS: apps changed since this chat started. Use them the same way as the apps in your Wizard OS context:', ...body].join('\n')
+  return apps.map((app) => {
+    const job = app.jobs.find((j) => /^[a-z0-9][a-z0-9-]{0,39}$/u.test(j))
+    const state = app.status === 'running' ? 'new app' : `app ${app.status}`
+    const how = job && harness === 'hermes' ? `load \`${jobSkillName(job)}\`` : `tools \`${agentToolName(app.prefix, '*', harness)}\``
+    return `Wizard OS, ${state}: ${app.name} for ${job ? jobWords(job) : 'other jobs'}; ${how}.`
+  }).join('\n')
 }
 
 // ---------- pointer skills ----------
 
-/** One tiny skill per job, so the job word the owner says matches a skill description. */
-export function pointerSkills(apps, { harness = 'hermes' } = {}) {
-  const byJob = new Map()
-  for (const app of apps) for (const job of app.jobs) {
-    if (!/^[a-z0-9][a-z0-9-]{0,39}$/u.test(job)) continue
-    if (!byJob.has(job)) byJob.set(job, [])
-    byJob.get(job).push(app)
-  }
+/**
+ * One tiny skill per job, so the job words the owner says match a skill description in the agent's
+ * normal skills index. Routing only: which app, its skill, its tool names. `tools` maps app id -> tool
+ * names when the gateway knows them; without it the pointer names the app's tool prefix.
+ */
+export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
   const out = {}
-  for (const [job, owners] of [...byJob.entries()].sort()) {
+  for (const [job, owners] of jobsOf(apps)) {
     const words = jobWords(job)
     const names = owners.map((a) => a.name).join(' or ')
-    const body = [
+    const lines = owners.map((a) => {
+      const known = (tools[a.id] || []).slice(0, 8).map((t) => `\`${agentToolName(a.prefix, t, harness)}\``)
+      const calls = known.length ? known.join(', ') : `\`${agentToolName(a.prefix, '*', harness)}\``
+      const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
+      return `- ${a.name}.${a.skill ? ` Load its skill \`${a.id}\` with skill_view, then call` : ' Call'} ${calls}.${down}`
+    })
+    out[jobSkillName(job)] = [
       '---',
-      `name: wizard-job-${job}`,
-      `description: Use when the owner asks for ${words}. Use the installed ${names} app's tools; never search files for it.`,
+      `name: ${jobSkillName(job)}`,
+      `description: Use when the owner asks for ${words}. The installed ${names} app does it; call its tools, never search files.`,
       '---',
       '',
       `# ${words}`,
       '',
-      ...owners.map((a) => `- ${a.name}: call \`${agentToolName(a.prefix, '*', harness)}\`${a.skill ? `. Its full skill is \`${a.id}\` (skill_view).` : '.'}`),
+      ...lines,
       '',
-      'Pointer written by the Wizard Agent Service from apps.json. It is rebuilt when apps change; edit nothing here.',
+      `Tools are on the \`${MCP_SERVER_NAME}\` MCP server.${harness === 'hermes' ? ' If one is not in your tool list, run it with tool_call and that exact name.' : ''} Paths are relative to the owner's Files root.`,
+      '',
+      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
       '',
     ].join('\n')
-    out[job] = body
   }
   return out
 }
 
-/** Rewrite <osHome>/skills/_jobs atomically. Returns the jobs written, or null when the folder is read-only. */
+/**
+ * Write <osHome>/skills/wizard-job-<job>/SKILL.md and delete stale ones (and the v1 `_jobs` folder).
+ * The App Manager rewrites <osHome>/skills on every install, so this runs after each apps.json change.
+ * Returns the skill names written, or null when the folder is read-only.
+ */
 export function writePointerSkills(osHome, apps, opts = {}) {
   const root = join(osHome, 'skills')
-  const target = join(root, '_jobs')
-  const tmp = join(root, `._jobs.tmp-${process.pid}`)
   try {
     mkdirSync(root, { recursive: true })
-    rmSync(tmp, { recursive: true, force: true })
     const skills = pointerSkills(apps, opts)
-    for (const [job, text] of Object.entries(skills)) {
-      mkdirSync(join(tmp, job), { recursive: true })
-      writeFileSync(join(tmp, job, 'SKILL.md'), text)
+    for (const entry of readdirSync(root)) {
+      if ((entry.startsWith(JOB_SKILL_PREFIX) && !skills[entry]) || entry === '_jobs') rmSync(join(root, entry), { recursive: true, force: true })
     }
-    mkdirSync(tmp, { recursive: true })
-    rmSync(target, { recursive: true, force: true })
-    renameSync(tmp, target)
+    for (const [name, text] of Object.entries(skills)) {
+      const file = join(root, name, 'SKILL.md')
+      let current = ''
+      try { current = readFileSync(file, 'utf8') } catch { /* new */ }
+      if (current === text) continue
+      mkdirSync(join(root, name), { recursive: true })
+      writeFileSync(`${file}.tmp`, text)
+      renameSync(`${file}.tmp`, file)
+    }
+    writeFileSync(join(root, JOB_STAMP), `${Date.now()}\n`)
     return Object.keys(skills)
   } catch {
-    try { rmSync(tmp, { recursive: true, force: true }) } catch { /* read-only */ }
     return null
   }
 }
@@ -274,7 +306,7 @@ export function gatewayToken({ osHome, env = process.env, create = true }) {
 export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
-  writeSkills = true, harness = 'hermes',
+  writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
 }) {
   let mtime = null
   let apps = []
@@ -293,10 +325,12 @@ export function createAgentBridge({
     if (writeSkills && osHome) {
       const written = writePointerSkills(osHome, apps, { harness })
       log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
+      // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
+      const snapshot = apps
+      collectNames().then((tools) => { if (apps === snapshot) writePointerSkills(osHome, apps, { harness, tools }) }).catch(() => {})
     }
     return true
   }
-  refresh()
 
   const notifyChanged = () => {
     const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`
@@ -329,11 +363,15 @@ export function createAgentBridge({
     }
   }
 
-  async function toolNames() {
-    refresh()
+  async function collectNames() {
     const out = {}
     await Promise.all(apps.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
     return out
+  }
+
+  async function toolNames() {
+    refresh()
+    return collectNames()
   }
 
   function metaTool() {
@@ -435,7 +473,7 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(apps, { harness, tools: await toolNames() }),
+          instructions: renderKernel(apps, { harness, filesRoot, jobMap }),
         })
       }
       if (method === 'ping') return reply({})
@@ -506,15 +544,19 @@ export function createAgentBridge({
 
   async function kernel({ harness: h = harness } = {}) {
     const tools = await toolNames()
-    const text = renderKernel(apps, { harness: h, tools })
+    const text = renderKernel(apps, { harness: h, filesRoot, jobMap })
     return {
-      text, chars: text.length, harness: h, mcp_server: MCP_SERVER_NAME,
+      text, chars: text.length, harness: h, mcp_server: MCP_SERVER_NAME, job_map: Boolean(jobMap || h !== 'hermes'),
+      job_skills: jobsOf(apps).map(([job]) => jobSkillName(job)),
       apps: apps.map((a) => ({ id: a.id, name: a.name, status: a.status, jobs: a.jobs, tools: (tools[a.id] || []).map((t) => `${a.prefix}__${t}`), skill: a.skill ? a.id : '' })),
     }
   }
 
+  refresh()
+
   return {
     handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() },
+    kernelText: (h = harness) => { refresh(); return renderKernel(apps, { harness: h, filesRoot, jobMap }) },
     apps: () => { refresh(); return apps },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
     close: () => { if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
@@ -549,6 +591,6 @@ export class ThreadAppSnapshots {
 }
 
 export function listJobSkills(osHome) {
-  try { return readdirSync(join(osHome, 'skills', '_jobs')).sort() } catch { return [] }
+  try { return readdirSync(join(osHome, 'skills')).filter((n) => n.startsWith(JOB_SKILL_PREFIX)).sort() } catch { return [] }
 }
 

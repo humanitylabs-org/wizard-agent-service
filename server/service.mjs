@@ -1861,6 +1861,7 @@ export function createWizardServer(options = {}) {
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
       fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
+      jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
     })
     : null
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
@@ -1873,7 +1874,8 @@ export function createWizardServer(options = {}) {
       const delta = renderDelta(appsDelta(apps, before))
       return delta ? `\n\n${delta}` : ''
     }
-    return apps.length ? `\n\n${renderKernel(apps)}` : ''
+    // No plugin: the full kernel every run, with the job -> app map (no skills index to lean on).
+    return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
   }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`

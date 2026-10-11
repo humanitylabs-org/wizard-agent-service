@@ -74,6 +74,8 @@ const server = createWizardServer({
   mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
+  kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
+  filesRoot: process.env.WIZARD_FILES_ROOT || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
   wizardOsHome: osHome,
