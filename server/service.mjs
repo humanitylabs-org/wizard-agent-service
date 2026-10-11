@@ -23,7 +23,8 @@ import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleTo
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
-import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
+import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
+import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 
@@ -261,44 +262,8 @@ function isDirectHumanSessionIdentity(id, source) {
     || id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
 }
 
-// Stale-run guard reader: true while Hermes holds an unexpired turn lease anywhere in the
-// session's compression chain (leases key on the chain root), false when none is held.
-export function readSessionTurnHeld(sessionDbPath, sessionId, currentTime = Date.now()) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    const row = database.prepare(`
-      WITH RECURSIVE
-        up(id) AS (SELECT ? UNION SELECT sessions.parent_session_id FROM sessions JOIN up ON sessions.id = up.id
-                   WHERE sessions.parent_session_id IS NOT NULL),
-        chain(id) AS (SELECT id FROM up UNION SELECT sessions.id FROM sessions JOIN chain ON sessions.parent_session_id = chain.id)
-      SELECT 1 AS held FROM session_turn_leases
-       WHERE conversation_id IN (SELECT id FROM chain) AND expires_at > ? LIMIT 1
-    `).get(String(sessionId), currentTime / 1000)
-    return Boolean(row)
-  } finally {
-    database.close()
-  }
-}
-
-// After an abandoned run: `completed` when the thread's last assistant text since the run
-// started is followed only by tool rows (the answer reached James), otherwise `interrupted`.
-export function readAbandonedRunOutcome(sessionDbPath, sessionId, startedAt) {
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    const rows = database.prepare(`SELECT role, content FROM messages
-      WHERE session_id = ? AND timestamp >= ? ORDER BY timestamp DESC, rowid DESC LIMIT 50`).all(String(sessionId), Number(startedAt) || 0)
-    for (const row of rows) {
-      if (row.role === 'tool') continue
-      if (row.role === 'assistant' && !String(row.content ?? '').trim()) continue
-      return row.role === 'assistant' ? 'completed' : 'interrupted'
-    }
-    return 'interrupted'
-  } finally {
-    database.close()
-  }
-}
-
+// Turns running on other surfaces (Telegram, TUI, cron). Stock Hermes serves no list of live turns
+// over HTTP, so this read needs WIZARD_HERMES_STATE_PATH (spec/AGENT_BRIDGE.md, "Agent adapter").
 export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now()) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
@@ -1925,9 +1890,15 @@ export function createWizardServer(options = {}) {
   if (!['require', 'prefer', 'off', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer, off or unchecked')
   const sessionMessageCache = new Map()
   const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
-  const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
+  // Hermes reads go over its HTTP API. Only what stock Hermes does not serve (archived threads,
+  // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
+  // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
+  // "Agent adapter" keeps the list.
+  const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
   const canonicalSessionReader = options.canonicalSessionReader
-    ?? (options.canonicalSessionListing ? () => readCanonicalSessions(sessionDbPath, helmDbPath) : null)
+    ?? (!options.canonicalSessionListing ? null
+      : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => readCanonicalSessions(hermesStatePath, helmDbPath)
+        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let canonicalSessionInFlight = null
@@ -2445,21 +2416,23 @@ export function createWizardServer(options = {}) {
       return { payload, capacityStatus, workerRunId }
     }
     const maxActive = Number(options.runQueueMaxActive ?? 8)
-    const activeSessionReader = options.activeSessionReader ?? (() => readActiveHumanSessionIds(hermesStatePath || sessionDbPath))
+    // Turns started on other surfaces (Telegram, TUI) are visible only in state.db; without it the
+    // queue counts its own runs, which Hermes serialises per session anyway.
+    const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveHumanSessionIds(hermesStatePath) : []))
     const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
-    const leaseDbPath = hermesStatePath || sessionDbPath
+    const turnHeldCache = new Map()
+    const runTurnHeld = async (runId) => {
+      const cached = turnHeldCache.get(runId)
+      if (cached && cached.until > Date.now()) return cached.held
+      const held = await hermesRunTurnHeld(fetchImpl, upstreamOrigin, hermesKey, runId)
+      turnHeldCache.set(runId, { held, until: Date.now() + 15_000 })
+      if (turnHeldCache.size > 500) turnHeldCache.delete(turnHeldCache.keys().next().value)
+      return held
+    }
     const staleRunLogPath = resolve(dirname(runQueueStatePath), 'stale-run-guard.jsonl')
     // Side-effect-free liveness probe: an empty steer is refused with 400 by a live agent, with
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
-    const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => {
-      const result = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(runId)}/steer`, {
-        method: 'POST', redirect: 'manual',
-        headers: { Authorization: `Bearer ${hermesKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: '' }),
-      })
-      await result.arrayBuffer().catch(() => null)
-      return result.status === 409 || result.status === 404
-    })
+    const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
       statePath: runQueueStatePath,
       maxActive,
@@ -2470,10 +2443,10 @@ export function createWizardServer(options = {}) {
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
-      turnHeld: options.turnHeldReader ?? ((record) => readSessionTurnHeld(leaseDbPath, record.sessionId)),
+      turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
-        return { status: (options.abandonedOutcomeReader ?? readAbandonedRunOutcome)(leaseDbPath, record.sessionId, record.createdAt) }
+        return { status: await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt) }
       },
       onReconciled: (record, verdict, leaselessSeconds) => {
         const entry = { at: new Date().toISOString(), public_run_id: record.publicRunId, session_id: record.sessionId,
@@ -3743,14 +3716,19 @@ export function createWizardServer(options = {}) {
   if (runQueue) server.once('close', () => runQueue.close())
   if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
-  if (options.followThrough !== false && hermesStatePath) {
+  if (options.followThrough !== false) {
     let selfOrigin = ''
     server.on('listening', () => {
       const address = server.address()
       if (address && typeof address === 'object') selfOrigin = `http://127.0.0.1:${address.port}`
     })
+    const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
     const watcher = startDelegationFollowThrough({
-      sessionDbPath: hermesStatePath,
+      find: options.followThroughFinder ?? createFollowThroughFinder({
+        request: (path) => hermesJson(path),
+        prefix: FOLLOW_THROUGH_PREFIX,
+        busy: (sessionId) => (runQueue?.latestProjections([sessionId]) ?? []).some((run) => LIVE.has(run.status)),
+      }),
       enabled: async () => {
         if (!selfOrigin || joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
         if (joinedDelegation === 'off') return true
