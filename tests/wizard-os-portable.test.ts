@@ -174,16 +174,16 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', appsJsonPath: appsJson })
     expect((await postRun(wizard)).status).toBe(202)
     const first = String(hermes.bodies[0].instructions)
-    expect(first).toContain('You are an agent inside Wizard OS')
-    expect(first).toContain('DeFleur Video (`defleur-video`)')
-    expect(first).toContain('Jobs: video-editing, short-form-video.')
-    expect(first).toContain('MCP (streamable-http): http://127.0.0.1:20002/mcp.')
-    expect(first).toContain(`Read its skill first: ${join(dir, 'skills/defleur-video/SKILL.md')}.`)
+    // The agent-bridge kernel replaced the URL- and path-heavy block (spec/AGENT_BRIDGE.md).
+    expect(first).toContain("You are the owner's agent on a Wizard OS box")
+    expect(first).toContain('- video editing, short-form video -> DeFleur Video: `mcp__wizard__defleur_video__*`; skill `defleur-video`')
+    expect(first).toContain('- other -> Stopped (stopped): `mcp__wizard__stopped_app__*`')
+    expect(first).not.toContain('http://127.0.0.1:20002/mcp')
+    expect(first).not.toContain(join(dir, 'skills'))
     expect(first).toContain('short pointer to the app')
-    expect(first).not.toContain('stopped-app')
     writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))
     expect((await postRun(wizard)).status).toBe(202)
-    expect(String(hermes.bodies[1].instructions)).not.toContain('You are an agent inside Wizard OS')
+    expect(String(hermes.bodies[1].instructions)).not.toContain('Wizard OS box')
   })
 
   it('serves a Wizard UX build under its prefix and refuses dotfiles and traversal', async () => {

@@ -75,6 +75,11 @@ const server = createWizardServer({
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
+  // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
+  wizardOsHome: osHome,
+  ...(process.env.WIZARD_MCP_TOKEN ? { mcpToken: process.env.WIZARD_MCP_TOKEN } : {}),
+  ...(process.env.WIZARD_AGENT_BRIDGE === 'off' ? { agentBridge: false } : {}),
+  threadAppsStatePath: process.env.WIZARD_THREAD_APPS_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-apps.json'),
   appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.

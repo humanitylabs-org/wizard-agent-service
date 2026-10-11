@@ -21,10 +21,11 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
-import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter, wizardOsInstructions } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 import { createMediaFiles } from './media-files.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -219,7 +220,7 @@ function directBody(method, pathname, body, contract, osInstructions = '', noteF
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [runInstructions(contract) + osInstructions, typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
+    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -1849,8 +1850,31 @@ export function createWizardServer(options = {}) {
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
-  // Installed Wizard OS apps, re-read from apps.json for every run (see wizardOsInstructions).
-  const osInstructions = () => appsJsonPath ? wizardOsInstructions({ appsJsonPath, mcpAddress: options.appsMcpAddress, skillsInline: options.appsSkillsInline }) : ''
+  // Wizard OS agent bridge (spec/AGENT_BRIDGE.md): the `wizard` MCP gateway, the kernel and the pointer skills,
+  // all from apps.json. Per run the agent gets the kernel, or, when the wizard-os Hermes plugin already puts the
+  // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
+  // thread started.
+  const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  const bridge = appsJsonPath && options.agentBridge !== false
+    ? createAgentBridge({
+      appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
+      mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
+      fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
+      log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
+    })
+    : null
+  const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
+  const osInstructions = (sessionId) => {
+    if (!bridge) return ''
+    const apps = bridge.apps()
+    const { settings } = readSettings(settingsPath)
+    if (settings.agent.adapter === 'hermes-plugin') {
+      const before = threadApps.take(sessionId, bridge.snapshot())
+      const delta = renderDelta(appsDelta(apps, before))
+      return delta ? `\n\n${delta}` : ''
+    }
+    return apps.length ? `\n\n${renderKernel(apps)}` : ''
+  }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
@@ -2367,7 +2391,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions(), runTitleNote)
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -2778,6 +2802,26 @@ export function createWizardServer(options = {}) {
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/mcp') {
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        await bridge.handle(request, response)
+        return
+      }
+      if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
+        const tokenOk = Boolean(bearer) && bearer === (options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome, create: false }))
+        if (!tokenOk && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
+        const context = await bridge.kernel({ harness })
+        if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
+        else {
+          const body = Buffer.from(context.text)
+          response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+          response.end(body)
+        }
         return
       }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
@@ -3409,7 +3453,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions(), runTitleNote)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -3695,6 +3739,7 @@ export function createWizardServer(options = {}) {
     }
   })
   if (runQueue) server.once('close', () => runQueue.close())
+  if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false && hermesStatePath) {
     let selfOrigin = ''
