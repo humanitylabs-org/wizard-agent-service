@@ -4,7 +4,7 @@ id: wizard-shell
 name: Wizard
 type: view
 category: interface
-version: 0.1.0
+version: 0.2.0
 summary: "The Wizard shell: chats, launcher, voice and apps on top of Hermes Agent."
 icon: icon.png
 license: MIT

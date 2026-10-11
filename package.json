@@ -1,6 +1,6 @@
 {
   "name": "wizard-agent-service",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Wizard Agent Service: the back end Wizard front ends talk to. Sits in front of Hermes Agent and owns threads, runs, steers, approvals, files, read state and voice recovery.",
   "type": "module",

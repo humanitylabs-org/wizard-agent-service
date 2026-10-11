@@ -1,6 +1,6 @@
 services:
   wizard-shell:
-    image: ${WIZARD_SHELL_IMAGE:-ghcr.io/humanitylabs-org/wizard-shell:0.1.0}
+    image: ${WIZARD_SHELL_IMAGE:-ghcr.io/humanitylabs-org/wizard-shell:0.2.0}
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
