@@ -1,5 +1,7 @@
-node_modules/
+*.pyc
 .env.local
 .ui-live/
-ux/
 .ux-src/
+__pycache__/
+node_modules/
+ux/

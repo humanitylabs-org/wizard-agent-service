@@ -62,6 +62,9 @@ export function normalizeSettings(raw) {
     },
     agent: {
       name: cleanText(agent.name, 40) || DEFAULT_AGENT_NAME,
+      // 'hermes-plugin': the wizard-os Hermes plugin puts the Wizard OS kernel in the agent's system prompt, so
+      // runs carry only app changes. '' (any other harness): every run carries the full kernel.
+      adapter: agent.adapter === 'hermes-plugin' ? 'hermes-plugin' : '',
     },
     clock: {
       // Empty means "use the device's own time zone"; that is right for a person carrying a phone.

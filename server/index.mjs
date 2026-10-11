@@ -20,7 +20,9 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 
 const port = Number(process.env.WIZARD_PORT || 8787)
 const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
-const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/state.db') : '')
+// Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
+// spec/AGENT_BRIDGE.md "Agent adapter" lists them.
+const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
 const hermesHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
 const osHome = wizardOsHome()
 const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
@@ -37,7 +39,6 @@ const server = createWizardServer({
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
   hermesStatePath,
-  sessionDbPath: hermesStatePath,
   canonicalSessionListing: true,
   helmDbPath: process.env.WIZARD_HELM_DB_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/data/apps/helm/helm.db') : ''),
   hermesKey: key,
@@ -74,7 +75,14 @@ const server = createWizardServer({
   mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
+  kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
+  filesRoot: process.env.WIZARD_FILES_ROOT || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
+  // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
+  wizardOsHome: osHome,
+  ...(process.env.WIZARD_MCP_TOKEN ? { mcpToken: process.env.WIZARD_MCP_TOKEN } : {}),
+  ...(process.env.WIZARD_AGENT_BRIDGE === 'off' ? { agentBridge: false } : {}),
+  threadAppsStatePath: process.env.WIZARD_THREAD_APPS_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-apps.json'),
   appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
