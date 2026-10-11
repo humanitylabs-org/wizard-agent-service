@@ -39,3 +39,4 @@ describe('canonical session listing over Hermes HTTP', () => {
     expect((await readCanonicalSessionsHttp(request, { now, limit: 250 })).length).toBe(250)
   })
 })
+

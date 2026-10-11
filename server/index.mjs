@@ -20,7 +20,9 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 
 const port = Number(process.env.WIZARD_PORT || 8787)
 const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
-const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/state.db') : '')
+// Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
+// spec/AGENT_BRIDGE.md "Agent adapter" lists them.
+const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
 const hermesHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
 const osHome = wizardOsHome()
 const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
@@ -37,7 +39,6 @@ const server = createWizardServer({
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
   hermesStatePath,
-  sessionDbPath: hermesStatePath,
   canonicalSessionListing: true,
   helmDbPath: process.env.WIZARD_HELM_DB_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/data/apps/helm/helm.db') : ''),
   hermesKey: key,

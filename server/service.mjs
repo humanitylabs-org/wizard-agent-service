@@ -1889,7 +1889,6 @@ export function createWizardServer(options = {}) {
   //   turn, exactly as on a stock Hermes. Lets an owner run the stock behaviour on a forked Hermes.
   if (!['require', 'prefer', 'off', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer, off or unchecked')
   const sessionMessageCache = new Map()
-  const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
   // Hermes reads go over its HTTP API. Only what stock Hermes does not serve (archived threads,
   // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
@@ -2546,7 +2545,9 @@ export function createWizardServer(options = {}) {
   }
   // ---- Thread titles (thread-titles.mjs): the agent's status-line title renames a thread once per
   // final reply, only when it names a different project or feature; James's own renames lock it.
-  const titleDbPath = () => hermesStatePath || sessionDbPath
+  // Title authority (title_source) is not on stock /api/sessions/<id>, so this read stays on the
+  // WIZARD_HERMES_STATE_PATH fallback; without it agent titling is off (spec/AGENT_BRIDGE.md).
+  const titleDbPath = () => hermesStatePath
   const titleLocked = (current, record) => {
     if (record?.locked) return true
     if (!current?.title) return false
