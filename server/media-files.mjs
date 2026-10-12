@@ -63,12 +63,6 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     list(limit = 100) {
       return load().slice(-limit).reverse().map((record) => publicRecord(record))
     },
-    /** The service's own path of a stored file (never sent to the agent or a browser). */
-    localPath(id) {
-      if (!ID.test(String(id))) return null
-      const record = load().find((item) => item.id === id)
-      return record ? hostPath(record) : null
-    },
     get(id, trusted = false) {
       if (!ID.test(String(id))) return null
       const record = load().find((item) => item.id === id)

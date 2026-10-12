@@ -1298,7 +1298,8 @@ function nativeImageParts(files) {
     if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) continue
     if (file.bytes < 1 || file.bytes > WIZARD_AGENT_IMAGE_LIMIT || totalBytes + file.bytes > WIZARD_AGENT_IMAGE_LIMIT) continue
     let bytes
-    try { bytes = readFileSync(file.localPath ?? file.trusted_path) } catch { continue }
+    // Media-folder files carry the service's own path; Inbox files are read where the Inbox put them.
+    try { bytes = readFileSync(Object.hasOwn(file, 'localPath') ? file.localPath : file.trusted_path) } catch { continue }
     if (bytes.length !== file.bytes || file.sha256 && createHash('sha256').update(bytes).digest('hex') !== file.sha256) continue
     if (imageMimeFromMagic(bytes) !== mime) continue
     parts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } })
@@ -2764,7 +2765,8 @@ export function createWizardServer(options = {}) {
       if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
       const file = safeFile(record, true)
       if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
-      return { ...file, userVisible: true, localPath: mediaFiles.localPath(id) }
+      // The service reads its own copy from the same record the agent path came from (never the agent path).
+      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
     }
     const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
     const file = safeFile(payload.file, true)
