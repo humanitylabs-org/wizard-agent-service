@@ -27,6 +27,8 @@ import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegatio
 import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { createAppsViewsRoutes } from './wizard-apps-views.mjs'
+import { createAppLifecycleRoutes, localOwnerAccess } from './app-lifecycle.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -2761,9 +2763,17 @@ export function createWizardServer(options = {}) {
     return file
   }))
 
+  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : localOwnerAccess)
+  const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
+  const appLifecycle = createAppLifecycleRoutes({
+    appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
+    access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
+  })
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      if (await appsViews(request, response, url)) return
+      if (await appLifecycle(request, response, url)) return
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)

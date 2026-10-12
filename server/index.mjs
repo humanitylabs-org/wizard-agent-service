@@ -66,6 +66,8 @@ const server = createWizardServer({
   joinedDelegation,
   settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  appManagerUrl: process.env.WIZARD_APP_MANAGER_URL || '',
+  appManagerToken: process.env.WIZARD_APP_MANAGER_TOKEN || '',
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
