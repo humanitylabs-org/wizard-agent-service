@@ -2782,6 +2782,12 @@ export function createWizardServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      // Optional harness adapters have their own admission and state. Never send
+      // their input through Hermes personality, Wizard run instructions or locks.
+      if (url.pathname.startsWith('/wizard/agents/') && options.agentRouter) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (await options.agentRouter(request, response)) return
+      }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)
