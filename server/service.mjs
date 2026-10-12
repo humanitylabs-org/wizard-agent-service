@@ -29,6 +29,7 @@ import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { createAppsViewsRoutes } from './wizard-apps-views.mjs'
 import { createAppLifecycleRoutes, localOwnerAccess } from './app-lifecycle.mjs'
+import { createAgentAppActions } from './agent-app-actions.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1829,6 +1830,14 @@ export function createWizardServer(options = {}) {
       fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
+      // The owner's agent installs catalogue apps through the same App Manager bridge the Store uses.
+      appActions: options.appManagerUrl && options.appManagerToken ? createAgentAppActions({
+        managerUrl: options.appManagerUrl, managerToken: options.appManagerToken, managerHosts: options.appManagerHosts || [],
+        fetchImpl: options.appManagerFetch ?? fetchImpl, ...(options.appIndexUrl ? { indexBase: options.appIndexUrl } : {}),
+        ...(options.appIndexFetch ? { indexFetch: options.appIndexFetch } : {}),
+        log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
+      }) : null,
+      ...(options.bridgeToolWaitMs !== undefined ? { toolWaitMs: options.bridgeToolWaitMs } : {}),
     })
     : null
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null

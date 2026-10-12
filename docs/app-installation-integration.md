@@ -18,7 +18,17 @@ Browser obtains HttpOnly SameSite owner cookie and CSRF via `GET /wizard/v1/app-
 
 Projection routes each running registered app view to `/apps/<id>/`, resolved from its server-only loopback upstream. Constrained redirects and relative nested assets are preserved; owner auth/cookies are not forwarded. Browser app writes require same origin. Cookie-authenticated apps, root-absolute asset paths and WebSockets require app-specific base-path adaptation; they are not silently converted into reachable proof.
 
-Every completed lifecycle write calls `bridge.refresh()` without Hermes restart; registry atomic updates cause the existing gateway watcher/pointer jobs to refresh. Launcher registry now exposes `refresh` and adapter reloads immediately. UI designs remain preview lane-owned.
+Every completed lifecycle write calls `bridge.refresh()` without Hermes restart; registry atomic updates cause the existing gateway watcher/pointer jobs to refresh. Launcher registry now exposes `refresh` and adapter reloads immediately; it also polls `/wizard/v1/apps` every 5 s while visible (one timer, none while hidden) and rebuilds only when the list changed, so agent and `wam` installs appear without a reload. UI designs remain preview lane-owned.
+
+## Agent installs (the owner-agent gateway)
+
+The existing `wizard_apps` meta tool on the one `/wizard/mcp` gateway takes an optional `action` when the App Manager bridge is configured (`server/agent-app-actions.mjs`); without it the tool is the plain installed list, as before. No new server, connection, per-app reconnect or Hermes restart.
+
+- `installed` (default): the installed list. `search` + `query`: the configured App Index only (`WIZARD_APP_INDEX_URL`, else the public index), projected to id, name, summary, jobs, uses and installed state; shell, Agent Service and agent apps are never offered; fixture entries are labelled "test catalogue entry".
+- `install` + `app`: refuses ids the configured index does not list, system apps, bad ids/forms/keys. Reads the status from the bridge: running = nothing to do; stopped = `start`; missing = `install`. Mutations use the bridge's journaled lifecycle route with one Idempotency-Key per logical operation. The key is kept only while the outcome is uncertain (no reply, non-JSON, `operation_unconfirmed`, `terminal_status_unconfirmed`, `projection_refresh_failed`, `completion_unconfirmed`), so the agent's retry replays rather than installing twice; the answer says "NOT confirmed" and never success. A definitive failure releases the key. `dependencies_required` names the missing apps and installs nothing else. Success is the bridge's terminal answer plus a status read back from the bridge; the gateway then re-reads apps.json, waits up to 45 s for the app's MCP server, sends `tools/list_changed` again when its tools first answer, rewrites pointers, and returns the tool names.
+- `call` + `tool` + `arguments`: runs an installed app's tool through the same gateway when the agent's tool list does not have it yet.
+
+Authority: installs need the gateway token (the Hermes slot); `/wizard/mcp` refuses anything proxied from off the box, and the install path refuses unless the gateway's own authenticated call asked. This is the configured owner-agent gateway, not a public API; app containers and browsers never hold the token. The manager token, URLs, repos and install sources never appear in a result or log. The fixed kernel is unchanged (byte parity with the plugin); the guidance is in the tool description and its results.
 
 ## Receipts so far
 

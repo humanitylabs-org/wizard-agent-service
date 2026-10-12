@@ -75,16 +75,19 @@ function sameOrigin(req, hosts) {
   } catch { return false }
 }
 
+/** The App Manager bridge origin: plain HTTP on loopback, or a declared bridge host (fresh mode). Throws otherwise. */
+export function managerOrigin(managerUrl, managerHosts = []) {
+  const u = new URL(managerUrl)
+  if (u.protocol !== 'http:' || ![...LOOPBACK_HOSTS, ...managerHosts].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') throw new Error('App Manager bridge must be a loopback HTTP origin')
+  return u.origin
+}
+
 export function createAppLifecycleRoutes({
   managerUrl = '', managerToken = '', appsJsonPath = '', access = localOwnerAccess, fetchImpl = fetch,
   refresh = () => {}, now = Date.now, allowedHosts = [], controlOrigins = [], appsOrigin = '',
   upstreamHosts = [], managerHosts = [], reservedPorts = [], role = 'control',
 } = {}) {
-  if (managerUrl) {
-    const u = new URL(managerUrl)
-    if (u.protocol !== 'http:' || ![...LOOPBACK_HOSTS, ...managerHosts].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') throw new Error('App Manager bridge must be a loopback HTTP origin')
-    managerUrl = u.origin
-  }
+  if (managerUrl) managerUrl = managerOrigin(managerUrl, managerHosts)
   if (appsOrigin) {
     const u = new URL(appsOrigin)
     if (!['https:', 'http:'].includes(u.protocol) || u.username || u.password || u.pathname !== '/' || u.search || u.hash) throw new Error('apps origin must be a bare origin')
