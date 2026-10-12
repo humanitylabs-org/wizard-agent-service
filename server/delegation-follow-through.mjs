@@ -59,7 +59,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
  * normal admission path. `enabled()` is checked every tick so it turns itself off on agents that
  * join delegated work inside the run.
  */
-export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, allowSession = () => true, intervalMs = 5000, log = () => {} }) {
+export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, allowSession = () => true, eligible = async () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
   let busy = false
   const tick = async () => {
@@ -72,6 +72,7 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, al
       const receipts = findIdleUndeliveredHelperReceipts(sessionDbPath).filter(row => !completionSessions.has(row.sessionId))
       const touchedSessions = new Set()
       for (const pending of [...completions, ...receipts].filter(row => allowSession(row.sessionId))) {
+        if (!await eligible(pending.sessionId)) continue
         if (touchedSessions.has(pending.sessionId)
           || !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
         touchedSessions.add(pending.sessionId)

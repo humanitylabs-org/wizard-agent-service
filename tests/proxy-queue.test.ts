@@ -50,6 +50,13 @@ describe('Wizard proxy capacity queue', () => {
     expect(wizardDispatchHealthy({ cpuCount: 8, oneMinuteLoad: 4, pressureText: 'some avg10=82.00 avg60=0.00 avg300=0.00 total=0' })).toBe(false)
   })
 
+  const admission = (res: any, body: any, runId: string, streaming: boolean) => {
+    if (streaming) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(`event: run.started\ndata: ${JSON.stringify({run_id:runId,runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}})}\n\n`);
+    } else {res.writeHead(202, {'Content-Type':'application/json'}); res.end(JSON.stringify({run_id:runId,session_id:body.session_id,status:'running'}));}
+  }
+
   it('caps admission, projects FIFO queue state, drains automatically, and preserves the public run identity in SSE', async () => {
     const sessions = ['wizard_one', 'wizard_two', 'wizard_three', 'wizard_four'].map((id) => ({
       id,
@@ -64,7 +71,7 @@ describe('Wizard proxy capacity queue', () => {
     let admissions = 0
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')
-      if (req.method === 'POST' && url.pathname === '/v1/runs') {
+      if (req.method === 'POST' && (url.pathname === '/v1/runs' || url.pathname.endsWith('/chat/stream'))) {
         const chunks: Buffer[] = []
         for await (const chunk of req) chunks.push(Buffer.from(chunk))
         const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -77,8 +84,7 @@ describe('Wizard proxy capacity queue', () => {
           instructions: value.instructions,
           delegationDelivery: value.delegation_delivery,
         })
-        res.writeHead(202, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ object: 'run', run_id: runId, session_id: value.session_id, status: 'running' }))
+        admission(res, value, runId, url.pathname.endsWith('/chat/stream'))
         return
       }
       const event = url.pathname.match(/^\/v1\/runs\/([^/]+)\/events$/)
@@ -283,10 +289,10 @@ describe('Wizard proxy capacity queue', () => {
         res.writeHead(201).end(JSON.stringify({ session: { id: workerSessionId } })); return
       }
       if (req.method === 'PATCH' && sessionDetail) { res.end('{}'); return }
-      if (req.method === 'POST' && url.pathname === '/v1/runs') {
+      if (req.method === 'POST' && (url.pathname === '/v1/runs' || url.pathname.endsWith('/chat/stream'))) {
         admissions += 1
         const runId = body.session_id === workerSessionId ? workerRunId : ackRunId
-        res.writeHead(202).end(JSON.stringify({ run_id: runId, session_id: body.session_id, status: 'running' })); return
+        admission(res, body, runId, url.pathname.endsWith('/chat/stream')); return
       }
       if (req.method === 'GET' && url.pathname === `/v1/runs/${ackRunId}`) {
         res.end(JSON.stringify({ run_id: ackRunId, session_id: operatorSessionId, status: 'completed', output: 'Delegated to GLM-5.3.' })); return
@@ -421,16 +427,16 @@ describe('Wizard proxy capacity queue', () => {
         sessions.add(body.id); res.writeHead(201).end(JSON.stringify({ session: { id: body.id } })); return
       }
       if (req.method === 'PATCH' && sessionDetail) { res.end('{}'); return }
-      if (req.method === 'POST' && url.pathname === '/v1/runs') {
+      if (req.method === 'POST' && (url.pathname === '/v1/runs' || url.pathname.endsWith('/chat/stream'))) {
         const key = String(req.headers['idempotency-key'] ?? '')
         if (String(body.session_id).startsWith('wizardopw_')) {
           let runId = idempotentRuns.get(key)
           if (!runId) { runId = 'worker-run'; idempotentRuns.set(key, runId); workerAdmissions += 1 }
-          res.writeHead(202).end(JSON.stringify({ run_id: runId, session_id: body.session_id, status: 'running' })); return
+          admission(res, body, runId, url.pathname.endsWith('/chat/stream')); return
         }
         ackAttempts += 1
         if (ackAttempts === 1) { res.writeHead(503).end('{}'); return }
-        res.writeHead(202).end(JSON.stringify({ run_id: 'ack-run', session_id: body.session_id, status: 'running' })); return
+        admission(res, body, 'ack-run', url.pathname.endsWith('/chat/stream')); return
       }
       const runDetail = url.pathname.match(/^\/v1\/runs\/([^/]+)$/)
       if (req.method === 'GET' && runDetail) {
