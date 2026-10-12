@@ -2764,7 +2764,7 @@ export function createWizardServer(options = {}) {
   }))
 
   const appOwners = (options.appOwnerLogins || []).map((login) => String(login).trim().toLowerCase()).filter(Boolean)
-  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : (req) => localOwnerAccess(req, appOwners))
+  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : (req) => localOwnerAccess(req, appOwners, options.appTrustedProxyIps || []))
   const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
   const appRouteOptions = {
     appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
@@ -2782,6 +2782,13 @@ export function createWizardServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      // Standalone Store reads canonical Service routes. No writable or arbitrary-upstream alias.
+      const storePrefix = `${uxPrefix}store-data/`
+      if (url.pathname.startsWith(storePrefix)) {
+        const route = url.pathname.slice(storePrefix.length)
+        if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
+        url.pathname = '/' + route
+      }
       if (await appsViews(request, response, url)) return
       if (await appLifecycle(request, response, url)) return
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
@@ -2795,6 +2802,7 @@ export function createWizardServer(options = {}) {
           settings: publicSettings, settingsSource: source,
           capabilities: {
             voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
+            app_installation: Boolean(options.appManagerUrl && options.appManagerToken),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })

@@ -76,6 +76,7 @@ const server = createWizardServer({
   appsOrigin: process.env.WIZARD_APPS_ORIGIN || '',
   appUpstreamHosts: list(process.env.WIZARD_APP_UPSTREAM_HOSTS),
   appOwnerLogins: list(process.env.WIZARD_APP_OWNER_LOGINS),
+  appTrustedProxyIps: list(process.env.WIZARD_APP_TRUSTED_PROXY_IPS),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',

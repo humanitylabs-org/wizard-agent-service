@@ -11,6 +11,7 @@
 // - Every route checks the Host header against the configured trusted hosts first (DNS-rebinding fence).
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { isIP } from 'node:net'
 
 const ID = '[a-z0-9][a-z0-9-]{0,63}'
 const LIFE = new RegExp(`^/api/app-lifecycle/(${ID})(?::wizardapps)?/(install|start|stop|restart|update|uninstall)$`, 'u')
@@ -28,8 +29,9 @@ const hostName = (host) => { try { return new URL(`http://${String(host || '')}`
 
 /** Direct loopback callers, or a loopback reverse proxy (Tailscale Serve) that names a tailnet principal.
  * The proxy must strip client-supplied identity headers; `owners` optionally pins the accepted logins. */
-export function localOwnerAccess(request, owners = []) {
-  if (!loopbackIp(request.socket?.remoteAddress)) return false
+export function localOwnerAccess(request, owners = [], trustedProxyIps = []) {
+  const peer = String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!loopbackIp(peer) && !trustedProxyIps.some(ip => isIP(ip) && ip === peer)) return false;
   const h = request.headers
   const forwarded = h.forwarded || h['x-forwarded-for'] || h['x-forwarded-host']
   const login = String(h['tailscale-user-login'] || '').trim().toLowerCase()
