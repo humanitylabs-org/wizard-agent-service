@@ -2491,7 +2491,7 @@ export function createWizardServer(options = {}) {
     request: path => hermesJson(path), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
-    busy: id => readSessionTurnHeld(hermesStatePath || sessionDbPath, id),
+    busy: id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true,
   })
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
@@ -3695,7 +3695,10 @@ export function createWizardServer(options = {}) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
-          if (backgroundResults) result = await backgroundResults.project(result)
+          if (backgroundResults) {
+            try { result = await backgroundResults.project(result) }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          }
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = decorateSessionTitles(result, operator)
         }

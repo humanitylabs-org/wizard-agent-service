@@ -27,6 +27,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
   const reads = new Map()
+  const clicks = new Map()
   const recent = async (id, fresh = false, revision = '') => {
     const previous = reads.get(id)
     if (!fresh && previous?.revision === revision) return previous.rows
@@ -133,7 +134,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         const pending = bySession.get(id)
         if (!pending) return row
         // Ready/manual is separate from Working: never pretend a stopped parent or finished helper is running.
-        return { ...row, wizard_background_result: publicRecord(pending), wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result', subject: '', title: '' } }
+        return { ...row, status: 'completed', wizard_waiting_on: '', wizard_background_result: publicRecord(pending), wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result', subject: '', title: '' } }
       }
       for (const key of ['data', 'sessions']) {
         if (Array.isArray(payload[key])) payload[key] = payload[key].map(decorate)
@@ -142,6 +143,14 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       return Buffer.from(JSON.stringify(payload))
     },
     async continue(id, sessionId) {
+      const key = `${sessionId}/${id}`
+      const pending = clicks.get(key)
+      if (pending) { const result = await pending; return { ...result, replayed: true } }
+      const work = this.continueOnce(id, sessionId).finally(() => { clicks.delete(key) })
+      clicks.set(key, work)
+      return work
+    },
+    async continueOnce(id, sessionId) {
       if (!/^bg_[0-9a-f]{32}$/.test(id) || !WIZARD.test(sessionId)) throw error('invalid recovery', 400)
       const q = queue()
       if (!q) throw error('durable admission unavailable', 503)
@@ -165,7 +174,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (!marker) return body
       const rows = await recent(marker.read_id, true)
       const snap = snapshot(rows, marker.at)
-      if (snap.moved || snap.gated || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id)) throw error('recovery became stale before dispatch')
+      if (snap.moved || snap.gated || busy(body.session_id) || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id)) throw error('recovery became stale before dispatch', 400)
       const { _wizard_background_recovery: _internal, ...forward } = body
       return forward
     },
