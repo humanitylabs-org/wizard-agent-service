@@ -317,6 +317,30 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect((await f.click(pending)).status).toBe(409)
     expect(f.calls).toHaveLength(0)
   })
+  it('a visible dropped receipt is really read and explicitly continued through the durable queue', async () => {
+    const f = await fixture({ count: 1, history: true }); f.receipt('wizard_manual_0')
+    const result = (await f.list()).body
+    expect(result.scan_complete).toBe(true)
+    expect(result.results).toHaveLength(2)
+    const transcript = result.results.find((r: any) => r.id === (result.results[0].id))
+    // The receipt and transcript have different delegation identities. Their order follows discovery.
+    const receipt = result.results[1]
+    expect(receipt.id).not.toBe(transcript.id)
+    expect((await f.click(receipt)).status).toBe(202)
+    await settled(f, 1)
+    expect(f.calls[0].input).toContain('[Wizard follow-through] Recovered helper receipt deleg_saved_receipt\n')
+    expect(f.calls[0].input).toContain('Saved receipt fixture findings.')
+    expect(f.calls[0].session_id).toBe('wizard_manual_0')
+  })
+  it('object tool payload consumption prevents an already-collected result being offered twice', async () => {
+    const f = await fixture({ count: 1 }), pending = (await f.list()).body.results[0]
+    f.rows.get('wizard_manual_0')!.push({ id: 3, role: 'tool', content: { delegation_id: 'deleg_manual_0', results: [{ summary: 'Already collected' }] }, timestamp: f.at })
+    f.sessions[0].message_count += 1
+    f.advance(1000)
+    expect((await f.list()).body.results).toHaveLength(0)
+    expect((await f.click(pending)).status).toBe(409)
+    expect(f.calls).toHaveLength(0)
+  })
   it('one unreadable dropped-receipt thread cannot hide a valid transcript result', async () => {
     const f = await fixture({ count: 2, history: true }); f.receipt('wizard_manual_1'); f.badHistory.add('wizard_manual_1')
     const result = (await f.list()).body

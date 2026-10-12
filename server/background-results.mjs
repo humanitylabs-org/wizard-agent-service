@@ -39,7 +39,8 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       id: row.id, role: row.role, timestamp: row.timestamp, finish_reason: row.finish_reason, display_kind: row.display_kind,
       // Native photos/voice are real human turns too. Keep their boundary without retaining base64 media or
       // unrelated reasoning in the discovery cache. Completion text is retained for the explicit replay.
-      content: textOf(row) || (row.role === 'user' && Array.isArray(row.content) && row.content.length ? '[Human attachment]' : ''),
+      content: row.role === 'tool' ? (typeof row.content === 'string' ? row.content : JSON.stringify(row.content ?? ''))
+        : textOf(row) || (row.role === 'user' && Array.isArray(row.content) && row.content.length ? '[Human attachment]' : ''),
       tool_calls: row.tool_calls,
     }))
     reads.set(id, { revision, rows })
