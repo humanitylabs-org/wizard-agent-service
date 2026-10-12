@@ -216,7 +216,7 @@ export function clientViewContext(value) {
   const raw = Array.isArray(value) ? value[0] : value
   if (typeof raw !== 'string') return ''
   // eslint-disable-next-line no-control-regex
-  const note = raw.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const note = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
   if (!note.startsWith(VIEW_CONTEXT_PREFIX)) return ''
   return `${VIEW_CONTEXT_FRAME}\n${note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note}`
 }
@@ -1825,14 +1825,16 @@ function sttNoSpeech(status, raw) {
   try { return /^no speech detected$/i.test(String(JSON.parse(raw.toString('utf8'))?.detail ?? '').trim()) } catch { return false }
 }
 
-// Whisper scores every segment's chance of being silence (no_speech_prob). With verbose_json, segments it
-// scores above 0.6 (Whisper's own no-speech threshold) are its guesses at silence, e.g. "you" for an empty
-// take, and are dropped. Replies without segments (plain json, Wizard's own STT) keep their text unchanged.
+// Whisper's own silence rule (openai-whisper / faster-whisper): a segment is silence when its no_speech_prob is
+// above 0.6 AND the decode was unsure (avg_logprob below a threshold). Whisper uses -1.0, which keeps the word it
+// invents for an empty take ("you": no_speech_prob 0.878, avg_logprob -0.82 measured on Speaches); -0.5 drops
+// that while a confident short reply ("yes", "stop") decodes far above it and is kept. Replies without
+// segments (plain json, Wizard's own STT) keep their text unchanged.
 export function speechText(value) {
   const segments = Array.isArray(value?.segments) ? value.segments : null
   if (!segments) return typeof value?.text === 'string' ? value.text : ''
   return segments
-    .filter((s) => typeof s?.text === 'string' && !(Number(s.no_speech_prob) > 0.6))
+    .filter((s) => typeof s?.text === 'string' && !(Number(s.no_speech_prob) > 0.6 && Number(s.avg_logprob) < -0.5))
     .map((s) => s.text).join('').replace(/\s+/g, ' ')
 }
 
@@ -1943,7 +1945,10 @@ export function createWizardServer(options = {}) {
         value = { reachable: true, ready: false, provider: models.ok ? 'local' : '', name: models.ok ? 'No voice model installed' : 'Voice unavailable', model: '', attested: false }
       }
     }
-    sttProbe = { value, at: Date.now() }
+    // A brief (bootstrap) probe that times out while the transcriber is busy must not hide a voice that was
+    // ready moments ago; and an unreachable result is only trusted for 5 s, so voice returns quickly.
+    if (!value.reachable && timeoutMs < 2000 && sttProbe.value?.ready && Date.now() - sttProbe.at < 120_000) return sttProbe.value
+    sttProbe = { value, at: value.reachable ? Date.now() : Date.now() - 25_000 }
     return value
   }
   const sttAvailable = async () => (await sttReadiness()).ready
@@ -3027,7 +3032,8 @@ export function createWizardServer(options = {}) {
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal })
           const raw = Buffer.from(await upstream.arrayBuffer())
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
-          if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
+          // verbose_json carries per-segment tokens, several times the plain reply; long takes need room.
+          if (!upstream.ok || raw.length > (sttInfo.segments ? 4 * 1024 * 1024 : 256 * 1024)) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
           const text = speechText(value).trim().slice(0, 64_000)
           // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).

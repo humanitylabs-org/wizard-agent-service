@@ -131,6 +131,13 @@ describe('voice readiness: bootstrap and status give one answer', () => {
     expect(await spoken.json()).toMatchObject({ text: 'hello there' })
   })
 
+  it("a confident short reply is kept even when Whisper's window scores high on silence", async () => {
+    const { speechText } = await import('../server/service.mjs')
+    expect(speechText({ text: 'Yes.', segments: [{ text: ' Yes.', no_speech_prob: 0.72, avg_logprob: -0.21 }] })).toBe(' Yes.')
+    expect(speechText({ text: 'you', segments: [{ text: ' you', no_speech_prob: 0.878, avg_logprob: -0.82 }] })).toBe('')
+    expect(speechText({ text: 'plain' })).toBe('plain')
+  })
+
   it('a transcriber whose models carry no task keeps the plain json reply', async () => {
     Object.assign(stt, { health: 'none', speech: true, models: ['whisper-1'] })
     const base = await start()
