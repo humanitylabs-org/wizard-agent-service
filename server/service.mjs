@@ -205,9 +205,6 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
-<<<<<<< HEAD
-function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
-=======
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
 // shell's own screen note ("[Wizard OS context] … Window in front: … Visible on screen: …"), which tells the
 // agent what the user was looking at when they spoke. It rides after the contract, bounded, as background only.
@@ -221,8 +218,7 @@ export function clientViewContext(value) {
   return note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note
 }
 
-function directBody(method, pathname, body, contract, noteFor = null) {
->>>>>>> 4f9f85f8e47afbff9f740556b87f3f9ce7dfb247
+function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -239,11 +235,7 @@ function directBody(method, pathname, body, contract, noteFor = null) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-<<<<<<< HEAD
-    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
-=======
-    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
->>>>>>> 4f9f85f8e47afbff9f740556b87f3f9ce7dfb247
+    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
