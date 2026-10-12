@@ -35,19 +35,28 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     reads.set(id, { revision, rows })
     return rows
   }
+  const threadRows = async (root, readId, fresh = false, revision = '') => {
+    const rows = await recent(readId, fresh, revision)
+    if (root === readId) return rows
+    const rootRows = await recent(root, fresh, revision)
+    const unique = new Map()
+    for (const row of [...rows, ...rootRows]) unique.set(String(row.id), row)
+    return [...unique.values()]
+  }
   const admitted = key => queue()?.byIdempotencyKey('direct', key)
   const isBusy = id => busy(id) || (queue()?.latestProjections([id]) || []).some(row => ACTIVE.has(row.status))
-  const consumed = (rows, delegationId, at, messageId) => rows.some(row => {
+  const consumed = (rows, delegationId, at, messageId, sourceKind = 'transcript') => rows.some(row => {
     if (delegationId && row.role === 'user' && textOf(row).includes(`${RECEIPT_PREFIX}${delegationId}\n`)) return true
     if (delegationId && Number(row.timestamp) > at && (row.role === 'tool' || row.role === 'assistant' && row.tool_calls?.length)) {
       return JSON.stringify(row.role === 'tool' ? row.content : row.tool_calls).includes(delegationId)
     }
     // Legacy completion without a delegation identity: a later final assistant is its ordinary resolution.
-    return !delegationId && row.role === 'assistant' && Number(row.id) > Number(messageId) && ['stop', 'end_turn'].includes(row.finish_reason)
+    return sourceKind === 'transcript' && row.role === 'assistant' && !row.tool_calls?.length && !['commentary', 'hidden'].includes(row.display_kind)
+      && (Number(row.timestamp) > at || Number(row.id) > Number(messageId)) && ['stop', 'end_turn'].includes(row.finish_reason)
   })
   const acceptable = (candidate, rows) => {
     const snap = snapshot(rows, candidate.at)
-    if (snap.moved || snap.gated || isBusy(candidate.sessionId) || consumed(rows, candidate.delegationId, candidate.at, candidate.messageId)) return null
+    if (snap.moved || snap.gated || isBusy(candidate.sessionId) || isBusy(candidate.readId) || consumed(rows, candidate.delegationId, candidate.at, candidate.messageId, candidate.sourceKind)) return null
     return { ...candidate, boundary: snap.boundary }
   }
   const scan = async () => {
@@ -60,7 +69,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const page = rowsOf(p)
       for (const row of page) {
         const root = String(row._lineage_root_id || row.id || '')
-        if (!WIZARD.test(root) || row.hidden || row.is_internal_child || row.parent_session_id) continue
+        if (!WIZARD.test(root) || row.hidden || row.archived || row.deferred || row.is_internal_child || row.parent_session_id) continue
         const id = String(row.id || '')
         if (!ID.test(id)) continue
         aliases.set(id, root)
@@ -73,8 +82,8 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     }
     for (let offset = 0; offset < sessions.length; offset += 8) {
       await Promise.all(sessions.slice(offset, offset + 8).map(async ({ row, id, root }) => {
-        if (isBusy(root)) return
-        const rows = await recent(id, false, `${row.last_active || row.started_at}:${row.message_count}`)
+        if (isBusy(root) || isBusy(id)) return
+        const rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`)
         for (const message of rows) {
           const text = textOf(message), at = Number(message.timestamp)
           if (message.role !== 'user' || !text.startsWith(PREFIX) || !Number.isFinite(at) || now() / 1000 - at <= 7200 || text.length > 60_000) continue
@@ -82,11 +91,13 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
           const source = delegationId || `message-${id}-${message.id}`
           const key = delegationId ? receiptKey(delegationId) : `wizard-follow-through-${root}-${message.id}`
           if (admitted(key)) continue
-          const candidate = acceptable({ id: identity(root, source), source, sessionId: root, readId: id, at, messageId: message.id, delegationId, key,
+          const candidate = acceptable({ id: identity(root, source), sourceKind: 'transcript', source, sessionId: root, readId: id, at, messageId: message.id, delegationId, key,
             input: delegationId ? `${RECEIPT_PREFIX}${delegationId}\nThe owner pressed Continue for these saved helper findings. Finish the original request under its latest instructions and release authority; verify helper claims yourself.\n\n${text}`
               : `[Wizard follow-through] The owner pressed Continue for the saved result below. Finish the original request under its latest instructions and release authority; verify the findings yourself.\n\n${text}` }, rows)
-          if (candidate) records.push(candidate)
+          if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
         }
+        const cacheEntry = reads.get(id)
+        if (cacheEntry && !records.some(record => record.readId === id)) cacheEntry.rows = []
       }))
     }
     // Optional read-only history opt-in: dropped/pending receipts that never produced a transcript row.
@@ -96,23 +107,25 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (now() / 1000 - receipt.at <= 7200 || admitted(receipt.key)) continue
       const root = aliases.get(receipt.sessionId) || receipt.sessionId
       if (!WIZARD.test(root)) continue
-      const candidate = acceptable({ ...receipt, id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
-        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, await recent(receipt.sessionId))
+      const candidate = acceptable({ ...receipt, sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
+        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, await threadRows(root, receipt.sessionId, true))
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
     }
-    cache = { at: now(), records, sessions: [...roots.values()], complete }
+    for (const id of reads.keys()) if (!aliases.has(id)) reads.delete(id)
+    cache = { at: now(), records, sessions: [...roots.values()], complete, error: false }
     return cache
   }
   const refresh = async (fresh = false) => {
     if (!fresh && cache.at && now() - cache.at < refreshMs) return cache
-    if (!inflight) inflight = scan().finally(() => { inflight = null })
+    if (!inflight) inflight = scan().catch(() => { cache = { ...cache, at: now(), error: true }; return cache }).finally(() => { inflight = null })
     return inflight
   }
   const publicRecord = row => ({ id: row.id, session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
   return {
     async list() {
-      const c = await refresh()
-      const pending = c.records.filter(row => !admitted(row.key))
+      void refresh()
+      const c = cache
+      const pending = c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId) && !isBusy(row.readId))
       const bySession = new Map(pending.map(row => [row.sessionId, row]))
       // Include the minimal public thread metadata for an unresolved result that the normal 30-day display
       // window omitted. Full helper findings and host paths never cross into this listing.
@@ -122,11 +135,12 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         status: 'completed', wizard_background_result: publicRecord(bySession.get(row.id)),
         wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result' },
       }))
-      return { results: pending.map(publicRecord), sessions, scan_complete: c.complete }
+      return { results: pending.map(publicRecord), sessions, scan_complete: !inflight && !c.error && c.complete, scanning: Boolean(inflight), available: !c.error }
     },
     async project(result) {
-      const c = await refresh()
-      const bySession = new Map(c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId)).map(row => [row.sessionId, row]))
+      void refresh()
+      const c = cache
+      const bySession = new Map(c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId) && !isBusy(row.readId)).map(row => [row.sessionId, row]))
       let payload
       try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
       const decorate = row => {
@@ -146,7 +160,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const key = `${sessionId}/${id}`
       const pending = clicks.get(key)
       if (pending) { const result = await pending; return { ...result, replayed: true } }
-      const work = this.continueOnce(id, sessionId).finally(() => { clicks.delete(key) })
+      const work = this.continueOnce(id, sessionId).finally(() => { cache.at = 0; clicks.delete(key) })
       clicks.set(key, work)
       return work
     },
@@ -160,11 +174,11 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const c = await refresh(true)
       const pending = c.records.find(row => row.id === id && row.sessionId === sessionId)
       if (!pending) throw error('recovery no longer matches this thread')
-      const rows = await recent(pending.readId, true)
+      const rows = await threadRows(pending.sessionId, pending.readId, true)
       const current = acceptable(pending, rows)
       if (!current || current.boundary !== pending.boundary) throw error('the thread changed')
       const body = JSON.stringify({ session_id: pending.sessionId, input: pending.input,
-        _wizard_background_recovery: { id, read_id: pending.readId, boundary: pending.boundary, at: pending.at, delegation_id: pending.delegationId || '', message_id: pending.messageId || '' } })
+        _wizard_background_recovery: { id, source_kind: pending.sourceKind, read_id: pending.readId, boundary: pending.boundary, at: pending.at, delegation_id: pending.delegationId || '', message_id: pending.messageId || '' } })
       const result = await q.admit({ runtime: 'direct', sessionId, idempotencyKey: pending.key, requestHash: createHash('sha256').update(`direct\0${body}`).digest('hex'), body, trustedPaths: [] })
       cache.at = 0
       return result
@@ -172,9 +186,11 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     async validateDispatch(body) {
       const marker = body?._wizard_background_recovery
       if (!marker) return body
-      const rows = await recent(marker.read_id, true)
+      let rows
+      try { rows = await threadRows(body.session_id, marker.read_id, true) }
+      catch { throw error('history is temporarily unavailable', 503) }
       const snap = snapshot(rows, marker.at)
-      if (snap.moved || snap.gated || busy(body.session_id) || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id)) throw error('recovery became stale before dispatch', 400)
+      if (snap.moved || snap.gated || (busy(body.session_id) || busy(marker.read_id)) || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
       const { _wizard_background_recovery: _internal, ...forward } = body
       return forward
     },

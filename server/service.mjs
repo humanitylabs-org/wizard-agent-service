@@ -2491,7 +2491,7 @@ export function createWizardServer(options = {}) {
     request: path => hermesJson(path), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
-    busy: id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true,
+    busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
   })
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
