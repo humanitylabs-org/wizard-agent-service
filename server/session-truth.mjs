@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import { readUndeliveredHelperReceipts } from './delegation-receipts.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -132,6 +133,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         if (current) current.helpersRunning = Number(row.n) || 0
       }
     } catch { /* agents without background delegation */ }
+    // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
+    // Read delivery receipts independently of the latest transcript row and execution state.
+    for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
+      const current = truth.get(receipt.sessionId)
+      if (current) current.helperResultUnanswered = true
+    }
     try {
       const newestRow = db.prepare(`
         SELECT role, content, timestamp FROM messages

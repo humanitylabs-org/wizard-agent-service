@@ -11,6 +11,7 @@
 // at most once (idempotency key = session + row id).
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import { findIdleUndeliveredHelperReceipts } from './delegation-receipts.mjs'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
@@ -57,13 +58,16 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, in
     busy = true
     try {
       if (!(await enabled())) return
-      for (const pending of findPendingFollowThroughs(sessionDbPath)) {
-        const key = `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
+      const completions = findPendingFollowThroughs(sessionDbPath)
+      const completionSessions = new Set(completions.map(row => row.sessionId))
+      const receipts = findIdleUndeliveredHelperReceipts(sessionDbPath).filter(row => !completionSessions.has(row.sessionId))
+      for (const pending of [...completions, ...receipts]) {
+        const key = pending.key ?? `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
         if (done.has(key)) continue
         done.add(key)
         try {
-          await admit(pending.sessionId, FOLLOW_THROUGH_INPUT, key)
-          log(`follow-through started for ${pending.sessionId} (row ${pending.messageId})`)
+          await admit(pending.sessionId, pending.input ?? FOLLOW_THROUGH_INPUT, key)
+          log(`follow-through started for ${pending.sessionId} (${pending.delegationId ?? `row ${pending.messageId}`})`)
         } catch (error) {
           done.delete(key)
           log(`follow-through failed for ${pending.sessionId}: ${error?.message ?? error}`)
