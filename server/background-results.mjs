@@ -64,7 +64,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   }
   const scan = async () => {
     const signal = AbortSignal.timeout(40_000)
-    const sessions = [], records = [], aliases = new Map(), roots = new Map()
+    const sessions = [], records = [], aliases = new Map(), roots = new Map(), failures = new Map()
     let complete = true
     // Walk the real HTTP pages, including session 101. This is independent of the UX's 30-day display policy.
     // Unchanged conversations reuse their message reads; one scan is shared/cached by all list consumers.
@@ -87,7 +87,13 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     for (let offset = 0; offset < sessions.length; offset += 8) {
       await Promise.all(sessions.slice(offset, offset + 8).map(async ({ row, id, root }) => {
         if (isBusy(root) || isBusy(id)) return
-        const rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`, signal)
+        let rows
+        try { rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`, signal) }
+        catch (failure) {
+          if (signal.aborted) throw failure
+          complete = false; failures.set(root, Number(failure?.status) || 503)
+          return
+        }
         for (const message of rows) {
           const text = textOf(message), at = Number(message.timestamp)
           if (message.role !== 'user' || !text.startsWith(PREFIX) || !Number.isFinite(at) || now() / 1000 - at <= 7200 || text.length > 60_000) continue
@@ -116,7 +122,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
     }
     for (const id of reads.keys()) if (!aliases.has(id)) reads.delete(id)
-    cache = { at: now(), records, sessions: [...roots.values()], complete, error: false }
+    cache = { at: now(), records, sessions: [...roots.values()], complete, failures, error: false }
     return cache
   }
   const refresh = async (fresh = false) => {
@@ -177,8 +183,15 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (existing) return { record: existing, replayed: true }
       const c = await refresh(true)
       const pending = c.records.find(row => row.id === id && row.sessionId === sessionId)
-      if (!pending) throw error('recovery no longer matches this thread')
-      const rows = await threadRows(pending.sessionId, pending.readId, true)
+      if (!pending) {
+        const failure = c.failures?.get(sessionId)
+        if (failure === 404) throw error('the thread no longer exists', 400)
+        if (failure || c.error || !c.complete) throw error('history is temporarily unavailable', 503)
+        throw error('recovery no longer matches this thread')
+      }
+      let rows
+      try { rows = await threadRows(pending.sessionId, pending.readId, true) }
+      catch (failure) { throw error(Number(failure?.status) === 404 ? 'the thread no longer exists' : 'history is temporarily unavailable', Number(failure?.status) === 404 ? 400 : 503) }
       const current = acceptable(pending, rows)
       if (!current || current.boundary !== pending.boundary) throw error('the thread changed')
       const body = JSON.stringify({ session_id: pending.sessionId, input: pending.input,

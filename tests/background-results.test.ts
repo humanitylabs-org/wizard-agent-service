@@ -12,7 +12,8 @@ async function fixture({ count = 205, access = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-manual-background-'))
   const at = Date.now() / 1000, finished = at - 3 * 3600
   const rows = new Map<string, any[]>(), sessions: any[] = [], calls: any[] = [], reads: string[] = []
-  let canDispatch = true, failHistory = false, slowHistory = false, clock = Date.now()
+  let canDispatch = true, failHistory = false, slowHistory = false, skew = 0, historyStatus = 500, failLease = false
+  const badHistory = new Set<string>()
   const held = new Set<string>()
   for (let i = 0; i < count; i++) {
     const id = i === 101 ? 'wizard-assistant-101' : i === 202 ? 'live_tip_202' : `wizard_manual_${i}`
@@ -31,8 +32,9 @@ async function fixture({ count = 205, access = false } = {}) {
     }
     const msgs = u.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/)
     if (msgs) {
-      if (slowHistory) await new Promise(r => setTimeout(r, 150))
-      if (failHistory) { res.statusCode = 500; res.end('{}'); return }
+      if (slowHistory) await new Promise(r => setTimeout(r, 250))
+      if (badHistory.has(decodeURIComponent(msgs[1]))) { res.statusCode = 500; res.end('{}'); return }
+      if (failHistory) { res.statusCode = historyStatus; res.end('{}'); return }
       res.end(JSON.stringify({ data: rows.get(decodeURIComponent(msgs[1])) || [] })); return
     }
     if (u.pathname === '/v1/runs' && req.method === 'POST') {
@@ -53,19 +55,20 @@ async function fixture({ count = 205, access = false } = {}) {
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
       requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30,
-      backgroundResultsBusyReader: (id: string) => held.has(id), backgroundResultsNow: () => clock, runQueueRetryDelayMs: 25 })
+      backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: 25 })
     base = `http://127.0.0.1:${(await listen(server)).port}`
   }
   await open()
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
   owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); rmSync(dir, { recursive: true, force: true }) })
-  return { rows, calls, reads, sessions, finished, at, held,
-    advance: (ms: number) => { clock += ms },
-    failHistory: (v: boolean) => { failHistory = v }, slowHistory: (v: boolean) => { slowHistory = v },
+  return { rows, calls, reads, sessions, finished, at, held, badHistory,
+    advance: (ms: number) => { skew += ms },
+    failHistory: (v: boolean) => { failHistory = v },
+    deleted: () => { failHistory = true; historyStatus = 404 }, denyHistory: () => { failHistory = true; historyStatus = 403 }, failLease: (v: boolean) => { failLease = v }, slowHistory: (v: boolean) => { slowHistory = v },
     pause: () => { canDispatch = false }, resume: () => { canDispatch = true },
     restart: async () => { await close(); await open() },
     list: async () => {
-      for (let n = 0; n < 120; n++) {
+      for (let n = 0; n < 250; n++) {
         const r = await fetch(`${base}/wizard/background-results`), body = await r.json()
         if (!body.scanning) return { response: r, body }
         await new Promise(r => setTimeout(r, 15))
@@ -157,17 +160,17 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect(f.calls).toHaveLength(0)
   })
   it('normal Chats responds while a cold discovery scan is slow; the manual list also returns scanning immediately', async () => {
-    const f = await fixture({ count: 1 }); f.slowHistory(true)
+    const f = await fixture({ count: 101 }); f.slowHistory(true)
     const before = Date.now()
     // First-page preview enrichment already reads history. Use a subsequent page to isolate discovery's
     // latency; it must stay responsive while the independent cold recovery scan waits on that history.
     const r = await fetch(`${f.base()}/wizard/hermes/api/sessions?limit=100&offset=100`)
     expect(r.status).toBe(200)
-    expect(Date.now() - before).toBeLessThan(140)
+    expect(Date.now() - before).toBeLessThan(220)
     const manual = await fetch(`${f.base()}/wizard/background-results`)
     expect((await manual.json()).scanning).toBe(true)
     expect(f.calls).toHaveLength(0)
-    await f.list()
+    f.slowHistory(false); await f.list()
   })
   it('a temporary history failure at dispatch retries when the original thread is readable again', async () => {
     const f = await fixture({ count: 1 }); f.pause()
@@ -212,7 +215,10 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
   it('a result first seen before two hours becomes manual Continue as it ages without a new message', async () => {
     const f = await fixture({ count: 1 })
     f.rows.get('wizard_manual_0')![1].timestamp = f.at - 3600
-    expect((await f.list()).body.results).toHaveLength(0)
+    const first = (await f.list()).body
+    expect(first.scanning).toBe(false)
+    expect(first.scan_complete).toBe(true)
+    expect(first.results).toHaveLength(0)
     f.advance(2 * 3600 * 1000)
     expect((await f.list()).body.results).toHaveLength(1)
     expect(f.calls).toHaveLength(0)
@@ -228,6 +234,25 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     f.rows.get('wizard_manual_0')!.push({ id: 100099, role: 'assistant', content: 'All saved findings addressed.', finish_reason: 'stop', timestamp: f.at + 20 })
     expect((await f.list()).body.results).toHaveLength(0)
   })
+  it('a deleted canonical thread is terminal rather than retrying forever', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const pending = (await f.list()).body.results[0]
+    expect((await f.click(pending)).status).toBe(202)
+    f.deleted(); f.resume()
+    await new Promise(r => setTimeout(r, 200))
+    expect(f.calls).toHaveLength(0)
+    expect((await (await f.click(pending)).json()).status).toBe('failed')
+  })
+  it('a temporary lease-read failure preserves the queued result for retry', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const pending = (await f.list()).body.results[0]
+    expect((await f.click(pending)).status).toBe(202)
+    f.failLease(true); f.resume()
+    await new Promise(r => setTimeout(r, 150))
+    expect(f.calls).toHaveLength(0)
+    expect((await (await f.click(pending)).json()).status).toBe('queued')
+    f.failLease(false); await settled(f, 1)
+  })
   it('the endpoints are authenticated and arbitrary input is refused', async () => {
     const locked = await fixture({ count: 1, access: true })
     expect((await locked.list()).response.status).toBe(403)
@@ -236,5 +261,39 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect((await f.click(r, { input: 'run a different task' })).status).toBe(400)
     expect((await f.click({ ...r, session_id: 'wizard_other' })).status).toBe(409)
     expect(f.calls).toHaveLength(0)
+  })
+  it('one broken history read leaves another thread recoverable and reports the partial scan honestly', async () => {
+    const f = await fixture({ count: 2 }); f.badHistory.add('wizard_manual_0')
+    const result = (await f.list()).body
+    expect(result.scan_complete).toBe(false)
+    expect(result.available).toBe(true)
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0].session_id).toBe('wizard_manual_1')
+    expect((await f.click(result.results[0])).status).toBe(202)
+    await settled(f, 1)
+    expect(f.calls[0].session_id).toBe('wizard_manual_1')
+  })
+  it('an upstream history permission failure is temporary503, never a misleading Wizard sign-in prompt', async () => {
+    const f = await fixture({ count: 1 }), pending = (await f.list()).body.results[0]
+    f.denyHistory()
+    expect((await f.click(pending)).status).toBe(503)
+    expect(f.calls).toHaveLength(0)
+    f.failHistory(false)
+    expect((await f.click(pending)).status).toBe(202)
+    await settled(f, 1)
+  })
+  it('a legacy result listed through both root and tip has one stable recovery identity', async () => {
+    const f = await fixture({ count: 1 })
+    f.rows.get('wizard_manual_0')![1].content = '[ASYNC DELEGATION BATCH COMPLETE] Legacy saved result.'
+    f.rows.set('live_tip_0', f.rows.get('wizard_manual_0')!)
+    f.sessions.push({ ...f.sessions[0], id: 'live_tip_0', _lineage_root_id: 'wizard_manual_0' })
+    const initial = (await f.list()).body.results
+    expect(initial).toHaveLength(1)
+    f.advance(1000)
+    const next = (await f.list()).body.results
+    expect(next).toHaveLength(1)
+    expect(next[0].id).toBe(initial[0].id)
+    expect((await f.click(initial[0])).status).toBe(202)
+    await settled(f, 1)
   })
 })

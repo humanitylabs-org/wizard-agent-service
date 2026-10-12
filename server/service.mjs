@@ -1987,13 +1987,13 @@ export function createWizardServer(options = {}) {
     renameSync(temporary, operatorWorkerStatePath)
   }
 
-  const hermesJson = async (path, init = {}) => {
+  const hermesJson = async (path, init = {}, preserveStatus = false) => {
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${hermesKey}`)
     if (init.body) headers.set('Content-Type', 'application/json')
     const result = await fetchImpl(`${upstreamOrigin}${path}`, { ...init, headers, redirect: 'manual' })
     const raw = Buffer.from(await result.arrayBuffer())
-    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: 502 })
+    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: preserveStatus ? result.status : 502 })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
@@ -2488,7 +2488,7 @@ export function createWizardServer(options = {}) {
   }
 
   if (runQueue) backgroundResults = createBackgroundResults({
-    request: (path, init) => hermesJson(path, init), sessionDbPath: hermesStatePath, queue: () => runQueue,
+    request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
     busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
