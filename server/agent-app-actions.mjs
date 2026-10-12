@@ -30,6 +30,7 @@ const SYSTEM_JOBS = new Set(['shell', 'agent-service', 'agent', 'agent-ui'])
 const UNCERTAIN = new Set(['operation_unconfirmed', 'terminal_status_unconfirmed', 'projection_refresh_failed', 'completion_unconfirmed', 'invalid_response'])
 const PENDING_TTL_MS = 3600_000
 const LATE_TTL_MS = 600_000
+const formIdentity = (values) => JSON.stringify(Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b))))
 
 const text = (value, max) => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, max) : '')
 const ids = (value) => (Array.isArray(value) ? value.filter((x) => typeof x === 'string' && APP_ID.test(x)).slice(0, 16) : [])
@@ -95,7 +96,7 @@ export function createAgentAppActions({
   async function operate(id, action, form, given, op) {
     const held = pending.get(id)
     const same = held?.action === action
-    if (same && JSON.stringify(held.form) !== JSON.stringify(form)) return { outcome: 'refused', error: 'operation_pending', key: held.key }
+    if (same && formIdentity(held.form) !== formIdentity(form)) return { outcome: 'refused', error: 'operation_pending', key: held.key }
     // A held key for another action (e.g. an install that has since landed stopped) is not reused for this one.
     const key = same ? held.key : (!held && given) || randomBytes(18).toString('base64url')
     pending.set(id, { key, action, form, at: same ? held.at : now() })
@@ -130,7 +131,7 @@ export function createAgentAppActions({
     if (!APP_ID.test(id)) return { ok: false, error: 'invalid_app' }
     const values = validForm(form)
     if (!values) return { ok: false, error: 'invalid_form' }
-    const valueIdentity = JSON.stringify(Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b))))
+    const valueIdentity = formIdentity(values)
     if (given !== undefined && (typeof given !== 'string' || !OPERATION_KEY.test(given))) return { ok: false, error: 'invalid_operation_key' }
     for (const [k, p] of pending) if (now() - p.at > PENDING_TTL_MS) pending.delete(k)
     for (const [k, f] of finished) if (now() - f.at > LATE_TTL_MS) finished.delete(k)
@@ -191,7 +192,7 @@ export function createAgentAppActions({
       : { ok: false, error: 'app_manager_unavailable', entry: op.entry }))
       .then((result) => {
         active.delete(id)
-        if (job.late) finished.set(id, { result, values: job.values, key: job.key, at: now() }) // only a matching caller consumes it
+        if (job.late) finished.set(id, { result, values: job.values, key: op.key || job.key, at: now() }) // only a matching caller consumes it
         return result
       })
     active.set(id, job)
