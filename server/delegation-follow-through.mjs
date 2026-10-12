@@ -12,6 +12,8 @@
 // (hermes-http-readers.mjs createFollowThroughFinder); this file keeps only the watcher.
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
+// Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
+export const FOLLOW_THROUGH_SESSION_PREFIXES = ['wizard_', 'wizard-assistant-']
 export const FOLLOW_THROUGH_INPUT = '[Wizard follow-through] The delegated results above have arrived. Finish the original request now, in one self-contained reply.'
 
 /**

@@ -14,9 +14,8 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 export const TITLE_MAX = 40
-export const BREADCRUMB_DAYS = 3
 // A title that was on screen for less than this before being replaced was never a recognition anchor
-// (typically the opener's sentence title, replaced by the first final reply), so no breadcrumb.
+// (typically the opener's sentence title, replaced by the first final reply), so the thread marks no rename.
 export const ANCHOR_SECONDS = 30 * 60
 const HISTORY_MAX = 8
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
@@ -144,7 +143,7 @@ export class ThreadTitleStore {
   }
 
   // A rename that reached Hermes. `since` is when the old title first appeared (session start for the
-  // first rename), so a title that was barely on screen leaves no breadcrumb.
+  // first rename), so a title that was barely on screen leaves no mark in the thread.
   recordRename(sessionId, { from, to, by, assistantAt = null, since = null }) {
     const at = this.now()
     const current = this.get(sessionId) ?? { title: '', locked: false, appliedFor: null, history: [] }
@@ -157,16 +156,6 @@ export class ThreadTitleStore {
       appliedFor: assistantAt ?? current.appliedFor,
       history: [...current.history, entry].slice(-HISTORY_MAX),
     })
-  }
-
-  // What the list shows next to the title: the previous name for a few days after an agent rename.
-  breadcrumb(sessionId, currentTitle) {
-    const record = this.load()[sessionId]
-    const last = record?.history?.at(-1)
-    if (!last || last.quiet || last.by !== 'agent') return null
-    if (this.now() - last.at > BREADCRUMB_DAYS * 86400) return null
-    if (currentTitle && titleKey(currentTitle) !== titleKey(last.to)) return null
-    return { was: last.from, at: last.at }
   }
 
   // Renames the thread view can mark in place ("Renamed from …"), oldest first.

@@ -20,6 +20,7 @@ import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -204,7 +205,24 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
+<<<<<<< HEAD
 function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
+=======
+// The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
+// shell's own screen note ("[Wizard OS context] … Window in front: … Visible on screen: …"), which tells the
+// agent what the user was looking at when they spoke. It rides after the contract, bounded, as background only.
+const VIEW_CONTEXT_PREFIX = '[Wizard OS context]'
+const VIEW_CONTEXT_MAX = 2400
+export function clientViewContext(value) {
+  const raw = Array.isArray(value) ? value.filter((x) => typeof x === 'string').join('\n') : value
+  if (typeof raw !== 'string') return ''
+  const note = raw.trim()
+  if (!note.startsWith(VIEW_CONTEXT_PREFIX)) return ''
+  return note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note
+}
+
+function directBody(method, pathname, body, contract, noteFor = null) {
+>>>>>>> 4f9f85f8e47afbff9f740556b87f3f9ce7dfb247
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -221,7 +239,11 @@ function directBody(method, pathname, body, contract, osInstructions = '', noteF
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
+<<<<<<< HEAD
     instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
+=======
+    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
+>>>>>>> 4f9f85f8e47afbff9f740556b87f3f9ce7dfb247
     ...runContractFields(contract),
   }))
 }
@@ -1799,6 +1821,15 @@ function replacePrivateControlIdentities(result, replacements) {
   return Buffer.from(projected)
 }
 
+// wizard-stt answers 422 {detail:'No speech detected'} for a take with no words in it (an accidental tap,
+// a pocket recording). That is a result, not an outage: report it as an empty transcript so every client
+// takes its "No speech detected" path instead of retrying a permanent 502 forever (James, 12 Oct 2026).
+// FastAPI also uses 422 for malformed forms, so only the exact no-speech detail counts.
+function sttNoSpeech(status, raw) {
+  if (status !== 422) return false
+  try { return /^no speech detected$/i.test(String(JSON.parse(raw.toString('utf8'))?.detail ?? '').trim()) } catch { return false }
+}
+
 export function createWizardServer(options = {}) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
@@ -1938,6 +1969,9 @@ export function createWizardServer(options = {}) {
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
+  const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
+  // The subject each thread was last served with, so the next run can be told to keep it.
+  const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
@@ -2556,12 +2590,16 @@ export function createWizardServer(options = {}) {
     const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
     return (current.source === 'user' || current.source === null) && !agentOwned
   }
-  const runTitleNote = (sessionId) => {
-    if (typeof sessionId !== 'string' || !sessionId) return ''
+  const titleNote = (sessionId) => {
     const current = readSessionTitle(titleDbPath(), sessionId)
     if (!current) return ''
     const record = threadTitleStore.get(sessionId)
     return titleContextLine(current.title, { locked: titleLocked(current, record) })
+  }
+  // Appended to every direct run: the thread's current title and the owner's subject list.
+  const runTitleNote = (sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId) return subjectCatalog.runNote()
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? '')].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -2602,11 +2640,17 @@ export function createWizardServer(options = {}) {
       const payload = JSON.parse(result.toString('utf8'))
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
-        const was = threadTitleStore.breadcrumb(session.id, session.title)
         const renames = threadTitleStore.visibleHistory(session.id)
+        // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+        const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
+        if (attention?.subject) {
+          servedSubjects.delete(session.id)
+          servedSubjects.set(session.id, attention.subject)
+          if (servedSubjects.size > 2000) servedSubjects.delete(servedSubjects.keys().next().value)
+        }
         return {
           ...session,
-          ...(was ? { wizard_title_was: was.was, wizard_title_renamed_at: was.at } : {}),
+          ...(attention ? { wizard_attention: attention } : {}),
           ...(renames.length ? { wizard_title_renames: renames } : {}),
         }
       })
@@ -2911,6 +2955,7 @@ export function createWizardServer(options = {}) {
             method: 'POST', body, redirect: 'error', signal: controller.signal, headers,
           })
           const raw = Buffer.from(await upstream.arrayBuffer())
+          if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, ms: Date.now() - started, model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
           sendJson(response, 200, { text: typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : '', ms: Date.now() - started, model: typeof value.model === 'string' ? value.model.slice(0, 120) : '' })
@@ -2947,10 +2992,12 @@ export function createWizardServer(options = {}) {
         try {
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal })
           const raw = Buffer.from(await upstream.arrayBuffer())
+          if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
           const text = typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : ''
-          if (!text) throw Object.assign(new Error('blank transcription'), { status: 400 })
+          // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).
+          if (!text) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           sendJson(response, 200, {
             text,
             provider: typeof value.provider === 'string' ? value.provider.slice(0, 80) : '',
