@@ -125,6 +125,7 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
     const r = await call(base, { action: 'search', query: 'time' })
     expect(r.text).toContain('Hello View (hello-view): A screen and two tools. Jobs: diagnostics. Not installed. (test catalogue entry)')
     expect(r.text).toContain('Needs: notifications.')
+    expect(r.text).toContain('Install one with wizard_apps {"action": "install", "app": "<id>"}.')
     expect(r.text).not.toMatch(/wizard-shell|hermes-agent|https?:|github|logo/u)
     expect(bridge.writes).toEqual([])
     expect(catalogueEntry({ id: '../x' })).toBe(null)
@@ -136,6 +137,7 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
     expect(r.result.isError).toBeFalsy()
     expect(r.text).toContain('Installed Hello View (hello-view); it is running.')
     expect(r.text).toContain('mcp__wizard__hello_view__wizard_time: Current UTC time')
+    expect(r.text).toContain('{"action": "call", "tool": "hello_view__<tool>", "arguments": {...}}')
     expect(bridge.writes).toHaveLength(1)
     expect(bridge.writes[0]).toMatchObject({ app: 'hello-view', action: 'install', body: {} })
     expect(bridge.writes[0].key).toMatch(/^[A-Za-z0-9_-]{16,128}$/u)
@@ -196,8 +198,8 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
 
   it('validates ids, form values and keys before any write', async () => {
     const { base, bridge } = await setup()
-    expect((await call(base, { action: 'install', app: '../etc' })).text).toContain('Give the app id exactly')
-    expect((await call(base, { action: 'install', app: 'Hello View' })).text).toContain('Give the app id exactly')
+    expect((await call(base, { action: 'install', app: '../etc' })).text).toContain('Pass the app id as "app"')
+    expect((await call(base, { action: 'install', app: 'Hello View' })).text).toContain('Pass the app id as "app"')
     expect((await call(base, { action: 'install', app: 'hello-view', form: { 'bad key': 'x' } })).text).toContain('flat object')
     expect((await call(base, { action: 'install', app: 'hello-view', form: { A: { nested: 1 } } })).text).toContain('flat object')
     expect((await call(base, { action: 'install', app: 'hello-view', operation_key: 'short' })).text).toContain('operation_key')
