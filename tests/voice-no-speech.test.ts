@@ -57,8 +57,9 @@ describe('a take with no speech is an empty transcript, never a retryable failur
     const response = await fetch(`${base}/wizard-os-home/api/transcribe`, { method: 'POST', body: form })
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ text: 'hello there' })
-    expect(upstream).toHaveBeenCalledOnce()
-    expect(String((upstream.mock.calls[0] as unknown[])[0])).toMatch(/\/v1\/audio\/transcriptions$/)
+    // (an earlier call may ask the transcriber for its model list)
+    const urls = upstream.mock.calls.map((call) => String((call as unknown[])[0]))
+    expect(urls.filter((u) => u.endsWith('/v1/audio/transcriptions'))).toHaveLength(1)
   })
 
   it('without the compat flag a headless service does not claim the shell paths', async () => {
