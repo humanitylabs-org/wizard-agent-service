@@ -97,3 +97,29 @@ describe('App Manager views routes (read-only)', () => {
     expect(readWizardApps('/nonexistent/apps.json')).toEqual({ schema: 1, store: 'wizardapps', apps: [] })
   })
 })
+
+describe('owner gate without Cloudflare Access (a Wizard OS box or container)', () => {
+  const tailnet = { 'X-Forwarded-For': '100.64.0.9', 'Tailscale-User-Login': 'owner@example.test' }
+  async function box(extra: Record<string, unknown> = {}) {
+    const wizard = createWizardServer({ hermesKey: 'fixture-key', requireAccess: false, appsJsonPath: appsJson(), upstreamOrigin: 'http://127.0.0.1:9', ...extra })
+    servers.push(wizard)
+    const address = await listen(wizard)
+    return `http://127.0.0.1:${(address as import('node:net').AddressInfo).port}`
+  }
+
+  it('guards sessions, runs, files and context like lifecycle: forwarded callers need a pinned owner login', async () => {
+    const base = await box({ appOwnerLogins: ['owner@example.test'] })
+    for (const path of ['/wizard/hermes/api/sessions', '/wizard/hermes/v1/runs', '/wizard/files', '/wizard/v1/bootstrap', '/wizard/v1/wizard-apps', '/wizard/v1/agent-context']) {
+      expect((await fetch(`${base}${path}`, { headers: { 'X-Forwarded-For': '172.18.0.5' } })).status, path).toBe(403)
+      expect((await fetch(`${base}${path}`, { headers: { ...tailnet, 'Tailscale-User-Login': 'guest@example.test' } })).status, path).toBe(403)
+    }
+    expect((await fetch(`${base}/wizard/v1/wizard-apps`, { headers: tailnet })).status).toBe(200)
+    expect((await fetch(`${base}/wizard/v1/wizard-apps`)).status).toBe(200)   // direct loopback stays the owner
+    expect((await fetch(`${base}/wizard/health`, { headers: { 'X-Forwarded-For': '172.18.0.5' } })).status).not.toBe(403)
+  })
+
+  it('refuses to start with a trusted gateway peer and no owner list', () => {
+    expect(() => createWizardServer({ hermesKey: 'fixture-key', requireAccess: false, appTrustedProxyIps: ['172.18.0.1'] })).toThrow(/OWNER_LOGINS/u)
+    expect(() => createWizardServer({ hermesKey: 'fixture-key', requireAccess: false, appTrustedProxyIps: ['172.18.0.1'], appOwnerLogins: ['owner@example.test'] })).not.toThrow()
+  })
+})

@@ -2764,12 +2764,18 @@ export function createWizardServer(options = {}) {
   }))
 
   const appOwners = (options.appOwnerLogins || []).map((login) => String(login).trim().toLowerCase()).filter(Boolean)
-  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : (req) => localOwnerAccess(req, appOwners, options.appTrustedProxyIps || []))
+  const trustedProxyIps = options.appTrustedProxyIps || []
+  // A trusted gateway peer is only ever an owner by a named login: refuse to start with one and no owner list.
+  if (!requireAccess && trustedProxyIps.length && !appOwners.length) throw new Error('WIZARD_APP_TRUSTED_PROXY_IPS needs WIZARD_APP_OWNER_LOGINS')
+  // Without Cloudflare Access (a Wizard OS box or container) the same owner rule guards every control route.
+  const boxOwner = (req) => localOwnerAccess(req, appOwners, trustedProxyIps)
+  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : boxOwner)
   const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
   const appRouteOptions = {
     appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
     access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
     allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [], managerHosts: options.appManagerHosts || [],
+    reservedPorts: options.appReservedPorts || [],
     controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || ''],
   }
   const appLifecycle = createAppLifecycleRoutes(appRouteOptions)
@@ -2788,6 +2794,11 @@ export function createWizardServer(options = {}) {
         const route = url.pathname.slice(storePrefix.length)
         if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
         url.pathname = '/' + route
+      }
+      // Token routes (the agent gateway, its context) and health check their own callers; everything else is the
+      // owner's. Containers on the box (installed apps, other services) get no sessions/runs/files authority here.
+      if (!requireAccess && !options.appLifecycleAccess && !['/wizard/health', '/wizard/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && !boxOwner(request)) {
+        sendJson(response, 403, { error: 'access_required' }); return
       }
       if (await appsViews(request, response, url)) return
       if (await appLifecycle(request, response, url)) return
@@ -2817,7 +2828,7 @@ export function createWizardServer(options = {}) {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
         const tokenOk = Boolean(bearer) && bearer === (options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome, create: false }))
-        if (!tokenOk && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!tokenOk && !(requireAccess ? await accessVerified(request, accessVerifier) : boxOwner(request))) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
         const context = await bridge.kernel({ harness })
         if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)

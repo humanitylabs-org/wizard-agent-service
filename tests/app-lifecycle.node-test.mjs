@@ -16,9 +16,11 @@ async function fixture(t, extra = {}) {
     { id: 'hello', status: 'running', view: { url: '/apps/hello/' } },
     { id: 'evil', status: 'running', view: { url: '/apps/evil/' } },
     { id: 'stopped', status: 'stopped', view: { url: '/apps/stopped/' } },
+    { id: 'strict', status: 'running', view: { url: '/apps/strict/' } },
+    { id: 'self', status: 'running', view: { url: '/apps/self/' } },
   ] }))
-  const upstreams = { hello: 'http://127.0.0.1:12345/ui/', evil: 'http://169.254.169.254/', stopped: 'http://127.0.0.1:12346/' }
-  const calls = []; let refresh = 0
+  const upstreams = { hello: 'http://127.0.0.1:12345/ui/', evil: 'http://169.254.169.254/', stopped: 'http://127.0.0.1:12346/', strict: 'http://127.0.0.1:12347/', self: 'http://127.0.0.1:8787/' }
+  const calls = []; let refresh = 0; let clock = extra.clock || { t: 1_000_000 }
   const fetchImpl = async (url, opts = {}) => {
     calls.push({ url: String(url), opts })
     const u = new URL(String(url))
@@ -27,11 +29,13 @@ async function fixture(t, extra = {}) {
       return upstreams[view[1]] ? Response.json({ upstream: upstreams[view[1]], path: `/apps/${view[1]}/` }) : Response.json({ error: 'view_not_found' }, { status: 404 })
     }
     if (u.port === '12345') return new Response('<h1>Hello</h1>', { headers: { 'content-type': 'text/html' } })
+    // A FastAPI-like app server: GET routes answer HEAD with 405.
+    if (u.port === '12347') return opts.method === 'HEAD' ? new Response('', { status: 405 }) : new Response('<h1>Strict</h1>', { headers: { 'content-type': 'text/html' } })
     if (extra.lifecycleFails && u.pathname.startsWith('/api/app-lifecycle/')) throw new Error('bridge dropped')
     if (extra.bridgeError) return Response.json({ success: false, error: extra.bridgeError }, { status: 409 })
     return Response.json({ success: true, installed: [] })
   }
-  const options = { managerUrl: 'http://127.0.0.1:9876', managerToken: 'internal-fixture', appsJsonPath: p, refresh: () => refresh++, fetchImpl, ...extra.options }
+  const options = { managerUrl: 'http://127.0.0.1:9876', managerToken: 'internal-fixture', appsJsonPath: p, refresh: () => { refresh++; if (extra.refreshThrows) throw new Error('read failed') }, fetchImpl, now: () => clock.t, reservedPorts: [8787], ...extra.options }
   const handler = createAppLifecycleRoutes(options)
   const s = createServer(async (req, res) => { if (!await handler(req, res, new URL(req.url, 'http://localhost'))) { res.writeHead(404); res.end() } })
   await new Promise((r) => s.listen(0, '127.0.0.1', r)); t.after(() => new Promise((r) => s.close(r)))
@@ -43,7 +47,7 @@ async function fixture(t, extra = {}) {
     await new Promise((r) => a.listen(0, '127.0.0.1', r)); t.after(() => new Promise((r) => a.close(r)))
     appsBase = `http://127.0.0.1:${a.address().port}`
   }
-  return { base, appsBase, calls, refresh: () => refresh, lifeCalls: () => calls.filter((c) => c.url.includes('/api/app-lifecycle/')) }
+  return { base, appsBase, clock, calls, refresh: () => refresh, lifeCalls: () => calls.filter((c) => c.url.includes('/api/app-lifecycle/')) }
 }
 async function owner(base) {
   const boot = await fetch(`${base}/wizard/v1/app-lifecycle/session`)
@@ -147,15 +151,59 @@ test('with an apps origin, the control origin only redirects; the apps listener 
   assert.equal((await fetch(`${f.appsBase}/apps/hello/create`, { method: 'POST', headers: { Origin: 'https://evil.test' }, body: '{}' })).status, 403)
 })
 
-test('trusts loopback or a loopback Tailscale principal (optionally pinned), never raw remote headers', () => {
+test('trusts direct loopback or a pinned Tailscale owner; a trusted gateway peer is never the owner by itself', () => {
   const req = (ip, h = {}) => ({ socket: { remoteAddress: ip }, headers: h })
+  const ts = (login) => ({ 'x-forwarded-for': '100.1.2.3', 'tailscale-user-login': login })
   assert.equal(localOwnerAccess(req('127.0.0.1')), true);
   assert.equal(localOwnerAccess(req('172.18.0.1')), false);
-  assert.equal(localOwnerAccess(req('172.18.0.1'), [], ['172.18.0.1']), true);
-  assert.equal(localOwnerAccess(req('172.18.0.2'), [], ['172.18.0.1']), false);
-  assert.equal(localOwnerAccess(req('8.8.8.8', { 'tailscale-user-login': 'owner' })), false)
+  // Hairpinned container traffic also arrives from the gateway: no headers, a forged login or an unpinned login fail.
+  assert.equal(localOwnerAccess(req('172.18.0.1'), [], ['172.18.0.1']), false);
+  assert.equal(localOwnerAccess(req('172.18.0.1'), ['owner@x'], ['172.18.0.1']), false);
+  assert.equal(localOwnerAccess(req('172.18.0.1', ts('owner@x')), [], ['172.18.0.1']), false);
+  assert.equal(localOwnerAccess(req('172.18.0.1', ts('guest@x')), ['owner@x'], ['172.18.0.1']), false);
+  assert.equal(localOwnerAccess(req('::ffff:172.18.0.1', ts('Owner@X')), ['owner@x'], ['172.18.0.1']), true);
+  assert.equal(localOwnerAccess(req('172.18.0.2', ts('owner@x')), ['owner@x'], ['172.18.0.1']), false);
+  assert.equal(localOwnerAccess(req('8.8.8.8', { 'tailscale-user-login': 'owner@x' }), ['owner@x']), false)
   assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3' })), false)
-  assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3', 'tailscale-user-login': 'owner@x' })), true)
-  assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3', 'tailscale-user-login': 'guest@x' }), ['owner@x']), false)
-  assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3', 'tailscale-user-login': 'Owner@X' }), ['owner@x']), true)
+  // A forwarded identity needs an explicit owner list, never "any tailnet login".
+  assert.equal(localOwnerAccess(req('127.0.0.1', ts('owner@x'))), false)
+  assert.equal(localOwnerAccess(req('127.0.0.1', ts('guest@x')), ['owner@x']), false)
+  assert.equal(localOwnerAccess(req('127.0.0.1', ts('Owner@X')), ['owner@x']), true)
+})
+
+test('HEAD confirmation is answered from an upstream GET without a body; a HEAD-405 app still confirms', async (t) => {
+  const { base, calls } = await fixture(t)
+  const r = await fetch(`${base}/apps/strict/`, { method: 'HEAD' })
+  assert.equal(r.status, 200); assert.match(r.headers.get('content-type'), /text\/html/u)
+  assert.match(r.headers.get('content-security-policy'), /^sandbox /u)
+  assert.equal((await r.arrayBuffer()).byteLength, 0)
+  const sent = calls.filter((c) => c.url.startsWith('http://127.0.0.1:12347'))
+  assert.equal(sent.length, 1); assert.equal(sent[0].opts.method, 'GET'); assert.equal(sent[0].opts.body, undefined)
+  assert.equal((await fetch(`${base}/apps/strict/`)).status, 200)
+})
+
+test('an app upstream on the Service\'s own or the bridge\'s loopback port is refused', async (t) => {
+  const { base, calls } = await fixture(t)
+  assert.equal((await fetch(`${base}/apps/self/`)).status, 404)
+  assert.equal(calls.filter((c) => c.url.startsWith('http://127.0.0.1:8787')).length, 0)
+})
+
+test('the session rotates in its last two minutes; any valid cookie of that name counts', async (t) => {
+  const f = await fixture(t)
+  const a = await owner(f.base)
+  f.clock.t += 3600_000 - 100_000
+  const same = await fetch(`${f.base}/wizard/v1/app-lifecycle/session`, { headers: { Cookie: a.cookie } })
+  const b = await same.json()
+  assert.notEqual(b.csrf, a.csrf); assert.ok(b.expires_in > 3500)
+  const cookie = same.headers.get('set-cookie').split(';')[0]
+  // A planted cookie of the same name first (an app on another port of this host) doesn't lock the owner out.
+  const r = await fetch(`${f.base}/api/app-lifecycle/hello/install`, { method: 'POST', headers: { ...a.headers, Cookie: `wizard_lifecycle=planted; ${cookie}`, 'X-Wizard-CSRF': b.csrf }, body: '{}' })
+  assert.equal(r.status, 200)
+})
+
+test('a projection refresh that throws after a successful mutation does not report the mutation as failed', async (t) => {
+  const f = await fixture(t, { refreshThrows: true })
+  const o = await owner(f.base)
+  const r = await fetch(`${f.base}/api/app-lifecycle/hello/install`, { method: 'POST', headers: o.headers, body: '{}' })
+  assert.equal(r.status, 200); assert.equal((await r.json()).success, true); assert.equal(f.refresh(), 1)
 })

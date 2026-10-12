@@ -21,23 +21,26 @@ const METHOD = { install: 'POST', start: 'POST', stop: 'POST', restart: 'POST', 
 const IDEMPOTENCY = /^[A-Za-z0-9_-]{16,128}$/u
 const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1', '[::1]']
 const SESSION_TTL_MS = 3600_000
+const SESSION_ROTATE_MS = 120_000
 const APP_SANDBOX = 'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals'
 
 const same = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 const loopbackIp = (ip) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)
 const hostName = (host) => { try { return new URL(`http://${String(host || '')}`).hostname.toLowerCase() } catch { return '' } }
 
-/** Direct loopback callers, or a loopback reverse proxy (Tailscale Serve) that names a tailnet principal.
- * The proxy must strip client-supplied identity headers; `owners` optionally pins the accepted logins. */
+/** The owner without Cloudflare Access: a direct loopback caller, or a reverse proxy (Tailscale Serve) that names a
+ * tailnet principal listed in `owners`. The proxy must strip client-supplied identity headers. A forwarded identity
+ * never counts without an explicit owner list.
+ * A non-loopback `trustedProxyIps` peer (the Docker gateway in front of a container's 127.0.0.1-published port) is
+ * also where hairpinned container traffic would arrive, so it is never the owner by itself: only a named owner. */
 export function localOwnerAccess(request, owners = [], trustedProxyIps = []) {
   const peer = String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  if (!loopbackIp(peer) && !trustedProxyIps.some(ip => isIP(ip) && ip === peer)) return false;
   const h = request.headers
   const forwarded = h.forwarded || h['x-forwarded-for'] || h['x-forwarded-host']
   const login = String(h['tailscale-user-login'] || '').trim().toLowerCase()
-  if (!forwarded && !login) return true
-  if (!login) return false
-  return !owners.length || owners.includes(login)
+  const named = Boolean(login) && owners.includes(login)
+  if (loopbackIp(peer)) return (!forwarded && !login) || named
+  return trustedProxyIps.some(ip => isIP(ip) && ip === peer) && named
 }
 
 /** Hostnames this Service answers to: loopback, plus every configured origin/host. */
@@ -75,7 +78,7 @@ function sameOrigin(req, hosts) {
 export function createAppLifecycleRoutes({
   managerUrl = '', managerToken = '', appsJsonPath = '', access = localOwnerAccess, fetchImpl = fetch,
   refresh = () => {}, now = Date.now, allowedHosts = [], controlOrigins = [], appsOrigin = '',
-  upstreamHosts = [], managerHosts = [], role = 'control',
+  upstreamHosts = [], managerHosts = [], reservedPorts = [], role = 'control',
 } = {}) {
   if (managerUrl) {
     const u = new URL(managerUrl)
@@ -89,16 +92,22 @@ export function createAppLifecycleRoutes({
   }
   const hosts = trustedHostnames({ allowedHosts, origins: [...controlOrigins, appsOrigin] })
   const upstreamOk = new Set([...LOOPBACK_HOSTS, ...upstreamHosts.map((h) => String(h).toLowerCase())])
+  // An app upstream on loopback must never be this Service (or its bridge): its requests would arrive as the owner.
+  const reserved = new Set([...reservedPorts, managerUrl && (new URL(managerUrl).port || '80')].filter(Boolean).map(String))
   const sessions = new Map()
   const cookieName = 'wizard_lifecycle'
   const views = new Map()
+  // Any valid cookie of that name counts: another origin on the same host can plant one with a longer path.
   const session = (req) => {
-    const sid = String(req.headers.cookie || '').split(';').map((x) => x.trim()).find((x) => x.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1)
-    const s = sid && sessions.get(sid)
-    if (!s) return null
-    if (now() - s.at >= SESSION_TTL_MS) { sessions.delete(sid); return null }
-    return s
+    for (const c of String(req.headers.cookie || '').split(';').map((x) => x.trim()).filter((x) => x.startsWith(`${cookieName}=`))) {
+      const sid = c.slice(cookieName.length + 1), s = sessions.get(sid)
+      if (!s) continue
+      if (now() - s.at >= SESSION_TTL_MS) { sessions.delete(sid); continue }
+      return s
+    }
+    return null
   }
+  const refreshSafely = async () => { try { await refresh() } catch { /* a projection refresh never changes the outcome */ } }
 
   async function managerJson(path, init = {}) {
     const r = await fetchImpl(managerUrl + path, { redirect: 'error', ...init, headers: { Authorization: `Bearer ${managerToken}`, Accept: 'application/json', ...(init.headers || {}) } })
@@ -120,7 +129,8 @@ export function createAppLifecycleRoutes({
       if (r.ok && data?.path === `/apps/${id}/`) {
         const u = new URL(data.upstream)
         // Internal fresh-mode routing names this installed app's own Runtipi service; never a caller-chosen host.
-        if (u.protocol === 'http:' && (upstreamOk.has(u.hostname.toLowerCase()) || u.hostname === id) && u.port && !u.username && !u.password && !u.search && !u.hash) url = u
+        const loop = LOOPBACK_HOSTS.includes(u.hostname.toLowerCase())
+        if (u.protocol === 'http:' && (upstreamOk.has(u.hostname.toLowerCase()) || u.hostname === id) && u.port && !(loop && reserved.has(u.port)) && !u.username && !u.password && !u.search && !u.hash) url = u
       }
     } catch {}
     views.set(id, { url, at: now() })
@@ -147,12 +157,14 @@ export function createAppLifecycleRoutes({
         body = await readBody(req, 2 * 1024 * 1024)
         if (req.headers['content-type']) headers['Content-Type'] = String(req.headers['content-type'])
       }
-      const r = await fetchImpl(target, { method: req.method, redirect: 'manual', signal: AbortSignal.timeout(15000), headers, ...(write ? { body } : {}) })
+      // HEAD (the shell's frame confirmation) is answered from an upstream GET: many app servers 405 a HEAD.
+      const r = await fetchImpl(target, { method: req.method === 'HEAD' ? 'GET' : req.method, redirect: 'manual', signal: AbortSignal.timeout(15000), headers, ...(write ? { body } : {}) })
       if (r.status >= 300 && r.status < 400) {
         const loc = new URL(r.headers.get('location') || '/', target)
         if (loc.origin !== upstream.origin || !loc.pathname.startsWith(root)) { send(res, 502, { error: 'app_redirect_refused' }); return }
         res.writeHead(r.status, { Location: `/apps/${id}/${loc.pathname.slice(root.length)}${loc.search}${loc.hash}` }); res.end(); return
       }
+      if (req.method === 'HEAD') await r.body?.cancel().catch(() => undefined)
       const bytes = req.method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer())
       if (bytes.length > 16 * 1024 * 1024) throw new Error('too_large')
       res.writeHead(r.status, {
@@ -198,7 +210,8 @@ export function createAppLifecycleRoutes({
       if (!managerUrl || !managerToken) { send(res, 503, { error: 'app_manager_not_configured' }); return true }
       for (const [id, s] of sessions) if (now() - s.at >= SESSION_TTL_MS) sessions.delete(id)
       let s = session(req)
-      if (!s) {
+      // Rotate a session in its last two minutes, so a write never starts on one about to expire.
+      if (!s || SESSION_TTL_MS - (now() - s.at) < SESSION_ROTATE_MS) {
         s = { id: randomBytes(32).toString('hex'), csrf: randomBytes(32).toString('hex'), at: now() }
         sessions.set(s.id, s)
         if (sessions.size > 500) sessions.delete(sessions.keys().next().value)
@@ -235,13 +248,13 @@ export function createAppLifecycleRoutes({
         return true
       }
       const { r, data } = await managerJson(path, init)
-      if (life) { views.delete(life[1]); await refresh() }
+      if (life) { views.delete(life[1]); await refreshSafely() }
       if (!r.ok) {
         const error = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(data.error) ? data.error : 'app_operation_failed'
         send(res, r.status >= 400 && r.status < 500 ? r.status : 502, { success: false, error })
       } else send(res, r.status, data)
     } catch {
-      if (life) { views.delete(life[1]); await refresh() }
+      if (life) { views.delete(life[1]); await refreshSafely() }
       // A lost bridge response after submission is uncertain, never a definitive failure: same key retries replay.
       send(res, 502, { success: false, error: life ? 'operation_unconfirmed' : 'app_manager_unavailable' })
     }
