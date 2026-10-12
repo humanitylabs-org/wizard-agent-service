@@ -2763,12 +2763,22 @@ export function createWizardServer(options = {}) {
     return file
   }))
 
-  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : localOwnerAccess)
+  const appOwners = (options.appOwnerLogins || []).map((login) => String(login).trim().toLowerCase()).filter(Boolean)
+  const ownerAccess = options.appLifecycleAccess ?? (requireAccess ? (req) => accessVerified(req, accessVerifier) : (req) => localOwnerAccess(req, appOwners))
   const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
-  const appLifecycle = createAppLifecycleRoutes({
+  const appRouteOptions = {
     appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
     access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
-  })
+    allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [],
+    controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || ''],
+  }
+  const appLifecycle = createAppLifecycleRoutes(appRouteOptions)
+  // The apps origin: a second listener that serves installed app documents and nothing else (index.mjs binds it).
+  const appsOnly = createAppLifecycleRoutes({ ...appRouteOptions, role: 'apps' })
+  const appsHandler = async (request, response) => {
+    try { await appsOnly(request, response, new URL(request.url ?? '/', 'http://wizard.local')) }
+    catch { if (!response.headersSent) { response.writeHead(500); response.end() } }
+  }
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
@@ -3758,6 +3768,7 @@ export function createWizardServer(options = {}) {
     })
     server.on('close', () => watcher.stop())
   }
+  server.appsHandler = appsHandler
   return server
 }
 

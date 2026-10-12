@@ -148,7 +148,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
     // The shell is the thing drawing the launcher; it never gets a tile of its own.
     if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
-      : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
+      : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url
+      : app.view && typeof app.view.open === 'string' && SAFE_URL.test(app.view.open) ? app.view.open : ''
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),

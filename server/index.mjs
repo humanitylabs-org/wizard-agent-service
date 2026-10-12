@@ -1,4 +1,5 @@
 import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
+import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { wizardOsHome } from './wizard-os-settings.mjs'
@@ -19,6 +20,7 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 }
 
 const port = Number(process.env.WIZARD_PORT || 8787)
+const list = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean)
 const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
 // Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
 // spec/AGENT_BRIDGE.md "Agent adapter" lists them.
@@ -68,6 +70,12 @@ const server = createWizardServer({
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
   appManagerUrl: process.env.WIZARD_APP_MANAGER_URL || '',
   appManagerToken: process.env.WIZARD_APP_MANAGER_TOKEN || '',
+  // Installed apps: trusted Host names (DNS-rebinding fence), the separate apps origin, the hosts app upstreams may
+  // use (a container Service names its host gateway) and, optionally, the tailnet logins that count as the owner.
+  allowedHosts: list(process.env.WIZARD_ALLOWED_HOSTS),
+  appsOrigin: process.env.WIZARD_APPS_ORIGIN || '',
+  appUpstreamHosts: list(process.env.WIZARD_APP_UPSTREAM_HOSTS),
+  appOwnerLogins: list(process.env.WIZARD_APP_OWNER_LOGINS),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
@@ -91,3 +99,12 @@ const server = createWizardServer({
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+// The apps origin listener (serve it on its own HTTPS port, e.g. `tailscale serve --https=8444`): app documents only.
+const appsPort = Number(process.env.WIZARD_APPS_PORT || 0)
+if (appsPort) {
+  if (!process.env.WIZARD_APPS_ORIGIN) {
+    process.stderr.write('WIZARD_APPS_PORT needs WIZARD_APPS_ORIGIN (the public origin that reaches it).\n')
+    process.exit(1)
+  }
+  createServer(server.appsHandler).listen(appsPort, host, () => process.stdout.write(`Wizard apps origin listening on ${host}:${appsPort}\n`))
+}
