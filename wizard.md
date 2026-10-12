@@ -5,7 +5,7 @@ name: Wizard Agent Service
 type: service
 category: system
 version: 0.3.0-candidate.20261012
-summary: "Headless Wizard API and durable run/approval state; shells install separately."
+summary: "The Wizard API: chats, runs, approvals, voice and the one app gateway. Shells install separately."
 icon: icon.png
 license: MIT
 source: https://github.com/humanitylabs-org/wizard-agent-service
@@ -20,6 +20,7 @@ uses:
 - hermes-agent
 - transcriber
 - files
+skill: skill/SKILL.md
 health: /wizard/health
 mcp:
   path: /wizard/mcp
@@ -27,9 +28,16 @@ mcp:
 ---
 
 # Wizard Agent Service
-Owns the unchanged /wizard/... API, runs, approvals, voice, attachments and one app-tool gateway.
-The separate Wizard Shell is a view app. Hermes stays on the host in alongside mode.
-The state volume belongs to this service; shell updates never mount or replace it.
-The loopback published port is 8797; containers reach wizard-agent-service:8787.
-History fallback is opt-in; the default has no host Hermes home mount.
-This candidate disables automatic follow-through until the release owner selects the sole writer.
+
+The headless half of the Wizard shell ([wizard-os DECISIONS #36](https://github.com/humanitylabs-org/wizard-os/blob/main/docs/DECISIONS.md)):
+it fills the `agent-service` spot and serves the `/wizard/...` API that every shell talks to.
+The Wizard shell itself ([wizard-ux](https://github.com/humanitylabs-org/wizard-ux)) is a separate view app
+in the `shell` spot; either can be updated or replaced without touching the other.
+
+- Sits in front of the agent's API (`hermes-agent`, or the box's own Hermes in alongside mode).
+- Owns threads, runs, approvals, files and voice; its state lives in its own app-data folder, so a shell
+  update never touches it.
+- Serves the one `wizard` MCP gateway (`/wizard/mcp`) that carries every installed app's tools.
+- Voice goes to the `transcriber` app. No cloud speech service.
+
+Reach it through the shell. Its port is published on the box's loopback only.

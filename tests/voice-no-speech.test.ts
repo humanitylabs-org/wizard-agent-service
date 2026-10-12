@@ -10,11 +10,12 @@ import { createWizardServer } from '../server/service.mjs'
 const servers: ReturnType<typeof createWizardServer>[] = []
 afterEach(async () => { await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); servers.length = 0 })
 
-async function fixture(reply: () => Response) {
+async function fixture(reply: () => Response, headless = false) {
   const upstream = vi.fn(async () => reply())
   const uxDir = mkdtempSync(join(tmpdir(), 'was-ux-'))
   writeFileSync(join(uxDir, 'index.html'), '<!doctype html>')
-  const server = createWizardServer({ requireAccess: false, fetchImpl: upstream, archivedSessionReader: () => [], uxDir })
+  // headless: the two-container split; the shell serves the UX, the service only the API (no uxDir).
+  const server = createWizardServer({ requireAccess: false, fetchImpl: upstream, archivedSessionReader: () => [], ...(headless ? { uxApiCompat: true } : { uxDir }) })
   servers.push(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -47,6 +48,31 @@ describe('a take with no speech is an empty transcript, never a retryable failur
     const response = await fetch(`${base}/wizard-os-home/api/transcribe`, { method: 'POST', body: form })
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ text: '', no_speech: true })
+  })
+
+  it('a headless service (separate shell container) still answers the native multipart path', async () => {
+    const { base, upstream } = await fixture(() => new Response(JSON.stringify({ text: ' hello there ' }), { status: 200 }), true)
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array(7426).fill(1)], { type: 'audio/aac' }), 'voice.aac')
+    const response = await fetch(`${base}/wizard-os-home/api/transcribe`, { method: 'POST', body: form })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ text: 'hello there' })
+    expect(upstream).toHaveBeenCalledOnce()
+    expect(String((upstream.mock.calls[0] as unknown[])[0])).toMatch(/\/v1\/audio\/transcriptions$/)
+  })
+
+  it('without the compat flag a headless service does not claim the shell paths', async () => {
+    const upstream = vi.fn(async () => new Response('{}'))
+    const server = createWizardServer({ requireAccess: false, fetchImpl: upstream, archivedSessionReader: () => [] })
+    servers.push(server)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing fixture port')
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array(10)], { type: 'audio/aac' }), 'voice.aac')
+    const response = await fetch(`http://127.0.0.1:${address.port}/wizard-os-home/api/transcribe`, { method: 'POST', body: form })
+    expect(response.status).toBe(404)
+    expect(upstream).not.toHaveBeenCalled()
   })
 
   it.each([

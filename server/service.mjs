@@ -1867,6 +1867,9 @@ export function createWizardServer(options = {}) {
   }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
+  // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
+  // (<prefix>api/transcribe, <prefix>api/route): native builds post multipart audio there, through the shell.
+  const uxApi = Boolean(uxDir || options.uxApiCompat)
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
   // without one shows no mic instead of a mic that fails. Tests can pin it with sttConfigured.
   let sttProbe = { ok: options.sttConfigured ?? false, at: options.sttConfigured === undefined ? 0 : Infinity }
@@ -2841,7 +2844,7 @@ export function createWizardServer(options = {}) {
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
         return
       }
-      if ((url.pathname === '/wizard/v1/route' || (uxDir && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
+      if ((url.pathname === '/wizard/v1/route' || (uxApi && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const fast = resolveFastRouter(readSettings(settingsPath).settings, router)
         if (!fast) { sendJson(response, 404, { error: 'router_not_configured' }); return }
@@ -2920,7 +2923,7 @@ export function createWizardServer(options = {}) {
 
       // Compatibility for shells and native builds that still post multipart audio to the old
       // sidecar path (<ux prefix>/api/transcribe), e.g. the Android lock-screen assistant.
-      if (uxDir && url.pathname === `${uxPrefix}api/transcribe` && request.method === 'POST') {
+      if (uxApi && url.pathname === `${uxPrefix}api/transcribe` && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (request.headers.origin) {

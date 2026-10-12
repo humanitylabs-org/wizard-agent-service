@@ -1,6 +1,6 @@
 services:
   wizard-agent-service:
-    image: ${WIZARD_SHELL_IMAGE:-ghcr.io/humanitylabs-org/wizard-agent-service:0.2.0}
+    image: ${WIZARD_AGENT_SERVICE_IMAGE:-ghcr.io/humanitylabs-org/wizard-agent-service:0.3.0-candidate.20261012}
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
@@ -14,7 +14,6 @@ services:
       WIZARD_STT_ORIGIN: http://transcriber:8000
       WIZARD_HELM_ORIGIN: http://127.0.0.1:9
       WIZARD_HERMES_STATE_PATH: ""
-      WIZARD_FOLLOW_THROUGH: "off"
       WIZARD_HELM_DB_PATH: ""
       WIZARD_MEDIA_ROOT: /media
       WIZARD_MEDIA_AGENT_ROOT: /media
