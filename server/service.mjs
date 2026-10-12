@@ -1821,6 +1821,17 @@ function sttNoSpeech(status, raw) {
   try { return /^no speech detected$/i.test(String(JSON.parse(raw.toString('utf8'))?.detail ?? '').trim()) } catch { return false }
 }
 
+// Whisper scores every segment's chance of being silence (no_speech_prob). With verbose_json, segments it
+// scores above 0.6 (Whisper's own no-speech threshold) are its guesses at silence, e.g. "you" for an empty
+// take, and are dropped. Replies without segments (plain json, Wizard's own STT) keep their text unchanged.
+export function speechText(value) {
+  const segments = Array.isArray(value?.segments) ? value.segments : null
+  if (!segments) return typeof value?.text === 'string' ? value.text : ''
+  return segments
+    .filter((s) => typeof s?.text === 'string' && !(Number(s.no_speech_prob) > 0.6))
+    .map((s) => s.text).join('').replace(/\s+/g, ' ')
+}
+
 export function createWizardServer(options = {}) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
@@ -1914,7 +1925,7 @@ export function createWizardServer(options = {}) {
       const models = await sttProbeGet('/v1/models', 2000)
       const first = models.ok ? speechModelOf(models.value) : null
       if (first) {
-        sttModelCache = { id: first.id.slice(0, 200), at: Date.now() }
+        sttModelCache = { id: first.id.slice(0, 200), segments: typeof first.task === 'string', at: Date.now() }
         value = { reachable: true, ready: true, provider: 'local', name: VOICE_NAMES.local, model: first.id.slice(0, 120), attested: false }
       } else if (health.reachable || models.reachable) {
         value = { reachable: true, ready: false, provider: models.ok ? 'local' : '', name: models.ok ? 'No voice model installed' : 'Voice unavailable', model: '', attested: false }
@@ -1926,19 +1937,26 @@ export function createWizardServer(options = {}) {
   const sttAvailable = async () => (await sttReadiness()).ready
   // OpenAI-compatible transcribers (e.g. the Speaches-based `transcriber` app) need a `model` field;
   // Wizard's own STT ignores it. Use the transcriber's speech model, cached for 5 minutes.
-  let sttModelCache = { id: '', at: 0 }
-  const sttModel = async () => {
-    if (Date.now() - sttModelCache.at < 300_000) return sttModelCache.id
+  // `segments`: the transcriber is Speaches-shaped (its models carry a task). Whisper invents a word for a silent
+  // take ("you", "Thank you."), so those requests ask for verbose_json and the reply keeps only the segments
+  // Whisper itself scores as speech (see speechText); a silent take is then reported as no speech.
+  let sttModelCache = { id: '', segments: false, at: 0 }
+  const sttModel = async () => (await sttModelInfo()).id
+  const sttModelInfo = async () => {
+    if (Date.now() - sttModelCache.at < 300_000) return sttModelCache
     let id = ''
+    let segments = false
     try {
       const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
       if (r.ok) {
-        const first = speechModelOf(await r.json())
+        const listing = await r.json()
+        const first = speechModelOf(listing)
         id = first ? first.id.slice(0, 200) : ''
+        segments = typeof first?.task === 'string'
       } else await r.body?.cancel().catch(() => undefined)
     } catch { /* keep '' */ }
-    sttModelCache = { id, at: Date.now() }
-    return id
+    sttModelCache = { id, segments, at: Date.now() }
+    return sttModelCache
   }
   const router = options.router && options.router.url && options.router.model ? options.router : null
   // 'require' (default, today's live behaviour): Hermes must advertise join; every run asks for
@@ -2977,7 +2995,9 @@ export function createWizardServer(options = {}) {
         const filename = named.replace(/\.[a-z0-9]{1,5}$/i, '') + `.${voiceExt}`
         const form = new FormData()
         form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
-        { const model = await sttModel(); if (model) form.append('model', model) }
+        const sttInfo = await sttModelInfo()
+        if (sttInfo.id) form.append('model', sttInfo.id)
+        if (sttInfo.segments) form.append('response_format', 'verbose_json')
         {
           // Language and spelling hints come from Wizard OS settings: the agent's name, the user's
           // own vocabulary. Nothing about any particular user is built in.
@@ -2995,7 +3015,7 @@ export function createWizardServer(options = {}) {
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
-          const text = typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : ''
+          const text = speechText(value).trim().slice(0, 64_000)
           // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).
           if (!text) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           sendJson(response, 200, {

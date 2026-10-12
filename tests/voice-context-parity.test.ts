@@ -7,10 +7,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
 
-type Stt = { health: 'wizard' | 'plain' | 'none'; models: Array<string | { id: string; task: string }> | null; speech: boolean }
+type Stt = { health: 'wizard' | 'plain' | 'none'; models: Array<string | { id: string; task: string }> | null; speech: boolean; silent?: boolean }
 const stt: Stt = { health: 'none', models: ['Systran/faster-whisper-small'], speech: true }
 const runs: Array<Record<string, any>> = []
 const transcribeModels: string[] = []
+const transcribeFormats: string[] = []
 const root = mkdtempSync(join(tmpdir(), 'wizard-voice-context-'))
 let sttServer: ReturnType<typeof createServer>
 let upstream: ReturnType<typeof createServer>
@@ -43,6 +44,15 @@ beforeAll(async () => {
     if (request.url === '/v1/audio/transcriptions') {
       const body = Buffer.concat(chunks).toString('latin1')
       transcribeModels.push(body.match(/name="model"\r\n\r\n([^\r]*)/)?.[1] ?? '')
+      const format = body.match(/name="response_format"\r\n\r\n([^\r]*)/)?.[1] ?? ''
+      transcribeFormats.push(format)
+      // Like Speaches (measured on Thales): Whisper invents "you" for silence, scoring it no_speech_prob 0.878.
+      if (stt.silent) {
+        response.setHeader('Content-Type', 'application/json')
+        response.end(JSON.stringify(format === 'verbose_json' ? { text: 'you', segments: [{ text: ' you', no_speech_prob: 0.878, avg_logprob: -0.82 }] } : { text: 'you' }))
+        return
+      }
+      if (format === 'verbose_json') { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ text: ' hello there ', segments: [{ text: ' hello there', no_speech_prob: 0.001 }] })); return }
       response.setHeader('Content-Type', 'application/json')
       if (!stt.speech) { response.statusCode = 422; response.end(JSON.stringify({ detail: 'No speech detected' })); return }
       response.end(JSON.stringify({ text: ' hello there ' })); return
@@ -108,6 +118,24 @@ describe('voice readiness: bootstrap and status give one answer', () => {
     expect(r).toMatchObject({ boot: true, code: 200, status: { ready: true, model: 'Systran/faster-whisper-small' } })
     await fetch(`${base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/aac' }, body: Buffer.from('x') })
     expect(transcribeModels.at(-1)).toBe('Systran/faster-whisper-small')
+  })
+
+  it('Speaches: a silent take comes back as no speech, not the word Whisper invents for it', async () => {
+    Object.assign(stt, { health: 'plain', speech: true, silent: true, models: [{ id: 'Systran/faster-whisper-small', task: 'automatic-speech-recognition' }] })
+    const base = await start()
+    const r = await fetch(`${base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/aac' }, body: Buffer.from('x') })
+    expect(transcribeFormats.at(-1)).toBe('verbose_json')
+    expect(await r.json()).toMatchObject({ text: '', no_speech: true })
+    stt.silent = false
+    const spoken = await fetch(`${base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/aac' }, body: Buffer.from('x') })
+    expect(await spoken.json()).toMatchObject({ text: 'hello there' })
+  })
+
+  it('a transcriber whose models carry no task keeps the plain json reply', async () => {
+    Object.assign(stt, { health: 'none', speech: true, models: ['whisper-1'] })
+    const base = await start()
+    await fetch(`${base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/aac' }, body: Buffer.from('x') })
+    expect(transcribeFormats.at(-1)).toBe('')
   })
 
   it("Wizard's own STT (/health with provider) keeps its name and attestation", async () => {
