@@ -1,0 +1,59 @@
+{
+  "name": "Wizard",
+  "id": "wizard-shell",
+  "wizard_type": "view",
+  "available": true,
+  "short_desc": "The Wizard shell: chats, launcher, voice and apps on top of Hermes Agent.",
+  "author": "Humanity Labs",
+  "port": 8796,
+  "categories": [
+    "utilities"
+  ],
+  "description": "The Wizard front end (Wizard UX) and the Wizard Agent Service in one container. Talks to the hermes-agent app; reads Hermes session history read-only; saves attachments into the shared media folder.",
+  "tipi_version": 2,
+  "version": "0.2.0",
+  "source": "https://github.com/humanitylabs-org/wizard-agent-service",
+  "exposable": false,
+  "supported_architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "created_at": 1791630000000,
+  "updated_at": 1791630000000,
+  "dynamic_config": true,
+  "min_tipi_version": "4.8.0",
+  "uid": 1000,
+  "gid": 1000,
+  "form_fields": [
+    {
+      "type": "password",
+      "label": "Hermes API key",
+      "env_variable": "WIZARD_HERMES_API_KEY",
+      "required": true,
+      "min": 8,
+      "hint": "The HERMES_API_KEY of your hermes-agent app (Runtipi > Hermes Agent > Settings)."
+    },
+    {
+      "type": "text",
+      "label": "Orb router URL (optional)",
+      "env_variable": "WIZARD_ROUTER_URL",
+      "required": false,
+      "default": "",
+      "hint": "OpenAI-compatible chat completions URL for a fast, cheap model. Leave empty to send every orb request to the agent."
+    },
+    {
+      "type": "text",
+      "label": "Orb router model (optional)",
+      "env_variable": "WIZARD_ROUTER_MODEL",
+      "required": false,
+      "default": ""
+    },
+    {
+      "type": "password",
+      "label": "Orb router key (optional)",
+      "env_variable": "WIZARD_ROUTER_KEY",
+      "required": false,
+      "default": ""
+    }
+  ]
+}

@@ -59,7 +59,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
  * normal admission path. `enabled()` is checked every tick so it turns itself off on agents that
  * join delegated work inside the run.
  */
-export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, allowSession = () => true, intervalMs = 5000, log = () => {} }) {
+export function startDelegationFollowThrough({ sessionDbPath, find, admit, enabled, allowSession = () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
   let busy = false
   const tick = async () => {
@@ -67,13 +67,13 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, al
     busy = true
     try {
       if (!(await enabled())) return
-      const completions = findPendingFollowThroughs(sessionDbPath)
+      const completions = sessionDbPath ? findPendingFollowThroughs(sessionDbPath) : await find()
       const completionSessions = new Set(completions.map(row => row.sessionId))
       const receipts = findIdleUndeliveredHelperReceipts(sessionDbPath).filter(row => !completionSessions.has(row.sessionId))
       const touchedSessions = new Set()
       for (const pending of [...completions, ...receipts].filter(row => allowSession(row.sessionId))) {
         if (touchedSessions.has(pending.sessionId)
-          || !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
+          || sessionDbPath && !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
         touchedSessions.add(pending.sessionId)
         const key = pending.key ?? `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
         if (done.has(key)) continue
