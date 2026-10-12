@@ -69,6 +69,7 @@ const server = createWizardServer({
   settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
   appManagerUrl: process.env.WIZARD_APP_MANAGER_URL || '',
+  appIndexUrl: process.env.WIZARD_APP_INDEX_URL || undefined,
   appManagerToken: process.env.WIZARD_APP_MANAGER_TOKEN || '',
   // Installed apps: trusted Host names (DNS-rebinding fence), the separate apps origin, the hosts app upstreams may
   // use (a container Service names its host gateway) and, optionally, the tailnet logins that count as the owner.
@@ -77,6 +78,7 @@ const server = createWizardServer({
   appUpstreamHosts: list(process.env.WIZARD_APP_UPSTREAM_HOSTS),
   appOwnerLogins: list(process.env.WIZARD_APP_OWNER_LOGINS),
   appTrustedProxyIps: list(process.env.WIZARD_APP_TRUSTED_PROXY_IPS),
+  appManagerHosts: list(process.env.WIZARD_APP_MANAGER_HOSTS),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',

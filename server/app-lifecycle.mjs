@@ -75,11 +75,11 @@ function sameOrigin(req, hosts) {
 export function createAppLifecycleRoutes({
   managerUrl = '', managerToken = '', appsJsonPath = '', access = localOwnerAccess, fetchImpl = fetch,
   refresh = () => {}, now = Date.now, allowedHosts = [], controlOrigins = [], appsOrigin = '',
-  upstreamHosts = [], role = 'control',
+  upstreamHosts = [], managerHosts = [], role = 'control',
 } = {}) {
   if (managerUrl) {
     const u = new URL(managerUrl)
-    if (u.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') throw new Error('App Manager bridge must be a loopback HTTP origin')
+    if (u.protocol !== 'http:' || ![...LOOPBACK_HOSTS, ...managerHosts].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') throw new Error('App Manager bridge must be a loopback HTTP origin')
     managerUrl = u.origin
   }
   if (appsOrigin) {
@@ -119,7 +119,8 @@ export function createAppLifecycleRoutes({
       const { r, data } = await managerJson(`/api/internal/apps/${id}/view`, { signal: AbortSignal.timeout(5000) })
       if (r.ok && data?.path === `/apps/${id}/`) {
         const u = new URL(data.upstream)
-        if (u.protocol === 'http:' && upstreamOk.has(u.hostname.toLowerCase()) && u.port && !u.username && !u.password && !u.search && !u.hash) url = u
+        // Internal fresh-mode routing names this installed app's own Runtipi service; never a caller-chosen host.
+        if (u.protocol === 'http:' && (upstreamOk.has(u.hostname.toLowerCase()) || u.hostname === id) && u.port && !u.username && !u.password && !u.search && !u.hash) url = u
       }
     } catch {}
     views.set(id, { url, at: now() })

@@ -2769,7 +2769,7 @@ export function createWizardServer(options = {}) {
   const appRouteOptions = {
     appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
     access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
-    allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [],
+    allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [], managerHosts: options.appManagerHosts || [],
     controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || ''],
   }
   const appLifecycle = createAppLifecycleRoutes(appRouteOptions)

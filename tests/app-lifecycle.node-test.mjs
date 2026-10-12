@@ -149,7 +149,10 @@ test('with an apps origin, the control origin only redirects; the apps listener 
 
 test('trusts loopback or a loopback Tailscale principal (optionally pinned), never raw remote headers', () => {
   const req = (ip, h = {}) => ({ socket: { remoteAddress: ip }, headers: h })
-  assert.equal(localOwnerAccess(req('127.0.0.1')), true)
+  assert.equal(localOwnerAccess(req('127.0.0.1')), true);
+  assert.equal(localOwnerAccess(req('172.18.0.1')), false);
+  assert.equal(localOwnerAccess(req('172.18.0.1'), [], ['172.18.0.1']), true);
+  assert.equal(localOwnerAccess(req('172.18.0.2'), [], ['172.18.0.1']), false);
   assert.equal(localOwnerAccess(req('8.8.8.8', { 'tailscale-user-login': 'owner' })), false)
   assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3' })), false)
   assert.equal(localOwnerAccess(req('127.0.0.1', { 'x-forwarded-for': '100.1.2.3', 'tailscale-user-login': 'owner@x' })), true)

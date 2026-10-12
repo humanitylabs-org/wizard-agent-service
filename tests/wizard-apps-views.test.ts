@@ -84,6 +84,15 @@ describe('App Manager views routes (read-only)', () => {
     expect(await r.json()).toEqual({ error: 'index_unavailable' })
   })
 
+  it('serves standalone Store reads through canonical routes and rejects a lifecycle alias', async () => {
+    const { base } = await start()
+    const r = await fetch(`${base}/wizard-os-home/store-data/wizard/v1/index/search`)
+    expect(r.status).toBe(200)
+    expect((await r.json()).apps[0].id).toBe('transcriber')
+    const bad = await fetch(`${base}/wizard-os-home/store-data/api/app-lifecycle/hello%3Awizardapps/install`, { method: 'POST', body: '{}' })
+    expect(bad.status).toBe(404)
+  })
+
   it('reads a missing apps.json as an empty list', () => {
     expect(readWizardApps('/nonexistent/apps.json')).toEqual({ schema: 1, store: 'wizardapps', apps: [] })
   })
