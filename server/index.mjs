@@ -82,6 +82,8 @@ const server = createWizardServer({
   appReservedPorts: [port, Number(process.env.WIZARD_APPS_PORT || 0)].filter(Boolean),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
+  // Headless Agent Service behind a separate shell container: keep the shell's sidecar API paths.
+  uxApiCompat: process.env.WIZARD_UX_API_COMPAT === '1',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,
