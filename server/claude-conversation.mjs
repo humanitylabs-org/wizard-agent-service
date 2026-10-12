@@ -101,12 +101,13 @@ export class ClaudeConversation {
         }
         if(e.type==='result')result=e;
       };
-      child.stdout.on('data',chunk=>{if(bytes+chunk.length>2*1024*1024){this.stop(id,'output_limit');return}bytes+=chunk.length;lines+=chunk.toString();let p;while((p=lines.indexOf('\n'))!==-1){const line=lines.slice(0,p);lines=lines.slice(p+1);try{parse(line)}catch{this.stop(id,'invalid_cli_stream');return}}});
+      child.stdout.on('data',chunk=>{if(this.closed||this.run(id).state!=='running')return;if(bytes+chunk.length>2*1024*1024){this.stop(id,'output_limit');return}bytes+=chunk.length;lines+=chunk.toString();let p;while((p=lines.indexOf('\n'))!==-1){const line=lines.slice(0,p);lines=lines.slice(p+1);try{parse(line)}catch{this.stop(id,'invalid_cli_stream');return}}});
       child.stderr.on('data',chunk=>{diagnostic=(diagnostic+chunk.toString()).slice(-1000)});
-      child.on('error',()=>{this.finish(id,'failed','claude_unavailable')});
+      child.on('error',()=>{if(!this.closed)this.finish(id,'failed','claude_unavailable')});
       const deadline=setTimeout(()=>this.stop(id,'deadline'),this.timeoutMs);deadline.unref();
       child.on('close',code=>{
         clearTimeout(deadline);this.children.delete(id);
+        if(this.closed)return;
         if(!['running','accepted'].includes(this.run(id).state))return;
         try{if(lines.trim())parse(lines)}catch{this.finish(id,'failed','invalid_cli_stream');return}
         if(code===0&&result&&!result.is_error){const content=String(result.result??partial);resolvedModel=Object.keys(result.modelUsage||{})[0]||resolvedModel;
@@ -128,8 +129,8 @@ export class ClaudeConversation {
     this.db.prepare('UPDATE threads SET updated=? WHERE id=?').run(now(),r.thread_id);
     this.event(id,'terminal',{run_id:id,state,error});return this.run(id)
   }
-  stop(id,reason='user_stop') {const r=this.run(id);if(!['accepted','running'].includes(r.state))return r;const child=this.children.get(id);if(child){try{process.kill(-child.pid,'SIGTERM')}catch{child.kill?.('SIGTERM')}const kill=setTimeout(()=>{try{process.kill(-child.pid,'SIGKILL')}catch{}},2000);kill.unref()}return this.finish(id,reason==='user_stop'?'stopped':'interrupted',reason)}
-  close() {for(const id of this.children.keys())this.stop(id,'service_shutdown');this.db.close()}
+  stop(id,reason='user_stop') {const r=this.run(id);if(!['accepted','running'].includes(r.state))return r;const child=this.children.get(id);if(child){try{process.kill(-child.pid,'SIGTERM')}catch{child.kill?.('SIGTERM')}const kill=setTimeout(()=>{if(this.children.get(id)!==child)return;try{process.kill(-child.pid,'SIGKILL')}catch{}},2000);kill.unref()}return this.finish(id,reason==='user_stop'?'stopped':'interrupted',reason)}
+  close() {for(const id of this.children.keys())this.stop(id,'service_shutdown');this.closed=true;this.db.close()}
 }
 
 export function streamConversationEvents(adapter,id,response,after=0) {
