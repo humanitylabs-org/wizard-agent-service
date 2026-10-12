@@ -202,6 +202,19 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
+// The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
+// shell's own screen note ("[Wizard OS context] … Window in front: … Visible on screen: …"), which tells the
+// agent what the user was looking at when they spoke. It rides after the contract, bounded, as background only.
+const VIEW_CONTEXT_PREFIX = '[Wizard OS context]'
+const VIEW_CONTEXT_MAX = 2400
+export function clientViewContext(value) {
+  const raw = Array.isArray(value) ? value.filter((x) => typeof x === 'string').join('\n') : value
+  if (typeof raw !== 'string') return ''
+  const note = raw.trim()
+  if (!note.startsWith(VIEW_CONTEXT_PREFIX)) return ''
+  return note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note
+}
+
 function directBody(method, pathname, body, contract, noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
@@ -219,7 +232,7 @@ function directBody(method, pathname, body, contract, noteFor = null) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
+    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
