@@ -28,6 +28,7 @@ import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegatio
 import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { LockedRunBridge } from './locked-run-bridge.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -442,7 +443,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           if (truth?.activityAt) projected.wizard_activity_at = truth.activityAt
           if (truth?.requestPreview) projected.wizard_request_preview = truth.requestPreview
           if (truth?.startedAt) projected.wizard_started_at = truth.startedAt
-          if (!operator && !projected.provider && truth?.route && truth.route.model === projected.model) projected.provider = truth.route.provider
+          if (!operator && truth?.route && truth.route.model === projected.model) {
+            projected.provider = truth.route.provider
+            if (truth.routeUpdatedAt) projected.wizard_model_lock_updated_at = truth.routeUpdatedAt
+          }
           if (!operator) {
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const latestDirect = newestRun(directRuns, session.id)
@@ -1833,7 +1837,28 @@ export function createWizardServer(options = {}) {
   const requireAccess = options.requireAccess ?? true
   const accessVerifier = options.accessVerifier
   if (requireAccess && typeof accessVerifier !== 'function') throw new Error('A Cloudflare Access verifier is required')
-  const fetchImpl = options.fetchImpl ?? fetch
+  const rawFetchImpl = options.fetchImpl ?? fetch
+  const lockedBridge = new LockedRunBridge({
+    fetchImpl: rawFetchImpl, origin: upstreamOrigin,
+    statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
+    sessionRoute: sessionId => {
+      // Never infer a host state.db path on portable installs. Explicit client locks still work
+      // without this optional read-only persisted-selector fallback.
+      if (!hermesStatePath || !existsSync(hermesStatePath)) return null
+      const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+      try {
+        let row
+        try { row = db.prepare('SELECT model, model_config FROM sessions WHERE id=?').get(String(sessionId)) }
+        catch (error) { if (/no such column/.test(error.message)) return null; throw error }
+        const cfg = JSON.parse(row?.model_config || '{}')
+        const lock = cfg.browser_model_lock
+        if (lock?.confirmed && lock.model && lock.provider) return { model: lock.model, provider: lock.provider, version: Number(lock.updated_at) || 0 }
+        if (cfg.provider === 'tinfoil' && row?.model) return { model: row.model, provider: 'custom:tinfoil-operator' }
+        return null
+      } finally { db.close() }
+    },
+  })
+  const fetchImpl = (url, init) => lockedBridge.fetch(url, init)
   // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
@@ -3525,6 +3550,11 @@ export function createWizardServer(options = {}) {
           return
         }
         let result = Buffer.from(await upstream.arrayBuffer())
+        if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
+          const ack = JSON.parse(result.toString('utf8'))
+          const selected = lockedBridge.sessionRoute(decodeURIComponent(upstreamPath.split('/')[3]))
+          if (ack.runtime && selected?.version) { ack.runtime.selection_version = selected.version; result = Buffer.from(JSON.stringify(ack)) }
+        }
         if (queuedProxyRecord && contentType.includes('application/json')) {
           const operatorRecord = queuedProxyRecord.runtime === 'operator'
             ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
@@ -3767,21 +3797,38 @@ export function createWizardServer(options = {}) {
     })
     const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
     const watcher = startDelegationFollowThrough({
-      find: options.followThroughFinder ?? createFollowThroughFinder({
+      sessionDbPath: hermesStatePath,
+      // Receipt delivery/gates are not exposed by stock HTTP. Retain the live recovery path
+      // only when state is explicitly mounted; otherwise keep the portable HTTP finder.
+      find: options.followThroughFinder ?? (hermesStatePath ? undefined : createFollowThroughFinder({
         request: (path) => hermesJson(path),
         prefix: FOLLOW_THROUGH_PREFIX,
         busy: (sessionId) => (runQueue?.latestProjections([sessionId]) ?? []).some((run) => LIVE.has(run.status)),
-      }),
+      })),
       enabled: async () => {
-        if (!selfOrigin || joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
+        if (!selfOrigin) return false
+        if (lockedBridge.entries.size) return true  // the native locked-chat lane is detached
+        if (joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
+        if (joinedDelegation === 'off') return true
+        try { return !(await runContract()).join } catch { return false }
+      },
+      eligible: async sessionId => {
+        if ([...lockedBridge.entries.values()].some(entry => entry.sessionId === sessionId)) return true
+        if (joinedDelegation === 'require' || joinedDelegation === 'unchecked') return false
         if (joinedDelegation === 'off') return true
         try { return !(await runContract()).join } catch { return false }
       },
       admit: async (sessionId, input, idempotencyKey) => {
+        // Without a mounted state.db there is no persisted-selector reader. Keep the last admitted
+        // send's exact lock on its automatic continuation instead of falling back to the default route.
+        const locked = !hermesStatePath ? [...lockedBridge.entries.values()]
+          .filter(entry => entry.sessionId === sessionId)
+          .sort((a, b) => b.createdAt - a.createdAt)[0] : null
         const response = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey, 'X-Wizard-Internal': 'follow-through' },
-          body: JSON.stringify({ session_id: sessionId, input }),
+          body: JSON.stringify({ session_id: sessionId, input,
+            ...(locked ? { model: locked.model, provider: locked.provider, require_model_lock: true } : {}) }),
         })
         await response.body?.cancel().catch(() => undefined)
         if (!response.ok) throw new Error(`admission ${response.status}`)

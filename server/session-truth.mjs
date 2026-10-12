@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -58,7 +59,7 @@ function lockedRoute(modelConfig) {
     const lock = JSON.parse(modelConfig)?.browser_model_lock
     const model = typeof lock?.model === 'string' ? lock.model : ''
     const provider = typeof lock?.provider === 'string' ? lock.provider : ''
-    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider } : null
+    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider, updatedAt: Number(lock.updated_at) || 0 } : null
   } catch { return null }
 }
 
@@ -86,7 +87,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       for (const row of routeRows) {
         const current = truth.get(String(row.id))
         const lock = lockedRoute(row.model_config)
-        if (current && lock && lock.model === row.model) current.route = lock
+        if (current && lock && lock.model === row.model) {
+          current.route = { model: lock.model, provider: lock.provider }
+          current.routeUpdatedAt = lock.updatedAt
+        }
       }
     } catch { /* older state schemas carry no model lock */ }
     // Seek newest-first within each session's existing indexed range. Loading
@@ -129,9 +133,15 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current) current.helpersRunning = Number(row.n) || 0
+        if (current && !ownerGate(db, String(row.id))) current.helpersRunning = Number(row.n) || 0
       }
     } catch { /* agents without background delegation */ }
+    // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
+    // Read delivery receipts independently of the latest transcript row and execution state.
+    for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
+      const current = truth.get(receipt.sessionId)
+      if (current) current.helperResultUnanswered = true
+    }
     try {
       const newestRow = db.prepare(`
         SELECT role, content, timestamp FROM messages
@@ -140,8 +150,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `)
       for (const [id, current] of truth) {
         const row = newestRow.get(id)
+        const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
-          && Number(row.timestamp) > nowSeconds - 6 * 3600) current.helperResultUnanswered = true
+          && Number(row.timestamp) > nowSeconds - 6 * 3600 && !ownerGate(db, id)
+          && !(delegationId && receiptConsumed(db, id, delegationId))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`
