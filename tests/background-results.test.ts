@@ -12,7 +12,7 @@ async function fixture({ count = 205, access = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-manual-background-'))
   const at = Date.now() / 1000, finished = at - 3 * 3600
   const rows = new Map<string, any[]>(), sessions: any[] = [], calls: any[] = [], reads: string[] = []
-  let canDispatch = true, failHistory = false, slowHistory = false
+  let canDispatch = true, failHistory = false, slowHistory = false, clock = Date.now()
   const held = new Set<string>()
   for (let i = 0; i < count; i++) {
     const id = i === 101 ? 'wizard-assistant-101' : i === 202 ? 'live_tip_202' : `wizard_manual_${i}`
@@ -53,13 +53,14 @@ async function fixture({ count = 205, access = false } = {}) {
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
       requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30,
-      backgroundResultsBusyReader: (id: string) => held.has(id), runQueueRetryDelayMs: 25 })
+      backgroundResultsBusyReader: (id: string) => held.has(id), backgroundResultsNow: () => clock, runQueueRetryDelayMs: 25 })
     base = `http://127.0.0.1:${(await listen(server)).port}`
   }
   await open()
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
   owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); rmSync(dir, { recursive: true, force: true }) })
   return { rows, calls, reads, sessions, finished, at, held,
+    advance: (ms: number) => { clock += ms },
     failHistory: (v: boolean) => { failHistory = v }, slowHistory: (v: boolean) => { slowHistory = v },
     pause: () => { canDispatch = false }, resume: () => { canDispatch = true },
     restart: async () => { await close(); await open() },
@@ -158,7 +159,9 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
   it('normal Chats responds while a cold discovery scan is slow; the manual list also returns scanning immediately', async () => {
     const f = await fixture({ count: 1 }); f.slowHistory(true)
     const before = Date.now()
-    const r = await fetch(`${f.base()}/wizard/hermes/api/sessions?limit=100`)
+    // First-page preview enrichment already reads history. Use a subsequent page to isolate discovery's
+    // latency; it must stay responsive while the independent cold recovery scan waits on that history.
+    const r = await fetch(`${f.base()}/wizard/hermes/api/sessions?limit=100&offset=100`)
     expect(r.status).toBe(200)
     expect(Date.now() - before).toBeLessThan(140)
     const manual = await fetch(`${f.base()}/wizard/background-results`)
@@ -205,6 +208,25 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     f.rows.set('wizard_compressed', [{ id: 88888, role: 'user', content: 'The root moved on.', timestamp: f.at }])
     expect((await f.click(pending)).status).toBe(409)
     expect(f.calls).toHaveLength(0)
+  })
+  it('a result first seen before two hours becomes manual Continue as it ages without a new message', async () => {
+    const f = await fixture({ count: 1 })
+    f.rows.get('wizard_manual_0')![1].timestamp = f.at - 3600
+    expect((await f.list()).body.results).toHaveLength(0)
+    f.advance(2 * 3600 * 1000)
+    expect((await f.list()).body.results).toHaveLength(1)
+    expect(f.calls).toHaveLength(0)
+  })
+  it('Continue deliberately covers sibling saved findings, which disappear after a genuine final answer', async () => {
+    const f = await fixture({ count: 1 })
+    f.rows.get('wizard_manual_0')!.push({ id: 3, role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_other] Second saved result.', timestamp: f.finished + 10 })
+    const pending = (await f.list()).body.results
+    expect(pending).toHaveLength(2)
+    expect((await f.click(pending[0])).status).toBe(202)
+    await settled(f, 1)
+    expect(f.calls[0].input).toContain('including any other saved results above')
+    f.rows.get('wizard_manual_0')!.push({ id: 100099, role: 'assistant', content: 'All saved findings addressed.', finish_reason: 'stop', timestamp: f.at + 20 })
+    expect((await f.list()).body.results).toHaveLength(0)
   })
   it('the endpoints are authenticated and arbitrary input is refused', async () => {
     const locked = await fixture({ count: 1, access: true })

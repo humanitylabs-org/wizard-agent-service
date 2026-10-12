@@ -2488,7 +2488,7 @@ export function createWizardServer(options = {}) {
   }
 
   if (runQueue) backgroundResults = createBackgroundResults({
-    request: path => hermesJson(path), sessionDbPath: hermesStatePath, queue: () => runQueue,
+    request: (path, init) => hermesJson(path, init), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
     busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),

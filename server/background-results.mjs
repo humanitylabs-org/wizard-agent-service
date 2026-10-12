@@ -26,19 +26,22 @@ function snapshot(rows, at) {
 export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000 }) {
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
+  const requestBounded = (path, signal) => request(path, {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
+  })
   const reads = new Map()
   const clicks = new Map()
-  const recent = async (id, fresh = false, revision = '') => {
+  const recent = async (id, fresh = false, revision = '', signal) => {
     const previous = reads.get(id)
     if (!fresh && previous?.revision === revision) return previous.rows
-    const rows = rowsOf(await request(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`))
+    const rows = rowsOf(await requestBounded(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`, signal))
     reads.set(id, { revision, rows })
     return rows
   }
-  const threadRows = async (root, readId, fresh = false, revision = '') => {
-    const rows = await recent(readId, fresh, revision)
+  const threadRows = async (root, readId, fresh = false, revision = '', signal) => {
+    const rows = await recent(readId, fresh, revision, signal)
     if (root === readId) return rows
-    const rootRows = await recent(root, fresh, revision)
+    const rootRows = await recent(root, fresh, revision, signal)
     const unique = new Map()
     for (const row of [...rows, ...rootRows]) unique.set(String(row.id), row)
     return [...unique.values()]
@@ -60,12 +63,13 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     return { ...candidate, boundary: snap.boundary }
   }
   const scan = async () => {
+    const signal = AbortSignal.timeout(40_000)
     const sessions = [], records = [], aliases = new Map(), roots = new Map()
     let complete = true
     // Walk the real HTTP pages, including session 101. This is independent of the UX's 30-day display policy.
     // Unchanged conversations reuse their message reads; one scan is shared/cached by all list consumers.
     for (let offset = 0; ; offset += 200) {
-      const p = await request(`/api/sessions?limit=200&offset=${offset}&include_children=false`)
+      const p = await requestBounded(`/api/sessions?limit=200&offset=${offset}&include_children=false`, signal)
       const page = rowsOf(p)
       for (const row of page) {
         const root = String(row._lineage_root_id || row.id || '')
@@ -83,21 +87,21 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     for (let offset = 0; offset < sessions.length; offset += 8) {
       await Promise.all(sessions.slice(offset, offset + 8).map(async ({ row, id, root }) => {
         if (isBusy(root) || isBusy(id)) return
-        const rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`)
+        const rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`, signal)
         for (const message of rows) {
           const text = textOf(message), at = Number(message.timestamp)
           if (message.role !== 'user' || !text.startsWith(PREFIX) || !Number.isFinite(at) || now() / 1000 - at <= 7200 || text.length > 60_000) continue
           const delegationId = completionDelegationId(text)
-          const source = delegationId || `message-${id}-${message.id}`
+          const source = delegationId || `message-${root}-${message.id}`
           const key = delegationId ? receiptKey(delegationId) : `wizard-follow-through-${root}-${message.id}`
           if (admitted(key)) continue
           const candidate = acceptable({ id: identity(root, source), sourceKind: 'transcript', source, sessionId: root, readId: id, at, messageId: message.id, delegationId, key,
-            input: delegationId ? `${RECEIPT_PREFIX}${delegationId}\nThe owner pressed Continue for these saved helper findings. Finish the original request under its latest instructions and release authority; verify helper claims yourself.\n\n${text}`
-              : `[Wizard follow-through] The owner pressed Continue for the saved result below. Finish the original request under its latest instructions and release authority; verify the findings yourself.\n\n${text}` }, rows)
+            input: delegationId ? `${RECEIPT_PREFIX}${delegationId}\nThe owner pressed Continue for these saved helper findings. Finish the original request, including any other saved results above, under its latest instructions and release authority; verify helper claims yourself.\n\n${text}`
+              : `[Wizard follow-through] The owner pressed Continue for the saved result below. Finish the original request, including any other saved results above, under its latest instructions and release authority; verify the findings yourself.\n\n${text}` }, rows)
           if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
         }
         const cacheEntry = reads.get(id)
-        if (cacheEntry && !records.some(record => record.readId === id)) cacheEntry.rows = []
+        if (cacheEntry && !records.some(record => record.readId === id)) if (!rows.some(m => textOf(m).startsWith(PREFIX) && now() / 1000 - Number(m.timestamp) <= 7200)) cacheEntry.rows = []
       }))
     }
     // Optional read-only history opt-in: dropped/pending receipts that never produced a transcript row.
@@ -108,7 +112,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const root = aliases.get(receipt.sessionId) || receipt.sessionId
       if (!WIZARD.test(root)) continue
       const candidate = acceptable({ ...receipt, sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
-        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, await threadRows(root, receipt.sessionId, true))
+        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, await threadRows(root, receipt.sessionId, true, '', signal))
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
     }
     for (const id of reads.keys()) if (!aliases.has(id)) reads.delete(id)
@@ -117,7 +121,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   }
   const refresh = async (fresh = false) => {
     if (!fresh && cache.at && now() - cache.at < refreshMs) return cache
-    if (!inflight) inflight = scan().catch(() => { cache = { ...cache, at: now(), error: true }; return cache }).finally(() => { inflight = null })
+    if (!inflight) inflight = scan().catch(error => { console.warn('[background-results] discovery temporarily unavailable:', String(error?.message || 'read failed').slice(0, 120)); cache = { ...cache, at: now(), error: true }; return cache }).finally(() => { inflight = null })
     return inflight
   }
   const publicRecord = row => ({ id: row.id, session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
@@ -186,11 +190,11 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     async validateDispatch(body) {
       const marker = body?._wizard_background_recovery
       if (!marker) return body
-      let rows
-      try { rows = await threadRows(body.session_id, marker.read_id, true) }
-      catch { throw error('history is temporarily unavailable', 503) }
+      let rows, leased
+      try { rows = await threadRows(body.session_id, marker.read_id, true); leased = busy(body.session_id) || busy(marker.read_id) }
+      catch (failure) { throw error(Number(failure?.status) === 404 ? 'the thread no longer exists' : 'history is temporarily unavailable', Number(failure?.status) === 404 ? 400 : 503) }
       const snap = snapshot(rows, marker.at)
-      if (snap.moved || snap.gated || (busy(body.session_id) || busy(marker.read_id)) || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
+      if (snap.moved || snap.gated || leased || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
       const { _wizard_background_recovery: _internal, ...forward } = body
       return forward
     },
