@@ -1799,6 +1799,15 @@ function replacePrivateControlIdentities(result, replacements) {
   return Buffer.from(projected)
 }
 
+// wizard-stt answers 422 {detail:'No speech detected'} for a take with no words in it (an accidental tap,
+// a pocket recording). That is a result, not an outage: report it as an empty transcript so every client
+// takes its "No speech detected" path instead of retrying a permanent 502 forever (James, 12 Oct 2026).
+// FastAPI also uses 422 for malformed forms, so only the exact no-speech detail counts.
+function sttNoSpeech(status, raw) {
+  if (status !== 422) return false
+  try { return /^no speech detected$/i.test(String(JSON.parse(raw.toString('utf8'))?.detail ?? '').trim()) } catch { return false }
+}
+
 export function createWizardServer(options = {}) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
@@ -2911,6 +2920,7 @@ export function createWizardServer(options = {}) {
             method: 'POST', body, redirect: 'error', signal: controller.signal, headers,
           })
           const raw = Buffer.from(await upstream.arrayBuffer())
+          if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, ms: Date.now() - started, model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
           sendJson(response, 200, { text: typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : '', ms: Date.now() - started, model: typeof value.model === 'string' ? value.model.slice(0, 120) : '' })
@@ -2947,10 +2957,12 @@ export function createWizardServer(options = {}) {
         try {
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal })
           const raw = Buffer.from(await upstream.arrayBuffer())
+          if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
           const text = typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : ''
-          if (!text) throw Object.assign(new Error('blank transcription'), { status: 400 })
+          // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).
+          if (!text) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           sendJson(response, 200, {
             text,
             provider: typeof value.provider === 'string' ? value.provider.slice(0, 80) : '',
