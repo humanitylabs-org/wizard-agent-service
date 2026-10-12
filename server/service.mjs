@@ -27,6 +27,7 @@ import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
+import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -2368,6 +2369,9 @@ export function createWizardServer(options = {}) {
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      if (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey)) {
+        requireCurrentContinuation(hermesStatePath, record.continuation)
+      }
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
       if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
@@ -2759,19 +2763,52 @@ export function createWizardServer(options = {}) {
     return file
   }))
 
+  // Private closure used by authenticated Continue and the watcher. It is not addressable by
+  // HTTP; headers/body fields never bypass Access or confer continuation authority.
+  const helperAdmissions = new Map()
+  const admitHelperContinuation = async (sessionId, input, key, continuation) => {
+    requireCurrentContinuation(hermesStatePath, continuation)
+    const existing = helperAdmissions.get(key)
+    if (existing) return existing
+    const admission = (async () => {
+      const contract = await assertJoinedDelegationCapability()
+      if (runQueue) await runQueueReady
+      const raw = Buffer.from(JSON.stringify({ session_id: sessionId, input }))
+      const prepared = await prepareRunBody(raw, resolveFiles, true)
+      const body = prepared.body
+      const projected = directBody('POST', '/v1/runs', body, contract, runTitleNote)
+      requireCurrentContinuation(hermesStatePath, continuation)
+      if ([...(runQueue?.latestProjections([sessionId]) ?? []), ...directRuns.values()].some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))) {
+        throw Object.assign(new Error('Agent already active'), { status: 410 })
+      }
+      if (runQueue) {
+        const admitted = await runQueue.admit({ runtime: 'direct', sessionId, idempotencyKey: key,
+          requestHash: queueRequestHash('direct', body.toString('utf8')), body: body.toString('utf8'), trustedPaths: prepared.trustedPaths, continuation })
+        if (admitted.record.status === 'cancelled') throw Object.assign(new Error('Stale helper request'), { status: 410 })
+        return admitted.record
+      }
+      const result = await hermesJson('/v1/runs', { method: 'POST', body: projected, headers: { 'Idempotency-Key': key } })
+      const runId = result.run_id ?? result.id
+      if (typeof runId !== 'string' || !new RegExp(`^${ID}$`).test(runId)) throw Object.assign(new Error('Invalid helper admission'), { status: 502 })
+      directRuns.set(runId, { sessionId, runId, status: result.status ?? 'queued', createdAt: Date.now()/1000, updatedAt: Date.now()/1000 })
+      return result
+    })()
+    helperAdmissions.set(key, admission)
+    try { return await admission } finally { helperAdmissions.delete(key) }
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response,403,{error:'access_required'}); return }
+        const authenticated = requireAccess && await accessVerified(request, accessVerifier)
+        if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
+        const refusal = helperContinueRequestAllowed(request,{authenticated,trustedOrigins:options.helperContinueOrigins ?? []})
+        if (refusal) { sendJson(response,refusal,{error:refusal===415?'unsupported_media_type':'same_origin_required'}); return }
         const body = parseJsonBody(await readBoundedBody(request, 1024));
-        if (!/^wizard(?:_|-assistant-)[A-Za-z0-9._:-]+$/.test(String(body.session_id || ''))) { sendJson(response,400,{error:'invalid_session'}); return }
+        if (typeof body.session_id !== 'string' || !/^wizard(?:_|-assistant-)[A-Za-z0-9._:-]+$/.test(body.session_id)) { sendJson(response,400,{error:'invalid_session'}); return }
         if ([...(runQueue?.latestProjections([body.session_id]) ?? []), ...directRuns.values()].some(r=>r.sessionId===body.session_id && ACTIVE_RUN_STATUSES.has(r.status))) { sendJson(response,409,{error:'agent_already_active'}); return }
-        const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:async(sessionId,input,key)=> {
-          const address=server.address();
-          const r=await fetchImpl(`http://127.0.0.1:${address.port}${PROXY_PREFIX}/v1/runs`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key,'X-Wizard-Internal':'follow-through'},body:JSON.stringify({session_id:sessionId,input})});
-          await r.body?.cancel().catch(()=>undefined); if(!r.ok) throw new Error(`admission ${r.status}`);
-        }});
+        const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:admitHelperContinuation});
         sendJson(response,outcome.status,outcome.body); return
       }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
@@ -3695,15 +3732,7 @@ export function createWizardServer(options = {}) {
         if (joinedDelegation === 'off') return true
         try { return !(await runContract()).join } catch { return false }
       },
-      admit: async (sessionId, input, idempotencyKey) => {
-        const response = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey, 'X-Wizard-Internal': 'follow-through' },
-          body: JSON.stringify({ session_id: sessionId, input }),
-        })
-        await response.body?.cancel().catch(() => undefined)
-        if (!response.ok) throw new Error(`admission ${response.status}`)
-      },
+      admit: admitHelperContinuation,
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
     server.on('close', () => watcher.stop())

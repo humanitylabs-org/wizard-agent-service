@@ -13,14 +13,16 @@ export function currentOwnerResult(db, sessionId) {
   const active = columns.has('active') ? 'AND COALESCE(active, 1) = 1' : ''
   const kind = columns.has('display_kind') ? ', display_kind' : ''
   const rows = db.prepare(`SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
-    AND role IN ('user','assistant') ${active} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC`).iterate(sessionId)
-  let assistant, userAt=0
+    AND role IN ('user','assistant') ${active} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
+  let assistant, userAt=0, inspected=0
   for (const row of rows) {
+    inspected++
     if (internal(row.content) || ['async_delegation_complete','internal_notification','system','commentary','hidden'].includes(row.display_kind)) continue
     if (row.role==='user' && !userAt) userAt=Number(row.timestamp)
     if (row.role==='assistant' && !assistant) assistant=row
     if (assistant && userAt) break
   }
+  if (inspected>512 && (!assistant || !userAt)) return 'unknown'
   const state=parseStatus(assistant?.content)?.state
   return Number(assistant?.timestamp)>=userAt && ['done','needs_you','check'].includes(state) ? state : null
 }
@@ -30,11 +32,12 @@ export function currentOwnerResult(db, sessionId) {
 export const OWNER_GATES = new Set(['needs_you', 'check'])
 export function ownerGate(db, sessionId) {
   const state = currentOwnerResult(db, sessionId)
-  return OWNER_GATES.has(state) ? state : null
+  return state==='unknown' || OWNER_GATES.has(state) ? state : null
 }
 export function receiptConsumed(db, sessionId, id, completedAt) {
+  const after = Number.isFinite(Number(completedAt)) ? Number(completedAt) : 0
   if (db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND role='user'
-    AND instr(COALESCE(content,''),?)>0 LIMIT 1`).get(sessionId, RECEIPT_PREFIX+id+'\n')) return true
+    AND timestamp>=? AND instr(COALESCE(content,''),?)>0 LIMIT 1`).get(sessionId, after, RECEIPT_PREFIX+id+'\n')) return true
   // The agent fetched this delegation itself after it finished (a tool call or tool result names it).
   // Prose in a final reply ("review deleg_x is running") deliberately does not count.
   if (!Number.isFinite(Number(completedAt))) return false
@@ -55,9 +58,10 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
 // The owner has taken the thread forward since the helper finished: the result is stale for this
 // thread, and resuming it would override what James asked for next. It stays queryable in Hermes.
 export function ownerMovedOn(db, sessionId, completedAt) {
-  const rows = db.prepare(`SELECT content FROM messages WHERE session_id=? AND role='user' AND timestamp>?
-    AND COALESCE(active,1)=1 AND trim(COALESCE(content,''))<>''`).all(sessionId, Number(completedAt) || 0)
-  return rows.some(row => !internal(row.content))
+  const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
+  const rows = db.prepare(`SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
+    AND COALESCE(active,1)=1 AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
+  return rows.length>512 || rows.some(row => !internal(row.content) && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind))
 }
 // Automatic resumption is for the turn that was waiting on the helper; after two hours it is stale.
 export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=2*3600,includeDelivered=false,delegationId}={}) {
@@ -77,8 +81,8 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
     for(const row of rows) {
       const sessionId=String(row.session_id||''),id=String(row.delegation_id||'')
       if(!/^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/.test(sessionId)||!/^[A-Za-z0-9_-]+$/.test(id)) continue
-      if(receiptConsumed(db,sessionId,id,includeDelivered?undefined:row.completed_at)||ownerGate(db,sessionId)) continue
-      if(!includeDelivered && ownerMovedOn(db,sessionId,row.completed_at)) continue
+      if(receiptConsumed(db,sessionId,id,row.completed_at)||ownerGate(db,sessionId)) continue
+      if(ownerMovedOn(db,sessionId,row.completed_at) || Number(row.completed_at)<now/1000-maxAgeSeconds) continue
       let results;try{results=JSON.parse(row.result_json)?.results}catch{continue}
       if(!Array.isArray(results)) continue
       const text=results.filter(r=>typeof r?.summary==='string'&&r.summary.trim()).map(r=>`Helper ${Number(r.task_index)+1} (${String(r.status||'unknown')}):\n${r.summary.trim()}`).join('\n\n')

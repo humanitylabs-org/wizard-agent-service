@@ -13,15 +13,15 @@ const read=path=>readHelperStatuses(path,[sid],{now}).get(sid)
 test('HTTP continuation validates access, payload and the original receipt identity',()=>fixture(async({db,path})=>{
  const {createWizardServer,listen}=await import('../server/service.mjs');add(db,'completed');
  const delta=Date.now()/1000-sec;db.prepare('UPDATE messages SET timestamp=timestamp+?').run(delta);db.prepare('UPDATE async_delegations SET dispatched_at=dispatched_at+?,completed_at=completed_at+?').run(delta,delta);
- const calls=[];const s=createWizardServer({requireAccess:false,hermesStatePath:path,sessionDbPath:path,followThrough:false,fetchImpl:async(url,o)=>{calls.push({url,options:o});return new Response(null,{status:202})}});await listen(s);const url=`http://127.0.0.1:${s.address().port}/wizard/helper-continue`;
+ const calls=[];const s=createWizardServer({requireAccess:false,joinedDelegation:'off',hermesStatePath:path,sessionDbPath:path,followThrough:false,fetchImpl:async(url,o)=>{calls.push({url,options:o});return new Response(JSON.stringify(String(url).endsWith('/v1/capabilities')?{}:{run_id:'helper_fixture',status:'running'}),{status:202,headers:{'content-type':'application/json'}})}});await listen(s);const url=`http://127.0.0.1:${s.address().port}/wizard/helper-continue`;
  try {
-  assert.equal((await fetch(url,{method:'POST',body:'{'})).status,400);
-  assert.equal((await fetch(url,{method:'POST',body:JSON.stringify({session_id:'bad'})})).status,400);
-  assert.equal((await fetch(url,{method:'POST',body:JSON.stringify({session_id:sid})})).status,202);
-  assert.equal(calls.length,1);assert.equal(calls[0].options.headers['Idempotency-Key'],'wizard-helper-receipt-deleg_one');assert.ok(calls[0].url.endsWith('/wizard/hermes/v1/runs'));
+  assert.equal((await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:'{'})).status,400);
+  assert.equal((await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:'bad'})})).status,400);
+  assert.equal((await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:sid})})).status,202);
+  const admissions=calls.filter(r=>r.url.endsWith('/v1/runs'));assert.equal(admissions.length,1);assert.equal(admissions[0].options.headers.get('Idempotency-Key'),'wizard-helper-receipt-deleg_one');assert.ok(!admissions[0].url.includes('/wizard/hermes'));
  }finally{await new Promise(r=>s.close(r))}
  const protectedServer=createWizardServer({requireAccess:true,accessVerifier:async()=>false,hermesStatePath:path,followThrough:false});await listen(protectedServer);
- try{assert.equal((await fetch(`http://127.0.0.1:${protectedServer.address().port}/wizard/helper-continue`,{method:'POST',body:JSON.stringify({session_id:sid})})).status,403)}finally{await new Promise(r=>protectedServer.close(r))}
+ try{assert.equal((await fetch(`http://127.0.0.1:${protectedServer.address().port}/wizard/helper-continue`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:sid})})).status,403)}finally{await new Promise(r=>protectedServer.close(r))}
 }))
 test('session-list projection carries helper status through the real API code',()=>fixture(async({db,path})=>{
  const {createWizardServer,listen}=await import('../server/service.mjs');add(db,'running');db.exec('ALTER TABLE messages ADD COLUMN finish_reason TEXT DEFAULT "stop";CREATE TABLE sessions(id TEXT,started_at REAL);');db.prepare('INSERT INTO sessions VALUES(?,?)').run(sid,sec-3000);
