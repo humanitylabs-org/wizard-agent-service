@@ -58,7 +58,7 @@ function lockedRoute(modelConfig) {
     const lock = JSON.parse(modelConfig)?.browser_model_lock
     const model = typeof lock?.model === 'string' ? lock.model : ''
     const provider = typeof lock?.provider === 'string' ? lock.provider : ''
-    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider } : null
+    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider, updatedAt: Number(lock.updated_at) || 0 } : null
   } catch { return null }
 }
 
@@ -86,7 +86,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       for (const row of routeRows) {
         const current = truth.get(String(row.id))
         const lock = lockedRoute(row.model_config)
-        if (current && lock && lock.model === row.model) current.route = lock
+        if (current && lock && lock.model === row.model) {
+          current.route = { model: lock.model, provider: lock.provider }
+          current.routeUpdatedAt = lock.updatedAt
+        }
       }
     } catch { /* older state schemas carry no model lock */ }
     // Seek newest-first within each session's existing indexed range. Loading
