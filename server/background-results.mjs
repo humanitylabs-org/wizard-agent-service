@@ -10,7 +10,8 @@ const ACTIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping']
 const PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 const INTERNAL = /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/
 const rowsOf = p => Array.isArray(p?.data) ? p.data : Array.isArray(p?.sessions) ? p.sessions : []
-const textOf = row => typeof row?.content === 'string' ? row.content : ''
+const textOf = row => typeof row?.content === 'string' ? row.content : Array.isArray(row?.content)
+  ? row.content.filter(part => typeof part?.text === 'string').map(part => part.text).join('\n') : ''
 const human = row => row?.role === 'user' && textOf(row).trim() && !INTERNAL.test(textOf(row)) && !['async_delegation_complete', 'internal_notification', 'system', 'hidden'].includes(row.display_kind)
 const identity = (root, source) => `bg_${createHash('sha256').update(`${root}\0${source}`).digest('hex').slice(0, 32)}`
 const error = (message, status = 409) => Object.assign(new Error(message), { status })
@@ -34,7 +35,13 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   const recent = async (id, fresh = false, revision = '', signal) => {
     const previous = reads.get(id)
     if (!fresh && previous?.revision === revision) return previous.rows
-    const rows = rowsOf(await requestBounded(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`, signal))
+    const rows = rowsOf(await requestBounded(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`, signal)).map(row => ({
+      id: row.id, role: row.role, timestamp: row.timestamp, finish_reason: row.finish_reason, display_kind: row.display_kind,
+      // Native photos/voice are real human turns too. Keep their boundary without retaining base64 media or
+      // unrelated reasoning in the discovery cache. Completion text is retained for the explicit replay.
+      content: textOf(row) || (row.role === 'user' && Array.isArray(row.content) && row.content.length ? '[Human attachment]' : ''),
+      tool_calls: row.tool_calls,
+    }))
     reads.set(id, { revision, rows })
     return rows
   }
@@ -115,10 +122,18 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     // horizon is expanded here; automatic recovery keeps the original two-hour horizon unchanged.
     for (const receipt of readUndeliveredHelperReceipts(sessionDbPath, { now: now(), maxAgeSeconds: Number.MAX_SAFE_INTEGER })) {
       if (now() / 1000 - receipt.at <= 7200 || admitted(receipt.key)) continue
-      const root = aliases.get(receipt.sessionId) || receipt.sessionId
+      if (!aliases.has(receipt.sessionId)) continue
+      const root = aliases.get(receipt.sessionId)
       if (!WIZARD.test(root)) continue
+      let rows
+      try { rows = await threadRows(root, receipt.sessionId, true, '', signal) }
+      catch (failure) {
+        if (signal.aborted) throw failure
+        complete = false; failures.set(root, Number(failure?.status) || 503)
+        continue
+      }
       const candidate = acceptable({ ...receipt, sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
-        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, await threadRows(root, receipt.sessionId, true, '', signal))
+        input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, rows)
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
     }
     for (const id of reads.keys()) if (!aliases.has(id)) reads.delete(id)
@@ -192,7 +207,9 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       let rows
       try { rows = await threadRows(pending.sessionId, pending.readId, true) }
       catch (failure) { throw error(Number(failure?.status) === 404 ? 'the thread no longer exists' : 'history is temporarily unavailable', Number(failure?.status) === 404 ? 400 : 503) }
-      const current = acceptable(pending, rows)
+      let current
+      try { current = acceptable(pending, rows) }
+      catch { throw error('lease information is temporarily unavailable', 503) }
       if (!current || current.boundary !== pending.boundary) throw error('the thread changed')
       const body = JSON.stringify({ session_id: pending.sessionId, input: pending.input,
         _wizard_background_recovery: { id, source_kind: pending.sourceKind, read_id: pending.readId, boundary: pending.boundary, at: pending.at, delegation_id: pending.delegationId || '', message_id: pending.messageId || '' } })

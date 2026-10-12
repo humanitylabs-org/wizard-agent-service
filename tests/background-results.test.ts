@@ -3,12 +3,13 @@ import { createServer } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const owned: Array<() => Promise<void>> = []
 afterEach(async () => { while (owned.length) await owned.pop()!() })
 const status = (state: string) => `Outcome\n[WIZARD_STATUS_V1]{"state":"${state}","ask":"Approve the release"}[/WIZARD_STATUS_V1]`
-async function fixture({ count = 205, access = false } = {}) {
+async function fixture({ count = 205, access = false, history = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-manual-background-'))
   const at = Date.now() / 1000, finished = at - 3 * 3600
   const rows = new Map<string, any[]>(), sessions: any[] = [], calls: any[] = [], reads: string[] = []
@@ -22,6 +23,19 @@ async function fixture({ count = 205, access = false } = {}) {
     rows.set(id, [{ id: i * 10 + 1, role: 'user', content: 'Finish the approved research.', timestamp: finished - 100 },
       { id: i * 10 + 2, role: 'user', content: `[ASYNC DELEGATION BATCH COMPLETE — deleg_manual_${i}] Saved findings: fixture result ${i}.`, display_kind: 'async_delegation_complete', timestamp: finished }])
     if (root !== id) rows.set(root, rows.get(id)!)
+  }
+  let db: DatabaseSync | undefined
+  const historyPath = join(dir, 'history.db')
+  if (history) {
+    db = new DatabaseSync(historyPath)
+    db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY, started_at REAL, source TEXT);
+      CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, active INTEGER DEFAULT 1, tool_calls TEXT, display_kind TEXT, finish_reason TEXT);
+      CREATE TABLE session_turn_leases(conversation_id TEXT PRIMARY KEY, expires_at REAL);
+      CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY, origin_session_id TEXT, state TEXT, delivery_state TEXT, result_json TEXT, completed_at REAL);`)
+    for (const [id, entries] of rows) {
+      db.prepare('INSERT OR IGNORE INTO sessions VALUES(?,?,?)').run(id, finished - 100, 'api_server')
+      for (const row of entries) db.prepare('INSERT OR IGNORE INTO messages(id,session_id,role,content,timestamp,display_kind) VALUES(?,?,?,?,?,?)').run(row.id, id, row.role, row.content, row.timestamp, row.display_kind || null)
+    }
   }
   const upstream = createServer(async (req, res) => {
     const u = new URL(req.url!, 'http://fixture'); reads.push(u.pathname + u.search)
@@ -50,7 +64,7 @@ async function fixture({ count = 205, access = false } = {}) {
   let server: ReturnType<typeof createWizardServer>, base: string
   const open = async () => {
     server = createWizardServer({ upstreamOrigin: origin, hermesKey: 'fixture-only', joinedDelegation: 'prefer',
-      followThrough: false, hermesStatePath: '', sessionDbPath: join(dir, 'absent-state.db'), archivedSessionReader: () => [],
+      followThrough: false, hermesStatePath: history ? historyPath : '', sessionDbPath: join(dir, 'absent-state.db'), archivedSessionReader: () => [],
       runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: 25, dispatchHealthReader: () => canDispatch,
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
@@ -60,8 +74,9 @@ async function fixture({ count = 205, access = false } = {}) {
   }
   await open()
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
-  owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); rmSync(dir, { recursive: true, force: true }) })
+  owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); db?.close(); rmSync(dir, { recursive: true, force: true }) })
   return { rows, calls, reads, sessions, finished, at, held, badHistory,
+    receipt: (sessionId: string, id = 'deleg_saved_receipt') => db!.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run(id, sessionId, 'completed', 'dropped', JSON.stringify({ results: [{ task_index: 0, status: 'completed', summary: 'Saved receipt fixture findings.' }] }), finished),
     advance: (ms: number) => { skew += ms },
     failHistory: (v: boolean) => { failHistory = v },
     deleted: () => { failHistory = true; historyStatus = 404 }, denyHistory: () => { failHistory = true; historyStatus = 403 }, failLease: (v: boolean) => { failLease = v }, slowHistory: (v: boolean) => { slowHistory = v },
@@ -294,6 +309,37 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect(next).toHaveLength(1)
     expect(next[0].id).toBe(initial[0].id)
     expect((await f.click(initial[0])).status).toBe(202)
+    await settled(f, 1)
+  })
+  it('a newer image-only human reply is authoritative even with no text content', async () => {
+    const f = await fixture({ count: 1 }), pending = (await f.list()).body.results[0]
+    f.rows.get('wizard_manual_0')!.push({ id: 3, role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,fixture' } }], timestamp: f.at })
+    expect((await f.click(pending)).status).toBe(409)
+    expect(f.calls).toHaveLength(0)
+  })
+  it('one unreadable dropped-receipt thread cannot hide a valid transcript result', async () => {
+    const f = await fixture({ count: 2, history: true }); f.receipt('wizard_manual_1'); f.badHistory.add('wizard_manual_1')
+    const result = (await f.list()).body
+    expect(result.available).toBe(true)
+    expect(result.scan_complete).toBe(false)
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0].session_id).toBe('wizard_manual_0')
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a hidden thread receipt does not bypass the owner visibility filter', async () => {
+    const f = await fixture({ count: 2, history: true }); f.receipt('wizard_manual_0'); f.sessions[0].hidden = true
+    const result = (await f.list()).body
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0].session_id).toBe('wizard_manual_1')
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a click-time lease read error is retryable503 and starts no model', async () => {
+    const f = await fixture({ count: 1 }), pending = (await f.list()).body.results[0]
+    f.failLease(true)
+    expect((await f.click(pending)).status).toBe(503)
+    expect(f.calls).toHaveLength(0)
+    f.failLease(false)
+    expect((await f.click(pending)).status).toBe(202)
     await settled(f, 1)
   })
 })
