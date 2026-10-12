@@ -11,7 +11,7 @@
 // at most once (idempotency key = session + row id).
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, currentOwnerResult, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
+import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, ownerGate, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
@@ -39,7 +39,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
     } catch { /* older Hermes without leases */ }
     return rows
       .filter(row => sessionPrefixes.some(prefix => String(row.session_id).startsWith(prefix))
-        && !leased.has(String(row.session_id)) && !currentOwnerResult(database, String(row.session_id)))
+        && !leased.has(String(row.session_id)) && !ownerGate(database, String(row.session_id)))
       .map(row => {
         const sessionId = String(row.session_id), delegationId = completionDelegationId(row.content)
         if (delegationId && receiptConsumed(database, sessionId, delegationId)) return null

@@ -24,21 +24,43 @@ export function currentOwnerResult(db, sessionId) {
   const state=parseStatus(assistant?.content)?.state
   return Number(assistant?.timestamp)>=userAt && ['done','needs_you','check'].includes(state) ? state : null
 }
-export function receiptConsumed(db, sessionId, id) {
-  return Boolean(db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND role='user'
-    AND instr(COALESCE(content,''),?)>0 LIMIT 1`).get(sessionId, RECEIPT_PREFIX+id+'\n'))
+// Only a gate that waits on the owner holds back a continuation. A 'done' written while a helper was
+// still running never saw that helper's findings (a reviewer's must-fix is exactly that case), so the
+// findings still go back to the agent. Held results become eligible again after the owner's next turn.
+export const OWNER_GATES = new Set(['needs_you', 'check'])
+export function ownerGate(db, sessionId) {
+  const state = currentOwnerResult(db, sessionId)
+  return OWNER_GATES.has(state) ? state : null
+}
+export function receiptConsumed(db, sessionId, id, completedAt) {
+  if (db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND role='user'
+    AND instr(COALESCE(content,''),?)>0 LIMIT 1`).get(sessionId, RECEIPT_PREFIX+id+'\n')) return true
+  // The agent fetched this delegation itself after it finished (a tool call or tool result names it).
+  // Prose in a final reply ("review deleg_x is running") deliberately does not count.
+  if (!Number.isFinite(Number(completedAt))) return false
+  return Boolean(db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND timestamp>?
+    AND ((role='tool' AND instr(COALESCE(content,''),?)>0) OR (role='assistant' AND instr(COALESCE(tool_calls,''),?)>0))
+    LIMIT 1`).get(sessionId, Number(completedAt), id, id))
 }
 export function continuationAllowed(path, sessionId, id, now=Date.now()) {
   if(!path || !existsSync(path)) return false
   let db
   try {
     db=new DatabaseSync(path,{readOnly:true})
-    if (currentOwnerResult(db,sessionId) || id && receiptConsumed(db,sessionId,id)) return false
+    if (ownerGate(db,sessionId) || id && receiptConsumed(db,sessionId,id)) return false
     if(db.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(sessionId,now/1000)) return false
     return true
   } catch { return false } finally { db?.close() }
 }
-export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=6*3600,includeDelivered=false,delegationId}={}) {
+// The owner has taken the thread forward since the helper finished: the result is stale for this
+// thread, and resuming it would override what James asked for next. It stays queryable in Hermes.
+export function ownerMovedOn(db, sessionId, completedAt) {
+  const rows = db.prepare(`SELECT content FROM messages WHERE session_id=? AND role='user' AND timestamp>?
+    AND COALESCE(active,1)=1 AND trim(COALESCE(content,''))<>''`).all(sessionId, Number(completedAt) || 0)
+  return rows.some(row => !internal(row.content))
+}
+// Automatic resumption is for the turn that was waiting on the helper; after two hours it is stale.
+export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=2*3600,includeDelivered=false,delegationId}={}) {
   if(!path || !existsSync(path)) return []
   let db
   try {
@@ -55,7 +77,8 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
     for(const row of rows) {
       const sessionId=String(row.session_id||''),id=String(row.delegation_id||'')
       if(!/^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/.test(sessionId)||!/^[A-Za-z0-9_-]+$/.test(id)) continue
-      if(receiptConsumed(db,sessionId,id)||currentOwnerResult(db,sessionId)) continue
+      if(receiptConsumed(db,sessionId,id,includeDelivered?undefined:row.completed_at)||ownerGate(db,sessionId)) continue
+      if(!includeDelivered && ownerMovedOn(db,sessionId,row.completed_at)) continue
       let results;try{results=JSON.parse(row.result_json)?.results}catch{continue}
       if(!Array.isArray(results)) continue
       const text=results.filter(r=>typeof r?.summary==='string'&&r.summary.trim()).map(r=>`Helper ${Number(r.task_index)+1} (${String(r.status||'unknown')}):\n${r.summary.trim()}`).join('\n\n')
