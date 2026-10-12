@@ -48,7 +48,9 @@ Requires Node 22.5 or later, because it uses the built-in `node:sqlite` module.
 | `WIZARD_HERMES_API_KEY` | required | Key for the Hermes API server |
 | `HERMES_ORIGIN` | `http://127.0.0.1:8642` | Hermes API server |
 | `WIZARD_HOST` / `WIZARD_PORT` | `127.0.0.1` / `8787` | Listener (loopback only) |
-| `WIZARD_REQUIRE_CF_ACCESS` | `1` | Require Cloudflare Access JWTs; set `0` behind a Tailscale-only gateway |
+| `WIZARD_AUTH_MODE` | see right | `tailscale` (Tailscale Serve identity, the Wizard OS default), `cloudflare` (Access JWTs) or `none` (box-only, behind a gateway that checks identity). Unset: `tailscale` when `WIZARD_TAILNET_ORIGIN` is set, else from `WIZARD_REQUIRE_CF_ACCESS` |
+| `WIZARD_TAILNET_ORIGIN` / `WIZARD_TAILNET_LOGIN` | — | Tailscale mode: the exact `https://<box>.<tailnet>.ts.net[:port]` origin Serve publishes, and the owner's Tailscale login (comma list allowed). Only requests from the Serve proxy (loopback, or the container gateway in a Wizard OS container) are trusted; never use Funnel |
+| `WIZARD_REQUIRE_CF_ACCESS` | `1` | Older switch: `0` means no access check (same as `WIZARD_AUTH_MODE=none`) |
 | `WIZARD_STATIC_DIR` | `.ui-live` | Optional static front end to serve at `/wizard/` |
 | `WIZARD_HERMES_STATE_PATH` | `~/.hermes/state.db` | Hermes session database (read-only) |
 | `WIZARD_STT_ORIGIN` | `http://127.0.0.1:8864` | Voice-to-text |
