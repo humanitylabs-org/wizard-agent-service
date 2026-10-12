@@ -45,6 +45,14 @@ test('app URL resolves only to running registered loopback upstream and never fo
   assert.equal((await fetch(base+'/apps/evil/')).status,404);assert.equal((await fetch(base+'/apps/missing/')).status,404)
   assert.equal(calls.length,1)
 })
+test('same-origin app writes pass bounded bodies while cross-origin writes never reach the app',async t=>{
+  const {base,calls}=await fixture(t)
+  const target=base+'/apps/hello/create'
+  assert.equal((await fetch(target,{method:'POST',headers:{Origin:'https://evil.test','Content-Type':'application/json'},body:'{}'})).status,403)
+  assert.equal(calls.length,0)
+  const r=await fetch(target,{method:'POST',headers:{Origin:base,'Content-Type':'application/json',Authorization:'Bearer OWNER'},body:'{"name":"test"}'})
+  assert.equal(r.status,200);assert.equal(calls.length,1);assert.equal(calls[0].opts.body.toString(),'{"name":"test"}');assert.equal(calls[0].opts.headers.Authorization,undefined)
+})
 test('trusts loopback or a loopback verified Tailscale principal, never raw remote headers',()=>{
   const req=(ip,h={})=>({socket:{remoteAddress:ip},headers:h})
   assert.equal(localOwnerAccess(req('127.0.0.1')),true)
