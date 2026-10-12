@@ -204,6 +204,19 @@ export function runInstructions(contract = { join: true }) {
   return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
+// The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
+// shell's own screen note ("[Wizard OS context] … Window in front: … Visible on screen: …"), which tells the
+// agent what the user was looking at when they spoke. It rides after the contract, bounded, as background only.
+const VIEW_CONTEXT_PREFIX = '[Wizard OS context]'
+const VIEW_CONTEXT_MAX = 2400
+export function clientViewContext(value) {
+  const raw = Array.isArray(value) ? value.filter((x) => typeof x === 'string').join('\n') : value
+  if (typeof raw !== 'string') return ''
+  const note = raw.trim()
+  if (!note.startsWith(VIEW_CONTEXT_PREFIX)) return ''
+  return note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note
+}
+
 function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
@@ -221,7 +234,7 @@ function directBody(method, pathname, body, contract, osInstructions = '', noteF
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : ''].filter(Boolean).join('\n\n'),
+    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -1855,22 +1868,53 @@ export function createWizardServer(options = {}) {
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
   // without one shows no mic instead of a mic that fails. Tests can pin it with sttConfigured.
-  let sttProbe = { ok: options.sttConfigured ?? false, at: options.sttConfigured === undefined ? 0 : Infinity }
-  const sttAvailable = async () => {
-    if (Date.now() - sttProbe.at < 30_000) return sttProbe.ok
-    let ok = false
-    for (const path of ['/health', '/v1/models']) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 800)
-      try {
-        const r = await fetchImpl(`${sttOrigin}${path}`, { signal: controller.signal, redirect: 'error' })
-        await r.body?.cancel().catch(() => undefined)
-        if (r.ok) { ok = true; break }
-      } catch { /* not reachable */ } finally { clearTimeout(timer) }
-    }
-    sttProbe = { ok, at: Date.now() }
-    return ok
+  // One answer to "can this box take dictation?", shared by bootstrap and /wizard/voice/status so they never
+  // disagree. Wizard's own STT reports itself on /health ({status, provider, model}); an OpenAI-compatible
+  // transcriber (the Speaches-based `transcriber` app) has no such /health but lists its models on /v1/models,
+  // and it is usable exactly when it lists at least one: that model is what every transcription request names.
+  // Unreachable is `reachable: false`; reachable with no model is honest `ready: false`.
+  const VOICE_NAMES = { tinfoil: 'Tinfoil', 'openai-compatible': 'OpenAI', local: 'Local model' }
+  let sttProbe = { value: null, at: 0 }
+  const sttProbeGet = async (path, timeoutMs) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const r = await fetchImpl(`${sttOrigin}${path}`, { signal: controller.signal, redirect: 'error' })
+      const raw = Buffer.from(await r.arrayBuffer())
+      if (!r.ok || raw.length > 64 * 1024) return { reachable: true, ok: false, value: null }
+      try { return { reachable: true, ok: true, value: JSON.parse(raw.toString('utf8')) } } catch { return { reachable: true, ok: true, value: null } }
+    } catch { return { reachable: false, ok: false, value: null } } finally { clearTimeout(timer) }
   }
+  // WIZARD_STT_ENABLED=0 (sttConfigured: false) turns voice off outright; nothing is probed.
+  const sttReadiness = async ({ fresh = false } = {}) => {
+    if (options.sttConfigured === false) return { reachable: false, ready: false, provider: '', name: 'Voice off', model: '', attested: false }
+    if (!fresh && sttProbe.value && Date.now() - sttProbe.at < 30_000) return sttProbe.value
+    let value = { reachable: false, ready: false, provider: '', name: 'Voice unavailable', model: '', attested: false }
+    const health = await sttProbeGet('/health', 2000)
+    if (health.ok && health.value && typeof health.value === 'object' && typeof health.value.provider === 'string' && health.value.provider) {
+      const provider = health.value.provider.slice(0, 80)
+      value = {
+        reachable: true,
+        ready: health.value.status === 'ok',
+        provider,
+        name: VOICE_NAMES[provider] ?? 'Managed by Wizard',
+        model: typeof health.value.model === 'string' ? health.value.model.slice(0, 120) : '',
+        attested: health.value.attested === true,
+      }
+    } else {
+      const models = await sttProbeGet('/v1/models', 2000)
+      const first = models.ok && Array.isArray(models.value?.data) ? models.value.data.find((m) => typeof m?.id === 'string' && m.id) : null
+      if (first) {
+        sttModelCache = { id: first.id.slice(0, 200), at: Date.now() }
+        value = { reachable: true, ready: true, provider: 'local', name: VOICE_NAMES.local, model: first.id.slice(0, 120), attested: false }
+      } else if (health.reachable || models.reachable) {
+        value = { reachable: true, ready: false, provider: models.ok ? 'local' : '', name: models.ok ? 'No voice model installed' : 'Voice unavailable', model: '', attested: false }
+      }
+    }
+    sttProbe = { value, at: Date.now() }
+    return value
+  }
+  const sttAvailable = async () => (await sttReadiness()).ready
   // OpenAI-compatible transcribers (e.g. the Speaches-based `transcriber` app) need a `model` field;
   // Wizard's own STT ignores it. Use the transcriber's first advertised model, cached for 5 minutes.
   let sttModelCache = { id: '', at: 0 }
@@ -2863,25 +2907,8 @@ export function createWizardServer(options = {}) {
 
       if (url.pathname === '/wizard/voice/status' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 2000)
-        try {
-          const upstream = await fetchImpl(`${sttOrigin}/health`, { signal: controller.signal, redirect: 'error' })
-          const raw = Buffer.from(await upstream.arrayBuffer())
-          if (!upstream.ok || raw.length > 64 * 1024) throw new Error('voice unavailable')
-          const value = JSON.parse(raw.toString('utf8'))
-          const provider = typeof value.provider === 'string' ? value.provider.slice(0, 80) : ''
-          const model = typeof value.model === 'string' ? value.model.slice(0, 120) : ''
-          const names = { tinfoil: 'Tinfoil', 'openai-compatible': 'OpenAI', local: 'Local model' }
-          sendJson(response, 200, {
-            ready: value.status === 'ok' && Boolean(provider),
-            provider,
-            name: names[provider] ?? 'Managed by Wizard',
-            model,
-            attested: value.attested === true,
-          })
-        } catch { sendJson(response, 503, { ready: false, provider: '', name: 'Voice unavailable', model: '', attested: false }) }
-        finally { clearTimeout(timer) }
+        const { reachable, ...status } = await sttReadiness({ fresh: true })
+        sendJson(response, reachable ? 200 : 503, status)
         return
       }
 
