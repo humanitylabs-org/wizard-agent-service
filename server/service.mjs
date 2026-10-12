@@ -3708,10 +3708,11 @@ export function createWizardServer(options = {}) {
         if (!file.startsWith(`${uxDir}${sep}`) || !existsSync(file) || !(await stat(file)).isFile()) { sendJson(response, 404, { error: 'not_found' }); return }
         const details = await stat(file)
         // Wizard UX plays recorded audio and shows blob: images (voice, attachments), so its pages
-        // get the shell's own policy rather than the legacy client's.
+        // get the shell's own policy rather than the legacy client's. frame-ancestors 'self': the shell opens its
+        // own Store/System pages as windows; other origins and opaque-origin (sandboxed) app documents can't frame them.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix

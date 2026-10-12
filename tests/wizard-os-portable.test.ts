@@ -200,6 +200,8 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, uxDir: ux })
     expect(await (await fetch(`${wizard}/wizard-os-home/`)).text()).toContain('Wizard UX')
     expect(await (await fetch(`${wizard}/wizard-os-home/core/core.js`)).text()).toBe('ok')
+    // The shell frames its own Store/System pages; nothing else may frame UX pages.
+    expect((await fetch(`${wizard}/wizard-os-home/`)).headers.get('content-security-policy')).toMatch(/frame-ancestors 'self'(;|$)/u)
     expect((await fetch(`${wizard}/wizard-os-home/.env`)).status).toBe(404)
     expect((await fetch(`${wizard}/wizard-os-home/%2e%2e/%2e%2e/etc/passwd`)).status).toBe(404)
     const root = await fetch(`${wizard}/`, { redirect: 'manual' })
