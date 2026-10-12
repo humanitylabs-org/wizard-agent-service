@@ -16,7 +16,7 @@ async function fixture(fn) {
  CREATE INDEX idx_messages_session_id ON messages(session_id,id);
  CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY,origin_session_id TEXT,parent_session_id TEXT,origin_ui_session_id TEXT,state TEXT,dispatched_at REAL,completed_at REAL,task_json TEXT,delivery_state TEXT,result_json TEXT);
  CREATE INDEX idx_async_delegations_delivery ON async_delegations(delivery_state,completed_at);
- CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);`)
+ CREATE TABLE sessions(id TEXT PRIMARY KEY,started_at REAL,model TEXT,model_config TEXT);CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);`)
  const message=(role,content,at=sec-100)=>db.prepare('INSERT INTO messages(session_id,role,content,timestamp)VALUES(?,?,?,?)').run(sid,role,content,at)
  message('user','Build only the approved backend; do not deploy',sec-2000)
  db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_review',sid,null,'','completed',sec-1800,sec-300,JSON.stringify({goals:['A','B','C'],task_indexes:[1]}),'pending',JSON.stringify({results:[{task_index:1,status:'completed',summary:'Verified saved findings'}]}))
