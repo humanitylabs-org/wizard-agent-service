@@ -25,6 +25,8 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough } from './delegation-follow-through.mjs'
+import { readHelperStatuses } from './helper-status.mjs'
+import { resumeHelper } from './helper-resume.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -469,6 +471,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           const session = sanitizeSessionRuntimePreview(rawSession)
           const truth = sessionTruth.get(session.id)
           const projected = { ...session }
+          if (truth?.helperStatus) projected.wizard_helper_status = truth.helperStatus
           delete projected.wizard_run_id
           if (truth?.lastUserAt) projected.wizard_last_user_at = truth.lastUserAt
           if (truth?.lastAssistantAt) projected.wizard_last_assistant_at = truth.lastAssistantAt
@@ -2759,6 +2762,18 @@ export function createWizardServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response,403,{error:'access_required'}); return }
+        const body = parseJsonBody(await readBoundedBody(request, 1024));
+        if (!/^wizard(?:_|-assistant-)[A-Za-z0-9._:-]+$/.test(String(body.session_id || ''))) { sendJson(response,400,{error:'invalid_session'}); return }
+        if ([...(runQueue?.latestProjections([body.session_id]) ?? []), ...directRuns.values()].some(r=>r.sessionId===body.session_id && ACTIVE_RUN_STATUSES.has(r.status))) { sendJson(response,409,{error:'agent_already_active'}); return }
+        const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:async(sessionId,input,key)=> {
+          const address=server.address();
+          const r=await fetchImpl(`http://127.0.0.1:${address.port}${PROXY_PREFIX}/v1/runs`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key,'X-Wizard-Internal':'follow-through'},body:JSON.stringify({session_id:sessionId,input})});
+          await r.body?.cancel().catch(()=>undefined); if(!r.ok) throw new Error(`admission ${r.status}`);
+        }});
+        sendJson(response,outcome.status,outcome.body); return
+      }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)
@@ -3560,6 +3575,8 @@ export function createWizardServer(options = {}) {
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           result = filterSessionList(
             result,
             operator,
