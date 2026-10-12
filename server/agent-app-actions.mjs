@@ -10,6 +10,14 @@
 //   owner's Store uses, with one Idempotency-Key per logical operation. The key is kept only while the outcome is
 //   uncertain, so a retry replays instead of installing twice; a definitive answer releases it. An installed but
 //   stopped app is started. Success is the bridge's terminal answer plus a status read back from the bridge.
+// - Response budget: an MCP client gives up on a tool call after its own timeout (stock Hermes: 120-300 s), and an
+//   image pull can take longer. So the caller waits at most `waitMs`; past that it gets `in_progress` with the key,
+//   while the real operation runs on, never aborted. A retry for the same app joins that operation (or, once it has
+//   finished, gets its outcome); it never starts a second one.
+// - operation_key: while an outcome is uncertain the app holds exactly one key, and only that key is accepted (a
+//   different one is refused before anything is sent). With nothing held, a caller may pass a key it was given
+//   earlier, e.g. after a Service restart cleared this memory: the bridge binds a key to one exact request
+//   (idempotency_conflict otherwise), so a supplied key can only replay its own operation.
 import { randomBytes } from 'node:crypto'
 import { managerOrigin } from './app-lifecycle.mjs'
 import { APP_INDEX_URL, createIndexProxy } from './wizard-apps-views.mjs'
@@ -21,6 +29,7 @@ const SYSTEM_JOBS = new Set(['shell', 'agent-service', 'agent', 'agent-ui'])
 // Kept for a retry only when the bridge may have acted (same list as the Store client, web/core/app-lifecycle-client.js).
 const UNCERTAIN = new Set(['operation_unconfirmed', 'terminal_status_unconfirmed', 'projection_refresh_failed', 'completion_unconfirmed', 'invalid_response'])
 const PENDING_TTL_MS = 3600_000
+const LATE_TTL_MS = 600_000
 
 const text = (value, max) => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, max) : '')
 const ids = (value) => (Array.isArray(value) ? value.filter((x) => typeof x === 'string' && APP_ID.test(x)).slice(0, 16) : [])
@@ -49,12 +58,13 @@ export function validForm(form) {
 
 export function createAgentAppActions({
   managerUrl = '', managerToken = '', managerHosts = [], indexBase = APP_INDEX_URL, indexFetch = fetch, fetchImpl = fetch,
-  now = Date.now, timeoutMs = 900_000, log = () => {},
+  now = Date.now, timeoutMs = 900_000, waitMs: defaultWaitMs = 90_000, log = () => {},
 } = {}) {
   const origin = managerUrl && managerToken ? managerOrigin(managerUrl, managerHosts) : ''
   const index = createIndexProxy({ base: indexBase || APP_INDEX_URL, fetchImpl: indexFetch, now })
-  const pending = new Map() // fingerprint -> { key, at }: operations whose outcome is not known yet
-  const active = new Map() // app id -> in-flight promise (one operation per app at a time)
+  const pending = new Map() // app id -> { key, action, form, at }: the operation whose outcome is not known yet
+  const active = new Map() // app id -> { run, op, late }: the in-flight operation (one per app at a time)
+  const finished = new Map() // app id -> { result, at }: an outcome nobody was still waiting for
 
   async function manager(path, init = {}) {
     const r = await fetchImpl(origin + path, { redirect: 'error', ...init, headers: { Authorization: `Bearer ${managerToken}`, Accept: 'application/json', ...(init.headers || {}) } })
@@ -78,16 +88,18 @@ export function createAgentAppActions({
   async function status(id) {
     const { r, data } = await manager('/api/apps/installed', { signal: AbortSignal.timeout(15_000) })
     if (!r.ok || !Array.isArray(data?.installed)) throw new Error('status_unavailable')
-    const row = data.installed.find((x) => x?.info?.id === id || String(x?.info?.urn || '').split(':')[0] === id)
+    const row = data.installed.find((x) => x?.info?.urn === `${id}:wizardapps`) // this store's app, not a namesake
     return row ? text(row.app?.status, 24) || 'unknown' : 'missing'
   }
 
-  async function operate(id, action, form, given) {
-    const fingerprint = JSON.stringify([action, id, form])
-    for (const [f, p] of pending) if (now() - p.at > PENDING_TTL_MS) pending.delete(f)
-    const held = pending.get(fingerprint)
-    const key = given || held?.key || randomBytes(18).toString('base64url')
-    pending.set(fingerprint, { key, at: held?.at ?? now() })
+  async function operate(id, action, form, given, op) {
+    const held = pending.get(id)
+    const same = held?.action === action
+    if (same && JSON.stringify(held.form) !== JSON.stringify(form)) return { outcome: 'refused', error: 'operation_pending', key: held.key }
+    // A held key for another action (e.g. an install that has since landed stopped) is not reused for this one.
+    const key = same ? held.key : (!held && given) || randomBytes(18).toString('base64url')
+    pending.set(id, { key, action, form, at: same ? held.at : now() })
+    op.key = key
     let r, data
     try {
       ({ r, data } = await manager(`/api/app-lifecycle/${id}:wizardapps/${action}`, {
@@ -97,39 +109,68 @@ export function createAgentAppActions({
     } catch {
       return { outcome: 'uncertain', error: 'reply_lost', key }
     }
-    if (r.ok && data?.success === true) { pending.delete(fingerprint); return { outcome: 'done', status: text(data.status, 24), replayed: data.replayed === true, key } }
+    const release = () => { if (pending.get(id)?.key === key) pending.delete(id) }
+    if (r.ok && data?.success === true) { release(); return { outcome: 'done', status: text(data.status, 24), replayed: data.replayed === true, key } }
     // A 2xx without a success envelope is not an answer we can trust either way.
     const error = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(data.error) ? data.error : (r.ok ? 'invalid_response' : 'app_operation_failed')
     if (UNCERTAIN.has(error)) return { outcome: 'uncertain', error, key }
-    pending.delete(fingerprint)
+    release()
     return { outcome: 'failed', error, key }
   }
 
   /**
    * Install (or start) a catalogue app for the owner's agent. `authenticated` must come from the gateway's own
-   * token check. Returns { ok, ... } for the bridge to word; never throws for an expected failure.
+   * token check. Waits at most `waitMs` for the outcome, else answers `in_progress` and leaves the operation running.
+   * Returns { ok, ... } for the bridge to word; never throws for an expected failure.
    */
-  async function install({ app, form, operation_key: given } = {}, { authenticated = false } = {}) {
+  async function install({ app, form, operation_key: given } = {}, { authenticated = false, waitMs = defaultWaitMs } = {}) {
     if (!authenticated) return { ok: false, error: 'gateway_token_required' }
     if (!origin) return { ok: false, error: 'app_manager_not_configured' }
-    const id = typeof app === 'string' ? app.trim().toLowerCase() : ''
+    const id = typeof app === 'string' ? app : '' // the literal catalogue id: no trimming or case folding
     if (!APP_ID.test(id)) return { ok: false, error: 'invalid_app' }
     const values = validForm(form)
     if (!values) return { ok: false, error: 'invalid_form' }
     if (given !== undefined && (typeof given !== 'string' || !OPERATION_KEY.test(given))) return { ok: false, error: 'invalid_operation_key' }
-    if (active.has(id)) return active.get(id)
-    const run = (async () => {
+    for (const [k, p] of pending) if (now() - p.at > PENDING_TTL_MS) pending.delete(k)
+    for (const [k, f] of finished) if (now() - f.at > LATE_TTL_MS) finished.delete(k)
+    let job = active.get(id)
+    const holding = job?.op.key || pending.get(id)?.key
+    if (given !== undefined && holding && given !== holding) return { ok: false, error: 'operation_key_mismatch', key: holding, action: job?.op.action || pending.get(id)?.action }
+    if (!job && finished.has(id)) {
+      const { result } = finished.get(id)
+      finished.delete(id)
+      return result
+    }
+    if (!job) job = start(id, values, given)
+    if (!Number.isFinite(waitMs)) return job.run
+    let timer
+    const result = await Promise.race([job.run, new Promise((r) => { timer = setTimeout(r, Math.max(0, waitMs), null) })])
+    clearTimeout(timer)
+    if (result) {
+      if (finished.get(id)?.result === result) finished.delete(id) // a joined caller got it: report it once
+      return result
+    }
+    job.late = true
+    return { ok: false, uncertain: true, error: 'in_progress', key: job.op.key, action: job.op.action || 'install', entry: job.op.entry, sent: Boolean(job.op.key) }
+  }
+
+  function start(id, values, given) {
+    const op = { key: '', action: '', entry: null }
+    const job = { op, late: false }
+    job.run = (async () => {
       const found = await catalogue(id)
       if (found.error) return { ok: false, error: found.error }
       const entry = found.apps.find((a) => a.id === id)
       if (!entry) return { ok: false, error: 'not_in_catalogue' }
       if (entry.system) return { ok: false, error: 'system_app', entry }
+      op.entry = entry
       let before
       try { before = await status(id) } catch { return { ok: false, error: 'app_manager_unavailable', entry } }
-      if (before === 'running') return { ok: true, already: true, status: 'running', entry }
+      if (before === 'running') { pending.delete(id); return { ok: true, already: true, status: 'running', entry } }
       const action = before === 'stopped' ? 'start' : 'install'
       if (before !== 'missing' && before !== 'stopped') return { ok: false, error: 'app_busy', status: before, entry }
-      const result = await operate(id, action, action === 'install' ? values : {}, given)
+      op.action = action
+      const result = await operate(id, action, action === 'install' ? values : {}, given, op)
       log(JSON.stringify({ event: 'app_action', app: id, action, outcome: result.outcome, error: result.error || '' }))
       if (result.outcome !== 'done') {
         let missing = []
@@ -143,9 +184,16 @@ export function createAgentAppActions({
       let after = result.status
       try { after = await status(id) } catch { /* the bridge's own terminal status stands */ }
       return { ok: after === 'running', action, status: after, replayed: result.replayed, entry, error: after === 'running' ? '' : 'not_running' }
-    })()
-    active.set(id, run)
-    try { return await run } finally { active.delete(id) }
+    })().catch(() => (op.key
+      ? { ok: false, uncertain: true, error: 'operation_unconfirmed', key: op.key, action: op.action, entry: op.entry, missing: [] }
+      : { ok: false, error: 'app_manager_unavailable', entry: op.entry }))
+      .then((result) => {
+        active.delete(id)
+        if (job.late) finished.set(id, { result, at: now() }) // the next call for this app reports it
+        return result
+      })
+    active.set(id, job)
+    return job
   }
 
   return { configured: Boolean(origin), catalogue, install }

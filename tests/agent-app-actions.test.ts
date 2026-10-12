@@ -26,10 +26,12 @@ function fakeApp() {
 }
 
 // A journaling App Manager bridge like wam/lifecycle.py: same key -> the recorded outcome; it writes apps.json.
-function fakeBridge(dir, appPort, { lose = 0, fail = null, installed = {} } = {}) {
+// `delay`: the operation takes that long (an image pull). `others`: rows from other app stores. `toolless`: apps.json
+// lists the app with no MCP endpoint. `staleApps`: apps.json is never rewritten.
+function fakeBridge(dir, appPort, { lose = 0, fail = null, installed = {}, delay = 0, others = [], toolless = false, staleApps = false } = {}) {
   const state = { installed: { ...installed }, writes: [], journal: new Map(), lose, fail }
   const writeApps = () => writeFileSync(join(dir, 'apps.json'), JSON.stringify({ apps: Object.entries(state.installed).map(([id, status]) => ({
-    id, name: 'Hello View', status, provides: ['diagnostics'], summary: 'Hello.', mcp: { url: `http://127.0.0.1:${appPort}/mcp` },
+    id, name: 'Hello View', status, provides: ['diagnostics'], summary: 'Hello.', ...(toolless ? {} : { mcp: { url: `http://127.0.0.1:${appPort}/mcp` } }),
   })) }))
   writeApps()
   const server = createServer(async (req, res) => {
@@ -38,17 +40,18 @@ function fakeBridge(dir, appPort, { lose = 0, fail = null, installed = {} } = {}
     const json = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)) }
     if (req.headers.authorization !== `Bearer ${MANAGER_TOKEN}` || req.headers.origin) return json(401, { success: false, error: 'unauthorized' })
     if (req.method === 'GET' && req.url === '/api/apps/installed') {
-      return json(200, { installed: Object.entries(state.installed).map(([id, status]) => ({ info: { id, urn: `${id}:wizardapps` }, app: { status } })) })
+      return json(200, { installed: [...others, ...Object.entries(state.installed).map(([id, status]) => ({ info: { id, urn: `${id}:wizardapps` }, app: { status } }))] })
     }
     const m = /^\/api\/app-lifecycle\/([a-z0-9-]+):wizardapps\/([a-z]+)$/u.exec(req.url || '')
     if (req.method !== 'POST' || !m) return json(404, { success: false, error: 'not_found' })
     const key = String(req.headers['idempotency-key'] || '')
     state.writes.push({ key, app: m[1], action: m[2], body: JSON.parse(body || '{}') })
     if (!state.journal.has(key)) {
+      if (delay) await new Promise((r) => setTimeout(r, delay))
       if (state.fail) { state.journal.set(key, state.fail); state.fail = null }
       else {
         state.installed[m[1]] = 'running'
-        writeApps()
+        if (!staleApps) writeApps()
         state.journal.set(key, { code: 200, data: { success: true, noop: false, status: 'running' } })
       }
     }
@@ -81,7 +84,8 @@ async function setup(opts = {}) {
   const logs = []
   const svc = createWizardServer({
     upstreamOrigin: 'http://127.0.0.1:9', requireAccess: false, appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'),
-    mcpToken: TOKEN, bridgeWatchMs: 50, bridgeLog: (l) => logs.push(l), bridgeToolWaitMs: 3000,
+    mcpToken: TOKEN, bridgeWatchMs: 50, bridgeLog: (l) => logs.push(l), bridgeToolWaitMs: opts.toolWaitMs ?? 3000,
+    ...(opts.budget ? { bridgeInstallBudgetMs: opts.budget } : {}),
     appManagerUrl: `http://127.0.0.1:${bridgePort}`, appManagerToken: MANAGER_TOKEN, appIndexUrl: 'http://index.test/v1', appIndexFetch: indexFetch,
   })
   servers.push(svc)
@@ -180,10 +184,83 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
     expect(other.bridge.writes[1].key).not.toBe(other.bridge.writes[0].key)
   })
 
-  it('an explicit operation_key checks that operation again', async () => {
+  it('with nothing held, a supplied operation_key resumes that operation (e.g. after a Service restart)', async () => {
     const { base, bridge } = await setup({ fail: { code: 409, data: { success: false, error: 'operation_unconfirmed' } } })
     await call(base, { action: 'install', app: 'hello-view', operation_key: 'agent-retry-key-000001' })
     expect(bridge.writes[0].key).toBe('agent-retry-key-000001')
+  })
+
+  it('while an outcome is uncertain only the held key is accepted; another key or form sends nothing and keeps it', async () => {
+    const { base, bridge } = await setup({ fail: { code: 409, data: { success: false, error: 'operation_unconfirmed' } } })
+    await call(base, { action: 'install', app: 'hello-view' })
+    const held = bridge.writes[0].key
+    const other = await call(base, { action: 'install', app: 'hello-view', operation_key: 'someone-elses-key-000001' })
+    expect(other.result.isError).toBe(true)
+    expect(other.text).toContain(`held under operation_key ${held}; a different key was given, so nothing was sent`)
+    const form = await call(base, { action: 'install', app: 'hello-view', form: { NAME: 'x' } })
+    expect(form.text).toContain(`with other form values is still held (operation_key ${held}); nothing new was sent`)
+    expect(bridge.writes).toHaveLength(1)
+    // The held key survived both refusals: the next retries (with or without it) use it, and the bridge replays.
+    await call(base, { action: 'install', app: 'hello-view', operation_key: held })
+    await call(base, { action: 'install', app: 'hello-view' })
+    expect(bridge.writes.map((w) => w.key)).toEqual([held, held, held])
+  })
+
+  it('answers within its budget while a slow install runs on; a retry joins it and gets the real outcome, one write', async () => {
+    const { base, bridge } = await setup({ delay: 700, budget: 300 })
+    const t0 = Date.now()
+    const first = await call(base, { action: 'install', app: 'hello-view' })
+    expect(Date.now() - t0).toBeLessThan(650)
+    expect(first.result.isError).toBe(true)
+    expect(first.text).toContain('is still running on the box; it is not finished after 0 s, so its outcome is NOT confirmed yet')
+    expect(first.text).toContain('Do not tell the owner it worked or failed; tell them it is still installing.')
+    expect(bridge.writes).toHaveLength(1)
+    const key = bridge.writes[0].key
+    expect(first.text).toContain(`"operation_key": "${key}"`)
+    // Mid-operation: no token -> refused; a different key -> refused; a plain retry joins (no second write).
+    expect((await call(base, { action: 'install', app: 'hello-view' }, { token: '' })).status).toBe(401)
+    expect((await call(base, { action: 'install', app: 'hello-view', operation_key: 'someone-elses-key-000001' })).text).toContain('nothing was sent')
+    const joined = await call(base, { action: 'install', app: 'hello-view', operation_key: key })
+    expect(joined.text).toContain('still running on the box')
+    expect(bridge.writes).toHaveLength(1)
+    await new Promise((r) => setTimeout(r, 700))
+    // The operation finished while nobody waited: the next call reports that outcome, then it is plain status.
+    const done = await call(base, { action: 'install', app: 'hello-view' })
+    expect(done.result.isError).toBeFalsy()
+    expect(done.text).toContain('Installed Hello View (hello-view); it is running.')
+    expect(done.text).toContain('mcp__wizard__hello_view__wizard_time')
+    expect((await call(base, { action: 'install', app: 'hello-view' })).text).toContain('already installed and running')
+    expect(bridge.writes).toHaveLength(1)
+  })
+
+  it('a slow install that fails is reported to the retry and releases its key', async () => {
+    const { base, bridge } = await setup({ delay: 500, budget: 200, fail: { code: 422, data: { success: false, error: 'lifecycle_failed' } } })
+    expect((await call(base, { action: 'install', app: 'hello-view' })).text).toContain('still running on the box')
+    await new Promise((r) => setTimeout(r, 600))
+    expect((await call(base, { action: 'install', app: 'hello-view' })).text).toContain('tried to install Hello View (hello-view) and it failed')
+    expect(bridge.writes).toHaveLength(1)
+    await call(base, { action: 'install', app: 'hello-view' })
+    await new Promise((r) => setTimeout(r, 600))
+    expect(bridge.writes).toHaveLength(2)
+    expect(bridge.writes[1].key).not.toBe(bridge.writes[0].key)
+  })
+
+  it('reads status from the Wizard app store only: a namesake from another store neither skips an install nor gets started', async () => {
+    const running = await setup({ others: [{ info: { id: 'hello-view', urn: 'hello-view:otherstore' }, app: { status: 'running' } }] })
+    expect((await call(running.base, { action: 'install', app: 'hello-view' })).text).toContain('Installed Hello View (hello-view); it is running.')
+    expect(running.bridge.writes.map((w) => [w.app, w.action])).toEqual([['hello-view', 'install']])
+    const stopped = await setup({ others: [{ info: { id: 'hello-view', urn: 'hello-view:otherstore' }, app: { status: 'stopped' } }] })
+    await call(stopped.base, { action: 'install', app: 'hello-view' })
+    expect(stopped.bridge.writes.map((w) => w.action)).toEqual(['install'])
+  })
+
+  it('says tools are not confirmed when the app has not appeared yet, and "own screen" only for a known tool-less app', async () => {
+    const slow = await setup({ staleApps: true, toolWaitMs: 300 })
+    const r = await call(slow.base, { action: 'install', app: 'hello-view' })
+    expect(r.text).toContain('Its tools are not confirmed yet')
+    expect(r.text).not.toContain('own screen')
+    const screen = await setup({ toolless: true })
+    expect((await call(screen.base, { action: 'install', app: 'hello-view' })).text).toContain('It has no tools for you; it is used through its own screen.')
   })
 
   it('names missing dependencies and installs nothing else; refuses system and unknown apps', async () => {
@@ -200,6 +277,10 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
     const { base, bridge } = await setup()
     expect((await call(base, { action: 'install', app: '../etc' })).text).toContain('Pass the app id as "app"')
     expect((await call(base, { action: 'install', app: 'Hello View' })).text).toContain('Pass the app id as "app"')
+    // Literal ids only: no case folding or trimming turns a near miss into a real install.
+    for (const app of ['Hello-View', 'HELLO-VIEW', ' hello-view', 'hello-view ', 'hello-view\n', '\thello-view']) {
+      expect((await call(base, { action: 'install', app })).text).toContain('Pass the app id as "app"')
+    }
     expect((await call(base, { action: 'install', app: 'hello-view', form: { 'bad key': 'x' } })).text).toContain('flat object')
     expect((await call(base, { action: 'install', app: 'hello-view', form: { A: { nested: 1 } } })).text).toContain('flat object')
     expect((await call(base, { action: 'install', app: 'hello-view', operation_key: 'short' })).text).toContain('operation_key')

@@ -1838,6 +1838,7 @@ export function createWizardServer(options = {}) {
         log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       }) : null,
       ...(options.bridgeToolWaitMs !== undefined ? { toolWaitMs: options.bridgeToolWaitMs } : {}),
+      ...(options.bridgeInstallBudgetMs !== undefined ? { installBudgetMs: options.bridgeInstallBudgetMs } : {}),
     })
     : null
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null

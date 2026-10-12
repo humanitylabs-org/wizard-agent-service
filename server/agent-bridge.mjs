@@ -321,11 +321,12 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
-  appActions = null, toolWaitMs = 45_000,
+  appActions = null, toolWaitMs = 45_000, installBudgetMs = 90_000,
 }) {
   let mtime = null
   let apps = []
   const toolCache = new Map() // app id -> { tools, at }
+  const listReserve = Math.min(2 * timeoutMs, installBudgetMs / 4) // an initialize + tools/list past a deadline
   const clients = new Map()
   const sessions = new Map() // session id -> { streams: Set<response> }
 
@@ -408,7 +409,7 @@ export function createAgentBridge({
       name: META_TOOL,
       description: '[Wizard OS] The owner\'s Wizard apps on this box. action "installed" (default): what is installed, the job each does, running or not, its tool names; use for "what apps do I have?". '
         + 'action "search" with query: apps in the Wizard app catalogue for a job no installed app does. '
-        + 'action "install" with app (a catalogue id): install that app on the owner\'s box when the owner wants its job done; answers when it is running, with its tools. '
+        + 'action "install" with app (a catalogue id): install that app on the owner\'s box when the owner wants its job done; answers when it is running, with its tools, or after about 90 s that it is still in progress (call install again to keep waiting on the same operation). '
         + 'action "call" with tool (<app>__<tool>) and arguments: run an installed app\'s tool that is not in your tool list yet.',
       inputSchema: {
         type: 'object',
@@ -417,7 +418,7 @@ export function createAgentBridge({
           query: { type: 'string', maxLength: 200, description: 'search: the job or app in a few words.' },
           app: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,63}$', description: 'install: the app id from search.' },
           form: { type: 'object', description: 'install, optional: install-form values the app asks for.', additionalProperties: { type: ['string', 'number', 'boolean'] } },
-          operation_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{16,128}$', description: 'install, optional: the key an unconfirmed install answered with, to check it again.' },
+          operation_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{16,128}$', description: 'install, optional: the key an earlier unconfirmed or in-progress install answered with. Omit it otherwise; while an install is unconfirmed only that key is accepted.' },
           tool: { type: 'string', description: 'call: the tool name, <app>__<tool>.' },
           arguments: { type: 'object', description: 'call: the tool\'s arguments.' },
         },
@@ -467,12 +468,17 @@ export function createAgentBridge({
     return ok(`Wizard app catalogue${query ? ` for "${clean(query, 200)}"` : ''}:\n${lines.join('\n')}\nInstall one with ${META_TOOL} {"action": "install", "app": "<id>"}.`)
   }
 
-  /** After an install: the app's tools once its MCP server answers; clients re-list when they first do. */
-  async function newTools(id) {
-    const deadline = Date.now() + toolWaitMs
+  /**
+   * After an install: the app's tools once its MCP server answers; clients re-list when they first do. Stops by
+   * `until` (the install's response budget, less one tool-list round trip: listReserve). `toolless`: apps.json lists the app with
+   * no MCP endpoint, a known screen-only app.
+   */
+  async function newTools(id, until = Infinity) {
+    const deadline = Math.min(Date.now() + toolWaitMs, until - listReserve)
     for (;;) {
       onChange()
       const app = apps.find((a) => a.id === id)
+      if (!app && installedStatus()[id]) return { app: null, tools: [], toolless: true }
       if (app) {
         toolCache.delete(id)
         const tools = await appTools(app)
@@ -488,13 +494,17 @@ export function createAgentBridge({
   }
 
   async function install(args, ctx) {
-    const r = await appActions.install(args, ctx)
+    // One budget for the whole answer (catalogue, status, the operation and tool discovery), below MCP clients' own
+    // tool-call timeouts. The operation itself is never cut short; a later call joins it.
+    const until = Date.now() + installBudgetMs
+    const r = await appActions.install(args, { ...ctx, waitMs: installBudgetMs - listReserve })
     const e = r.entry
     const label = e ? `${e.name} (${e.id})` : clean(String(args?.app ?? ''), 64)
     if (r.ok) {
-      const { app, tools } = await newTools(e.id)
+      const { app, tools, toolless } = await newTools(e.id, until)
       const head = r.already ? `${label} is already installed and running.` : `${r.action === 'start' ? 'Started' : 'Installed'} ${label}; it is running.`
-      if (!app) return ok(`${head} It has no tools for you; it is used through its own screen.`)
+      if (toolless) return ok(`${head} It has no tools for you; it is used through its own screen.`)
+      if (!app) return ok(`${head} Its tools are not confirmed yet: it has not appeared in this box's app list. Do not tell the owner it has no tools; call ${META_TOOL} in a moment to see them.`)
       if (!tools.length) return ok(`${head} Its tools are not answering yet; call ${META_TOOL} in a moment to see them.`)
       const rows = tools.map((t) => `- ${agentToolName(app.prefix, t.name, harness)}${t.description ? `: ${clean(String(t.description).split(/(?<=[.!?])\s/u)[0], 100)}` : ''}`)
       return ok(`${head} Its tools on the \`${MCP_SERVER_NAME}\` MCP server:\n${rows.join('\n')}\nCall the one the owner's request needs now. If it is not in your tool list yet, call ${META_TOOL} with {"action": "call", "tool": "${app.prefix}__<tool>", "arguments": {...}}.`)
@@ -505,7 +515,9 @@ export function createAgentBridge({
       app_manager_not_configured: 'The app installer is not connected to this box\'s Agent Service, so apps cannot be installed from here. Tell the owner (`wam doctor`).',
       invalid_app: 'Pass the app id as "app", exactly as search shows it (lowercase letters, digits and dashes); nothing was installed.',
       invalid_form: 'The form values must be a flat object of short strings, numbers or booleans; nothing was installed.',
-      invalid_operation_key: 'That operation_key is not one this gateway gave out; nothing was installed.',
+      invalid_operation_key: 'operation_key must be exactly the key an earlier answer gave (16-128 letters, digits, _ or -); nothing was installed.',
+      operation_key_mismatch: `An unconfirmed ${how} of ${label} is held under operation_key ${r.key}; a different key was given, so nothing was sent. Call again with that key, or without operation_key.`,
+      operation_pending: `An unconfirmed install of ${label} with other form values is still held (operation_key ${r.key}); nothing new was sent. Call again with the same values, or tell the owner the installer needs a check (\`wam doctor\`).`,
       catalogue_unavailable: 'The Wizard app catalogue did not answer; nothing was installed. Try again shortly.',
       not_in_catalogue: `No app with id "${label}" is in the Wizard app catalogue; nothing was installed. Find one with ${META_TOOL} action "search".`,
       system_app: `${label} is part of Wizard itself (shell, Agent Service or agent); the owner manages it, not the agent. Nothing was installed.`,
@@ -515,9 +527,15 @@ export function createAgentBridge({
       lifecycle_failed: `The app installer tried to ${how} ${label} and it failed. Tell the owner it did not work; the Store and \`wam doctor\` show why.`,
       not_running: `${label} was installed but is ${r.status}, not running. Tell the owner (\`wam doctor\`).`,
     }
+    const id = e?.id || clean(String(args?.app ?? ''), 64)
+    if (r.error === 'in_progress') {
+      return failure(`The ${how} of ${label} is still running on the box; it is not finished after ${Math.round(installBudgetMs / 1000)} s, so its outcome is NOT confirmed yet. `
+        + `Do not tell the owner it worked or failed; tell them it is still ${how === 'start' ? 'starting' : 'installing'}. `
+        + `Call ${META_TOOL} {"action": "install", "app": "${id}"${r.key ? `, "operation_key": "${r.key}"` : ''}} again in a minute: it joins that same operation and reports its outcome; it never installs twice.`)
+    }
     if (r.uncertain) {
       return failure(`The ${how} of ${label} was sent, but its outcome is NOT confirmed (${r.error}). Do not tell the owner it worked. `
-        + `Call ${META_TOOL} {"action": "install", "app": "${e.id}"} again in a minute: it reuses operation_key ${r.key}, so it cannot install twice. If it stays unconfirmed, tell the owner the installer needs a check (\`wam doctor\`).`)
+        + `Call ${META_TOOL} {"action": "install", "app": "${id}"} again in a minute: it reuses operation_key ${r.key}, so it cannot install twice. If it stays unconfirmed, tell the owner the installer needs a check (\`wam doctor\`).`)
     }
     return failure(said[r.error] || `Could not ${how} ${label} (${r.error}). Tell the owner (\`wam doctor\`).`)
   }
