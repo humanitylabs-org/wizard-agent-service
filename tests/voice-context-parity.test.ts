@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
 
-type Stt = { health: 'wizard' | 'plain' | 'none'; models: string[] | null; speech: boolean }
+type Stt = { health: 'wizard' | 'plain' | 'none'; models: Array<string | { id: string; task: string }> | null; speech: boolean }
 const stt: Stt = { health: 'none', models: ['Systran/faster-whisper-small'], speech: true }
 const runs: Array<Record<string, any>> = []
 const transcribeModels: string[] = []
@@ -38,7 +38,7 @@ beforeAll(async () => {
     }
     if (request.url === '/v1/models') {
       if (stt.models === null) { response.statusCode = 404; response.end('{}'); return }
-      response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ data: stt.models.map((id) => ({ id })) })); return
+      response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ data: stt.models.map((m) => typeof m === 'string' ? { id: m } : m) })); return
     }
     if (request.url === '/v1/audio/transcriptions') {
       const body = Buffer.concat(chunks).toString('latin1')
@@ -93,6 +93,21 @@ describe('voice readiness: bootstrap and status give one answer', () => {
     Object.assign(stt, { health: 'none', models: [] })
     const r = await readiness(await start())
     expect(r).toMatchObject({ boot: false, code: 200, status: { ready: false, name: 'No voice model installed' } })
+  })
+
+  it('Speaches with only its voice-activity helper model is not ready (seen on the real transcriber)', async () => {
+    Object.assign(stt, { health: 'plain', models: [{ id: 'silero_vad_v5', task: 'voice-activity-detection' }] })
+    const r = await readiness(await start())
+    expect(r).toMatchObject({ boot: false, code: 200, status: { ready: false, name: 'No voice model installed' } })
+  })
+
+  it('Speaches with a whisper model next to the helper: ready, and transcription names the whisper model', async () => {
+    Object.assign(stt, { health: 'plain', speech: true, models: [{ id: 'silero_vad_v5', task: 'voice-activity-detection' }, { id: 'Systran/faster-whisper-small', task: 'automatic-speech-recognition' }] })
+    const base = await start()
+    const r = await readiness(base)
+    expect(r).toMatchObject({ boot: true, code: 200, status: { ready: true, model: 'Systran/faster-whisper-small' } })
+    await fetch(`${base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/aac' }, body: Buffer.from('x') })
+    expect(transcribeModels.at(-1)).toBe('Systran/faster-whisper-small')
   })
 
   it("Wizard's own STT (/health with provider) keeps its name and attestation", async () => {

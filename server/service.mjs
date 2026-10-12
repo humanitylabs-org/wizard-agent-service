@@ -1874,6 +1874,15 @@ export function createWizardServer(options = {}) {
   // and it is usable exactly when it lists at least one: that model is what every transcription request names.
   // Unreachable is `reachable: false`; reachable with no model is honest `ready: false`.
   const VOICE_NAMES = { tinfoil: 'Tinfoil', 'openai-compatible': 'OpenAI', local: 'Local model' }
+  // The transcription model in a /v1/models listing. Speaches also lists helper models (e.g. silero_vad_v5,
+  // task voice-activity-detection) even when no speech model is installed, so when entries carry a task only
+  // automatic-speech-recognition counts; a listing without task fields (other OpenAI-compatible servers)
+  // offers any model.
+  const speechModelOf = (listing) => {
+    const models = Array.isArray(listing?.data) ? listing.data.filter((m) => typeof m?.id === 'string' && m.id) : []
+    if (models.some((m) => typeof m.task === 'string')) return models.find((m) => m.task === 'automatic-speech-recognition') ?? null
+    return models[0] ?? null
+  }
   let sttProbe = { value: null, at: 0 }
   const sttProbeGet = async (path, timeoutMs) => {
     const controller = new AbortController()
@@ -1903,7 +1912,7 @@ export function createWizardServer(options = {}) {
       }
     } else {
       const models = await sttProbeGet('/v1/models', 2000)
-      const first = models.ok && Array.isArray(models.value?.data) ? models.value.data.find((m) => typeof m?.id === 'string' && m.id) : null
+      const first = models.ok ? speechModelOf(models.value) : null
       if (first) {
         sttModelCache = { id: first.id.slice(0, 200), at: Date.now() }
         value = { reachable: true, ready: true, provider: 'local', name: VOICE_NAMES.local, model: first.id.slice(0, 120), attested: false }
@@ -1916,7 +1925,7 @@ export function createWizardServer(options = {}) {
   }
   const sttAvailable = async () => (await sttReadiness()).ready
   // OpenAI-compatible transcribers (e.g. the Speaches-based `transcriber` app) need a `model` field;
-  // Wizard's own STT ignores it. Use the transcriber's first advertised model, cached for 5 minutes.
+  // Wizard's own STT ignores it. Use the transcriber's speech model, cached for 5 minutes.
   let sttModelCache = { id: '', at: 0 }
   const sttModel = async () => {
     if (Date.now() - sttModelCache.at < 300_000) return sttModelCache.id
@@ -1924,8 +1933,7 @@ export function createWizardServer(options = {}) {
     try {
       const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
       if (r.ok) {
-        const value = await r.json()
-        const first = Array.isArray(value?.data) ? value.data.find((m) => typeof m?.id === 'string') : null
+        const first = speechModelOf(await r.json())
         id = first ? first.id.slice(0, 200) : ''
       } else await r.body?.cancel().catch(() => undefined)
     } catch { /* keep '' */ }
