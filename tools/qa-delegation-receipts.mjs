@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, findIdleUndeliveredHelperReceipts, RECEIPT_PREFIX } from '../server/delegation-receipts.mjs'
-import { startDelegationFollowThrough } from '../server/delegation-follow-through.mjs'
+import { startDelegationFollowThrough, findPendingFollowThroughs } from '../server/delegation-follow-through.mjs'
 import { readHermesSessionTruth } from '../server/session-truth.mjs'
 const now = Date.now()
 function fixture({ delivery = 'dropped', final = '', lease = false, consumed = false, age = 30 } = {}) {
@@ -34,4 +34,37 @@ test('real watcher admits result once, retries a failed admission, respects disa
  const path=fixture(); const calls=[];let on=false;let fail=true
  const w=startDelegationFollowThrough({sessionDbPath:path,intervalMs:60000,enabled:async()=>on,admit:async(s,i,k)=>{if(fail){fail=false;throw Error('503')}calls.push({s,i,k})}})
  try {await w.tick();assert.equal(calls.length,0);on=true;await w.tick();await w.tick();await w.tick();assert.equal(calls.length,1);assert.match(calls[0].i,/MUST-FIX/);assert.equal(calls[0].k,'wizard-helper-receipt-deleg_a')}finally{w.stop()}
+})
+const status = state => `Outcome\n[WIZARD_STATUS_V1]{"state":"${state}","ask":"Decide the release"}[/WIZARD_STATUS_V1]`
+for (const state of ['done','needs_you','check']) test(`preserves ${state} before a late helper completion`,()=>{
+ const path=fixture({final:status(state),age:1});assert.equal(readUndeliveredHelperReceipts(path,{now}).length,0)
+ assert.ok(!readHermesSessionTruth(path,['wizard_a'],now/1000).get('wizard_a').helperResultUnanswered)
+})
+for (const state of ['done','needs_you','check']) test(`late original delivery after recovery cannot reopen ${state}, including restart`,async()=>{
+ const path=fixture({consumed:true,final:status(state)});const db=new DatabaseSync(path)
+ db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','user','[ASYNC DELEGATION BATCH COMPLETE — deleg_a] Late original findings',now/1000)
+ db.close();assert.equal(findPendingFollowThroughs(path,{now}).length,0)
+ assert.ok(!readHermesSessionTruth(path,['wizard_a'],now/1000).get('wizard_a').helperResultUnanswered)
+ for(let n=0;n<2;n++){let calls=0;const w=startDelegationFollowThrough({sessionDbPath:path,intervalMs:60000,enabled:async()=>true,admit:async()=>{calls++}});try{await w.tick();assert.equal(calls,0)}finally{w.stop()}}
+})
+test('ordinary and recovered delivery use identical keys and saved-result input',()=>{
+ const path=fixture();const recovered=readUndeliveredHelperReceipts(path,{now})[0];const db=new DatabaseSync(path)
+ db.prepare("UPDATE async_delegations SET delivery_state='delivered'").run()
+ db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','user','[ASYNC DELEGATION BATCH COMPLETE — deleg_a] Original findings',now/1000)
+ db.close();const original=findPendingFollowThroughs(path,{now})[0];assert.equal(original.key,recovered.key);assert.equal(original.input,recovered.input)
+})
+test('two same-parent receipts cannot admit a second turn after first admission acquires lease',async()=>{
+ const path=fixture();const db=new DatabaseSync(path);db.exec("INSERT INTO async_delegations SELECT 'deleg_b',origin_session_id,parent_session_id,state,delivery_state,result_json,dispatched_at,completed_at+1 FROM async_delegations")
+ let calls=0;const w=startDelegationFollowThrough({sessionDbPath:path,intervalMs:60000,enabled:async()=>true,admit:async()=>{calls++;db.prepare('INSERT INTO session_turn_leases VALUES(?,?)').run('wizard_a',Date.now()/1000+60)}})
+ try{await w.tick();await w.tick();assert.equal(calls,1)}finally{w.stop();db.close()}
+})
+test('a newer genuine request releases the previous owner gate',()=>{
+ const path=fixture({final:status('needs_you'),age:1});const db=new DatabaseSync(path)
+ db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','user','Approved, ship it',now/1000-1)
+ db.close();assert.equal(readUndeliveredHelperReceipts(path,{now}).length,1)
+})
+test('a consumed receipt alone suppresses late original delivery without a status marker',()=>{
+ const path=fixture({consumed:true});const db=new DatabaseSync(path)
+ db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','user','[ASYNC DELEGATION BATCH COMPLETE — deleg_a] Late original',now/1000)
+ db.close();assert.equal(findPendingFollowThroughs(path,{now}).length,0);assert.ok(!readHermesSessionTruth(path,['wizard_a'],now/1000).get('wizard_a').helperResultUnanswered)
 })

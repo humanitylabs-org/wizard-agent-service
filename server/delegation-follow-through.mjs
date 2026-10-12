@@ -11,7 +11,7 @@
 // at most once (idempotency key = session + row id).
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { findIdleUndeliveredHelperReceipts } from './delegation-receipts.mjs'
+import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, currentOwnerResult, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
@@ -25,7 +25,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
   try {
     const nowSeconds = now / 1000
     const rows = database.prepare(`
-      SELECT m.session_id AS session_id, m.id AS message_id, m.timestamp AS at
+      SELECT m.session_id AS session_id, m.id AS message_id, m.timestamp AS at, m.content AS content
         FROM messages m
         JOIN (SELECT session_id, MAX(id) AS id FROM messages WHERE COALESCE(active, 1) = 1 GROUP BY session_id) latest
           ON latest.session_id = m.session_id AND latest.id = m.id
@@ -38,8 +38,17 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
       leased = new Set(database.prepare('SELECT conversation_id FROM session_turn_leases WHERE expires_at > ?').all(nowSeconds).map((row) => String(row.conversation_id)))
     } catch { /* older Hermes without leases */ }
     return rows
-      .map((row) => ({ sessionId: String(row.session_id), messageId: Number(row.message_id), at: Number(row.at) }))
-      .filter((row) => sessionPrefixes.some((prefix) => row.sessionId.startsWith(prefix)) && !leased.has(row.sessionId))
+      .filter(row => sessionPrefixes.some(prefix => String(row.session_id).startsWith(prefix))
+        && !leased.has(String(row.session_id)) && !currentOwnerResult(database, String(row.session_id)))
+      .map(row => {
+        const sessionId = String(row.session_id), delegationId = completionDelegationId(row.content)
+        if (delegationId && receiptConsumed(database, sessionId, delegationId)) return null
+        const receipt = delegationId ? readUndeliveredHelperReceipts(sessionDbPath, { now, delegationId, includeDelivered: true })
+          .find(r => r.sessionId === sessionId) : null
+        return { sessionId, messageId: Number(row.message_id), at: Number(row.at),
+          ...(delegationId ? { delegationId, key: receiptKey(delegationId), input: receipt?.input
+            ?? RECEIPT_PREFIX + delegationId + '\nThe saved helper findings below arrived. Finish the original request under its latest instructions and release authority.\n\n' + row.content } : {}) }
+      }).filter(Boolean)
   } finally {
     database.close()
   }
@@ -50,7 +59,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
  * normal admission path. `enabled()` is checked every tick so it turns itself off on agents that
  * join delegated work inside the run.
  */
-export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, intervalMs = 5000, log = () => {} }) {
+export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, allowSession = () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
   let busy = false
   const tick = async () => {
@@ -61,7 +70,11 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, in
       const completions = findPendingFollowThroughs(sessionDbPath)
       const completionSessions = new Set(completions.map(row => row.sessionId))
       const receipts = findIdleUndeliveredHelperReceipts(sessionDbPath).filter(row => !completionSessions.has(row.sessionId))
-      for (const pending of [...completions, ...receipts]) {
+      const touchedSessions = new Set()
+      for (const pending of [...completions, ...receipts].filter(row => allowSession(row.sessionId))) {
+        if (touchedSessions.has(pending.sessionId)
+          || !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
+        touchedSessions.add(pending.sessionId)
         const key = pending.key ?? `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
         if (done.has(key)) continue
         done.add(key)

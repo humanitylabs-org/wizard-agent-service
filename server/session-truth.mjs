@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { readUndeliveredHelperReceipts } from './delegation-receipts.mjs'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, currentOwnerResult } from './delegation-receipts.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -130,7 +130,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current) current.helpersRunning = Number(row.n) || 0
+        if (current && !currentOwnerResult(db, String(row.id))) current.helpersRunning = Number(row.n) || 0
       }
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
@@ -147,8 +147,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `)
       for (const [id, current] of truth) {
         const row = newestRow.get(id)
+        const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
-          && Number(row.timestamp) > nowSeconds - 6 * 3600) current.helperResultUnanswered = true
+          && Number(row.timestamp) > nowSeconds - 6 * 3600 && !currentOwnerResult(db, id)
+          && !(delegationId && receiptConsumed(db, id, delegationId))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`

@@ -4,10 +4,10 @@ import { startDelegationFollowThrough } from '../server/delegation-follow-throug
 const origin = process.env.WIZARD_RECOVERY_ORIGIN || 'http://127.0.0.1:8923'
 const path = process.env.WIZARD_RECOVERY_STATE_DB
 const allowedSessions = new Set((process.env.WIZARD_RECOVERY_SESSION_IDS || '').split(',').filter(Boolean))
-if (!path || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error('Explicit local origin and state DB required')
+if (!path || !allowedSessions.size || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error('Explicit local origin, state DB and session allowlist required')
 const watcher = startDelegationFollowThrough({sessionDbPath:path,enabled:async()=>true,
+ allowSession:sessionId=>allowedSessions.has(sessionId),
  admit:async(sessionId,input,key)=>{
-   if (allowedSessions.size && !allowedSessions.has(sessionId)) return
    const list = await fetch(`${origin}/wizard/hermes/api/sessions?limit=200`,{signal:AbortSignal.timeout(20000)})
    if(!list.ok) throw new Error(`session preflight ${list.status}`)
    const s = (await list.json()).data?.find(row=>row.id===sessionId)
