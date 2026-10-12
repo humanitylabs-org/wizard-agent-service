@@ -12,6 +12,7 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, ownerGate, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
+import { captureContinuation, continuationCurrent } from './helper-continuation.mjs'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
@@ -77,10 +78,12 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, al
           || !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
         touchedSessions.add(pending.sessionId)
         const key = pending.key ?? `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
+        const token = captureContinuation(sessionDbPath, pending)
+        if (!continuationCurrent(sessionDbPath, token)) continue
         if (done.has(key)) continue
         done.add(key)
         try {
-          await admit(pending.sessionId, pending.input ?? FOLLOW_THROUGH_INPUT, key)
+          await admit(pending.sessionId, pending.input ?? FOLLOW_THROUGH_INPUT, key, token)
           log(`follow-through started for ${pending.sessionId} (${pending.delegationId ?? `row ${pending.messageId}`})`)
         } catch (error) {
           done.delete(key)

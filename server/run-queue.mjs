@@ -109,6 +109,9 @@ export class DurableRunQueue {
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
     `)
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
+    }
   }
 
   async initialize() {
@@ -138,6 +141,7 @@ export class DurableRunQueue {
       idempotencyKey: row.idempotency_key,
       requestHash: row.request_hash,
       body: row.body,
+      continuation: parseJson(row.continuation_json, null),
       trustedPaths: parseJson(row.trusted_paths_json, []),
       status: row.status,
       upstreamRunId: row.upstream_run_id,
@@ -317,7 +321,7 @@ export class DurableRunQueue {
     }
   }
 
-  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [] }) {
+  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
@@ -340,9 +344,9 @@ export class DurableRunQueue {
       this.database.prepare(`
         INSERT INTO wizard_run_queue (
           public_run_id, runtime, session_id, idempotency_key, request_hash, body,
-          trusted_paths_json, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt)
+          trusted_paths_json, status, created_at, updated_at, continuation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt, JSON.stringify(continuation))
       this.database.exec('COMMIT')
     } catch (error) {
       try { this.database.exec('ROLLBACK') } catch { /* already rolled back */ }
@@ -461,6 +465,9 @@ export class DurableRunQueue {
       return current
     } catch (error) {
       const status = Number(error?.status)
+      if (status === 410 && (current.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(current.idempotencyKey))) {
+        return this._update(record.publicRunId, { status: 'cancelled', payload: { status: 'cancelled', safe_error: 'The helper request is no longer current.' }, waitingReason: '', terminalAt: nowSeconds() })
+      }
       const retry = error instanceof TypeError || RETRIABLE.has(status)
       return this._update(record.publicRunId, retry
         ? { status: 'queued', waitingReason: status === 429 ? 'provider_busy' : 'capacity', retryAfter: nowSeconds() + this.retryDelayMs / 1000 }

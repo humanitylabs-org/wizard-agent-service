@@ -57,6 +57,7 @@ const server = createWizardServer({
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   requireAccess,
+  helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
