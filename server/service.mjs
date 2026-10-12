@@ -542,7 +542,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             }
             // A helper is still working for this thread (or its answer is in but the agent has not replied).
             // Keep the thread in Working so it reaches Ready only with the real answer.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered)
+            // The bounded helper projection also covers delivery followed by nonterminal FYI.
+            // Owner-held findings do not manufacture a new Working turn.
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered
+              || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
               projected.status = 'running'

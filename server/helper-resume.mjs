@@ -6,8 +6,10 @@ import { captureContinuation, continuationCurrent } from './helper-continuation.
 export async function resumeHelper({ sessionDbPath, sessionId, admit, now=Date.now() }) {
   const status=readHelperStatuses(sessionDbPath,[sessionId],{now}).get(sessionId)
   if(!status?.resumeEligible) return {status:409,body:{error:'helper_not_resumable'}}
-  const candidates=[...findPendingFollowThroughs(sessionDbPath,{now}),...findIdleUndeliveredHelperReceipts(sessionDbPath,{now})]
-  const pending=candidates.find(r=>r.sessionId===sessionId)
+  // Delivery is not an answer: a later FYI can hide the completion from the watcher.
+  // Reuse its receipt identity, but skip answered/stale candidates before selecting one.
+  const candidates=[...findPendingFollowThroughs(sessionDbPath,{now}),...findIdleUndeliveredHelperReceipts(sessionDbPath,{now,includeDelivered:true})]
+  const pending=candidates.find(r=>r.sessionId===sessionId && continuationCurrent(sessionDbPath,captureContinuation(sessionDbPath,r),now))
   if(!pending) return {status:409,body:{error:'helper_not_resumable'}}
   const key=pending.key??`wizard-follow-through-${pending.sessionId}-${pending.messageId}`
   const token=captureContinuation(sessionDbPath,pending)

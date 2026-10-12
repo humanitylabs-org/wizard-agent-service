@@ -29,6 +29,29 @@ test('session-list projection carries helper status through the real API code',(
  const s=createWizardServer({archivedSessionReader:()=>[],requireAccess:false,hermesKey:'fixture-only',hermesStatePath:path,sessionDbPath:path,followThrough:false,fetchImpl:async(url)=>new Response(JSON.stringify(String(url).includes('/api/sessions?')?{data:[{id:sid,source:'wizard-mobile',title:'Helper example'}]}:{data:[]}),{headers:{'content-type':'application/json'}})});await listen(s);
  try{const r=await fetch(`http://127.0.0.1:${s.address().port}/wizard/hermes/api/sessions?limit=10`);assert.equal(r.status,200);const p=await r.json();assert.equal(p.data[0].wizard_helper_status.phase,'running');assert.equal(p.data[0].wizard_helper_status.pending,1)}finally{await new Promise(r=>s.close(r))}
 }))
+test('delivered but unanswered helper stays Working and admits the original receipt after steering and FYI',()=>fixture(async({db,path})=>{
+ const {createWizardServer,listen}=await import('../server/service.mjs');add(db,'completed');
+ db.exec('ALTER TABLE messages ADD COLUMN finish_reason TEXT DEFAULT "stop";');
+ db.prepare('INSERT INTO sessions(id,started_at) VALUES(?,?)').run(sid,sec-3000);
+ db.exec("UPDATE async_delegations SET delivery_state='delivered'");
+ const message=(role,content,at)=>db.prepare('INSERT INTO messages(session_id,role,content,timestamp)VALUES(?,?,?,?)').run(sid,role,content,at);
+ message('user','Keep the approved scope; do not deploy',sec-800);
+ message('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_one] Findings',sec-600);
+ message('assistant','Still integrating [WIZARD_STATUS_V1]{"state":"fyi","ask":"Helpers returned; still verifying"}[/WIZARD_STATUS_V1]',sec-500);
+ const delta=Date.now()/1000-sec;db.prepare('UPDATE messages SET timestamp=timestamp+?').run(delta);db.prepare('UPDATE async_delegations SET dispatched_at=dispatched_at+?,completed_at=completed_at+?').run(delta,delta);
+ const calls=[];
+ const s=createWizardServer({archivedSessionReader:()=>[],requireAccess:false,joinedDelegation:'off',hermesKey:'fixture-only',hermesStatePath:path,sessionDbPath:path,followThrough:false,fetchImpl:async(url,o)=>{
+  calls.push({url,options:o});return new Response(JSON.stringify(String(url).includes('/api/sessions?')?{data:[{id:sid,source:'wizard-mobile',title:'Delivered fixture',status:'completed'}]}:String(url).endsWith('/v1/capabilities')?{}:{run_id:'delivered_fixture',status:'running'}),{status:String(url).endsWith('/v1/runs')?202:200,headers:{'content-type':'application/json'}})
+ }});await listen(s);const origin=`http://127.0.0.1:${s.address().port}`;
+ try{
+  const list=await fetch(origin+'/wizard/hermes/api/sessions?limit=10');assert.equal(list.status,200);const row=(await list.json()).data[0];
+  assert.equal(row.wizard_helper_status.phase,'stalled');assert.equal(row.wizard_helper_status.returned,1);assert.equal(row.wizard_helper_status.resumeEligible,true);
+  const response=await fetch(origin+'/wizard/helper-continue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:sid})});
+  console.log('DELIVERED_RECOVERY_RECEIPT '+JSON.stringify({listStatus:row.status,phase:row.wizard_helper_status.phase,continueStatus:response.status}));
+  assert.equal(row.status,'running');assert.equal(response.status,202);
+  const admissions=calls.filter(r=>r.url.endsWith('/v1/runs'));assert.equal(admissions.length,1);assert.equal(admissions[0].options.headers.get('Idempotency-Key'),'wizard-helper-receipt-deleg_one');assert.ok(JSON.parse(admissions[0].options.body).input.includes('Saved fixture findings'));
+ }finally{await new Promise(r=>s.close(r))}
+}))
 test('assigned batch count is exact and partial sibling remains pending',()=>fixture(({db,path})=>{add(db,'running','deleg_a',null,2);add(db,'completed','deleg_b');assert.deepEqual([read(path).phase,read(path).pending,read(path).returned],['running',2,1]);assert.equal(read(path).resumeEligible,false)}))
 test('lease means parent integrating, never stalled',()=>fixture(({db,path})=>{add(db,'completed');db.prepare('INSERT INTO session_turn_leases VALUES(?,?)').run(sid,sec+60);assert.equal(read(path).phase,'integrating');assert.equal(read(path).resumeEligible,false)}))
 test('active API run without a lease also means integrating',()=>fixture(({db,path})=>{add(db,'completed');assert.equal(readHelperStatuses(path,[sid],{now,activeSessionIds:new Set([sid])}).get(sid).phase,'integrating')}))
