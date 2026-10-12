@@ -130,18 +130,20 @@ export function createAgentAppActions({
     if (!APP_ID.test(id)) return { ok: false, error: 'invalid_app' }
     const values = validForm(form)
     if (!values) return { ok: false, error: 'invalid_form' }
+    const valueIdentity = JSON.stringify(Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b))))
     if (given !== undefined && (typeof given !== 'string' || !OPERATION_KEY.test(given))) return { ok: false, error: 'invalid_operation_key' }
     for (const [k, p] of pending) if (now() - p.at > PENDING_TTL_MS) pending.delete(k)
     for (const [k, f] of finished) if (now() - f.at > LATE_TTL_MS) finished.delete(k)
     let job = active.get(id)
-    const holding = job?.op.key || pending.get(id)?.key
+    const holding = job?.op.key || job?.key || pending.get(id)?.key
     if (given !== undefined && holding && given !== holding) return { ok: false, error: 'operation_key_mismatch', key: holding, action: job?.op.action || pending.get(id)?.action }
+    if (job && job.values !== valueIdentity) return { ok: false, error: 'operation_pending', key: holding, entry: job.op.entry }
     if (!job && finished.has(id)) {
-      const { result } = finished.get(id)
+      const { result, values: previousValues, key: previousKey } = finished.get(id)
       finished.delete(id)
-      return result
+      if (previousValues === valueIdentity && (given === undefined || given === previousKey)) return result
     }
-    if (!job) job = start(id, values, given)
+    if (!job) job = start(id, values, given, valueIdentity)
     if (!Number.isFinite(waitMs)) return job.run
     let timer
     const result = await Promise.race([job.run, new Promise((r) => { timer = setTimeout(r, Math.max(0, waitMs), null) })])
@@ -151,12 +153,12 @@ export function createAgentAppActions({
       return result
     }
     job.late = true
-    return { ok: false, uncertain: true, error: 'in_progress', key: job.op.key, action: job.op.action || 'install', entry: job.op.entry, sent: Boolean(job.op.key) }
+    return { ok: false, uncertain: true, error: 'in_progress', key: job.op.key || job.key, action: job.op.action || 'install', entry: job.op.entry, sent: Boolean(job.op.key) }
   }
 
-  function start(id, values, given) {
+  function start(id, values, given, valueIdentity) {
     const op = { key: '', action: '', entry: null }
-    const job = { op, late: false }
+    const job = { op, key: given || pending.get(id)?.key || randomBytes(18).toString('base64url'), values: valueIdentity, late: false }
     job.run = (async () => {
       const found = await catalogue(id)
       if (found.error) return { ok: false, error: found.error }
@@ -170,7 +172,7 @@ export function createAgentAppActions({
       const action = before === 'stopped' ? 'start' : 'install'
       if (before !== 'missing' && before !== 'stopped') return { ok: false, error: 'app_busy', status: before, entry }
       op.action = action
-      const result = await operate(id, action, action === 'install' ? values : {}, given, op)
+      const result = await operate(id, action, action === 'install' ? values : {}, job.key, op)
       log(JSON.stringify({ event: 'app_action', app: id, action, outcome: result.outcome, error: result.error || '' }))
       if (result.outcome !== 'done') {
         let missing = []
@@ -189,7 +191,7 @@ export function createAgentAppActions({
       : { ok: false, error: 'app_manager_unavailable', entry: op.entry }))
       .then((result) => {
         active.delete(id)
-        if (job.late) finished.set(id, { result, at: now() }) // the next call for this app reports it
+        if (job.late) finished.set(id, { result, values: job.values, key: job.key, at: now() }) // only a matching caller consumes it
         return result
       })
     active.set(id, job)

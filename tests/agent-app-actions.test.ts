@@ -233,6 +233,53 @@ describe('wizard_apps: find and install apps through the one gateway', () => {
     expect(bridge.writes).toHaveLength(1)
   })
 
+  it('joining a slow install refuses another form without reporting the first outcome as that request', async () => {
+    const { base, bridge } = await setup({ delay: 700, budget: 200 })
+    const first = await call(base, { action: 'install', app: 'hello-view', form: { A: '1' } })
+    expect(first.text).toContain('still running on the box')
+    const other = await call(base, { action: 'install', app: 'hello-view', form: { A: '2' } })
+    expect(other.text).toContain('other form values is still held')
+    expect(bridge.writes).toHaveLength(1)
+    await new Promise((r) => setTimeout(r, 800))
+    const same = await call(base, { action: 'install', app: 'hello-view', form: { A: '1' } })
+    expect(same.text).toContain('Installed Hello View')
+    expect(bridge.writes).toHaveLength(1)
+  })
+
+  it('a corrected form does not consume the late failure of the previous form', async () => {
+    const { base, bridge } = await setup({ delay: 500, budget: 200, fail: { code: 422, data: { success: false, error: 'required_fields_missing' } } })
+    expect((await call(base, { action: 'install', app: 'hello-view', form: { A: 'wrong' } })).text).toContain('still running on the box')
+    await new Promise((r) => setTimeout(r, 600))
+    const corrected = await call(base, { action: 'install', app: 'hello-view', form: { A: 'correct' } })
+    expect(corrected.text).not.toContain('required_fields_missing')
+    expect(bridge.writes).toHaveLength(2)
+    await new Promise((r) => setTimeout(r, 600))
+    expect((await call(base, { action: 'install', app: 'hello-view', form: { A: 'correct' } })).text).toContain('Installed Hello View')
+    expect((bridge.writes as { key: string }[])[1].key).not.toBe((bridge.writes as { key: string }[])[0].key)
+  })
+
+  it('reserves the request key before catalogue discovery so early joins cannot replace it', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => { release = r })
+    const writes: string[] = []
+    const actions = createAgentAppActions({ managerUrl: 'http://127.0.0.1:9', managerToken: MANAGER_TOKEN,
+      indexFetch: async () => { await gate; return Response.json(INDEX) },
+      fetchImpl: async (url, init = {}) => {
+        if (init.method === 'POST') { writes.push(new Headers(init.headers).get('Idempotency-Key') || ''); return Response.json({ success: true, status: 'running' }) }
+        return Response.json({ installed: [] })
+      },
+    })
+    const args = { app: 'hello-view', form: { B: '2', A: '1' }, operation_key: 'original-request-key-0001' }
+    const first = await actions.install(args, { authenticated: true, waitMs: 10 })
+    expect(first).toMatchObject({ error: 'in_progress', key: args.operation_key, sent: false })
+    expect(await actions.install({ ...args, operation_key: 'different-request-key-0001' }, { authenticated: true, waitMs: 10 })).toMatchObject({ error: 'operation_key_mismatch' })
+    expect(writes).toEqual([])
+    const joined = actions.install({ ...args, form: { A: '1', B: '2' } }, { authenticated: true, waitMs: 1000 })
+    release()
+    await joined
+    expect(writes).toEqual([args.operation_key])
+  })
+
   it('a slow install that fails is reported to the retry and releases its key', async () => {
     const { base, bridge } = await setup({ delay: 500, budget: 200, fail: { code: 422, data: { success: false, error: 'lifecycle_failed' } } })
     expect((await call(base, { action: 'install', app: 'hello-view' })).text).toContain('still running on the box')
