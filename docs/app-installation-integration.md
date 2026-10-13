@@ -35,7 +35,7 @@ Authority: installs need the gateway token (the Hermes slot); `/wizard/mcp` refu
 
 ## Receipts so far
 
-Thales (`thales.local`), source mirror `/Users/thales/projects/wizard-os-integration/rollout-20261012/app-installation/service`. Shared lock `/Volumes/ThalesMedia/AndroidBuilds/worker.lock`. Remote npm ci audit zero vulnerabilities; read-only App views and agent bridge fixtures 17/17, standalone security tests 4/4 on 12 Oct. These are fixtures, not isolated Runtipi/host-Hermes end-to-end proof.
+Thales (`thales.local`), source mirror `/Users/developer/projects/wizard-os-integration/rollout-20261012/app-installation/service`. Shared lock `/Volumes/ThalesMedia/AndroidBuilds/worker.lock`. Remote npm ci audit zero vulnerabilities; read-only App views and agent bridge fixtures 17/17, standalone security tests 4/4 on 12 Oct. These are fixtures, not isolated Runtipi/host-Hermes end-to-end proof.
 
 UX minimal adapter commit `23db0d10281f4b570ec845d0cb882b3bfda1fdcf` changes only `web/core/wizard-apps.js` and `web/core/apps.js`; cherry-pick this alone onto App views base. Preliminary integration branch has Apps views adapter carry commit; it is not a replacement for preview owner's visuals. Final exact reviewed SHA may follow fixes.
 

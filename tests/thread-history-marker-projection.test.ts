@@ -336,7 +336,7 @@ describe('Wizard thread history marker projection', () => {
           { id: 'user-one', role: 'user', content: 'Inspect the app.', timestamp: 1 },
           { id: 'legacy-background', role: 'user', content: '[IMPORTANT: Background process proc_fixture completed (exit_code=0).\nCommand: npm run build\nOutput: runtime output\n]', timestamp: 1.1 },
           { id: 'legacy-paused-loop', role: 'user', content: '[Your previous agent loop was paused while an out-of-band user message was delivered. The inner message was already included.]', timestamp: 1.2 },
-          { id: 'legacy-workspace-recovery', role: 'user', content: '[Workspace::v1: /home/telos]\n[James requested recovery of this interrupted Helm card.]\nContinue working.', timestamp: 1.3 },
+          { id: 'legacy-workspace-recovery', role: 'user', content: '[Workspace::v1: /home/developer]\n[James requested recovery of this interrupted Helm card.]\nContinue working.', timestamp: 1.3 },
           { id: 'assistant-tool', role: 'assistant', content: '', timestamp: 2, tool_calls: [
             {
               id: 'call-one', function: { name: 'read_file', arguments: JSON.stringify({ path: '/private/project/src/App.tsx' }) },
@@ -383,7 +383,7 @@ describe('Wizard thread history marker projection', () => {
   })
 
   it('projects background wakeups into safe Workline metadata without shipping raw process output', async () => {
-    const completion = '[Workspace::v1: /home/telos]\n[IMPORTANT: Background process proc_build completed (exit_code=1).\nCommand: ./gradlew assembleDebug --secret private-value\nOutput:\nPRIVATE BUILD OUTPUT\n]'
+    const completion = '[Workspace::v1: /home/developer]\n[IMPORTANT: Background process proc_build completed (exit_code=1).\nCommand: ./gradlew assembleDebug --secret private-value\nOutput:\nPRIVATE BUILD OUTPUT\n]'
     const upstream = createServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ data: [
@@ -508,7 +508,7 @@ describe('Wizard thread history marker projection', () => {
     expect(wire).not.toContain('object-secret')
     expect(wire).not.toContain('PRIVATE ARRAY OUTPUT')
     expect(wire).not.toContain('PRIVATE OBJECT OUTPUT')
-    expect(wire).not.toContain('/home/telos')
+    expect(wire).not.toContain('/home/developer')
     expect(wire).not.toContain('/private/array')
   })
 
