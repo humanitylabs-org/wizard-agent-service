@@ -2533,7 +2533,17 @@ export function createWizardServer(options = {}) {
   if (runQueueStatePath) {
     const queueHermesAdmission = async (record) => {
       let queuedBody = Buffer.from(record.body, 'utf8')
-      if (backgroundResults) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
+      // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Only the
+      // service writes this marker (client runs carrying it are refused at admission); validateDispatch below
+      // re-checks the thread at dispatch (newer human turn, owner gate, lease, consumed result, boundary) and
+      // strips it. That fence stands in for the automatic helper-continuation currency check, which refuses
+      // anything past 2 h by design. Every other helper/follow-through admission keeps that check.
+      let manualRecovery = false
+      if (backgroundResults) {
+        const parsed = parseJsonBody(queuedBody)
+        manualRecovery = record.runtime === 'direct' && Boolean(parsed?._wizard_background_recovery) && typeof parsed._wizard_background_recovery === 'object'
+        queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parsed)))
+      }
       let pendingWorker = null
       if (record.runtime === 'operator') {
         const value = parseJsonBody(queuedBody)
@@ -2545,7 +2555,7 @@ export function createWizardServer(options = {}) {
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
-      if (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey)) {
+      if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
         await requireHelperContinuation(record.continuation)
       }
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
