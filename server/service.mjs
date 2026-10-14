@@ -2792,6 +2792,9 @@ export function createWizardServer(options = {}) {
     controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || ''],
   }
   const appLifecycle = createAppLifecycleRoutes(appRouteOptions)
+  // Only the configured isolated app origin may frame into the shell. It never
+  // gains connect-src/native/control authority; the apps listener remains app-only.
+  const appFrameSources = ["'self'", ...(options.appsOrigin ? [new URL(options.appsOrigin).origin] : [])].join(' ')
   // The apps origin: a second listener that serves installed app documents and nothing else (index.mjs binds it).
   const appsOnly = createAppLifecycleRoutes({ ...appRouteOptions, role: 'apps' })
   const appsHandler = async (request, response) => {
@@ -3725,7 +3728,7 @@ export function createWizardServer(options = {}) {
         // own Store/System pages as windows; other origins and opaque-origin (sandboxed) app documents can't frame them.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
+          'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src ${appFrameSources}; frame-ancestors 'self'`,
           'X-Robots-Tag': 'noindex, nofollow',
         }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
