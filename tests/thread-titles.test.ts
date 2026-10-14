@@ -66,7 +66,7 @@ describe('when a title changes', () => {
     store.recordRename('s1', { from: 'Wizard OS · Voice notes', to: 'DeFleur · Captions', by: 'agent', assistantAt: 2 })
     expect(store.visibleHistory('s1').map((r: any) => r.from)).toEqual(['Wizard OS · Voice notes'])
     expect(new ThreadTitleStore(path).get('s1')?.title).toBe('DeFleur · Captions')
-    // James renames: locked.
+    // The owner renames: locked.
     store.recordRename('s1', { from: 'DeFleur · Captions', to: 'Captions', by: 'you' })
     expect(store.get('s1')?.locked).toBe(true)
     expect(ANCHOR_SECONDS).toBe(1800)
@@ -74,7 +74,11 @@ describe('when a title changes', () => {
 
   it('tells each run what the thread is called', () => {
     expect(titleContextLine('DeFleur · Captions', {})).toContain('“DeFleur · Captions”')
-    expect(titleContextLine('Captions', { locked: true })).toContain('James named it himself')
+    // The owner's name comes from settings (owner.name); no name means "The owner". Never a hardcoded person.
+    expect(titleContextLine('Captions', { locked: true })).toBe('This thread is titled “Captions”. The owner named it: put exactly that in the status line\'s title.')
+    expect(titleContextLine('Captions', { locked: true }, 'Alex')).toContain('Alex named it')
+    expect(titleContextLine('Captions', { locked: true }, '  ')).toContain('The owner named it')
+    expect(titleContextLine('Captions', { locked: true }, 'Alex')).not.toMatch(/James|himself/u)
   })
 })
 
@@ -157,7 +161,7 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(patches).toHaveLength(1)
   })
 
-  it('leaves a title James set alone and remembers his own renames', async () => {
+  it('leaves a title the owner set alone and remembers their own renames', async () => {
     const { origin, list, patches } = await fixture({ titleSource: 'user' })
     await list(); await settle()
     expect(patches).toEqual([])

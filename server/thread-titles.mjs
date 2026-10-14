@@ -6,7 +6,7 @@
 // so Hermes stays the canonical title. Every rename is remembered here so the chat list can show
 // "was: <old title>" for a few days and the thread can say "Renamed from …".
 //
-// A title James sets himself (a rename from a Wizard client, or any user-authority title Hermes holds
+// A title the owner sets themselves (a rename from a Wizard client, or any user-authority title Hermes holds
 // that the agent did not write) locks the thread: the agent's proposals are ignored from then on.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -21,7 +21,7 @@ const HISTORY_MAX = 8
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
 const LEADING_VERB = /^(?:review|reviewing|fix|fixing|build|building|send|sending|make|making|add|adding|create|creating|update|updating|check|checking|find|finding|help|helping|investigate|investigating|explore|exploring|discuss|discussing|plan|planning|set up|setting up|setup|write|writing)\s+/iu
 
-export const TITLE_INSTRUCTIONS = 'title names the thread on the chat list: the project, then the feature or piece of work, written "Project · Feature" in two to four words and at most 32 characters (for example "DeFleur · Captions" or "Wizard OS · Thread titles"). It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread\'s current title exactly while the work stays on the same project and feature; progress, fixes and refinements never change it. Give a new title only when the thread has moved to a different project or feature, or when the current title is a sentence or does not follow this form.'
+export const TITLE_INSTRUCTIONS = 'title names the thread on the chat list: the project, then the feature or piece of work, written "Project · Feature" in two to four words and at most 32 characters (for example "Garden · Watering plan" or "Wizard OS · Thread titles"). It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread\'s current title exactly while the work stays on the same project and feature; progress, fixes and refinements never change it. Give a new title only when the thread has moved to a different project or feature, or when the current title is a sentence or does not follow this form.'
 
 const squash = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, '').replace(/\s+/gu, ' ').trim()
 
@@ -69,10 +69,12 @@ export function readSessionTitle(sessionDbPath, sessionId) {
   }
 }
 
-// The per-run reminder: what the thread is called now, so the agent can keep it exactly.
-export function titleContextLine(current, record) {
+// The per-run reminder: what the thread is called now, so the agent can keep it exactly. The owner's name
+// comes from Wizard OS settings (owner.name); without one the line says "The owner".
+export function titleContextLine(current, record, ownerName = '') {
   const title = squash(current)
-  if (record?.locked) return `This thread is titled “${title}”. James named it himself: put exactly that in the status line's title.`
+  const owner = squash(ownerName).slice(0, 80) || 'The owner'
+  if (record?.locked) return `This thread is titled “${title}”. ${owner} named it: put exactly that in the status line's title.`
   if (!title) return 'This thread has no title yet: give one in the status line.'
   return `This thread is currently titled “${title}”.`
 }

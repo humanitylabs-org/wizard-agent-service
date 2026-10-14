@@ -1,8 +1,8 @@
-import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
-import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
+import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
+import { containerGateway, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { wizardOsHome } from './wizard-os-settings.mjs'
+import { readSettings, wizardOsHome } from './wizard-os-settings.mjs'
 
 const key = process.env.WIZARD_HERMES_API_KEY
 if (!key) {
@@ -39,18 +39,35 @@ const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
 const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL ? {
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
+const settingsPath = process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json')
+// The Serve listener: Tailscale Serve (https://<box>.<tailnet>.ts.net/) forwards here, and only here. Every
+// request on it is verified as the owner's tailnet identity, whatever WIZARD_AUTH_MODE says about the
+// box-local listener above. Unset: no tailnet listener (computer-only use).
+const tailnetPort = process.env.WIZARD_TAILNET_PORT ? Number(process.env.WIZARD_TAILNET_PORT) : 0
+if (process.env.WIZARD_TAILNET_PORT && (!Number.isInteger(tailnetPort) || tailnetPort < 1 || tailnetPort > 65535 || tailnetPort === port)) {
+  process.stderr.write('WIZARD_TAILNET_PORT must be a free TCP port other than WIZARD_PORT; the service was not started.\n')
+  process.exit(1)
+}
+let server
 // In a container, Tailscale Serve on the box reaches the published 127.0.0.1 port and the request arrives
-// from the container network's gateway; on a bare box it arrives from loopback.
-const accessVerifier = authMode === 'tailscale' ? createTailnetAccessVerifier({
+// from the container network's gateway; on a bare box it arrives from loopback. Origin and owner login come
+// from WIZARD_TAILNET_ORIGIN / WIZARD_TAILNET_LOGIN, else from settings access.tailscale (written by
+// "Connect your phone"), read per request.
+const tailnetVerifier = authMode === 'tailscale' || tailnetPort ? createSettingsTailnetVerifier({
   origin: process.env.WIZARD_TAILNET_ORIGIN,
   logins: process.env.WIZARD_TAILNET_LOGIN,
+  settings: () => readSettings(settingsPath).settings.access.tailscale,
   proxyPeers: [...['127.0.0.1', '::1'], ...(container ? [process.env.WIZARD_TAILNET_PROXY_PEER || containerGateway()] : [])].filter(Boolean),
-}) : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
+  // Opening the shared address from another app (a cross-site top-level navigation) may land on these entry pages.
+  appPaths: [...new Set(['/', '/wizard', '/wizard/', `/${String(process.env.WIZARD_UX_PREFIX || 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`])],
+  onVerified: (request) => server?.phoneSetup?.noteOwnerRequest(request),
+}) : null
+const accessVerifier = authMode === 'tailscale' ? tailnetVerifier : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
 }) : undefined
-const server = createWizardServer({
+server = createWizardServer({
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
@@ -79,9 +96,13 @@ const server = createWizardServer({
   requireAccess,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
+  ...(tailnetVerifier ? { tailnetVerifier } : {}),
+  tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
+  tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
-  settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
+  settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
@@ -109,3 +130,6 @@ const server = createWizardServer({
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+if (tailnetPort) {
+  createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
+}

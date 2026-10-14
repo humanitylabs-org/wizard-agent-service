@@ -56,7 +56,7 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
   } catch { return false } finally { db?.close() }
 }
 // The owner has taken the thread forward since the helper finished: the result is stale for this
-// thread, and resuming it would override what James asked for next. It stays queryable in Hermes.
+// thread, and resuming it would override what the owner asked for next. It stays queryable in Hermes.
 export function ownerMovedOn(db, sessionId, completedAt) {
   const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
   const rows = db.prepare(`SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?

@@ -4,6 +4,11 @@ import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed,
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
+// Recovery requests for an interrupted Helm card arrive as a user turn that starts with this marker; the
+// thread hides it. History written before markers were neutral carries the legacy wording (recognized only,
+// never emitted).
+export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
+export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
@@ -19,7 +24,8 @@ const INTERNAL_USER_PREFIXES = [
   '[PRIOR CONTEXT — for reference only; not a new message]',
   '[Your active task list was preserved across context compression]',
   '[Your previous agent loop was paused',
-  '[James requested recovery of this interrupted Helm card.]',
+  RECOVERY_REQUEST_MARKER,
+  LEGACY_RECOVERY_REQUEST_MARKER,
   '[STILL IN PROGRESS',
   'Workline browser QA found a concrete regression in ',
 ]

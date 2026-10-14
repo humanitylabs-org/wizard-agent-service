@@ -114,7 +114,7 @@ export function createHermesFixture(options = {}) {
       later(() => {
         emit(run, 'tool.completed', { summary: 'Checked the selected backup' })
         run.status = 'waiting_for_approval'
-        run.approval = { request_id: 'approval-1', redacted_action: 'restore snapshot 2026-09-04 →\n/home/james/restore-test/…', choices: ['allow_once', 'deny'] }
+        run.approval = { request_id: 'approval-1', redacted_action: 'restore snapshot 2026-09-04 →\n/home/owner/restore-test/…', choices: ['allow_once', 'deny'] }
         emit(run, 'approval.request', run.approval)
       }, 90)
       return
