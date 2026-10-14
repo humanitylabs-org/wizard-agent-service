@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeStatus, parseStatus, parseStatusAppId, replyAppId, stripStatus, projectStatusMarkers } from '../server/thread-status.mjs'
-import { appProvenanceCatalog, appProvenanceRunNote, normalizeAppId, projectSessionAppProvenance } from '../server/thread-app-provenance.mjs'
+import { appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, normalizeAppId, projectSessionAppProvenance } from '../server/thread-app-provenance.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 import { createWizardServer, latestVisibleSessionMessages, listen, runInstructions } from '../server/service.mjs'
 import { readHermesSessionTruth } from '../server/session-truth.mjs'
@@ -40,6 +40,13 @@ describe('explicit reply app provenance', () => {
     for (const tail of [tag({ state: 'fyi', ask: 'Unrelated' }), tag({ app_id: '../topics' }), '[WIZARD_STATUS_V1]{bad}[/WIZARD_STATUS_V1]', '[WIZARD_STATUS_V1]{"app_id":']) {
       expect(parseStatusAppId(`${tag({ app_id: 'topics' })}\n${tail}`)).toBeNull()
     }
+  })
+  it('rejects tool-call provenance even without a completion flag', () => {
+    for (const calls of [[{function:{name:'fixture'}}], JSON.stringify([{function:{name:'fixture'}}]), '{malformed']) {
+      expect(hasAppToolCalls({tool_calls:calls})).toBe(true)
+      expect(latestVisibleSessionMessages({data:[{role:'assistant',content:'Not a final report',tool_calls:calls,display_metadata:{app_id:'topics'}}]}).appId).toBeNull()
+    }
+    for (const calls of [null, undefined, '', '[]', 'null', []]) expect(hasAppToolCalls({tool_calls:calls})).toBe(false)
   })
   it('accepts object/serialized publisher metadata, with explicit metadata taking precedence', () => {
     expect(replyAppId('Report', { app_id: 'topics', report_id: 'r1' })).toBe('topics')
@@ -151,7 +158,8 @@ it('recognizes real script-publisher null completion flags and clears only prove
   db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY, started_at REAL); INSERT INTO sessions VALUES ('publisher',1);
     CREATE TABLE messages(session_id TEXT, role TEXT, finish_reason TEXT, timestamp REAL, content TEXT, display_kind TEXT, active INTEGER, display_metadata TEXT);
     CREATE TABLE session_turn_leases(conversation_id TEXT, expires_at REAL);`)
-  const add=db.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?,1,?)')
+  db.exec('ALTER TABLE messages ADD COLUMN tool_calls TEXT')
+  const add=db.prepare('INSERT INTO messages(session_id,role,finish_reason,timestamp,content,display_kind,active,display_metadata) VALUES (?,?,?,?,?,?,1,?)')
   const truth=()=>readHermesSessionTruth(path,['publisher'],200).get('publisher')
   add.run('publisher','user',null,10,'Read the feed',null,null)
   add.run('publisher','assistant',null,20,'Scheduled report',null,JSON.stringify({app_id:'wizard-signal',report_id:'weekly'}))
@@ -161,6 +169,9 @@ it('recognizes real script-publisher null completion flags and clears only prove
     add.run('publisher','assistant',finish,25,'Not an output',kind,JSON.stringify({app_id:'wisdom'}))
     expect(truth()?.appId).toBe('wizard-signal')
   }
+  add.run('publisher','assistant',null,27,'Tool action',null,JSON.stringify({app_id:'wisdom'}))
+  db.prepare('UPDATE messages SET tool_calls=? WHERE timestamp=27').run(JSON.stringify([{function:{name:'not_a_report'}}]))
+  expect(truth()?.appId).toBe('wizard-signal')
   add.run('publisher','assistant',null,30,'Different unbranded report',null,JSON.stringify({report_id:'other'}))
   expect(truth()?.appId).toBeNull()
   add.run('publisher','assistant',null,40,'New report',null,JSON.stringify({app_id:'topics',report_id:'new'}))

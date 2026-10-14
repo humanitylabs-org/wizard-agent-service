@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
 import { replyAppId } from './thread-status.mjs'
+import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -56,7 +57,7 @@ function visibleAssistantReply(content, displayKind, finishReason) {
 // model finish_reason/display_kind. Only explicit publisher metadata qualifies;
 // keep existing activity/attention semantics unchanged and reject internal/tool rows.
 function visibleProvenanceReply(row) {
-  if (row.role !== 'assistant') return false
+  if (row.role !== 'assistant' || hasAppToolCalls(row)) return false
   if (visibleAssistantReply(row.content, row.display_kind, row.finish_reason)) return true
   const kind = String(row.display_kind || ''), finish = String(row.finish_reason || '')
   const text = typeof row.content === 'string' ? row.content.trim() : ''
@@ -115,13 +116,14 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // every historical body for a whole Work page blocks the shared HTTP loop;
     // only the newest visible request and completed reply determine this view.
     const messageColumns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
-    const displayMetadata = messageColumns.has('display_metadata') ? 'display_metadata' : 'NULL AS display_metadata'
+    const metadataColumn = messageColumns.has('display_metadata') ? 'display_metadata' : 'NULL AS display_metadata'
+    const toolsColumn = messageColumns.has('tool_calls') ? 'tool_calls' : 'NULL AS tool_calls'
     // Real Hermes tables have rowid for equal-timestamp arrival order. A view may
     // not; do not force a sort/materialization of old bodies in that fallback.
     const messageTable = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name = 'messages'").get()
     const tieOrder = messageTable?.type === 'table' && !/WITHOUT ROWID/iu.test(messageTable.sql || '') ? ', rowid DESC' : ''
     const recentMessages = db.prepare(`
-      SELECT role, finish_reason, timestamp, content, display_kind, ${displayMetadata}
+      SELECT role, finish_reason, timestamp, content, display_kind, ${metadataColumn}, ${toolsColumn}
       FROM messages
       WHERE session_id = ?
         AND role IN ('user', 'assistant')

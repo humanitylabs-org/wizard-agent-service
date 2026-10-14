@@ -34,6 +34,17 @@ export function metadataAppId(metadata) {
   return { present, id: present ? normalizeAppId(value.app_id) : null }
 }
 
+export function hasAppToolCalls(message) {
+  for (let calls of [message?.tool_calls, message?.toolCalls, message?.function_call]) {
+    if (typeof calls === 'string') {
+      if (!calls.trim()) continue
+      try { calls = JSON.parse(calls) } catch { return true }
+    }
+    if (calls != null && !(Array.isArray(calls) && calls.length === 0)) return true
+  }
+  return false
+}
+
 // Canonical DB truth wins over previews (including stale upstream cache). Without a DB, the
 // history reader may supply the current reply's candidate. Unknown/uninstalled IDs fail closed.
 export function projectSessionAppProvenance(result, truth, installedIds) {

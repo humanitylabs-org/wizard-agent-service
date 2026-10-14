@@ -19,7 +19,7 @@ import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
-import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, projectSessionAppProvenance } from './thread-app-provenance.mjs'
+import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
@@ -1202,7 +1202,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
     const rawReply = historyContentStrings(message.content ?? message.text ?? message.output).join('\n')
     const status = role === 'assistant' ? parseStatus(rawReply) : null
-    const appId = role === 'assistant' && (!message.finish_reason || message.finish_reason === 'stop') ? replyAppId(rawReply, message.display_metadata) : null
+    const appId = role === 'assistant' && !hasAppToolCalls(message) && (!message.finish_reason || message.finish_reason === 'stop') ? replyAppId(rawReply, message.display_metadata) : null
     const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
     if (!content) return []
     const at = sessionMessageTimeValue(message)
