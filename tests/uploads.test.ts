@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
 import { createUploadStore } from '../server/uploads.mjs'
+import { createMediaFiles } from '../server/media-files.mjs'
 
 const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex')
 const roots: string[] = []
@@ -376,6 +377,21 @@ describe('upload store', () => {
     expect(store.upload(fresh.id)).toMatchObject({ status: 'uploading' })
     expect(existsSync(join(dir, 'staging', `${record.id}.part`))).toBe(false)
     await expect(store.patchUpload(record.id, 4, body(Buffer.alloc(1)))).rejects.toMatchObject({ status: 410 })
+    store.close()
+  })
+
+  it('recovers a file the store already took when the service died before recording completion', async () => {
+    const dir = tmp('wizard-upload-store-')
+    const media = createMediaFiles({ mediaRoot: join(dir, 'media'), agentRoot: '/files', indexPath: join(dir, 'idx.json') })
+    const target = () => ({ kind: 'local', stagingDir: media.stagingDir, finalize: async (path: string, meta: any) => media.adopt(path, meta), recover: async (key: string) => media.adopted(key) })
+    const store = createUploadStore({ statePath: join(dir, 'u.sqlite3'), target, deliverShare: async () => ({}), reserveBytes: 0, log: () => {} })
+    const { record } = await store.createUpload({ client_upload_id: 'crash', filename: 'c.txt', bytes: 3 })
+    await store.patchUpload(record!.id, 0, body(Buffer.from('abc')))
+    // the hand-over happened, then the process died before the upload record was marked complete
+    const taken = media.adopt(join(media.stagingDir, `${record!.id}.part`), { filename: 'c.txt', mime: 'text/plain', bytes: 3, sha256: sha(Buffer.from('abc')), key: record!.id })
+    const done = await store.completeUpload(record!.id)
+    expect(JSON.parse(done.file_json).id).toBe(taken.id)
+    expect(media.list().length).toBe(1)
     store.close()
   })
 

@@ -77,7 +77,7 @@ async function sha256File(path) {
 /**
  * options:
  *   statePath       SQLite file for upload and share records
- *   target(key)     → { kind:'local', stagingDir, finalize(path, meta) → file } | { kind:'drop', stagingDir } | null
+ *   target(key)     → { kind:'local', stagingDir, finalize(path, meta) → file, recover?(key) → file|null } | { kind:'drop', stagingDir } | null
  *   drop            Wizard Inbox drop client (kind 'drop' targets): create/status/chunk/complete/file/cancel/maxChunk
  *   deliverShare    async (share, uploads) → { run_id }  (must be idempotent per share: it may be re-driven)
  *   reserveBytes, maxBytes, expiryMs, sweepIntervalMs, now, statfs, log
@@ -379,6 +379,14 @@ export function createUploadStore(options) {
         }
         file = await drop.file(dropId)
       } else {
+        // A crash between the hand-over and this record's update leaves no staging file: the target
+        // finds the file it already stored under this upload's key.
+        const recovered = tgt.recover ? await tgt.recover(current.id) : null
+        if (recovered) {
+          try { unlinkSync(current.staging_path) } catch { /* already moved */ }
+          touch(id, { status: 'complete', file_json: JSON.stringify(recovered), error: '' })
+          return row(id)
+        }
         const actual = await sha256File(current.staging_path)
         if (current.sha256 && actual !== current.sha256) { failUpload(current, 'sha256_mismatch'); throw new UploadError(422, 'sha256_mismatch') }
         if (tgt.kind === 'drop') {
