@@ -52,6 +52,23 @@ function visibleAssistantReply(content, displayKind, finishReason) {
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
+// Script publishers append canonical assistant reports with metadata, but without
+// model finish_reason/display_kind. Only explicit publisher metadata qualifies;
+// keep existing activity/attention semantics unchanged and reject internal/tool rows.
+function visibleProvenanceReply(row) {
+  if (row.role !== 'assistant') return false
+  if (visibleAssistantReply(row.content, row.display_kind, row.finish_reason)) return true
+  const kind = String(row.display_kind || ''), finish = String(row.finish_reason || '')
+  const text = typeof row.content === 'string' ? row.content.trim() : ''
+  if (!text || text === '(empty)' || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')
+    || ['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(finish)
+    || INTERNAL_USER_PREFIXES.some(prefix => text.startsWith(prefix))) return false
+  let meta = row.display_metadata
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta) } catch { return false } }
+  return !!meta && typeof meta === 'object' && !Array.isArray(meta)
+    && (Object.hasOwn(meta, 'app_id') || (typeof meta.report_id === 'string' && meta.report_id.trim().length > 0))
+}
+
 const ROUTE_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[[0-9a-z]{1,8}\])?(?![\s\S])/
 
 function lockedRoute(modelConfig) {
@@ -137,11 +154,16 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       return null
     }
     for (const [id, current] of truth) {
-      let latestVisibleRole = null
+      let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+        const provenanceAssistant = visibleProvenanceReply(row)
+        if (!provenanceAt && (visibleUser || provenanceAssistant)) {
+          provenanceAt = timestamp
+          if (provenanceAssistant) current.appId = replyAppId(row.content, row.display_metadata)
+        }
         if (!latestVisibleRole && (visibleUser || visibleAssistant)) latestVisibleRole = row.role
         if (!current.activityAt && (visibleUser || visibleAssistant)) current.activityAt = timestamp
         if (!current.lastUserAt && visibleUser) {
@@ -150,7 +172,6 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         }
         if (!current.lastAssistantAt && visibleAssistant) {
           current.lastAssistantAt = timestamp
-          if (latestVisibleRole === 'assistant') current.appId = replyAppId(row.content, row.display_metadata)
         }
         if (current.lastUserAt && current.lastAssistantAt) break
       }
@@ -161,11 +182,11 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         delete current.appId
         if (tip) for (const row of recentMessages.iterate(tip)) {
           const user = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
-          const assistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+          const assistant = visibleProvenanceReply(row)
           if (!user && !assistant) continue
           // An explicit publisher can append a newer report to the root; prefer it
           // over older tip history, but never resurrect root work after a newer tip user.
-          if (current.activityAt > Number(row.timestamp)) current.appId = rootAppId
+          if (provenanceAt > Number(row.timestamp)) current.appId = rootAppId
           else if (assistant) current.appId = replyAppId(row.content, row.display_metadata)
           break
         }

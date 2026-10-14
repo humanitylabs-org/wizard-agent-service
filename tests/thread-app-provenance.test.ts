@@ -137,11 +137,35 @@ it('follows the compression tip only, ignores delegate/reset/branch forks, and f
   add.run('wizard_tip','assistant','stop',50,'Published','final',JSON.stringify({app_id:'wisdom'}))
   expect(truth()?.appId).toBe('wisdom')
   expect(truth()).toMatchObject({lastUserAt:10,lastAssistantAt:15,activityAt:15}) // existing status/activity untouched
-  add.run('wizard_root','assistant','stop',60,'Scheduled root report','final',JSON.stringify({app_id:'topics'}))
+  add.run('wizard_root','assistant',null,60,'Scheduled root report',null,JSON.stringify({app_id:'topics',report_id:'scheduled-root'}))
   expect(truth()?.appId).toBe('topics')
   add.run('wizard_tip','user',null,70,'Unrelated latest request',null,null)
   expect(truth()?.appId).toBeUndefined()
   db.exec("INSERT INTO sessions VALUES ('ambiguous',24,'wizard_root',NULL,'wizard-mobile','{}')")
+  expect(truth()?.appId).toBeUndefined()
+  db.close()
+})
+
+it('recognizes real script-publisher null completion flags and clears only provenance safely', async () => {
+  const dir=await directory(),path=join(dir,'publisher.db'),db=new DatabaseSync(path)
+  db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY, started_at REAL); INSERT INTO sessions VALUES ('publisher',1);
+    CREATE TABLE messages(session_id TEXT, role TEXT, finish_reason TEXT, timestamp REAL, content TEXT, display_kind TEXT, active INTEGER, display_metadata TEXT);
+    CREATE TABLE session_turn_leases(conversation_id TEXT, expires_at REAL);`)
+  const add=db.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?,1,?)')
+  const truth=()=>readHermesSessionTruth(path,['publisher'],200).get('publisher')
+  add.run('publisher','user',null,10,'Read the feed',null,null)
+  add.run('publisher','assistant',null,20,'Scheduled report',null,JSON.stringify({app_id:'wizard-signal',report_id:'weekly'}))
+  expect(truth()?.appId).toBe('wizard-signal')
+  expect(truth()).toMatchObject({lastUserAt:10,lastAssistantAt:0,activityAt:10})
+  for(const [kind,finish] of [['commentary',null],['hidden',null],[null,'tool_calls']]) {
+    add.run('publisher','assistant',finish,25,'Not an output',kind,JSON.stringify({app_id:'wisdom'}))
+    expect(truth()?.appId).toBe('wizard-signal')
+  }
+  add.run('publisher','assistant',null,30,'Different unbranded report',null,JSON.stringify({report_id:'other'}))
+  expect(truth()?.appId).toBeNull()
+  add.run('publisher','assistant',null,40,'New report',null,JSON.stringify({app_id:'topics',report_id:'new'}))
+  expect(truth()?.appId).toBe('topics')
+  add.run('publisher','user',null,50,'An unrelated question',null,null)
   expect(truth()?.appId).toBeUndefined()
   db.close()
 })
@@ -170,7 +194,7 @@ it('serves crosschecked canonical provenance on all pages even with unavailable/
     db.prepare('INSERT INTO sessions VALUES (?,1)').run(s.id)
     add.run(s.id,'user',null,10,'Ask',null,null)
     const id = i===55?'unknown-app':i===54?'usuals':i===53?'new-installed-app':'topics'
-    add.run(s.id,'assistant','stop',20,'Report','final',JSON.stringify({app_id:id,report_id:`r${i}`}))
+    add.run(s.id,'assistant',null,20,'Report',null,JSON.stringify({app_id:id,report_id:`r${i}`}))
   })
   add.run('wizard_app_56','user',null,30,'Unrelated next request',null,null)
   add.run('wizard_app_57','assistant','stop',40,'Unrelated answer','final',null)
