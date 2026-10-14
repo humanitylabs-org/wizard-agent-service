@@ -12,7 +12,7 @@
 //   agentRoot      where the agent sees the same folder (e.g. /files); trusted_path uses it
 //   indexPath      JSON index of uploaded files
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, linkSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 
 const ID = /^wf_[0-9a-f]{32}$/
@@ -105,6 +105,47 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
       }
       files.push(record)
       save(files)
+      return publicRecord(record)
+    },
+    // Resumable uploads (server/uploads.mjs) stage on this filesystem and hand the finished file over
+    // here: it is linked into Inbox/<date>/<name> (never overwriting) and indexed, without reading it
+    // into memory. `key` makes a retried hand-over return the file it already indexed.
+    stagingDir: join(root, '.wizard-uploads'),
+    adopt(sourcePath, { filename, mime, bytes, sha256, key = '' }) {
+      const files = load()
+      const existing = key ? files.find((item) => item.upload_key === key) : null
+      if (existing) {
+        try { unlinkSync(sourcePath) } catch { /* already moved */ }
+        return publicRecord(existing)
+      }
+      const same = files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
+      const day = now().toISOString().slice(0, 10)
+      const name = cleanName(filename)
+      const dir = join('Inbox', day)
+      mkdirSync(join(root, dir), { recursive: true })
+      const stem = name.slice(0, name.length - extname(name).length) || 'file'
+      let rel = ''
+      let moved = false
+      for (let n = 1; !rel; n += 1) {
+        const candidate = n === 1 ? name : `${stem} (${n})${extname(name)}`
+        const target = join(root, dir, candidate)
+        try { linkSync(sourcePath, target); rel = join(dir, candidate) } catch (error) {
+          if (error?.code === 'EEXIST') continue
+          // No hard links on this filesystem (exFAT, some network mounts): checked rename instead.
+          if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EMLINK', 'EXDEV'].includes(error?.code)) throw error
+          if (existsSync(target)) continue
+          renameSync(sourcePath, target)
+          rel = join(dir, candidate)
+          moved = true
+        }
+      }
+      const record = {
+        id: `wf_${randomUUID().replaceAll('-', '')}`, rel, filename: name, mime: String(mime || 'application/octet-stream').slice(0, 160),
+        bytes, sha256, created_at: now().toISOString(), duplicate_of: same ? same.id : null, ...(key ? { upload_key: key } : {}),
+      }
+      files.push(record)
+      save(files)
+      if (!moved) unlinkSync(sourcePath)
       return publicRecord(record)
     },
   }

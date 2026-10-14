@@ -53,6 +53,9 @@ Requires Node 22.5 or later, because it uses the built-in `node:sqlite` module.
 | `WIZARD_HERMES_STATE_PATH` | `~/.hermes/state.db` | Hermes session database (read-only) |
 | `WIZARD_STT_ORIGIN` | `http://127.0.0.1:8864` | Voice-to-text |
 | `WIZARD_INBOX_*` | see `ops/` | Wizard Files (uploads) |
+| `WIZARD_UPLOAD_RESERVE_BYTES` | `5368709120` (5 GiB) | Resumable uploads (`/wizard/v1/uploads`, `/wizard/v1/shares`) are refused with 507 when a file would leave less free disk than this |
+| `WIZARD_UPLOAD_MAX_BYTES` | `0` (disk-bound only) | Optional per-file cap for resumable uploads |
+| `WIZARD_UPLOAD_STATE_PATH` / `WIZARD_UPLOAD_STAGING_DIR` | under `~/.hermes/state/wizard-mobile/` | Upload/share records; staging for the Wizard Inbox backend (a Wizard OS box stages in `<media>/.wizard-uploads`) |
 | `WIZARD_*_STATE_PATH` | under `~/.hermes/state/wizard-mobile/` | Read state, dispositions, run queue, voice recovery |
 
 Every variable is listed in `server/index.mjs`. `ops/` has a hardened systemd unit and an env template. Their `wizard-mobile` file names are kept for now so existing deployments keep matching them.
