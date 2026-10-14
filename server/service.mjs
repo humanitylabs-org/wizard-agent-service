@@ -18,7 +18,8 @@ import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
-import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, projectStatusMarkers } from './thread-status.mjs'
+import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
@@ -98,7 +99,8 @@ The originating Wizard run owns the requested outcome through verified completio
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
-${STATUS_INSTRUCTIONS}`
+${STATUS_INSTRUCTIONS}
+${APP_PROVENANCE_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -440,6 +442,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           const session = sanitizeSessionRuntimePreview(rawSession)
           const truth = sessionTruth.get(session.id)
           const projected = { ...session }
+          delete projected.wizard_app_id
           if (truth?.helperStatus) projected.wizard_helper_status = truth.helperStatus
           delete projected.wizard_run_id
           if (truth?.lastUserAt) projected.wizard_last_user_at = truth.lastUserAt
@@ -1164,20 +1167,24 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
-    const status = role === 'assistant' ? parseStatus(historyContentStrings(message.content ?? message.text ?? message.output).join('\n')) : null
+    const rawReply = historyContentStrings(message.content ?? message.text ?? message.output).join('\n')
+    const status = role === 'assistant' ? parseStatus(rawReply) : null
+    const appId = role === 'assistant' && !hasAppToolCalls(message) && (!message.finish_reason || message.finish_reason === 'stop') ? replyAppId(rawReply, message.display_metadata) : null
     const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
     if (!content) return []
     const at = sessionMessageTimeValue(message)
-    return [{ role, content, ...(at !== null ? { created_at: at } : {}), ...(status ? { status } : {}) }]
+    return [{ role, content, ...(at !== null ? { created_at: at } : {}), ...(status ? { status } : {}), ...(appId ? { appId } : {}) }]
   }).reverse()
   const latest = visible[0] ?? null
   const latestAssistant = visible.find((message) => message.role === 'assistant') ?? null
   const status = latest?.role === 'assistant' ? latest.status ?? null : null
-  if (latest) delete latest.status
+  const appId = latest?.role === 'assistant' ? latest.appId ?? null : null
+  if (latest) { delete latest.status; delete latest.appId }
   return {
     latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
     status,
+    appId,
     latestAssistantAt: latestAssistant?.created_at ?? null,
   }
 }
@@ -1907,6 +1914,7 @@ export function createWizardServer(options = {}) {
     // No plugin: the full kernel every run, with the job -> app map (no skills index to lean on).
     return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
   }
+  const appCatalog = () => appProvenanceCatalog(readApps({ appsJsonPath, launcherPath }).apps)
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
@@ -2387,7 +2395,7 @@ export function createWizardServer(options = {}) {
         provider: 'custom:tinfoil-operator',
         require_model_lock: true,
         model_options: { reasoning_effort: 'max' },
-        instructions: WIZARD_RUN_INSTRUCTIONS,
+        instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
         ...runContractFields(await assertJoinedDelegationCapability()),
       }),
       headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
@@ -2643,8 +2651,9 @@ export function createWizardServer(options = {}) {
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
-    if (typeof sessionId !== 'string' || !sessionId) return subjectCatalog.runNote()
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? '')].filter(Boolean).join('\n')
+    const appNote = appProvenanceRunNote(appCatalog())
+    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -2733,6 +2742,7 @@ export function createWizardServer(options = {}) {
             ...session,
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
+            ...(messages.appId ? { wizard_app_id: messages.appId } : {}),
             ...(attention ? { wizard_attention: attention } : {}),
           }
         } catch {
@@ -3788,6 +3798,7 @@ export function createWizardServer(options = {}) {
             dismissedFailureStore,
           )
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
           result = decorateSessionTitles(result, operator)
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { createWizardServer, listen, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
+import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
+
+const instructions = `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}`
 
 const servers: Server[] = []
 
@@ -80,7 +83,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admittedBody()).toMatchObject({
       session_id: 'wizard-parity',
       input: 'finish this',
-      instructions: WIZARD_RUN_INSTRUCTIONS,
+      instructions,
       delegation_delivery: 'join',
       response_rendering: 'markdown',
     })
@@ -94,7 +97,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(upstream.admittedBody()).toMatchObject({
       session_id: 'wizard-parity-2',
       input: 'finish this too',
-      instructions: WIZARD_RUN_INSTRUCTIONS,
+      instructions,
       delegation_delivery: 'join',
       response_rendering: 'markdown',
     })
@@ -109,7 +112,7 @@ describe('Wizard delegated-work ownership contract', () => {
     expect(viewed.status).toBe(202)
     expect(upstream.admittedBody()).toMatchObject({
       session_id: 'wizard-parity-3',
-      instructions: `${WIZARD_RUN_INSTRUCTIONS}\n\n${note}`,
+      instructions: `${instructions}\n\n${note}`,
     })
 
     const long = `[Wizard OS context] ${'x'.repeat(5000)}`
@@ -120,6 +123,6 @@ describe('Wizard delegated-work ownership contract', () => {
     })
     const bounded = String(upstream.admittedBody()?.instructions ?? "")
     expect(bounded.startsWith(WIZARD_RUN_INSTRUCTIONS)).toBe(true)
-    expect(bounded.length).toBeLessThan(WIZARD_RUN_INSTRUCTIONS.length + 2500)
+    expect(bounded.length).toBeLessThan(instructions.length + 2500)
   })
 })

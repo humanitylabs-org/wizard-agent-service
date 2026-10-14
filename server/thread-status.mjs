@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'
+import { normalizeAppId, metadataAppId } from './thread-app-provenance.mjs'
 
 export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
@@ -31,7 +32,8 @@ export function normalizeStatus(value) {
   if (!ask) return null
   const subject = clip(value.subject ?? value.project, 40)
   const title = normalizeTitle(value.title)
-  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}) }
+  const appId = normalizeAppId(value.app_id)
+  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}) }
 }
 
 // The last status marker in a reply, or null.
@@ -42,6 +44,24 @@ export function parseStatus(text) {
     try { found = normalizeStatus(JSON.parse(match[1])) ?? found } catch { /* malformed: ignore */ }
   }
   return found
+}
+
+// Provenance is independent of attention: publishers may send an app-only marker.
+// Only the last marker counts; a malformed/omitted final app_id must not revive an older one.
+export function parseStatusAppId(text) {
+  if (typeof text !== 'string' || !text.includes('[WIZARD_STATUS_V1]')) return null
+  let id = null
+  for (const match of text.matchAll(MARKER)) {
+    id = null
+    try { id = normalizeAppId(JSON.parse(match[1])?.app_id) } catch { /* malformed: ignore */ }
+  }
+  if (text.replace(MARKER, '').match(OPEN_MARKER)) return null
+  return id
+}
+
+export function replyAppId(text, metadata) {
+  const publisher = metadataAppId(metadata)
+  return publisher.present ? publisher.id : parseStatusAppId(text)
 }
 
 // Remove status markers (and a trailing unterminated one) from user-visible text.
