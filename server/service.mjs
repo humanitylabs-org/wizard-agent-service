@@ -1860,7 +1860,7 @@ export function createWizardServer(options = {}) {
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
     sessionRoute: sessionId => {
-      if (!existsSync(sessionDbPath)) return null
+      if (!sessionDbPath || !existsSync(sessionDbPath)) return null
       const db = new DatabaseSync(sessionDbPath, { readOnly: true })
       try {
         let row
@@ -2008,6 +2008,9 @@ export function createWizardServer(options = {}) {
   //   turn, exactly as on a stock Hermes. Lets an owner run the stock behaviour on a forked Hermes.
   if (!['require', 'prefer', 'off', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer, off or unchecked')
   const sessionMessageCache = new Map()
+  // Daily line: the live session reads (locked-chat routes, helper receipts) keep the state.db path.
+  // Only when a state path is configured (index.mjs defaults it on this line), so a box without one opens no state.db.
+  const sessionDbPath = options.sessionDbPath ? resolve(String(options.sessionDbPath)) : hermesStatePath
   // Hermes reads go over its HTTP API. Only what stock Hermes does not serve (archived threads,
   // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
