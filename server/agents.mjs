@@ -684,6 +684,9 @@ export function createAgentRegistry(options = {}) {
       // #59: nothing turns a private agent into something another agent can read.
       if (body.privacy !== undefined && body.privacy !== 'private') sealed('a private agent stays private')
       for (const key of ['readable_by', 'shared_with', 'sources']) if (body.permissions?.[key] !== undefined || body[key] !== undefined) sealed('a private agent is never a source')
+      // An explicit downgrade would open its history to a public provider and to other agents: refused before
+      // anything else. (Without it, a public provider is refused as before: agent.confidential_provider.)
+      if (body.confirm_downgrade === true) sealed('a private agent cannot move to a public model')
     } else if (body.privacy !== undefined && body.privacy !== agent.privacy) fail(409, 'privacy_fixed', 'agent.privacy')
     const next = structuredClone(agent)
     if (body.label !== undefined) {
