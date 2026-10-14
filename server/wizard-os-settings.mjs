@@ -179,6 +179,8 @@ export function bootstrapPayload({ settings, settingsSource, capabilities }) {
       transcribe: capabilities.voice ? '/wizard/voice/transcribe' : '',
       route: capabilities.router ? '/wizard/v1/route' : '',
       upload: capabilities.files ? '/wizard/files/upload' : '',
+      uploads: capabilities.resumable_uploads ? '/wizard/v1/uploads' : '',
+      shares: capabilities.resumable_uploads ? '/wizard/v1/shares' : '',
     },
   }
 }

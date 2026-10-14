@@ -69,5 +69,10 @@ const server = createWizardServer({
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,
+  // Resumable uploads and shares (server/uploads.mjs). Size is bounded only by free disk minus the reserve.
+  uploadStatePath: process.env.WIZARD_UPLOAD_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'uploads.sqlite3'),
+  uploadStagingDir: process.env.WIZARD_UPLOAD_STAGING_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'upload-staging'),
+  ...(process.env.WIZARD_UPLOAD_RESERVE_BYTES ? { uploadReserveBytes: Number(process.env.WIZARD_UPLOAD_RESERVE_BYTES) } : {}),
+  ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
