@@ -185,6 +185,16 @@ export class DurableRunQueue {
     return existing
   }
 
+  /** Durable exact admission lookup: replay does not depend on which run is currently latest. */
+  byIdempotencyKey(runtime, key) { return this._existing(runtime, key) }
+
+  byBackgroundRecovery(id, sessionId) {
+    const row = this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime='direct' AND session_id=? AND json_extract(body,'$._wizard_background_recovery.id')=?
+      ORDER BY created_at LIMIT 1`).get(sessionId, id)
+    return row ? this._record(row) : null
+  }
+
   admittedVoiceRun(runtime, sessionId, audioPaths) {
     const paths = new Set((Array.isArray(audioPaths) ? audioPaths : []).filter((path) => typeof path === 'string' && path))
     if (!paths.size || typeof sessionId !== 'string' || !sessionId) return null
