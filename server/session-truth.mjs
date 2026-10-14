@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
+import { replyAppId } from './thread-status.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -96,27 +97,78 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // Seek newest-first within each session's existing indexed range. Loading
     // every historical body for a whole Work page blocks the shared HTTP loop;
     // only the newest visible request and completed reply determine this view.
+    const messageColumns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
+    const displayMetadata = messageColumns.has('display_metadata') ? 'display_metadata' : 'NULL AS display_metadata'
+    // Real Hermes tables have rowid for equal-timestamp arrival order. A view may
+    // not; do not force a sort/materialization of old bodies in that fallback.
+    const messageTable = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name = 'messages'").get()
+    const tieOrder = messageTable?.type === 'table' && !/WITHOUT ROWID/iu.test(messageTable.sql || '') ? ', rowid DESC' : ''
     const recentMessages = db.prepare(`
-      SELECT role, finish_reason, timestamp, content, display_kind
+      SELECT role, finish_reason, timestamp, content, display_kind, ${displayMetadata}
       FROM messages
       WHERE session_id = ?
         AND role IN ('user', 'assistant')
         AND active = 1
         AND trim(COALESCE(content, '')) <> ''
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC${tieOrder}
     `)
+    const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
+    const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
+    const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
+    const provenanceTip = (id) => {
+      if (!hasLineage) return id
+      const seen = new Set()
+      for (let depth = 0; depth < 1000; depth++) {
+        if (seen.has(id)) return null
+        seen.add(id)
+        if (lineageParent.get(id)?.end_reason !== 'compression') return id
+        const children = lineageChildren.all(id).filter(child => {
+          if (child.source === 'tool') return false
+          let config = {}
+          try { config = JSON.parse(child.model_config || '{}') } catch { return false }
+          // Fork markers inherited from an older ancestor are not forks of this parent.
+          return !['_branched_from', '_delegate_from', '_reset_from'].some(marker => config?.[marker] === id)
+        })
+        // Ambiguous/missing continuation fails closed, never reuse a stale ancestor icon.
+        if (children.length !== 1) return null
+        id = children[0].id
+      }
+      return null
+    }
     for (const [id, current] of truth) {
+      let latestVisibleRole = null
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+        if (!latestVisibleRole && (visibleUser || visibleAssistant)) latestVisibleRole = row.role
         if (!current.activityAt && (visibleUser || visibleAssistant)) current.activityAt = timestamp
         if (!current.lastUserAt && visibleUser) {
           current.lastUserAt = timestamp
           current.requestPreview = row.content.trim()
         }
-        if (!current.lastAssistantAt && visibleAssistant) current.lastAssistantAt = timestamp
+        if (!current.lastAssistantAt && visibleAssistant) {
+          current.lastAssistantAt = timestamp
+          if (latestVisibleRole === 'assistant') current.appId = replyAppId(row.content, row.display_metadata)
+        }
         if (current.lastUserAt && current.lastAssistantAt) break
+      }
+      // Provenance alone follows compression. Leave existing status/activity semantics intact.
+      const tip = provenanceTip(id)
+      if (tip !== id) {
+        const rootAppId = current.appId
+        delete current.appId
+        if (tip) for (const row of recentMessages.iterate(tip)) {
+          const user = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
+          const assistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+          if (!user && !assistant) continue
+          // An explicit publisher can append a newer report to the root; prefer it
+          // over older tip history, but never resurrect root work after a newer tip user.
+          if (current.activityAt > Number(row.timestamp)) current.appId = rootAppId
+          else if (assistant) current.appId = replyAppId(row.content, row.display_metadata)
+          break
+        }
       }
     }
     // Helpers the agent dispatched in the background (stock Hermes delegate_task). While one runs, or its

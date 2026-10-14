@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen, readActiveHumanSessionIds, WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
+import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 
 const servers: ReturnType<typeof createServer>[] = []
 const temporaryDirectories: string[] = []
@@ -220,7 +221,7 @@ describe('Wizard proxy capacity queue', () => {
     expect(admissions).toBe(3)
     expect(upstreamRuns.get('actual_3')?.input).toContain('Guidance added while queued:\nUse the compact implementation.')
     expect(upstreamRuns.get('actual_3')).toMatchObject({
-      instructions: WIZARD_RUN_INSTRUCTIONS,
+      instructions: `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}`,
       delegationDelivery: 'join',
     })
 
