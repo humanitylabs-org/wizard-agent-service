@@ -336,7 +336,8 @@ describe('Wizard thread history marker projection', () => {
           { id: 'user-one', role: 'user', content: 'Inspect the app.', timestamp: 1 },
           { id: 'legacy-background', role: 'user', content: '[IMPORTANT: Background process proc_fixture completed (exit_code=0).\nCommand: npm run build\nOutput: runtime output\n]', timestamp: 1.1 },
           { id: 'legacy-paused-loop', role: 'user', content: '[Your previous agent loop was paused while an out-of-band user message was delivered. The inner message was already included.]', timestamp: 1.2 },
-          { id: 'legacy-workspace-recovery', role: 'user', content: '[Workspace::v1: /home/telos]\n[James requested recovery of this interrupted Helm card.]\nContinue working.', timestamp: 1.3 },
+          { id: 'legacy-workspace-recovery', role: 'user', content: '[Workspace::v1: /home/owner]\n[James requested recovery of this interrupted Helm card.]\nContinue working.', timestamp: 1.3 },
+          { id: 'neutral-recovery', role: 'user', content: '[Owner requested recovery of this interrupted Helm card.]\nContinue working.', timestamp: 1.4 },
           { id: 'assistant-tool', role: 'assistant', content: '', timestamp: 2, tool_calls: [
             {
               id: 'call-one', function: { name: 'read_file', arguments: JSON.stringify({ path: '/private/project/src/App.tsx' }) },
@@ -348,7 +349,7 @@ describe('Wizard thread history marker projection', () => {
           { id: 'tool-one', role: 'tool', content: 'a very large private result', tool_call_id: 'call-one', timestamp: 3 },
           { id: 'tool-browser', role: 'tool', content: 'clicked', tool_call_id: 'call-browser', timestamp: 4 },
         ],
-        pagination: { returned: 7 },
+        pagination: { returned: 8 },
       }))
     })
     servers.push(upstream)
@@ -366,7 +367,7 @@ describe('Wizard thread history marker projection', () => {
     expect(response.status).toBe(200)
     expect(upstreamUrl).toBe('/api/sessions/chat-one/messages?order=oldest&limit=500&offset=0&include_compacted=true')
     const payload = await response.json() as { data: Array<Record<string, unknown>>; pagination: { returned: number } }
-    expect(payload.pagination.returned).toBe(7)
+    expect(payload.pagination.returned).toBe(8)
     expect(payload.data).toHaveLength(4)
     expect(payload.data[0]?.content).toBe('Inspect the app.')
     expect(payload.data[1]?.tool_calls).toEqual([

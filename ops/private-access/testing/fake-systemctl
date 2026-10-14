@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""fake-systemctl: just enough of systemctl for wizard-private-access tests (the tailscaled unit only).
+
+Shares $FAKE_TAILSCALE_STATE with fake-tailscale: `daemon` is "running" or "stopped"; `unit_missing`
+makes the unit unknown. Implements `show -p LoadState --value <unit>`, `enable --now`, `start` and `stop <unit>`.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+loader = importlib.machinery.SourceFileLoader("fake_tailscale", os.path.join(here, "fake-tailscale"))
+spec = importlib.util.spec_from_loader("fake_tailscale", loader)
+fake = importlib.util.module_from_spec(spec)
+loader.exec_module(fake)
+
+
+def main(argv):
+    fake.locked(lambda s: s["calls"].append(["systemctl", *argv]))
+    state = fake.read()
+    if argv[:2] == ["show", "-p"]:
+        print("not-found" if state["unit_missing"] else "loaded")
+        return 0
+    if argv[:1] == ["start"] or argv[:2] == ["enable", "--now"]:
+        if state["unit_missing"]:
+            sys.stderr.write("Failed to enable unit: Unit file tailscaled.service does not exist.\n")
+            return 1
+        fake.locked(lambda s: s.update(daemon="running"))
+        return 0
+    if argv[:1] == ["stop"]:
+        fake.locked(lambda s: s.update(daemon="stopped"))
+        return 0
+    sys.stderr.write("fake-systemctl: unsupported\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""fake-tailscale: a test double for the `tailscale` CLI, shaped after the real one.
+
+State lives in the JSON file named by $FAKE_TAILSCALE_STATE, so a test (or another lane without a
+tailnet) can set the scene and drive the human steps:
+
+  fake-tailscale _complete-login owner@example.com   the owner finished the sign-in page
+  fake-tailscale _enable-https                       the owner enabled HTTPS/Serve on the tailnet
+  fake-tailscale _add-peer NAME OS ONLINE [LOGIN]    a device appears (OS: iOS, android, macOS, ...)
+
+Implemented commands: status --json, up, logout, serve --bg --https=443 <target>, serve status --json,
+serve reset, version. Everything run is appended to state["calls"]. Funnel, ssh, routes and exit
+nodes are refused loudly so a test notices if the helper ever asks for them.
+"""
+import fcntl
+import json
+import os
+import sys
+import time
+
+STATE = os.environ.get("FAKE_TAILSCALE_STATE", "")
+FORBIDDEN = ("funnel", "--ssh", "--advertise-routes", "--advertise-exit-node", "--exit-node", "--auth-key", "--authkey")
+DEFAULT = {
+    "daemon": "running", "backend": "NoState", "auth_url": "", "login": "", "user_id": 0,
+    "hostname": "", "dns_suffix": "tail1234.ts.net", "https_enabled": False, "serve": {},
+    "peers": [], "up_blocks": True, "serve_should_wait": True, "calls": [], "unit_missing": False,
+    "serve_delay": 0, "logout_fails": False, "serve_notice": "",
+}
+
+
+def locked(fn):
+    with open(STATE + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            state = dict(DEFAULT)
+            if os.path.exists(STATE):
+                with open(STATE) as handle:
+                    state.update(json.load(handle))
+            result = fn(state)
+            tmp = STATE + ".tmp"
+            with open(tmp, "w") as handle:
+                json.dump(state, handle, indent=1)
+            os.replace(tmp, STATE)
+            return result
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def read():
+    return locked(lambda s: dict(s))
+
+
+def dns_name(state):
+    return f"{state['hostname'] or 'wizard'}.{state['dns_suffix']}."
+
+
+def status_json(state):
+    running = state["backend"] == "Running"
+    uid = state["user_id"] or 0
+    me = {
+        "ID": "nSELF1CNTRL", "PublicKey": "nodekey:self", "HostName": state["hostname"] or "wizard",
+        "DNSName": dns_name(state) if running else "", "OS": "linux", "UserID": uid,
+        "TailscaleIPs": ["100.64.0.1"] if running else None, "Online": running,
+        "LastSeen": "0001-01-01T00:00:00Z",
+    }
+    users = {}
+    peers = {}
+    if running:
+        users[str(uid)] = {"ID": uid, "LoginName": state["login"], "DisplayName": "Owner", "ProfilePicURL": ""}
+        for index, peer in enumerate(state["peers"]):
+            pid = uid if peer.get("login", state["login"]) == state["login"] else 9000 + index
+            users.setdefault(str(pid), {"ID": pid, "LoginName": peer.get("login", state["login"]), "DisplayName": "x"})
+            peers[f"nodekey:peer{index}"] = {
+                "ID": f"nPEER{index}CNTRL", "PublicKey": f"nodekey:peer{index}", "HostName": peer["name"],
+                "DNSName": f"{peer['name']}.{state['dns_suffix']}.", "OS": peer["os"], "UserID": pid,
+                "Online": bool(peer["online"]),
+                "LastSeen": "0001-01-01T00:00:00Z" if peer["online"] else "2026-10-01T10:00:00Z",
+            }
+    return {
+        "Version": "1.90.0-fake", "TUN": True, "BackendState": state["backend"], "HaveNodeKey": running,
+        "AuthURL": state["auth_url"], "TailscaleIPs": me["TailscaleIPs"], "Self": me, "Health": [],
+        "MagicDNSSuffix": state["dns_suffix"],
+        "CurrentTailnet": {"Name": state["login"] or "", "MagicDNSSuffix": state["dns_suffix"], "MagicDNSEnabled": True} if running else None,
+        "CertDomains": [dns_name(state).rstrip(".")] if running and state["https_enabled"] else None,
+        "Peer": peers or None, "User": users or None, "ClientVersion": None,
+    }
+
+
+def no_daemon():
+    sys.stderr.write("failed to connect to local tailscaled; it doesn't appear to be running (sudo systemctl start tailscaled ?)\n")
+    return 1
+
+
+def flag(args, name, default=None):
+    for arg in args:
+        if arg.startswith(name + "="):
+            return arg.split("=", 1)[1]
+    return default
+
+
+def cmd_up(args):
+    def begin(state):
+        if state["daemon"] != "running":
+            return "nodaemon"
+        state["hostname"] = flag(args, "--hostname", state["hostname"]) or "wizard"
+        if state["backend"] == "Running":
+            return "running"
+        state["backend"] = "NeedsLogin"
+        state["auth_url"] = "https://login.tailscale.com/a/fake%06d" % (int(time.time() * 1000) % 1000000)
+        return state["auth_url"]
+    result = locked(begin)
+    if result == "nodaemon":
+        return no_daemon()
+    if result == "running":
+        return 0
+    sys.stderr.write(f"\nTo authenticate, visit:\n\n\t{result}\n\n")
+    sys.stderr.flush()
+    if not read()["up_blocks"]:
+        return 0
+    while read()["backend"] != "Running":
+        time.sleep(0.05)
+    sys.stderr.write("Success.\n")
+    return 0
+
+
+def serve_set(state, target):
+    host = dns_name(state).rstrip(".") + ":443"
+    state["serve"] = {"TCP": {"443": {"HTTPS": True}}, "Web": {host: {"Handlers": {"/": {"Proxy": target}}}}}
+
+
+def cmd_serve(args):
+    if args[:1] == ["status"]:
+        state = read()
+        if state["daemon"] != "running":
+            return no_daemon()
+        print(json.dumps(state["serve"] or {}, indent=2))
+        return 0
+    if args[:1] == ["reset"]:
+        def reset(state):
+            state["serve"] = {}
+        locked(reset)
+        return 0
+    if "--bg" not in args or "--https=443" not in args or not args or not args[-1].startswith("http://127.0.0.1:"):
+        sys.stderr.write("fake-tailscale: unsupported serve invocation\n")
+        return 2
+    target = args[-1]
+    state = read()
+    time.sleep(float(state["serve_delay"] or 0))
+    if state["daemon"] != "running":
+        return no_daemon()
+    if state["backend"] != "Running":
+        sys.stderr.write("error: not logged in\n")
+        return 1
+    if state["serve_notice"]:
+        sys.stdout.write(state["serve_notice"] + "\n")
+        sys.stdout.flush()
+    if not state["https_enabled"]:
+        sys.stdout.write("\nServe is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/serve?node=nFAKE123\n\n")
+        sys.stdout.flush()
+        if not state["serve_should_wait"]:
+            return 0
+        while not read()["https_enabled"]:
+            time.sleep(0.05)
+        sys.stdout.write("Success.\n")
+    locked(lambda s: serve_set(s, target))
+    name = dns_name(read()).rstrip(".")
+    sys.stdout.write(f"Available within your tailnet:\n\nhttps://{name}/\n|-- proxy {target}\n\nServe started and running in the background.\nTo disable the proxy, run: tailscale serve --https=443 off\n")
+    return 0
+
+
+def main(argv):
+    if not STATE:
+        sys.stderr.write("FAKE_TAILSCALE_STATE is not set\n")
+        return 2
+    locked(lambda s: s["calls"].append(list(argv)))
+    if any(a.startswith(f) for a in argv for f in FORBIDDEN):
+        sys.stderr.write("fake-tailscale: forbidden feature requested\n")
+        return 97
+    cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    if cmd == "version":
+        print("1.90.0-fake")
+        return 0
+    if cmd == "status":
+        state = read()
+        if state["daemon"] != "running":
+            return no_daemon()
+        print(json.dumps(status_json(state), indent=2))
+        return 0
+    if cmd == "up":
+        return cmd_up(args)
+    if cmd == "serve":
+        return cmd_serve(args)
+    if cmd == "logout":
+        if read()["daemon"] != "running":
+            return no_daemon()
+        if read()["logout_fails"]:
+            sys.stderr.write("error: logout failed: context deadline exceeded\n")
+            return 1
+
+        def logout(state):
+            state.update(backend="NeedsLogin", auth_url="", login="", user_id=0)
+        locked(logout)
+        return 0
+    if cmd == "_complete-login":
+        def complete(state):
+            state.update(backend="Running", auth_url="", login=args[0].lower(), user_id=4242)
+        locked(complete)
+        return 0
+    if cmd == "_set":
+        def setter(state):
+            state[args[0]] = json.loads(args[1])
+        locked(setter)
+        return 0
+    if cmd == "_enable-https":
+        locked(lambda s: s.update(https_enabled=True))
+        return 0
+    if cmd == "_add-peer":
+        def add(state):
+            peer = {"name": args[0], "os": args[1], "online": args[2] == "true"}
+            if len(args) > 3:
+                peer["login"] = args[3]
+            state["peers"].append(peer)
+        locked(add)
+        return 0
+    sys.stderr.write(f"fake-tailscale: unknown command {cmd!r}\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
