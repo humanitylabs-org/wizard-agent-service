@@ -6,7 +6,7 @@
 // so Hermes stays the canonical title. Every rename is remembered here so the chat list can show
 // "was: <old title>" for a few days and the thread can say "Renamed from …".
 //
-// A title James sets himself (a rename from a Wizard client, or any user-authority title Hermes holds
+// A title the owner sets (a rename from a Wizard client, or any user-authority title Hermes holds
 // that the agent did not write) locks the thread: the agent's proposals are ignored from then on.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -73,7 +73,8 @@ export function readSessionTitle(sessionDbPath, sessionId) {
 // The per-run reminder: what the thread is called now, so the agent can keep it exactly.
 export function titleContextLine(current, record) {
   const title = squash(current)
-  if (record?.locked) return `This thread is titled “${title}”. James named it himself: put exactly that in the status line's title.`
+  // No person's name here: this line reaches every owner's agent, and a fixed title may come from code (onboarding).
+  if (record?.locked) return `This thread is titled “${title}”, and that title is fixed: put exactly that in the status line's title.`
   if (!title) return 'This thread has no title yet: give one in the status line.'
   return `This thread is currently titled “${title}”.`
 }
