@@ -147,7 +147,9 @@ describe('app → agent binding', () => {
     expect(deliveries.map((d) => d.id)).toEqual(['private'])
     const sid = appThreadId('meeting-recorder', 'recordings')
     // The delivered thread is pinned: reading it without naming an agent goes to the private Hermes only.
-    const read = await (await fetch(`${base}/wizard/hermes/api/sessions/${sid}/messages`)).json()
+    // #59: a private agent's thread is read through its own Chats (agent named), never by id alone.
+    expect((await fetch(`${base}/wizard/hermes/api/sessions/${sid}/messages`)).status).toBe(409)
+    const read = await (await fetch(`${base}/wizard/hermes/api/sessions/${sid}/messages?agent=private`)).json()
     expect(read.data[0].content).toBe('private recap')
     expect(main.seen.some((line) => line.includes(sid))).toBe(false)
     const agents = await (await fetch(`${base}/wizard/v1/agents`)).json()

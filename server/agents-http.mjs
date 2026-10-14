@@ -2,6 +2,8 @@
 //   /wizard/v1/agents, /wizard/v1/agents/<id>, /wizard/v1/agents/<id>/start|stop, /wizard/v1/agent-options
 //   /wizard/v1/agents/<id>/deliveries  (internal: assistant-only recap delivery, bearer token)
 //   /wizard/v1/apps/<app_id>/binding, /wizard/v1/app-bindings, /wizard/v1/apps/<app_id>/deliveries (app → agent binding)
+//   /wizard/v1/apps/<app_id>/agents   (which agents can use an app, #58)
+//   /wizard/v1/agent-grants           (agent-data grants; a private source is refused, #59)
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -13,6 +15,7 @@ export const AGENT_RUN_INSTRUCTIONS = `You are serving the user through Wizard, 
 ${STATUS_INSTRUCTIONS}`
 
 const AGENT_ROUTE = /^\/wizard\/v1\/agents(?:\/([a-z][a-z0-9-]{0,30})(?:\/(start|stop|deliveries))?)?$/u
+const GRANT_ROUTE = /^\/wizard\/v1\/agent-grants(?:\/(grant_[a-f0-9]{12}))?$/u
 
 function agentErrorBody(error) {
   return error instanceof AgentError ? error.payload : null
@@ -54,6 +57,27 @@ export async function handleAgentsApi(ctx, url, request, response) {
   const { registry, sendJson } = ctx
   const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [] })
   const isOptions = url.pathname === '/wizard/v1/agent-options'
+  const grantMatch = url.pathname.match(GRANT_ROUTE)
+  if (grantMatch || url.pathname.startsWith('/wizard/v1/agent-grants')) {
+    if (!grantMatch) { sendJson(response, 404, { error: 'not_found', check: 'grant.route' }); return true }
+    if (!await ctx.accessOk(request)) { sendJson(response, 403, { error: 'access_required' }); return true }
+    const method = request.method ?? 'GET'
+    try {
+      if (grantMatch[1]) {
+        if (method !== 'DELETE') throw new AgentError(405, 'method_not_allowed', 'grant.route')
+        registry.removeGrant(grantMatch[1])
+        sendJson(response, 200, { ok: true })
+      } else if (method === 'GET') {
+        const reader = url.searchParams.get('reader') ?? ''
+        if (reader && !registry.read(reader)) throw new AgentError(404, 'agent_not_found', 'grant.reader')
+        const grants = registry.grants().filter((grant) => !reader || grant.reader === reader)
+        sendJson(response, 200, { grants, ...(reader ? { readable_sources: registry.readableSources(reader) } : {}) })
+      } else if (method === 'POST') {
+        sendJson(response, 201, { grant: registry.addGrant(await readJson(ctx, request)) })
+      } else throw new AgentError(405, 'method_not_allowed', 'grant.route')
+    } catch (error) { sendAgentError(ctx, response, error) }
+    return true
+  }
   const match = isOptions ? null : url.pathname.match(AGENT_ROUTE)
   if (!isOptions && !match) {
     if (url.pathname.startsWith('/wizard/v1/agents')) { sendJson(response, 404, { error: 'not_found', check: 'agent.route' }); return true }
@@ -122,7 +146,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
   return true
 }
 
-const APP_ROUTE = /^\/wizard\/v1\/apps\/([a-z0-9][a-z0-9._-]{0,63})\/(binding|deliveries)$/u
+const APP_ROUTE = /^\/wizard\/v1\/apps\/([a-z0-9][a-z0-9._-]{0,63})\/(binding|deliveries|agents)$/u
 // Delivery failures that mean "the bound agent is not there right now": fail loudly, never reroute.
 const UNAVAILABLE = new Set(['agent_not_running', 'runtime_unreachable', 'agent_unavailable', 'docker_failed', 'runtime_unavailable'])
 
@@ -135,12 +159,23 @@ const UNAVAILABLE = new Set(['agent_not_running', 'runtime_unreachable', 'agent_
  */
 export async function handleAppBindingApi(ctx, url, request, response) {
   const { registry, bindings, sendJson } = ctx
-  if (!bindings) return false
   const method = request.method ?? 'GET'
   const isList = url.pathname === '/wizard/v1/app-bindings'
   const match = isList ? null : url.pathname.match(APP_ROUTE)
   if (!isList && !match) return false
   const [, appId, action] = match ?? []
+  // Which agents can use this app (#58): GET {app_id, kind, agents:[{id,label,privacy,appearance,enabled}]},
+  // PUT {agents:[ids]} sets exactly that set (ticked agents gain the app, unticked agents lose it).
+  if (action === 'agents') {
+    if (!await ctx.accessOk(request)) { sendJson(response, 403, { error: 'access_required' }); return true }
+    try {
+      if (method === 'GET') sendJson(response, 200, registry.appAgents(appId))
+      else if (method === 'PUT') sendJson(response, 200, await registry.setAppAgents(appId, await readJson(ctx, request)))
+      else throw new AgentError(405, 'method_not_allowed', 'app.route')
+    } catch (error) { sendAgentError(ctx, response, error) }
+    return true
+  }
+  if (!bindings) return false
   if (action === 'deliveries') {
     if (method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed', check: 'app.route' }); return true }
     const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
@@ -251,6 +286,18 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   const runId = runIdFromPath(upstreamPath)
   const pinned = (sessionId && registry.pinnedAgent(sessionId)) || (runId && registry.runAgent(runId)) || ''
   if (explicit && pinned && explicit !== pinned) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
+  // #59: a private agent's threads are read only through that agent's own Chats, which always names it. The operator
+  // surface (other agents' work) never reaches a non-main agent, and a thread read that arrives by id alone (a link,
+  // another view, another agent) is refused instead of being routed by the pin.
+  const target = explicit || pinned
+  if (target && target !== MAIN_AGENT_ID) {
+    const agent = registry.read(target)
+    if (operator) throw new AgentError(agent?.privacy === 'private' ? 409 : 404, agent?.privacy === 'private' ? 'private_agent_sealed' : 'agent_not_found', agent?.privacy === 'private' ? 'agent.private_sealed' : 'agent.id')
+    // Session reads only: a run id is returned to the one who started the run and polled by it.
+    if (agent?.privacy === 'private' && method === 'GET' && !explicit && sessionId && !runId) {
+      throw new AgentError(409, 'private_agent_sealed', 'agent.private_sealed', 'open this thread in its own agent\'s Chats')
+    }
+  }
   // A thread already on the main agent cannot be continued under another agent.
   if (explicit && explicit !== MAIN_AGENT_ID && !pinned && sessionId && await ctx.mainHasSession(sessionId)) {
     throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
