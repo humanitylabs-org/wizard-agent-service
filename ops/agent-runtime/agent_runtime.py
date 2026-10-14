@@ -295,7 +295,24 @@ class RuntipiDriver:
         doc = {"services": {service_names(agent)[0]: {"volumes": [f"{home}:/opt/data"], "environment": {"HERMES_UID": str(st.st_uid), "HERMES_GID": str(st.st_gid)}}}}
         rt.req("PUT", f"/user-config/{self.urn(agent)}", {"dockerCompose": json.dumps(doc, indent=2) + "\n", "appEnv": ""})
 
+    def _images(self, agent: dict) -> list[str]:
+        return [self.image] + ([self.proxy_image] if (agent.get("model") or {}).get("provider") == "tinfoil" else [])
+
+    def _ensure_images(self, agent: dict) -> None:
+        """Runtipi's install runs `compose down --rmi all` before `up`, which deletes the agent images (4 GB for
+        Hermes) and then fails `up` on a box that can't pull them in time. Pull them here once and pin each with a
+        stopped keeper container, so the install can never remove them (an image in use by a container is kept)."""
+        for image in self._images(agent):
+            if docker(["image", "inspect", image], timeout=60, check=False).returncode:
+                docker(["pull", "-q", image], timeout=1800)
+            keeper = "wizard-agent-image-" + re.sub(r"[^a-z0-9]+", "-", image.rsplit("/", 1)[-1].lower()).strip("-")
+            found = docker(["ps", "-aq", "--filter", f"name=^{keeper}$"], timeout=60, check=False).stdout.split()
+            if not found:
+                docker(["create", "--name", keeper, "--label", "wizard-os.agent-image-keeper=1", "--entrypoint", "true", image],
+                       timeout=120)
+
     def _install(self, agent: dict) -> dict:
+        self._ensure_images(agent)
         pkg = self._package(agent)
         head = subprocess.run(["git", "-C", str(pkg), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         p = self.private
@@ -305,10 +322,34 @@ class RuntipiDriver:
         p.fetch = lambda repo, commit, dest, tok: (Path(dest).mkdir(parents=True, exist_ok=True), subprocess.run(
             f"git -C {shlex.quote(str(pkg))} archive {commit} | tar -x -C {shlex.quote(str(dest))}", shell=True, check=True))
         p.pull = lambda image, tok: None
+        c = self.cli.Config()
         try:
-            return self.cli.install(self.cli.Config(), f"wizard-os-agents/{agent['runtime']['app_id']}", {})
+            # wait=False: wam's own wait only ends on running/stopped, so a failed install (Runtipi drops the app
+            # row) would hold the runtime lock for 15 minutes. Wait here and treat `missing` as the failure.
+            result = self.cli.install(c, f"wizard-os-agents/{agent['runtime']['app_id']}", {}, wait=False)
         finally:
             p.token, p.head_commit, p.fetch, p.pull = saved
+        status = self._settle(c.runtipi(), agent, {"running", "stopped"}, timeout=900)
+        self.cli.write_registry(c, c.runtipi())
+        if status not in {"running", "stopped"}:
+            raise RuntimeFailure(f"install_{status}"[:60])
+        return {**result, "status": status}
+
+    def _settle(self, rt, agent: dict, want: set[str], timeout: int) -> str:
+        """Wait for one of `want`; `missing` after the app was seen (or after a short grace) means Runtipi gave up."""
+        deadline, grace, seen, status = time.time() + timeout, time.time() + 20, False, "unknown"
+        while time.time() < deadline:
+            try:
+                status = ((rt.app(self.urn(agent)) or {}).get("app") or {}).get("status") or "missing"
+            except Exception:  # noqa: BLE001  (RuntipiError: transient API errors keep waiting)
+                status = "unknown"
+            if status in want:
+                return status
+            if status == "missing" and (seen or time.time() > grace):
+                return status
+            seen = seen or status not in {"missing", "unknown"}
+            time.sleep(3)
+        return status
 
     def _installed(self, rt, agent: dict) -> bool:
         return agent["runtime"]["app_id"] in self.cli.installed_ids(rt)
@@ -323,6 +364,8 @@ class RuntipiDriver:
             except SystemExit as error:
                 sys.stderr.write(f"[agent-runtime] wam install refused: {str(error)[:300]}\n")
                 raise RuntimeFailure("install_refused") from None
+            if result.get("status") == "stopped":
+                return self.start(agent)
             return {"ok": True, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
         self.stop(agent)
         return self.start(agent)
