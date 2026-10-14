@@ -1330,7 +1330,8 @@ function nativeImageParts(files) {
     if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) continue
     if (file.bytes < 1 || file.bytes > WIZARD_AGENT_IMAGE_LIMIT || totalBytes + file.bytes > WIZARD_AGENT_IMAGE_LIMIT) continue
     let bytes
-    try { bytes = readFileSync(file.trusted_path) } catch { continue }
+    // Media-folder files carry the service's own path; Inbox files are read where the Inbox put them.
+    try { bytes = readFileSync(Object.hasOwn(file, 'localPath') ? file.localPath : file.trusted_path) } catch { continue }
     if (bytes.length !== file.bytes || file.sha256 && createHash('sha256').update(bytes).digest('hex') !== file.sha256) continue
     if (imageMimeFromMagic(bytes) !== mime) continue
     parts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } })
@@ -1345,7 +1346,8 @@ function appendFileMarker(input, files, includeNativeImages = false) {
   const toolInspection = imageFiles.length > images.length
     ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect every image listed in WIZARD_FILES_V1 with vision_analyze using its trusted_path before answering.\n[/WIZARD_IMAGE_INTENT_V1]'
     : ''
-  const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files)}\n[/WIZARD_FILES_V1]${toolInspection}`
+  // The agent gets trusted_path (its own view of the file); the service-side path stays inside the service.
+  const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files.map(({ localPath: _local, ...file }) => file))}\n[/WIZARD_FILES_V1]${toolInspection}`
   if (typeof input === 'string') {
     const text = input + marker
     return images.length ? [{ role: 'user', content: [{ type: 'text', text }, ...images] }] : text
@@ -1470,9 +1472,20 @@ function writeAgentArtifactMetadata(artifactDir, metadata) {
   renameSync(metadataTemporary, metadataPath)
 }
 
-function trustedAgentSource(sourcePath, artifactRoots) {
+// When the agent sees the user-files folder under another path than this service (alongside mode: the host
+// Hermes reads /home/<user>/runtipi/media, the service /media), a file the agent names under its path is the
+// same file under ours. Each alias is [agentRoot, localRoot]; only exact root-prefixed paths are rewritten.
+function localAgentPath(sourcePath, aliases = []) {
+  const path = resolve(String(sourcePath).trim())
+  for (const [agentRoot, localRoot] of aliases) {
+    if (path.startsWith(`${agentRoot}${sep}`)) return resolve(localRoot, path.slice(agentRoot.length + 1))
+  }
+  return path
+}
+
+function trustedAgentSource(sourcePath, artifactRoots, aliases = []) {
   let source
-  try { source = realpathSync(resolve(sourcePath.trim())) } catch { return null }
+  try { source = realpathSync(localAgentPath(sourcePath, aliases)) } catch { return null }
   if (!artifactRoots.some((root) => source.startsWith(`${root}${sep}`))) return null
   let details
   try { details = statSync(source) } catch { return null }
@@ -1480,9 +1493,9 @@ function trustedAgentSource(sourcePath, artifactRoots) {
   return { source, details }
 }
 
-function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
   if (!artifactDir || !artifactRoots.length) return null
-  const trusted = trustedAgentSource(sourcePath, artifactRoots)
+  const trusted = trustedAgentSource(sourcePath, artifactRoots, aliases)
   if (!trusted || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
   const { source } = trusted
   let bytes
@@ -1523,9 +1536,9 @@ function hashFileSync(path) {
 }
 
 // A MEDIA: file that is not an image: allowlisted suffix, inside the artifact roots, up to 256 MB.
-function registerAgentFile(sourcePath, artifactDir, artifactRoots) {
+function registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases = []) {
   if (!artifactDir || !artifactRoots.length) return null
-  const trusted = trustedAgentSource(sourcePath, artifactRoots)
+  const trusted = trustedAgentSource(sourcePath, artifactRoots, aliases)
   if (!trusted || trusted.details.size > WIZARD_AGENT_FILE_LIMIT) return null
   const { source, details } = trusted
   const mime = AGENT_FILE_MIMES.get(extname(source).toLowerCase())
@@ -1577,7 +1590,7 @@ function readAgentArtifact(id, artifactDir) {
   } catch { return null }
 }
 
-function projectAgentMedia(result, artifactDir, artifactRoots) {
+export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = []) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
@@ -1593,8 +1606,8 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
       return _marker
     })
     const register = (_line, sourcePath) => {
-      const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots)
-        ?? registerAgentFile(sourcePath, artifactDir, artifactRoots)
+      const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
+        ?? registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases)
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
       if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
@@ -1603,7 +1616,7 @@ function projectAgentMedia(result, artifactDir, artifactRoots) {
     let text = value.replace(AGENT_MEDIA_LINE, register)
     if (userImageReferences) {
       text = text.replace(AGENT_IMAGE_REFERENCE_LINE, (_line, backtick, doubleQuote, singleQuote, bare) => {
-        const artifact = registerAgentArtifact(backtick || doubleQuote || singleQuote || bare, artifactDir, artifactRoots)
+        const artifact = registerAgentArtifact(backtick || doubleQuote || singleQuote || bare, artifactDir, artifactRoots, aliases)
         if (artifact && !durableImageHashes.has(artifact.sha256)
             && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
         return ''
@@ -1989,6 +2002,8 @@ export function createWizardServer(options = {}) {
     : null
   const agentArtifactDir = options.agentArtifactDir ? resolve(String(options.agentArtifactDir)) : ''
   const agentArtifactRoots = canonicalArtifactRoots(options.agentArtifactRoots)
+  // Where the agent's view of the user-files folder differs from ours, its paths map back onto ours.
+  const agentPathAliases = mediaFiles && mediaFiles.agentRoot !== mediaFiles.root ? [[mediaFiles.agentRoot, mediaFiles.root]] : []
   const runTrustedPaths = new Map()
   const directRuns = new Map()
   const terminalExternalRuns = new Map()
@@ -2849,7 +2864,8 @@ export function createWizardServer(options = {}) {
       if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
       const file = safeFile(record, true)
       if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
-      return { ...file, userVisible: true }
+      // The service reads its own copy from the same record the agent path came from (never the agent path).
+      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
     }
     const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
     const file = safeFile(payload.file, true)
@@ -3814,7 +3830,7 @@ export function createWizardServer(options = {}) {
           }
           result = projectWizardFileMarkers(result, messageHistory)
           if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
-          result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
+          result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
         }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
