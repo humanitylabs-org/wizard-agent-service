@@ -1,0 +1,3 @@
+# Test fixture keys in history (not secrets): the fake main Hermes key in the agents tests.
+f09e86f477efd5b2908b1fdfb1ba886db75e4213:tests/agents.test.ts:generic-api-key:73
+78067c8c3a7b922d3558878c4d76278760170623:tests/app-bindings.test.ts:generic-api-key:50

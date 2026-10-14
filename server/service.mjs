@@ -27,6 +27,9 @@ import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegatio
 import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { createAppBindings } from './app-bindings.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1842,6 +1845,52 @@ export function createWizardServer(options = {}) {
     // No plugin: the full kernel every run, with the job -> app map (no skills index to lean on).
     return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
   }
+  // Agents (wizard-os spec/AGENTS.md): <wizard-os home>/agents/<id>/agent.json; the main agent is this Hermes.
+  const agentsDir = options.agentsDir ? resolve(String(options.agentsDir)) : (bridgeOsHome ? resolve(bridgeOsHome, 'agents') : '')
+  const agentRuntime = options.agentRuntime ?? (options.agentRuntimeUrl && options.agentRuntimeToken
+    ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
+    : null)
+  const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath,
+    upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
+    basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
+    contextLength: options.agentContextLength,
+    mainLabel: options.mainAgentLabel,
+    mainProviders: async () => {
+      const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      if (!result.ok) return []
+      return (await result.json())?.providers ?? []
+    },
+    mainStatus: async () => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok ? { status: 'running', status_detail: '' } : { status: 'error', status_detail: 'not_responding' }
+      } catch { return { status: 'error', status_detail: 'not_responding' } }
+    },
+  }) : null
+  // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
+  const appBindings = agents && bridgeOsHome && options.appBindings !== false
+    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath })
+    : null
+  const agentCtx = agents ? {
+    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    isThreadVisible: (session) => isHumanSession(session, false),
+    mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
+    accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
+    deliveryToken: options.agentDeliveryToken ?? '',
+    deliver: async (agent, payload) => {
+      if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
+      try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
+    },
+    mainHasSession: async (sessionId) => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok
+      } catch { return false }
+    },
+  } : null
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
@@ -2800,6 +2849,12 @@ export function createWizardServer(options = {}) {
         }
         return
       }
+      if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents'))) {
+        if (await handleAgentsApi(agentCtx, url, request, response)) return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
+        if (await handleAppBindingApi(agentCtx, url, request, response)) return
+      }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
@@ -3305,6 +3360,18 @@ export function createWizardServer(options = {}) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
+        let agentResolution = null
+        if (agentCtx) {
+          agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
+          if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            await proxyToAgent(agentCtx, {
+              agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+            })
+            return
+          }
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -3360,7 +3427,7 @@ export function createWizardServer(options = {}) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? await readBoundedBody(request) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
@@ -3624,6 +3691,10 @@ export function createWizardServer(options = {}) {
           )
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = decorateSessionTitles(result, operator)
+          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+        }
+        if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
@@ -3707,6 +3778,10 @@ export function createWizardServer(options = {}) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof AgentError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })

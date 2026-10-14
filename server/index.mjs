@@ -2,6 +2,12 @@ import { createCloudflareAccessVerifier, createWizardServer } from './service.mj
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { wizardOsHome } from './wizard-os-settings.mjs'
+import { readFileSync } from 'node:fs'
+
+const secretFile = (path) => {
+  if (!path) return ''
+  try { return readFileSync(path, 'utf8').trim() } catch { return '' }
+}
 
 const key = process.env.WIZARD_HERMES_API_KEY
 if (!key) {
@@ -87,5 +93,15 @@ const server = createWizardServer({
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
+  // Agents (spec/AGENTS.md): folders under <WIZARD_OS_HOME>/agents; containers via the host agent-runtime helper.
+  ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
+  ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),
+  agentRuntimeUrl: process.env.WIZARD_AGENT_RUNTIME_URL || '',
+  agentRuntimeToken: process.env.WIZARD_AGENT_RUNTIME_TOKEN || secretFile(process.env.WIZARD_AGENT_RUNTIME_TOKEN_FILE),
+  agentDeliveryToken: process.env.WIZARD_AGENT_DELIVERY_TOKEN || secretFile(process.env.WIZARD_AGENT_DELIVERY_TOKEN_FILE),
+  agentUpstreamMode: process.env.WIZARD_AGENT_UPSTREAM === 'network' ? 'network' : 'host',
+  agentUpstreamHost: process.env.WIZARD_AGENT_UPSTREAM_HOST || '127.0.0.1',
+  ...(process.env.WIZARD_AGENT_BASE_PORT ? { agentBasePort: Number(process.env.WIZARD_AGENT_BASE_PORT) } : {}),
+  ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
