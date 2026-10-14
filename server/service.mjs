@@ -32,6 +32,11 @@ import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
+import { hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { createAppBindings } from './app-bindings.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -223,7 +228,7 @@ export function clientViewContext(value) {
   return note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note
 }
 
-function directBody(method, pathname, body, contract, noteFor = null) {
+function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -240,7 +245,7 @@ function directBody(method, pathname, body, contract, noteFor = null) {
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [runInstructions(contract), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
+    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -281,44 +286,8 @@ function isDirectHumanSessionIdentity(id, source) {
     || id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
 }
 
-// Stale-run guard reader: true while Hermes holds an unexpired turn lease anywhere in the
-// session's compression chain (leases key on the chain root), false when none is held.
-export function readSessionTurnHeld(sessionDbPath, sessionId, currentTime = Date.now()) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    const row = database.prepare(`
-      WITH RECURSIVE
-        up(id) AS (SELECT ? UNION SELECT sessions.parent_session_id FROM sessions JOIN up ON sessions.id = up.id
-                   WHERE sessions.parent_session_id IS NOT NULL),
-        chain(id) AS (SELECT id FROM up UNION SELECT sessions.id FROM sessions JOIN chain ON sessions.parent_session_id = chain.id)
-      SELECT 1 AS held FROM session_turn_leases
-       WHERE conversation_id IN (SELECT id FROM chain) AND expires_at > ? LIMIT 1
-    `).get(String(sessionId), currentTime / 1000)
-    return Boolean(row)
-  } finally {
-    database.close()
-  }
-}
-
-// After an abandoned run: `completed` when the thread's last assistant text since the run
-// started is followed only by tool rows (the answer reached James), otherwise `interrupted`.
-export function readAbandonedRunOutcome(sessionDbPath, sessionId, startedAt) {
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    const rows = database.prepare(`SELECT role, content FROM messages
-      WHERE session_id = ? AND timestamp >= ? ORDER BY timestamp DESC, rowid DESC LIMIT 50`).all(String(sessionId), Number(startedAt) || 0)
-    for (const row of rows) {
-      if (row.role === 'tool') continue
-      if (row.role === 'assistant' && !String(row.content ?? '').trim()) continue
-      return row.role === 'assistant' ? 'completed' : 'interrupted'
-    }
-    return 'interrupted'
-  } finally {
-    database.close()
-  }
-}
-
+// Turns running on other surfaces (Telegram, TUI, cron). Stock Hermes serves no list of live turns
+// over HTTP, so this read needs WIZARD_HERMES_STATE_PATH (spec/AGENT_BRIDGE.md, "Agent adapter").
 export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now()) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
@@ -1772,9 +1741,17 @@ export function createCloudflareAccessVerifier({ teamDomain, audience, jwksUrl, 
   }
 }
 
+// Inside a Wizard OS container the agent and the other apps are reached by their service names on the
+// box's private container network (e.g. http://hermes-agent-engine:8642), never on loopback.
+const PRIVATE_UPSTREAM_HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+function upstreamHostAllowed(hostname) {
+  if (hostname === '127.0.0.1') return true
+  return process.env.WIZARD_CONTAINER === '1' && PRIVATE_UPSTREAM_HOST.test(hostname)
+}
+
 function confinedUpstream(value) {
   const url = new URL(value)
-  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+  if (url.protocol !== 'http:' || !upstreamHostAllowed(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
     throw new Error('Hermes upstream must be an exact loopback HTTP origin')
   }
   return url.origin
@@ -1903,6 +1880,87 @@ export function createWizardServer(options = {}) {
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
   const appCatalog = () => appProvenanceCatalog(readApps({ appsJsonPath, launcherPath }).apps)
+  // Wizard OS agent bridge (spec/AGENT_BRIDGE.md): the `wizard` MCP gateway, the kernel and the pointer skills,
+  // all from apps.json. Per run the agent gets the kernel, or, when the wizard-os Hermes plugin already puts the
+  // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
+  // thread started.
+  const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  // The agent registry (below) decides which apps each agent may use on the gateway (#58).
+  let gatewayAgents = null
+  const bridge = appsJsonPath && options.agentBridge !== false
+    ? createAgentBridge({
+      agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
+      appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
+      appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
+      mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
+      fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
+      log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
+      jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
+    })
+    : null
+  const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
+  const osInstructions = (sessionId) => {
+    if (!bridge) return ''
+    const apps = bridge.apps()
+    const { settings } = readSettings(settingsPath)
+    if (settings.agent.adapter === 'hermes-plugin') {
+      const before = threadApps.take(sessionId, bridge.snapshot())
+      const delta = renderDelta(appsDelta(apps, before))
+      return delta ? `\n\n${delta}` : ''
+    }
+    // No plugin: the full kernel every run, with the job -> app map (no skills index to lean on).
+    return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
+  }
+  // Agents (wizard-os spec/AGENTS.md): <wizard-os home>/agents/<id>/agent.json; the main agent is this Hermes.
+  const agentsDir = options.agentsDir ? resolve(String(options.agentsDir)) : (bridgeOsHome ? resolve(bridgeOsHome, 'agents') : '')
+  const agentRuntime = options.agentRuntime ?? (options.agentRuntimeUrl && options.agentRuntimeToken
+    ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
+    : null)
+  const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath,
+    upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
+    basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
+    contextLength: options.agentContextLength,
+    mainLabel: options.mainAgentLabel,
+    // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
+    gatewayUrl: options.agentGatewayUrl || '',
+    onAppsChanged: () => bridge?.appsChanged(),
+    mainProviders: async () => {
+      const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      if (!result.ok) return []
+      return (await result.json())?.providers ?? []
+    },
+    mainStatus: async () => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok ? { status: 'running', status_detail: '' } : { status: 'error', status_detail: 'not_responding' }
+      } catch { return { status: 'error', status_detail: 'not_responding' } }
+    },
+  }) : null
+  if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
+  // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
+  const appBindings = agents && bridgeOsHome && options.appBindings !== false
+    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath })
+    : null
+  const agentCtx = agents ? {
+    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    isThreadVisible: (session) => isHumanSession(session, false),
+    mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
+    accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
+    deliveryToken: options.agentDeliveryToken ?? '',
+    deliver: async (agent, payload) => {
+      if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
+      try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
+    },
+    mainHasSession: async (sessionId) => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok
+      } catch { return false }
+    },
+  } : null
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // Voice is offered only when a transcription service actually answers (cached 30 s), so a box
@@ -1923,6 +1981,23 @@ export function createWizardServer(options = {}) {
     sttProbe = { ok, at: Date.now() }
     return ok
   }
+  // OpenAI-compatible transcribers (e.g. the Speaches-based `transcriber` app) need a `model` field;
+  // Wizard's own STT ignores it. Use the transcriber's first advertised model, cached for 5 minutes.
+  let sttModelCache = { id: '', at: 0 }
+  const sttModel = async () => {
+    if (Date.now() - sttModelCache.at < 300_000) return sttModelCache.id
+    let id = ''
+    try {
+      const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+      if (r.ok) {
+        const value = await r.json()
+        const first = Array.isArray(value?.data) ? value.data.find((m) => typeof m?.id === 'string') : null
+        id = first ? first.id.slice(0, 200) : ''
+      } else await r.body?.cancel().catch(() => undefined)
+    } catch { /* keep '' */ }
+    sttModelCache = { id, at: Date.now() }
+    return id
+  }
   const router = options.router && options.router.url && options.router.model ? options.router : null
   // 'require' (default, today's live behaviour): Hermes must advertise join; every run asks for
   //   join + Markdown exactly as before. 'prefer': ask only for what Hermes advertises, so a stock
@@ -1933,10 +2008,15 @@ export function createWizardServer(options = {}) {
   //   turn, exactly as on a stock Hermes. Lets an owner run the stock behaviour on a forked Hermes.
   if (!['require', 'prefer', 'off', 'unchecked'].includes(joinedDelegation)) throw new Error('joinedDelegation must be require, prefer, off or unchecked')
   const sessionMessageCache = new Map()
-  const sessionDbPath = resolve(String(options.sessionDbPath ?? (hermesStatePath || process.env.WIZARD_SESSION_DB_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state.db'))))
-  const archivedSessionReader = options.archivedSessionReader ?? (() => readArchivedSessions(sessionDbPath))
+  // Hermes reads go over its HTTP API. Only what stock Hermes does not serve (archived threads,
+  // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
+  // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
+  // "Agent adapter" keeps the list.
+  const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
   const canonicalSessionReader = options.canonicalSessionReader
-    ?? (options.canonicalSessionListing ? () => readCanonicalSessions(sessionDbPath, helmDbPath) : null)
+    ?? (!options.canonicalSessionListing ? null
+      : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => readCanonicalSessions(hermesStatePath, helmDbPath)
+        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let canonicalSessionInFlight = null
@@ -2405,7 +2485,7 @@ export function createWizardServer(options = {}) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), runTitleNote)
+      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -2460,21 +2540,23 @@ export function createWizardServer(options = {}) {
       return { payload, capacityStatus, workerRunId }
     }
     const maxActive = Number(options.runQueueMaxActive ?? 8)
-    const activeSessionReader = options.activeSessionReader ?? (() => readActiveHumanSessionIds(hermesStatePath || sessionDbPath))
+    // Turns started on other surfaces (Telegram, TUI) are visible only in state.db; without it the
+    // queue counts its own runs, which Hermes serialises per session anyway.
+    const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveHumanSessionIds(hermesStatePath) : []))
     const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
-    const leaseDbPath = hermesStatePath || sessionDbPath
+    const turnHeldCache = new Map()
+    const runTurnHeld = async (runId) => {
+      const cached = turnHeldCache.get(runId)
+      if (cached && cached.until > Date.now()) return cached.held
+      const held = await hermesRunTurnHeld(fetchImpl, upstreamOrigin, hermesKey, runId)
+      turnHeldCache.set(runId, { held, until: Date.now() + 15_000 })
+      if (turnHeldCache.size > 500) turnHeldCache.delete(turnHeldCache.keys().next().value)
+      return held
+    }
     const staleRunLogPath = resolve(dirname(runQueueStatePath), 'stale-run-guard.jsonl')
     // Side-effect-free liveness probe: an empty steer is refused with 400 by a live agent, with
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
-    const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => {
-      const result = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(runId)}/steer`, {
-        method: 'POST', redirect: 'manual',
-        headers: { Authorization: `Bearer ${hermesKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: '' }),
-      })
-      await result.arrayBuffer().catch(() => null)
-      return result.status === 409 || result.status === 404
-    })
+    const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
       statePath: runQueueStatePath,
       maxActive,
@@ -2485,10 +2567,10 @@ export function createWizardServer(options = {}) {
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
-      turnHeld: options.turnHeldReader ?? ((record) => readSessionTurnHeld(leaseDbPath, record.sessionId)),
+      turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
-        return { status: (options.abandonedOutcomeReader ?? readAbandonedRunOutcome)(leaseDbPath, record.sessionId, record.createdAt) }
+        return { status: await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt) }
       },
       onReconciled: (record, verdict, leaselessSeconds) => {
         const entry = { at: new Date().toISOString(), public_run_id: record.publicRunId, session_id: record.sessionId,
@@ -2588,7 +2670,9 @@ export function createWizardServer(options = {}) {
   }
   // ---- Thread titles (thread-titles.mjs): the agent's status-line title renames a thread once per
   // final reply, only when it names a different project or feature; James's own renames lock it.
-  const titleDbPath = () => hermesStatePath || sessionDbPath
+  // Title authority (title_source) is not on stock /api/sessions/<id>, so this read stays on the
+  // WIZARD_HERMES_STATE_PATH fallback; without it agent titling is off (spec/AGENT_BRIDGE.md).
+  const titleDbPath = () => hermesStatePath
   const titleLocked = (current, record) => {
     if (record?.locked) return true
     if (!current?.title) return false
@@ -2827,7 +2911,7 @@ export function createWizardServer(options = {}) {
       const raw = Buffer.from(JSON.stringify({ session_id: sessionId, input }))
       const prepared = await prepareRunBody(raw, resolveFiles, true)
       const body = prepared.body
-      const projected = directBody('POST', '/v1/runs', body, contract, runTitleNote)
+      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote)
       requireCurrentContinuation(hermesStatePath, continuation)
       if ([...(runQueue?.latestProjections([sessionId]) ?? []), ...directRuns.values()].some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))) {
         throw Object.assign(new Error('Agent already active'), { status: 410 })
@@ -3092,6 +3176,32 @@ export function createWizardServer(options = {}) {
         }), { 'Cache-Control': 'no-store' })
         return
       }
+      if (url.pathname === '/wizard/mcp') {
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        await bridge.handle(request, response)
+        return
+      }
+      if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
+        const tokenAgent = bridge.agentFor(request)
+        if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
+        const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
+        if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
+        else {
+          const body = Buffer.from(context.text)
+          response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+          response.end(body)
+        }
+        return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents') || url.pathname.startsWith('/wizard/v1/agent-grants'))) {
+        if (await handleAgentsApi(agentCtx, url, request, response)) return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
+        if (await handleAppBindingApi(agentCtx, url, request, response)) return
+      }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
@@ -3191,9 +3301,16 @@ export function createWizardServer(options = {}) {
         const timer = setTimeout(() => controller.abort(), 180_000)
         request.once('aborted', () => controller.abort())
         try {
+          // Add the transcriber's model when the front end didn't name one (OpenAI-compatible servers need it).
+          let body = data
+          let headers = { 'Content-Type': String(request.headers['content-type']) }
+          const model = await sttModel()
+          if (model) {
+            const form = await new Response(data, { headers }).formData().catch(() => null)
+            if (form && !form.has('model')) { form.append('model', model); body = form; headers = {} }
+          }
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, {
-            method: 'POST', body: data, redirect: 'error', signal: controller.signal,
-            headers: { 'Content-Type': String(request.headers['content-type']) },
+            method: 'POST', body, redirect: 'error', signal: controller.signal, headers,
           })
           const raw = Buffer.from(await upstream.arrayBuffer())
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, ms: Date.now() - started, model: '' }); return }
@@ -3218,6 +3335,7 @@ export function createWizardServer(options = {}) {
         const filename = named.replace(/\.[a-z0-9]{1,5}$/i, '') + `.${voiceExt}`
         const form = new FormData()
         form.append('file', new Blob([data], { type: contentType.split(';', 1)[0] }), filename)
+        { const model = await sttModel(); if (model) form.append('model', model) }
         {
           // Language and spelling hints come from Wizard OS settings: the agent's name, the user's
           // own vocabulary. Nothing about any particular user is built in.
@@ -3592,6 +3710,18 @@ export function createWizardServer(options = {}) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !(!operator && internalCall(request)) && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
+        let agentResolution = null
+        if (agentCtx) {
+          agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
+          if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            await proxyToAgent(agentCtx, {
+              agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+            })
+            return
+          }
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -3647,7 +3777,7 @@ export function createWizardServer(options = {}) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? await readBoundedBody(request) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
@@ -3716,7 +3846,7 @@ export function createWizardServer(options = {}) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, runTitleNote)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -3919,6 +4049,10 @@ export function createWizardServer(options = {}) {
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
           result = decorateSessionTitles(result, operator)
+          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+        }
+        if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
@@ -4002,6 +4136,10 @@ export function createWizardServer(options = {}) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof AgentError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })
@@ -4017,6 +4155,7 @@ export function createWizardServer(options = {}) {
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
   })
+  if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false && hermesStatePath) {
     let selfOrigin = ''

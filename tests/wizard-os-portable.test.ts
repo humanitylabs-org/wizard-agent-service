@@ -161,6 +161,35 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     ])
   })
 
+  it('every run is told it is inside Wizard OS and which jobs the apps do, re-read per run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    const appsJson = join(dir, 'apps.json')
+    writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [
+      { id: 'defleur-video', name: 'DeFleur Video', summary: 'Edit a talking-head video into a vertical short.', status: 'running',
+        provides: ['video-editing', 'short-form-video'], mcp: { url: 'http://127.0.0.1:20002/mcp', transport: 'streamable-http' },
+        skill: 'skills/defleur-video/SKILL.md', view: null },
+      { id: 'stopped-app', name: 'Stopped', summary: 'Not running', status: 'stopped', mcp: { url: 'http://127.0.0.1:1/mcp' } },
+    ] }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', appsJsonPath: appsJson })
+    expect((await postRun(wizard)).status).toBe(202)
+    const first = String(hermes.bodies[0].instructions)
+    // The agent-bridge kernel replaced the URL- and path-heavy block (spec/AGENT_BRIDGE.md).
+    expect(first).toContain("Wizard OS: you are the owner's agent on this box.")
+    // No plugin (generic harness): the fixed kernel plus the job -> app map, one line per job.
+    expect(first).toContain('- short-form video -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
+    expect(first).toContain('- video editing -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
+    expect(first).not.toContain('Stopped')
+    expect(first).not.toContain('http://127.0.0.1:20002/mcp')
+    expect(first).not.toContain(join(dir, 'skills'))
+    expect(first).toContain('Save only short pointer skills')
+    writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))
+    expect((await postRun(wizard)).status).toBe(202)
+    const second = String(hermes.bodies[1].instructions)
+    expect(second).toContain('- (no apps installed yet)')
+    expect(second).not.toContain('DeFleur Video (')
+  })
+
   it('serves a Wizard UX build under its prefix and refuses dotfiles and traversal', async () => {
     const ux = mkdtempSync(join(tmpdir(), 'wizard-ux-'))
     writeFileSync(join(ux, 'index.html'), '<title>Wizard UX</title>')

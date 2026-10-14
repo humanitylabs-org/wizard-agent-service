@@ -1,10 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
-import { readAbandonedRunOutcome, readSessionTurnHeld } from '../server/service.mjs'
+import { hermesRunTurnHeld, readAbandonedRunOutcomeHttp } from '../server/hermes-http-readers.mjs'
 
 const directories: string[] = []
 const queues: DurableRunQueue[] = []
@@ -108,44 +107,62 @@ describe('stale-run guard', () => {
   })
 })
 
-describe('stale-run guard Hermes readers', () => {
-  async function stateDb() {
-    const path = join(await tempDir(), 'state.db')
-    const db = new DatabaseSync(path)
-    db.exec(`
-      CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
-      CREATE TABLE session_turn_leases (conversation_id TEXT PRIMARY KEY, holder TEXT, acquired_at REAL, expires_at REAL);
-      CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);
-      INSERT INTO sessions VALUES ('root', NULL), ('child', 'root'), ('other', NULL);
-    `)
-    return { path, db }
+describe('stale-run guard Hermes readers (HTTP, stock Hermes)', () => {
+  // Fake Hermes: GET /v1/runs/<id> answers from `runs`; an empty steer is refused 400 when an agent is
+  // attached, 409 when none is, 404 when the run is unknown (stock api_server_runs.py behaviour).
+  function hermes(runs: Record<string, { status: string, agent?: boolean }>) {
+    const calls: string[] = []
+    const fetchImpl = async (url: string, init: { method?: string } = {}) => {
+      const path = new URL(url).pathname
+      calls.push(`${init.method ?? 'GET'} ${path}`)
+      const id = decodeURIComponent(path.split('/')[3] ?? '')
+      const run = runs[id]
+      if (!run) return new Response('{"error":"run_not_found"}', { status: 404 })
+      if (path.endsWith('/steer')) return new Response('{}', { status: run.status === 'running' && run.agent ? 400 : 409 })
+      return Response.json({ object: 'hermes.run', run_id: id, status: run.status })
+    }
+    return { fetchImpl, calls }
   }
 
-  it('sees a live lease anywhere in the compression chain and ignores expired ones', async () => {
-    const { path, db } = await stateDb()
-    const now = Date.now() / 1000
-    expect(readSessionTurnHeld(path, 'child')).toBe(false)
-    db.prepare('INSERT INTO session_turn_leases VALUES (?,?,?,?)').run('root', 'h', now, now + 120)
-    expect(readSessionTurnHeld(path, 'child')).toBe(true)
-    expect(readSessionTurnHeld(path, 'root')).toBe(true)
-    expect(readSessionTurnHeld(path, 'other')).toBe(false)
-    db.prepare('UPDATE session_turn_leases SET expires_at = ?').run(now - 1)
-    expect(readSessionTurnHeld(path, 'child')).toBe(false)
-    db.close()
+  it('holds the turn while Hermes still owns the run and releases it when the run is gone or finished', async () => {
+    const { fetchImpl, calls } = hermes({
+      live: { status: 'running', agent: true }, zombie: { status: 'running', agent: false },
+      approval: { status: 'waiting_for_approval' }, done: { status: 'completed' }, cut: { status: 'interrupted' },
+    })
+    const held = (id: string) => hermesRunTurnHeld(fetchImpl as typeof fetch, 'http://hermes', 'k', id)
+    expect(await held('live')).toBe(true)
+    expect(await held('zombie')).toBe(false)
+    expect(await held('approval')).toBe(true)
+    expect(await held('done')).toBe(false)
+    expect(await held('cut')).toBe(false)
+    expect(await held('unknown')).toBe(false)
+    // Only `running` costs a steer probe; settled runs are answered from status alone.
+    expect(calls.filter((c) => c.endsWith('/steer'))).toEqual(['POST /v1/runs/live/steer', 'POST /v1/runs/zombie/steer'])
+  })
+
+  it('treats an unreadable answer as unknown so the guard leaves the run alone', async () => {
+    const fetchImpl = async () => new Response('busy', { status: 503 })
+    await expect(hermesRunTurnHeld(fetchImpl as unknown as typeof fetch, 'http://hermes', 'k', 'r')).rejects.toThrow(/unknown/)
   })
 
   it('calls an abandoned run completed only when its answer reached the thread', async () => {
-    const { path, db } = await stateDb()
-    const add = db.prepare('INSERT INTO messages VALUES (?,?,?,?)')
-    add.run('root', 'user', 'question', 10)
-    expect(readAbandonedRunOutcome(path, 'root', 10)).toBe('interrupted')
-    add.run('root', 'assistant', '', 11)
-    add.run('root', 'tool', '{}', 12)
-    expect(readAbandonedRunOutcome(path, 'root', 10)).toBe('interrupted')
-    add.run('root', 'assistant', 'Here is the answer.', 13)
-    add.run('root', 'assistant', '', 14)
-    add.run('root', 'tool', '{"fact_id": 1}', 15)
-    expect(readAbandonedRunOutcome(path, 'root', 10)).toBe('completed')
-    db.close()
+    const rows: Array<Record<string, unknown>> = []
+    const add = (role: string, content: string, timestamp: number, extra: Record<string, unknown> = {}) => rows.push({ id: rows.length + 1, role, content, timestamp, ...extra })
+    const seen: string[] = []
+    // GET /api/sessions/<id>/messages?order=latest returns the newest page in chronological order.
+    const request = async (path: string) => { seen.push(path); return { object: 'list', data: rows.slice(-50) } }
+    add('user', 'old question', 5)
+    add('assistant', 'old answer', 6)
+    add('user', 'question', 10)
+    expect(await readAbandonedRunOutcomeHttp(request, 'root', 10)).toBe('interrupted')
+    add('assistant', '', 11)
+    add('tool', '{}', 12)
+    expect(await readAbandonedRunOutcomeHttp(request, 'root', 10)).toBe('interrupted')
+    add('assistant', 'Here is the answer.', 13)
+    add('assistant', '', 14)
+    add('tool', '{"fact_id": 1}', 15)
+    add('user', '', 16, { display_kind: 'hidden' })
+    expect(await readAbandonedRunOutcomeHttp(request, 'root', 10)).toBe('completed')
+    expect(seen[0]).toBe('/api/sessions/root/messages?order=latest&limit=50')
   })
 })

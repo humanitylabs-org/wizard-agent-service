@@ -1,0 +1,42 @@
+services:
+  wizard-shell:
+    image: ${WIZARD_SHELL_IMAGE:-ghcr.io/humanitylabs-org/wizard-shell:0.2.0}
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 1g
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    environment:
+      WIZARD_HERMES_API_KEY: ${WIZARD_HERMES_API_KEY}
+      HERMES_ORIGIN: http://hermes-agent-engine:8642
+      WIZARD_STT_ORIGIN: http://transcriber:8000
+      WIZARD_HELM_ORIGIN: http://127.0.0.1:9
+      WIZARD_HERMES_STATE_PATH: /hermes/state.db
+      WIZARD_HELM_DB_PATH: ""
+      WIZARD_MEDIA_ROOT: /media
+      WIZARD_MEDIA_AGENT_ROOT: /media
+      WIZARD_APPS_JSON_PATH: /wizard-os/apps.json
+      WIZARD_APPS_MCP_ADDRESS: internal
+      WIZARD_APPS_SKILLS_INLINE: "1"
+      WIZARD_AGENT_ARTIFACT_ROOTS: /hermes/cache/images:/media
+      WIZARD_ROUTER_URL: ${WIZARD_ROUTER_URL}
+      WIZARD_ROUTER_MODEL: ${WIZARD_ROUTER_MODEL}
+      WIZARD_ROUTER_KEY: ${WIZARD_ROUTER_KEY}
+    volumes:
+      - ${APP_DATA_DIR}/data:/state
+      # Hermes's own data (hermes-agent app, same store): session history only, never written.
+      - ${APP_DATA_DIR}/../hermes-agent/data:/hermes:ro
+      # The box's user-files folder (what the Files app shows).
+      - ${ROOT_FOLDER_HOST}/media:/media
+      # The App Manager's list of installed apps (apps.json + skills/), read-only.
+      - ${ROOT_FOLDER_HOST}/app-data/wizard-os:/wizard-os:ro
+    ports:
+      - 127.0.0.1:${APP_PORT}:8787
+    x-runtipi:
+      is_main: true
+      internal_port: 8787
+x-runtipi:
+  schema_version: 2
+  overrides: []

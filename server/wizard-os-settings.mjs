@@ -6,7 +6,7 @@
 // GET /wizard/v1/bootstrap and never hardcode any of it.
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 
 export const BOOTSTRAP_VERSION = 1
 export const DEFAULT_AGENT_NAME = 'Wizard'
@@ -62,6 +62,9 @@ export function normalizeSettings(raw) {
     },
     agent: {
       name: cleanText(agent.name, 40) || DEFAULT_AGENT_NAME,
+      // 'hermes-plugin': the wizard-os Hermes plugin puts the Wizard OS kernel in the agent's system prompt, so
+      // runs carry only app changes. '' (any other harness): every run carries the full kernel.
+      adapter: agent.adapter === 'hermes-plugin' ? 'hermes-plugin' : '',
     },
     clock: {
       // Empty means "use the device's own time zone"; that is right for a person carrying a phone.
@@ -142,6 +145,10 @@ export function readApps({ appsJsonPath, launcherPath }) {
   for (const app of Array.isArray(installed?.apps) ? installed.apps : []) {
     const id = cleanText(app?.id, 64)
     if (!id || seen.has(id)) continue
+    // The shell is the thing drawing the launcher; it never gets a tile of its own.
+    if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
+    // Agents are not apps (spec/AGENTS.md): an agent's container never gets a launcher tile; it lives in Agents.
+    if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
     seen.add(id)
@@ -163,6 +170,43 @@ export function readApps({ appsJsonPath, launcherPath }) {
     })
   }
   return { schema: 1, apps: out }
+}
+
+/**
+ * The Wizard OS block every agent run gets (WORK_OUTSTANDING: "instruction injection"): the agent
+ * is inside Wizard OS, and these apps are installed, with the MCP endpoint and skill file to use.
+ * Built from apps.json on each run, so an install or uninstall takes effect on the next message.
+ * Returns '' when no app is installed, so a box without the App Manager gets a plain run.
+ */
+// mcpAddress 'internal': the agent runs in a container on the box's private network, so it reaches apps
+// by service name (apps.json mcp.internal). skillsInline: the agent cannot read this service's files, so
+// each app's skill text travels in the instructions instead of a path.
+export function wizardOsInstructions({ appsJsonPath, mcpAddress = 'url', skillsInline = false }) {
+  const installed = readJsonFile(appsJsonPath)
+  const apps = Array.isArray(installed?.apps) ? installed.apps : []
+  const home = appsJsonPath ? dirname(appsJsonPath) : ''
+  const lines = []
+  for (const app of apps.slice(0, 40)) {
+    const id = cleanText(app?.id, 64)
+    if (!id || (app.status && cleanText(app.status, 24) !== 'running')) continue
+    const parts = [`- ${cleanText(app.name, 60) || id} (\`${id}\`): ${cleanText(app.summary, 200)}`]
+    const provides = Array.isArray(app.provides) ? app.provides.map((v) => cleanText(v, 40)).filter(Boolean) : []
+    if (provides.length) parts.push(`Jobs: ${provides.join(', ')}.`)
+    const mcp = cleanText(mcpAddress === 'internal' ? (app.mcp?.internal || app.mcp?.url) : app.mcp?.url, 300)
+    if (mcp) parts.push(`MCP (${cleanText(app.mcp?.transport, 40) || 'streamable-http'}): ${mcp}.`)
+    const skill = cleanText(app.skill, 200)
+    if (skill && home && !skill.includes('..')) {
+      if (!skillsInline) parts.push(`Read its skill first: ${resolve(home, skill)}.`)
+      else {
+        let text = ''
+        try { text = readFileSync(resolve(home, skill), 'utf8').slice(0, 6000) } catch { /* skill missing */ }
+        if (text) parts.push(`Its skill:\n<skill app="${id}">\n${text.replace(/<\/skill>/giu, '')}\n</skill>`)
+      }
+    }
+    lines.push(parts.join(' '))
+  }
+  if (!lines.length) return ''
+  return `\n\nYou are an agent inside Wizard OS. These apps are installed on this box. When a request matches an app's job, use that app through its MCP endpoint and follow its skill, even if the user does not name MCP. If you save a skill for such a job, make it a short pointer to the app and its skill file, never a copy of the app's workflow.\n${lines.join('\n')}`
 }
 
 export function bootstrapPayload({ settings, settingsSource, capabilities }) {
