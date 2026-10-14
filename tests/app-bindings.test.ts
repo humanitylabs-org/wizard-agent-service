@@ -48,7 +48,7 @@ async function start(dir: string, main: { origin: string }, deliver?: (id: strin
   }
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
-    appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
+    appsJsonPath: join(dir, 'apps.json'), launcherPath: join(dir, 'launcher.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
     agentRuntime: runtime, agentDeliveryToken: 'delivery-token-0123456789abcdef', followThrough: false, agentBasePort: 47650,
   })
   servers.push(svc)
@@ -183,6 +183,28 @@ describe('app → agent binding', () => {
     const res = await deliver(base, token(dir))
     expect(res.status).toBe(503)
     expect(await res.json()).toMatchObject({ error: 'bound_agent_unavailable' })
+  })
+
+  it('binds an owner launcher link that declares agent_binding (an app run outside the App Manager)', async () => {
+    const dir = box()
+    writeFileSync(join(dir, 'launcher.json'), JSON.stringify({ links: [
+      { id: 'recorder-link', name: 'Recorder', url: '/recorder/', agent_binding: { required: true, purpose: 'Recaps' } },
+      { id: 'meeting-recorder', name: 'Shadow', url: '/x/', agent_binding: { required: false, purpose: 'ignored' } },
+      { id: 'notes', name: 'Notes', url: '/notes/' },
+    ] }))
+    const main = await fakeHermes('main')
+    const { base, deliveries } = await start(dir, main)
+    const list = await (await fetch(`${base}/wizard/v1/app-bindings`)).json()
+    expect(list.bindings.map((b: any) => [b.app_id, b.label, b.purpose])).toEqual([
+      ['meeting-recorder', 'Meeting Recorder', 'Where your recording recaps go'], ['recorder-link', 'Recorder', 'Recaps']])
+    expect((await fetch(`${base}/wizard/v1/apps/notes/binding`)).status).toBe(409)
+    const priv = await fakeHermes('private')
+    const id = await withPrivate(dir, base, priv.port)
+    const set = await (await fetch(`${base}/wizard/v1/apps/recorder-link/binding`, send('PUT', { agent: id }))).json()
+    expect(set.binding).toMatchObject({ app_id: 'recorder-link', agent: id, is_default: false })
+    const res = await deliver(base, token(dir, 'recorder-link'), RECAP, 'recorder-link')
+    expect(res.status).toBe(200)
+    expect(deliveries.at(-1)?.id).toBe(id)
   })
 
   it('reads the wizard.md declaration shapes', () => {
