@@ -25,6 +25,7 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
+import { createBackgroundResults } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
@@ -2039,13 +2040,13 @@ export function createWizardServer(options = {}) {
     renameSync(temporary, operatorWorkerStatePath)
   }
 
-  const hermesJson = async (path, init = {}) => {
+  const hermesJson = async (path, init = {}, preserveStatus = false) => {
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${hermesKey}`)
     if (init.body) headers.set('Content-Type', 'application/json')
     const result = await fetchImpl(`${upstreamOrigin}${path}`, { ...init, headers, redirect: 'manual' })
     const raw = Buffer.from(await result.arrayBuffer())
-    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: 502 })
+    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: preserveStatus ? result.status : 502 })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
@@ -2438,10 +2439,12 @@ export function createWizardServer(options = {}) {
 
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
+  let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
     const queueHermesAdmission = async (record) => {
       let queuedBody = Buffer.from(record.body, 'utf8')
+      if (backgroundResults) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
       let pendingWorker = null
       if (record.runtime === 'operator') {
         const value = parseJsonBody(queuedBody)
@@ -2544,6 +2547,13 @@ export function createWizardServer(options = {}) {
     })
     runQueueReady = runQueue.initialize()
   }
+
+  if (runQueue) backgroundResults = createBackgroundResults({
+    request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
+    now: options.backgroundResultsNow ?? Date.now,
+    refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
+    busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
+  })
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
@@ -2929,6 +2939,29 @@ export function createWizardServer(options = {}) {
         const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:admitHelperContinuation});
         sendJson(response,outcome.status,outcome.body); return
       }
+      if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!backgroundResults) { sendJson(response, 200, { results: [], sessions: [], scan_complete: true }); return }
+        sendJson(response, 200, await backgroundResults.list())
+        return
+      }
+      const backgroundContinue = url.pathname.match(/^\/wizard\/background-results\/(bg_[0-9a-f]{32})\/continue$/)
+      if (backgroundContinue && request.method === 'POST') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let host
+          try { host = new URL(request.headers.origin).host } catch { host = '' }
+          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        if (!backgroundResults) throw Object.assign(new Error('durable admission unavailable'), { status: 503 })
+        const input = parseJsonBody(await readBoundedBody(request, 1024))
+        if (Object.keys(input).some(k => k !== 'session_id') || typeof input.session_id !== 'string') throw Object.assign(new Error('invalid recovery request'), { status: 400 })
+        const admission = await backgroundResults.continue(backgroundContinue[1], input.session_id)
+        sendQueuedRun(response, 202, admission.record, { 'Idempotency-Replayed': String(admission.replayed) })
+        return
+      }
+
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)
@@ -3543,6 +3576,7 @@ export function createWizardServer(options = {}) {
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
+          if (Object.hasOwn(requested, '_wizard_background_recovery')) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'
           const substantive = !operator || !isInlineOperatorRequest(requested.input)
@@ -3797,6 +3831,10 @@ export function createWizardServer(options = {}) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
+          if (backgroundResults) {
+            try { result = await backgroundResults.project(result) }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          }
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
           result = decorateSessionTitles(result, operator)
