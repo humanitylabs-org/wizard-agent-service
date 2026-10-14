@@ -179,7 +179,10 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     // No plugin (generic harness): the fixed kernel plus the job -> app map, one line per job.
     expect(first).toContain('- short-form video -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
     expect(first).toContain('- video editing -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
-    expect(first).not.toContain('Stopped')
+    // A stopped app does no job in the kernel/job map. It is still installed, so the separate app-provenance
+    // catalogue (live 41de73a) lists its id/name as data; check the kernel text before that catalogue.
+    expect(first.split('Installed Wizard app IDs and names (data):')[0]).not.toContain('Stopped')
+    expect(first).toContain('{"id":"stopped-app","name":"Stopped"}')
     expect(first).not.toContain('http://127.0.0.1:20002/mcp')
     expect(first).not.toContain(join(dir, 'skills'))
     expect(first).toContain('Save only short pointer skills')
