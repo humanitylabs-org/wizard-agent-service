@@ -1880,7 +1880,7 @@ export function createWizardServer(options = {}) {
   if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
   // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
-    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath })
+    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
     : null
   const agentCtx = agents ? {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,

@@ -45,16 +45,23 @@ export function appThreadId(appId, thread) {
   return `wizard_app_${appId.replace(/[^A-Za-z0-9-]/gu, '-')}_${createHash('sha256').update(`${appId}\n${thread}`).digest('hex').slice(0, 20)}`
 }
 
-export function createAppBindings({ osHome, registry, appsJsonPath, now = () => Date.now() }) {
+export function createAppBindings({ osHome, registry, appsJsonPath, launcherPath = '', now = () => Date.now() }) {
   const home = resolve(String(osHome))
   const bindingsPath = join(home, 'app-bindings.json')
   const tokensDir = join(home, 'app-tokens')
 
-  /** Installed apps that declare an agent binding: [{id, label, required, purpose}]. */
+  /** Owner links from launcher.json (spec/AGENT_SERVICE_API.md "launcher list"): an app that runs outside the App
+   * Manager can declare `agent_binding` on its link. App Manager entries win on an id collision. */
+  const launcherLinks = () => {
+    const links = launcherPath ? readJson(launcherPath)?.links : null
+    return Array.isArray(links) ? links : []
+  }
+
+  /** Installed apps (apps.json, then launcher links) that declare an agent binding: [{id, label, required, purpose}]. */
   function bindingApps() {
     const apps = readJson(appsJsonPath)?.apps
     const out = []
-    for (const app of Array.isArray(apps) ? apps : []) {
+    for (const app of [...(Array.isArray(apps) ? apps : []), ...launcherLinks()]) {
       const id = typeof app?.id === 'string' ? app.id : ''
       if (!APP_ID_RE.test(id) || out.some((item) => item.id === id)) continue
       const declared = bindingDeclaration(app)
@@ -78,7 +85,7 @@ export function createAppBindings({ osHome, registry, appsJsonPath, now = () => 
     if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) fail(404, 'app_not_found', 'app.id')
     const app = bindingApps().find((item) => item.id === appId)
     if (!app) {
-      const installed = (readJson(appsJsonPath)?.apps ?? []).some?.((item) => item?.id === appId)
+      const installed = [...(readJson(appsJsonPath)?.apps ?? []), ...launcherLinks()].some?.((item) => item?.id === appId)
       fail(installed ? 409 : 404, installed ? 'binding_not_declared' : 'app_not_found', installed ? 'app.agent_binding' : 'app.id')
     }
     return app
