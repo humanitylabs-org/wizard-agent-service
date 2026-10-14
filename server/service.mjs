@@ -330,6 +330,21 @@ export function wizardDispatchHealthy({ cpuCount = cpus().length, oneMinuteLoad 
   return oneMinuteLoad < Math.max(2, cpuCount * 1.5) && cpuPressure < 60
 }
 
+// A new turn in an archived thread must surface its result (James, 14 Oct 2026: replies
+// and follow-ups landed straight in Archive, unseen). Read the one flag we need.
+export function readSessionArchived(sessionDbPath, sessionId) {
+  if (!sessionDbPath || !sessionId || !existsSync(sessionDbPath)) return false
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    const row = database.prepare('SELECT archived FROM sessions WHERE id = ?').get(sessionId)
+    return Boolean(row?.archived)
+  } catch {
+    return false
+  } finally {
+    database.close()
+  }
+}
+
 export function readArchivedSessions(sessionDbPath) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
@@ -2016,6 +2031,7 @@ export function createWizardServer(options = {}) {
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
   // "Agent adapter" keeps the list.
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
+  const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (!options.canonicalSessionListing ? null
       : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => readCanonicalSessions(hermesStatePath, helmDbPath)
@@ -2481,6 +2497,36 @@ export function createWizardServer(options = {}) {
   let runQueue = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
+    // Every admitted turn (typed or voice reply, share, follow-through) brings an archived
+    // thread back: it shows in Working and its result lands in Ready, never silently in Archive.
+    // Best effort: a failed un-archive must never fail the run itself.
+    const unarchiveForNewTurn = async (sessionId) => {
+      try {
+        if (!sessionId) return
+        const archived = sessionArchivedReader
+          ? sessionArchivedReader(sessionId)
+          : (await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`))?.session?.archived === true
+        if (!archived) return
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 5_000)
+        try {
+          const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+            method: 'PATCH',
+            headers: { Authorization: ['Bearer', hermesKey].join(' '), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ archived: false }),
+            signal: controller.signal,
+            redirect: 'manual',
+          })
+          await result.body?.cancel().catch(() => undefined)
+          if (result.ok) {
+            canonicalSessionCache.expiresAt = 0
+            console.log(`[threads] new turn re-opened archived thread ${sessionId}`)
+          }
+        } finally {
+          clearTimeout(timer)
+        }
+      } catch { /* the run proceeds; Restore stays available */ }
+    }
     const queueHermesAdmission = async (record) => {
       let queuedBody = Buffer.from(record.body, 'utf8')
       let pendingWorker = null
@@ -2514,6 +2560,7 @@ export function createWizardServer(options = {}) {
         operatorWorkers.set(upstreamRunId, { ...pendingWorker, ackRunId: upstreamRunId })
         persistOperatorWorkers()
       }
+      await unarchiveForNewTurn(record.sessionId)
       return {
         upstreamRunId,
         workerRunId: pendingWorker?.workerRunId ?? '',
