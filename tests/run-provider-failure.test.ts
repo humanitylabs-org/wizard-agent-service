@@ -50,3 +50,22 @@ it('startup repairs historical receipts once without replaying or changing their
   expect(q.latestProjections(['wizard_saved'])[0].status).toBe('failed')
   expect(launches).toBe(1)
 })
+
+it.each(['launch', 'lookup'])('preserves independent Operator worker capacity after %s acknowledgement failure', async (phase) => {
+  let lookups = 0
+  const q = await make(async () => ({ upstreamRunId: 'run_operator_ack', workerRunId: 'run_operator_worker', capacityStatus: 'running', payload: phase === 'launch' ? failure() : { status: 'running' } }),
+    async () => { lookups++; return { capacityStatus: 'running', workerRunId: 'run_operator_worker', payload: failure() } })
+  const first = await q.admit({ ...request(), runtime: 'operator' })
+  await q.tick(true)
+  expect(q.get(first.record!.publicRunId)).toMatchObject({ status: 'running', workerRunId: 'run_operator_worker' })
+  expect((await q.summary()).active).toBe(1)
+  const previous = lookups; await q.tick(true); expect(lookups).toBeGreaterThan(previous)
+})
+
+it('leaves historical Operator acknowledgement receipts outside direct-run repair', async () => {
+  const q = await make(async () => ({ upstreamRunId: 'run_operator_old', payload: { status: 'completed', output: 'worker done' } }), async () => { throw new Error('no lookup') })
+  const first = await q.admit({ ...request(), runtime: 'operator' })
+  q._update(first.record!.publicRunId, { status: 'completed', payload: failure(), updatedAt: 123 })
+  await q.initialize()
+  expect(q.get(first.record!.publicRunId)).toMatchObject({ status: 'completed', updatedAt: 123 })
+})

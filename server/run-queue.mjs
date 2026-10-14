@@ -118,7 +118,7 @@ export class DurableRunQueue {
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
     // Normalize older terminal receipts without replaying or changing saved requests.
-    for (const record of this._rows("status = 'completed' AND payload_json LIKE '%Provider authentication failed:%'")) {
+    for (const record of this._rows("status = 'completed' AND runtime = 'direct' AND payload_json LIKE '%Provider authentication failed:%'")) {
       const payload = normalizeProviderPreflightFailure(record.payload)
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
@@ -438,7 +438,7 @@ export class DurableRunQueue {
     if (!force && nowSeconds() - record.updatedAt < 0.7) return record
     try {
       const result = await this.lookup(record)
-      const payload = normalizeProviderPreflightFailure(result?.payload)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
       if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
       return this._update(record.publicRunId, {
@@ -459,7 +459,7 @@ export class DurableRunQueue {
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
-      const payload = normalizeProviderPreflightFailure(result?.payload)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
       if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const status = safeStatus(result?.capacityStatus ?? result?.status ?? result?.payload?.status)
       current = this._update(record.publicRunId, {
