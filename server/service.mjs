@@ -38,6 +38,7 @@ import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderD
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
+import { createShareAgentRouting } from './share-agents.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -3031,6 +3032,8 @@ export function createWizardServer(options = {}) {
     file: async (dropId) => safeFile((await inboxJson(`/v1/internal/files/${encodeURIComponent(dropId)}`)).file),
     cancel: async (remoteId) => { const result = await inboxRequest(`/v1/drop/uploads/${remoteId}`, { method: 'DELETE' }); await result.body?.cancel().catch(() => undefined) },
   } : null
+  // With an agents registry, shares route per agent and a non-main agent's files stay in its own home.
+  const shareRouting = agents ? createShareAgentRouting({ registry: agents, homeMount: options.agentHomeMount, mainThreadExists: (threadId, routed) => mainShareThreadExists(threadId, routed) }) : null
   const uploadStagingDir = mediaFiles ? mediaFiles.stagingDir : options.uploadStagingDir ? resolve(String(options.uploadStagingDir)) : ''
   // Where a finished upload goes. 'files' is Wizard Files; options.uploadTargets adds more (an agent's
   // own home inbox when an agents registry is present).
@@ -3054,7 +3057,7 @@ export function createWizardServer(options = {}) {
         recover: async (id) => userFiles.placed(id),
       }
     }
-    return options.uploadTargets?.(key) ?? null
+    return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
   const deliveryCall = async (path, body, idempotencyKey = '') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
@@ -3070,11 +3073,11 @@ export function createWizardServer(options = {}) {
   }
   // Which agent a share goes to, and where its files are stored. Without an agents registry only the
   // main agent exists; options.resolveShareAgent replaces this when one is present.
-  const resolveShareAgent = options.resolveShareAgent ?? (async (agentId) => {
+  const resolveShareAgent = options.resolveShareAgent ?? shareRouting?.resolveShareAgent ?? (async (agentId) => {
     if (agentId && agentId !== MAIN_SHARE_AGENT) throw new UploadError(409, 'agent_unavailable', { agent: agentId })
     return { agent: MAIN_SHARE_AGENT, agent_label: '', target: 'files', query: '' }
   })
-  const shareThreadExists = options.shareThreadExists ?? (async (threadId, routed) => {
+  const mainShareThreadExists = async (threadId, routed) => {
     if (routed.agent !== MAIN_SHARE_AGENT) return true
     const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(threadId)}`, {
       headers: hermesKey ? { Authorization: ['Bearer', hermesKey].join(' ') } : {}, redirect: 'manual', signal: AbortSignal.timeout(5_000),
@@ -3083,7 +3086,8 @@ export function createWizardServer(options = {}) {
     if (result.status === 404) return false
     if (!result.ok) throw Object.assign(new Error('thread check failed'), { status: 503 })
     return true
-  })
+  }
+  const shareThreadExists = options.shareThreadExists ?? (shareRouting ? shareRouting.threadExists : mainShareThreadExists)
   // One user-authored message with every file attached, then the run: the same calls a Wizard client
   // makes for a new chat (POST sessions, 409 = already made) and a send (POST runs + Idempotency-Key).
   // The key is the share id, so a re-driven delivery replays the admitted run instead of posting twice.
