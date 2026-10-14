@@ -72,7 +72,9 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'main-key-0123456789', requireAccess: false, agentBridge: false,
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
-    agentRuntime: runtime, agentDeliveryToken: 'delivery-token-0123456789abcdef', followThrough: false, ...extra,
+    agentRuntime: runtime, agentDeliveryToken: 'delivery-token-0123456789abcdef', followThrough: false,
+    // Away from the default 18650, which a real agent on the test machine may hold.
+    agentBasePort: 47650, ...extra,
   })
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
@@ -121,7 +123,7 @@ describe('agents registry and API', () => {
     expect(calls).toEqual(['apply private'])
     const folder = join(dir, 'agents', 'private')
     const stored = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
-    expect(stored).toMatchObject({ schema: 1, id: 'private', runtime: { kind: 'container', app_id: 'agent-private', api: 'http://agent-private:8642', port: 18650 } })
+    expect(stored).toMatchObject({ schema: 1, id: 'private', runtime: { kind: 'container', app_id: 'agent-private', api: 'http://agent-private:8642', port: 47650 } })
     const key = readFileSync(join(folder, 'runtime.key'), 'utf8').trim()
     expect(key.length).toBeGreaterThan(30)
     const env = readFileSync(join(folder, 'home', '.env'), 'utf8')

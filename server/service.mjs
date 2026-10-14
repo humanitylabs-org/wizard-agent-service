@@ -28,7 +28,8 @@ import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAb
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
-import { decorateThreadAgent, handleAgentsApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { createAppBindings } from './app-bindings.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -1868,8 +1869,12 @@ export function createWizardServer(options = {}) {
       } catch { return { status: 'error', status_detail: 'not_responding' } }
     },
   }) : null
+  // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
+  const appBindings = agents && bridgeOsHome && options.appBindings !== false
+    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath })
+    : null
   const agentCtx = agents ? {
-    registry: agents, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
@@ -2846,6 +2851,9 @@ export function createWizardServer(options = {}) {
       }
       if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents'))) {
         if (await handleAgentsApi(agentCtx, url, request, response)) return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
+        if (await handleAppBindingApi(agentCtx, url, request, response)) return
       }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }

@@ -8,7 +8,9 @@ Agent Service never gets the Docker socket.
     POST /agents/<id>/apply    package + install (first time) or restart with the current config
     POST /agents/<id>/start    start the agent's container
     POST /agents/<id>/stop     stop it
-    POST /agents/<id>/deliver  assistant-only message into the agent's own session store (recording recaps)
+    POST /agents/<id>/deliver  assistant-only message into the agent's own session store (app deliveries such as
+                               recording recaps). `hermes` (the main agent) works when --main-container names the
+                               main Hermes container.
     GET  /healthz
 
 Drivers:
@@ -383,7 +385,7 @@ finally:
 '''
 
 
-def deliver(driver, agent: dict, payload: dict) -> dict:
+def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     need = {"session_id": str, "delivery_key": str, "body": str, "title": str}
     for name, kind in need.items():
         if not isinstance(payload.get(name), kind) or not payload[name]:
@@ -393,7 +395,7 @@ def deliver(driver, agent: dict, payload: dict) -> dict:
     meta = payload.get("display_metadata") if isinstance(payload.get("display_metadata"), dict) else {}
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
-    cid = container_for(driver.project(agent["id"]), service_names(agent)[0])
+    cid = container or container_for(driver.project(agent["id"]), service_names(agent)[0])
     run = docker(["exec", "-i", "-u", "hermes", cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -404,7 +406,7 @@ def deliver(driver, agent: dict, payload: dict) -> dict:
 
 # ---------------------------------------------------------------- HTTP
 
-def make_handler(token: str, agents: Agents, driver):
+def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
 
@@ -445,6 +447,12 @@ def make_handler(token: str, agents: Agents, driver):
                 return
             agent_id, action = m.groups()
             try:
+                if agent_id == "hermes" and action == "deliver":
+                    # The main agent is not an agent folder; it is delivered to only when the box names its container.
+                    if not main_container:
+                        raise RuntimeFailure("main_delivery_unavailable", 503)
+                    self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
+                    return
                 agent = agents.read(agent_id)
                 if action == "deliver":
                     self._json(200, deliver(driver, agent, payload))
@@ -472,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tinfoil-key-file", type=Path)
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
+    ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:
@@ -483,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
         driver = RuntipiDriver(agents, args.image, args.proxy_image, args.wam, args.home_mount)
     else:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
     return 0

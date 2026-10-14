@@ -309,9 +309,9 @@ export function createAgentRegistry(options = {}) {
     return `http://${upstreamHost}:${agent.runtime.port}`
   }
 
-  async function probe(agent) {
+  async function probe(agent, { fresh = false } = {}) {
     const cached = statusCache.get(agent.id)
-    if (cached && now() - cached.at < 3000) return cached.value
+    if (!fresh && cached && now() - cached.at < 3000) return cached.value
     const state = serviceState(agent.id)
     let value
     let healthy = false
@@ -329,9 +329,9 @@ export function createAgentRegistry(options = {}) {
     return value
   }
 
-  async function status(agent) {
+  async function status(agent, { fresh = false } = {}) {
     if (agent.id === MAIN_AGENT_ID) return options.mainStatus ? await options.mainStatus() : { status: 'running', status_detail: '' }
-    return probe(agent)
+    return probe(agent, { fresh })
   }
 
   async function providers() {

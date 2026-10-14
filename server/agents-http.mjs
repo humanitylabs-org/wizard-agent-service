@@ -1,6 +1,7 @@
 // HTTP side of the Agents MVP (wizard-os spec/AGENTS.md section 3):
 //   /wizard/v1/agents, /wizard/v1/agents/<id>, /wizard/v1/agents/<id>/start|stop, /wizard/v1/agent-options
 //   /wizard/v1/agents/<id>/deliveries  (internal: assistant-only recap delivery, bearer token)
+//   /wizard/v1/apps/<app_id>/binding, /wizard/v1/app-bindings, /wizard/v1/apps/<app_id>/deliveries (app → agent binding)
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -51,6 +52,7 @@ export function decorateThreadAgent(result, agentInfo) {
  */
 export async function handleAgentsApi(ctx, url, request, response) {
   const { registry, sendJson } = ctx
+  const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [] })
   const isOptions = url.pathname === '/wizard/v1/agent-options'
   const match = isOptions ? null : url.pathname.match(AGENT_ROUTE)
   if (!isOptions && !match) {
@@ -78,12 +80,12 @@ export async function handleAgentsApi(ctx, url, request, response) {
   try {
     if (isOptions) {
       if (method !== 'GET') throw new AgentError(405, 'method_not_allowed', 'agent.route')
-      sendJson(response, 200, await registry.agentOptions())
+      sendJson(response, 200, { ...await registry.agentOptions(), binding_apps: ctx.bindings ? ctx.bindings.list() : [] })
       return true
     }
     if (!id) {
       if (method === 'GET') {
-        const agents = await Promise.all(registry.list().map((agent) => registry.publicAgent(agent)))
+        const agents = await Promise.all(registry.list().map((agent) => publicAgent(agent)))
         sendJson(response, 200, { agents })
         return true
       }
@@ -91,7 +93,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
         const body = await readJson(ctx, request)
         const idempotencyKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
         const created = await registry.create(body, { idempotencyKey })
-        sendJson(response, created.replayed ? 200 : 201, { agent: await registry.publicAgent(created.agent) }, created.replayed ? { 'Idempotency-Replayed': 'true' } : {})
+        sendJson(response, created.replayed ? 200 : 201, { agent: await publicAgent(created.agent) }, created.replayed ? { 'Idempotency-Replayed': 'true' } : {})
         return true
       }
       throw new AgentError(405, 'method_not_allowed', 'agent.route')
@@ -100,22 +102,90 @@ export async function handleAgentsApi(ctx, url, request, response) {
       if (method !== 'POST') throw new AgentError(405, 'method_not_allowed', 'agent.route')
       requireJsonOrEmpty(request)
       const agent = await registry.setRunning(id, action === 'start')
-      sendJson(response, 202, { agent: await registry.publicAgent(agent) })
+      sendJson(response, 202, { agent: await publicAgent(agent) })
       return true
     }
     if (method === 'GET') {
       const agent = registry.read(id)
       if (!agent) throw new AgentError(404, 'agent_not_found', 'agent.id')
-      sendJson(response, 200, { agent: await registry.publicAgent(agent) })
+      sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
     }
     if (method === 'PATCH') {
       const body = await readJson(ctx, request)
       const agent = await registry.update(id, body)
-      sendJson(response, 200, { agent: await registry.publicAgent(agent) })
+      sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
     }
     throw new AgentError(405, 'method_not_allowed', 'agent.route')
+  } catch (error) { sendAgentError(ctx, response, error) }
+  return true
+}
+
+const APP_ROUTE = /^\/wizard\/v1\/apps\/([a-z0-9][a-z0-9._-]{0,63})\/(binding|deliveries)$/u
+// Delivery failures that mean "the bound agent is not there right now": fail loudly, never reroute.
+const UNAVAILABLE = new Set(['agent_not_running', 'runtime_unreachable', 'agent_unavailable', 'docker_failed', 'runtime_unavailable'])
+
+/**
+ * App → agent binding (spec/AGENTS.md "App → agent binding"). Returns true when the request was answered.
+ *   GET  /wizard/v1/app-bindings                → {bindings:[Binding]}            (owner)
+ *   GET  /wizard/v1/apps/<app_id>/binding       → {binding}                      (owner)
+ *   PUT  /wizard/v1/apps/<app_id>/binding       {agent} → {binding}              (owner)
+ *   POST /wizard/v1/apps/<app_id>/deliveries    {delivery_key,title,body,thread?,metadata?}  (app token)
+ */
+export async function handleAppBindingApi(ctx, url, request, response) {
+  const { registry, bindings, sendJson } = ctx
+  if (!bindings) return false
+  const method = request.method ?? 'GET'
+  const isList = url.pathname === '/wizard/v1/app-bindings'
+  const match = isList ? null : url.pathname.match(APP_ROUTE)
+  if (!isList && !match) return false
+  const [, appId, action] = match ?? []
+  if (action === 'deliveries') {
+    if (method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed', check: 'app.route' }); return true }
+    const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
+    if (!bindings.tokenOk(appId, bearer)) { sendJson(response, 403, { error: 'app_token_required', check: 'app.delivery_token' }); return true }
+    try {
+      const body = await readJson(ctx, request)
+      bindings.get(appId)   // the app must still be installed and declare a binding
+      const payload = bindings.deliveryPayload(appId, body)
+      const agentId = bindings.agentFor(appId)
+      const agent = registry.read(agentId)
+      if (!agent) throw new AgentError(409, 'bound_agent_missing', 'app.binding.agent', `bound to ${agentId}`)
+      if (agentId !== MAIN_AGENT_ID) {
+        const state = await registry.status(agent, { fresh: true })   // never deliver on a stale 'running'
+        if (state.status !== 'running') throw new AgentError(503, 'bound_agent_unavailable', 'app.binding.agent_running', `${agentId} is ${state.status}`)
+      }
+      let receipt
+      try { receipt = await ctx.deliver(agent, payload) } catch (error) {
+        const code = error instanceof AgentError ? error.error : ''
+        if (UNAVAILABLE.has(code)) throw new AgentError(503, 'bound_agent_unavailable', 'app.binding.agent_running', `${agentId}: ${code}`)
+        throw error
+      }
+      if (receipt?.verified !== true) throw new AgentError(502, 'delivery_not_verified', 'agent.delivery')
+      registry.pin(payload.session_id, agent.id)
+      if (typeof receipt.session_id === 'string' && receipt.session_id !== payload.session_id) registry.pin(receipt.session_id, agent.id)
+      sendJson(response, 200, {
+        verified: true, already_delivered: receipt.already_delivered === true, session_id: receipt.session_id ?? payload.session_id,
+        agent: registry.threadAgent(agent),
+      })
+    } catch (error) { sendAgentError(ctx, response, error) }
+    return true
+  }
+  if (!await ctx.accessOk(request)) { sendJson(response, 403, { error: 'access_required' }); return true }
+  try {
+    if (isList) {
+      if (method !== 'GET') throw new AgentError(405, 'method_not_allowed', 'app.route')
+      sendJson(response, 200, { bindings: bindings.list() })
+      return true
+    }
+    if (method === 'GET') { sendJson(response, 200, { binding: bindings.get(appId) }); return true }
+    if (method === 'PUT') {
+      const body = await readJson(ctx, request)
+      sendJson(response, 200, { binding: bindings.set(appId, body) })
+      return true
+    }
+    throw new AgentError(405, 'method_not_allowed', 'app.route')
   } catch (error) { sendAgentError(ctx, response, error) }
   return true
 }
