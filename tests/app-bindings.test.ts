@@ -47,7 +47,7 @@ async function start(dir: string, main: { origin: string }, deliver?: (id: strin
     },
   }
   const svc = createWizardServer({
-    upstreamOrigin: main.origin, hermesKey: 'main-key-0123456789', requireAccess: false, agentBridge: false,
+    upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
     agentRuntime: runtime, agentDeliveryToken: 'delivery-token-0123456789abcdef', followThrough: false, agentBasePort: 47650,
   })

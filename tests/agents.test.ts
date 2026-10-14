@@ -70,7 +70,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
   }
   const svc = createWizardServer({
-    upstreamOrigin: main.origin, hermesKey: 'main-key-0123456789', requireAccess: false, agentBridge: false,
+    upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
     agentRuntime: runtime, agentDeliveryToken: 'delivery-token-0123456789abcdef', followThrough: false,
     // Away from the default 18650, which a real agent on the test machine may hold.
