@@ -111,6 +111,10 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     // here: it is linked into Inbox/<date>/<name> (never overwriting) and indexed, without reading it
     // into memory. `key` makes a retried hand-over return the file it already indexed.
     stagingDir: join(root, '.wizard-uploads'),
+    adopted(key) {
+      const record = key ? load().find((item) => item.upload_key === key) : null
+      return record && existsSync(resolve(root, relOf(record))) ? publicRecord(record) : null
+    },
     adopt(sourcePath, { filename, mime, bytes, sha256, key = '' }) {
       const files = load()
       const existing = key ? files.find((item) => item.upload_key === key) : null
