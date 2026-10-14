@@ -74,7 +74,9 @@ describe('when a title changes', () => {
 
   it('tells each run what the thread is called', () => {
     expect(titleContextLine('DeFleur · Captions', {})).toContain('“DeFleur · Captions”')
-    expect(titleContextLine('Captions', { locked: true })).toContain('James named it himself')
+    const locked = titleContextLine('Captions', { locked: true })
+    expect(locked).toContain('“Captions”, and that title is fixed')
+    expect(locked).not.toMatch(/James|himself|herself/u)
   })
 })
 
