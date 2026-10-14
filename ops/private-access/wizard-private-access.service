@@ -1,0 +1,35 @@
+[Unit]
+Description=Wizard private access helper (Tailscale for "Connect your phone")
+Documentation=https://github.com/humanitylabs-org/wizard-agent-service/tree/main/ops/private-access
+# tailscaled is started on demand by the helper (POST /v1/start); it is not required at boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/wizard-private-access/wizard-private-access
+Restart=on-failure
+RestartSec=2
+# The socket directory: /run/wizard-private-access (0750, group from socket_group in the config).
+RuntimeDirectory=wizard-private-access
+RuntimeDirectoryMode=0750
+# Keep the directory across restarts so a container bind mount of it stays valid.
+RuntimeDirectoryPreserve=yes
+UMask=0117
+# Root is needed only to run the tailscale CLI (tailscaled's LocalAPI is root/operator-only) and systemctl.
+User=root
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,11 @@
 //   - the asserted user is the box owner (one login, or a short comma list);
 //   - writes are same-origin, and cross-site requests are refused except opening the app itself.
 // Never put Funnel or another header-forwarding proxy in front of this service.
+//
+// The origin and owner login(s) come from the environment (WIZARD_TAILNET_ORIGIN + WIZARD_TAILNET_LOGIN) or,
+// when neither is set, from Wizard OS settings access.tailscale, read on every request: "Connect your phone"
+// (phone-setup.mjs) writes them when the box starts serving, so phone access turns on without a restart.
+// Until both are known every request through this verifier is refused.
 
 import { readFileSync } from 'node:fs'
 
@@ -70,5 +75,47 @@ export function createTailnetAccessVerifier({ origin = '', logins = '', proxyPee
   }
   // The service passes request-based verifiers the whole request (Cloudflare Access verifiers get the JWT).
   verify.fromRequest = true
+  return verify
+}
+
+/**
+ * A Tailscale Serve verifier for Wizard OS. When the environment names the tailnet (WIZARD_TAILNET_ORIGIN and
+ * WIZARD_TAILNET_LOGIN), it is exactly the PR15 verifier and a partial or invalid pair fails startup. With
+ * neither set, origin and owner login(s) come from `settings()` (Wizard OS settings access.tailscale =
+ * { origin, owner_logins }), read on every request; until both are present every request is refused.
+ * `onVerified(request, claims)` runs after an accepted request (phone-seen detection); it never affects access.
+ * @param {{ origin?: string, logins?: string, settings?: () => ({ origin?: string, owner_logins?: string[] } | null | undefined),
+ *           proxyPeers?: string[], appPaths?: string[], onVerified?: (request: any, claims: any) => void }} [options]
+ */
+export function createSettingsTailnetVerifier({ origin = '', logins = '', settings = () => null, proxyPeers = LOOPBACK, appPaths, onVerified } = {}) {
+  const envOrigin = String(origin || '').trim()
+  const envLogins = String(logins || '').trim()
+  if (!proxyPeers.map(plainPeer).filter(Boolean).length) throw new Error('At least one trusted Tailscale Serve proxy peer is required')
+  const fixed = envOrigin || envLogins ? createTailnetAccessVerifier({ origin: envOrigin, logins: envLogins, proxyPeers, appPaths }) : null
+  let cached = { key: '', verify: null }
+  const current = () => {
+    if (fixed) return fixed
+    let saved = null
+    try { saved = settings() } catch { saved = null }
+    const o = typeof saved?.origin === 'string' ? saved.origin : ''
+    const l = Array.isArray(saved?.owner_logins) ? saved.owner_logins.filter((v) => typeof v === 'string').join(',') : ''
+    if (!o || !l) return null
+    const key = `${o}\n${l}`
+    if (cached.key !== key) {
+      try { cached = { key, verify: createTailnetAccessVerifier({ origin: o, logins: l, proxyPeers, appPaths }) } }
+      catch { cached = { key, verify: null } }
+    }
+    return cached.verify
+  }
+  const verify = async (request) => {
+    const inner = current()
+    if (!inner) throw new Error('Tailnet access is not set up on this box')
+    const claims = await inner(request)
+    if (onVerified) { try { onVerified(request, claims) } catch { /* observers never block access */ } }
+    return claims
+  }
+  verify.fromRequest = true
+  verify.configured = () => Boolean(current())
+  verify.pinned = Boolean(fixed)  // the environment, not settings, decides who may enter
   return verify
 }

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { request, createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
@@ -44,6 +44,7 @@ async function start(env: Record<string, string> = {}, failure = false) {
   let output = ''
   child.stdout!.on('data', b => { output += b }); child.stderr!.on('data', b => { output += b })
   await expect.poll(() => output.includes('Wizard listening') || child.exitCode !== null, { timeout: 5000 }).toBe(true)
+  if (env.WIZARD_TAILNET_PORT && !failure) await expect.poll(() => output.includes('Wizard tailnet listener'), { timeout: 5000 }).toBe(true)
   if (failure) {
     expect(output).not.toContain('Wizard listening')
     expect(child.exitCode).not.toBe(0)
@@ -91,8 +92,10 @@ it.each(['explicit', 'origin-opt-in'])('enforces Tailscale through the real entr
   expect(allowed.body).toContain('router_not_configured')
 })
 it.each([
-  { WIZARD_AUTH_MODE: 'invalid' }, { WIZARD_AUTH_MODE: 'tailscale' },
+  { WIZARD_AUTH_MODE: 'invalid' },
   { WIZARD_AUTH_MODE: 'tailscale', WIZARD_TAILNET_ORIGIN: origin },
+  { WIZARD_AUTH_MODE: 'tailscale', WIZARD_TAILNET_LOGIN: login },
+  { WIZARD_TAILNET_PORT: 'abc' }, { WIZARD_TAILNET_PORT: '0' },
   { WIZARD_AUTH_MODE: 'tailscale', WIZARD_TAILNET_ORIGIN: 'http://fixture.tail1234.ts.net', WIZARD_TAILNET_LOGIN: login },
 ])('fails startup closed for invalid auth configuration: %j', async env => {
   await start(env, true)
@@ -116,4 +119,58 @@ it('preserves the authenticated box-only MCP route but never exposes it through 
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } })
   expect((await call(address.port, '/wizard/mcp', headers, 'POST', body)).status).toBe(200)
   expect((await call(address.port, '/wizard/mcp', { ...headers, ...owner }, 'POST', body)).status).toBe(403)
+})
+
+async function freePort() {
+  const probe = createServer()
+  await new Promise<void>(done => probe.listen(0, '127.0.0.1', done))
+  const port = (probe.address() as any).port
+  await new Promise<void>(done => probe.close(() => done()))
+  return port
+}
+it('tailscale mode without env names reads settings per request and refuses until enrollment', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'auth-settings-')); dirs.push(dir)
+  const settings = join(dir, 'settings.json')
+  const { port } = await start({ WIZARD_AUTH_MODE: 'tailscale', WIZARD_SETTINGS_PATH: settings, WIZARD_PRIVATE_ACCESS_SOCKET: join(dir, 'none.sock') })
+  expect((await call(port, '/wizard/v1/apps', owner)).status).toBe(403)
+  writeFileSync(settings, JSON.stringify({ access: { tailscale: { origin, owner_logins: [login] } } }))
+  expect((await call(port, '/wizard/v1/apps', owner)).status).toBe(200)
+  expect((await call(port, '/wizard/v1/apps', { ...owner, 'tailscale-user-login': 'nonowner@example.invalid' })).status).toBe(403)
+  expect((await call(port, '/wizard/v1/apps', { ...owner, host: 'attacker.example' })).status).toBe(403)
+  expect((await call(port, '/wizard/v1/setup/seen', { ...owner, origin: 'https://attacker.example', 'content-type': 'application/json' }, 'POST', '{}')).status).toBe(403)
+  expect((await call(port, '/wizard/v1/setup/seen', { ...owner, origin, 'content-type': 'application/json' }, 'POST', '{}')).status).toBe(200)
+})
+it('the Serve listener (WIZARD_TAILNET_PORT) verifies the owner while the box-local listener stays open', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'auth-tailnet-')); dirs.push(dir)
+  const settings = join(dir, 'settings.json')
+  const tailnetPort = await freePort()
+  const ux = join(dir, 'ux'); mkdirSync(ux); writeFileSync(join(ux, 'index.html'), '<html>shell</html>')
+  const { port } = await start({ WIZARD_AUTH_MODE: 'none', WIZARD_TAILNET_PORT: String(tailnetPort), WIZARD_SETTINGS_PATH: settings,
+    WIZARD_PRIVATE_ACCESS_SOCKET: join(dir, 'none.sock'), WIZARD_UX_DIR: ux })
+  // Box-local (Mac app / local proxy) path: unchanged, owner implied.
+  expect((await call(port, '/wizard/v1/apps')).status).toBe(200)
+  expect((await call(port, '/wizard/v1/setup')).status).toBe(200)
+  expect((await call(port, '/wizard/v1/setup/phone')).body).toContain('"step":"unavailable"')
+  // Serve listener: nothing before enrollment, not even the owner, and never the local proxy's fake identity.
+  expect((await call(tailnetPort, '/wizard/v1/apps', owner)).status).toBe(403)
+  expect((await call(tailnetPort, '/wizard/v1/apps', { host: '127.0.0.1', 'tailscale-user-login': 'owner@wizard.local' })).status).toBe(403)
+  writeFileSync(settings, JSON.stringify({ access: { tailscale: { origin, owner_logins: [login] } } }))
+  expect((await call(tailnetPort, '/wizard/v1/apps', owner)).status).toBe(200)
+  for (const headers of [{ host }, { ...owner, 'tailscale-user-login': 'nonowner@example.invalid' }, { ...owner, host: 'attacker.example' },
+    { ...owner, origin: 'https://attacker.example' }, { host: '127.0.0.1', 'tailscale-user-login': 'owner@wizard.local' }]) {
+    expect((await call(tailnetPort, '/wizard/v1/apps', headers)).status).toBe(403)
+  }
+  for (const path of ['/wizard/v1/setup/phone/reset', '/wizard/hermes/v1/runs', '/wizard/v1/route']) {
+    expect((await call(tailnetPort, path, { ...owner, 'content-type': 'application/json' }, 'POST', '{}')).status).toBe(403)
+    expect((await call(tailnetPort, path, { ...owner, origin: 'https://attacker.example', 'content-type': 'application/json' }, 'POST', '{}')).status).toBe(403)
+  }
+  expect((await call(port, '/wizard/v1/apps')).status).toBe(200)
+  // Opening the shared address from another app: a top-level document navigation to an entry page only.
+  const nav = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }
+  expect((await call(tailnetPort, '/', { ...owner, ...nav })).status).toBe(302)
+  const entry = await call(tailnetPort, '/wizard-os-home/', { ...owner, ...nav })
+  expect(entry.status).toBe(200)
+  expect(entry.body).toContain('<html>shell</html>')
+  expect((await call(tailnetPort, '/wizard/v1/apps', { ...owner, ...nav })).status).toBe(403)
+  expect((await call(tailnetPort, '/', { ...owner, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' })).status).toBe(403)
 })

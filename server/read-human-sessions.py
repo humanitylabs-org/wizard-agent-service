@@ -22,6 +22,8 @@ INTERNAL_USER_PREFIXES = (
     "[PRIOR CONTEXT — for reference only; not a new message]",
     "[Your active task list was preserved across context compression]",
     "[Your previous agent loop was paused",
+    "[Owner requested recovery of this interrupted Helm card.]",
+    # Legacy wording in existing history: recognized, never emitted.
     "[James requested recovery of this interrupted Helm card.]",
     "[STILL IN PROGRESS",
     "Workline browser QA found a concrete regression in ",
