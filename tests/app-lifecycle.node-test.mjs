@@ -171,6 +171,19 @@ test('trusts direct loopback or a pinned Tailscale owner; a trusted gateway peer
   assert.equal(localOwnerAccess(req('127.0.0.1', ts('Owner@X')), ['owner@x']), true)
 })
 
+test('isolated-app launcher HEAD confirms upstream status without redirect, body or leaked owner credentials', async (t) => {
+  const f = await fixture(t, { appsListener: true, options: { appsOrigin: 'http://localhost:48023' } })
+  const r = await fetch(`${f.base}/apps/strict/`, { method: 'HEAD', headers: { Authorization: 'Bearer OWNER', Cookie: 'owner=SECRET' } })
+  assert.equal(r.status, 200); assert.equal(r.redirected, false); assert.equal(r.headers.get('location'), null)
+  assert.equal((await r.arrayBuffer()).byteLength, 0)
+  const sent = f.calls.filter(c => c.url.startsWith('http://127.0.0.1:12347'))
+  assert.equal(sent.length, 1); assert.equal(sent[0].opts.method, 'GET')
+  assert.equal(sent[0].opts.headers.Authorization, undefined); assert.equal(sent[0].opts.headers.Cookie, undefined)
+  assert.equal((await fetch(`${f.base}/apps/missing/`, { method: 'HEAD' })).status, 404)
+  const get = await fetch(`${f.base}/apps/strict/`, { redirect: 'manual' })
+  assert.equal(get.status, 302); assert.equal(get.headers.get('location'), 'http://localhost:48023/apps/strict/')
+})
+
 test('HEAD confirmation is answered from an upstream GET without a body; a HEAD-405 app still confirms', async (t) => {
   const { base, calls } = await fixture(t)
   const r = await fetch(`${base}/apps/strict/`, { method: 'HEAD' })
