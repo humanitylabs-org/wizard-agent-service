@@ -1,0 +1,7 @@
+# Bounded existing-MVP patch build: reuse the installed Service's exact runtime/dependencies.
+# No package/provider/engine updates. Stage this commit's server/ and assembled UX as ux/ in the build context.
+ARG BASE_IMAGE=wizard-shell:mac-mvp-20261013
+FROM ${BASE_IMAGE}
+COPY server /app/server
+COPY ux /app/ux
+USER 1000:1000
