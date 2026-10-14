@@ -12,6 +12,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { isIP } from 'node:net'
+import { adaptAppView } from './app-view-adapters.mjs'
 
 const ID = '[a-z0-9][a-z0-9-]{0,63}'
 const LIFE = new RegExp(`^/api/app-lifecycle/(${ID})(?::wizardapps)?/(install|start|stop|restart|update|uninstall)$`, 'u')
@@ -155,6 +156,8 @@ export function createAppLifecycleRoutes({
     if (target.origin !== upstream.origin || !target.pathname.startsWith(root)) { send(res, 400, { error: 'invalid_app_path' }); return }
     try {
       const headers = { Accept: String(req.headers.accept || '*/*') }
+      // File Browser's own per-app session token (not Wizard's owner cookie or server-side Hermes token).
+      if (id === 'files' && req.headers['x-auth']) headers['X-Auth'] = String(req.headers['x-auth'])
       let body
       if (write) {
         body = await readBody(req, 2 * 1024 * 1024)
@@ -168,8 +171,9 @@ export function createAppLifecycleRoutes({
         res.writeHead(r.status, { Location: `/apps/${id}/${loc.pathname.slice(root.length)}${loc.search}${loc.hash}` }); res.end(); return
       }
       if (req.method === 'HEAD') await r.body?.cancel().catch(() => undefined)
-      const bytes = req.method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer())
+      let bytes = req.method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer())
       if (bytes.length > 16 * 1024 * 1024) throw new Error('too_large')
+      if (req.method !== 'HEAD') bytes = adaptAppView(id, url.pathname, r.headers.get('content-type') || '', bytes)
       res.writeHead(r.status, {
         'Content-Type': r.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
