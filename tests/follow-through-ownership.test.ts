@@ -10,6 +10,7 @@ afterEach(async () => { await Promise.all(servers.splice(0).map((s) => new Promi
 
 async function startHermes() {
   const posted: string[] = []
+  const completionAt = Date.now() / 1000 // a persisted message keeps its identity across reads
   const server = createServer((request, response) => {
     if (request.method === 'POST') posted.push(request.url ?? '')
     // Stock Hermes HTTP only: no state.db anywhere in this test.
@@ -19,7 +20,7 @@ async function startHermes() {
     }
     if (request.url?.startsWith('/api/sessions/wizard_shared/messages')) {
       response.writeHead(200, { 'Content-Type': 'application/json' })
-      return response.end(JSON.stringify({ object: 'list', data: [{ id: 7, role: 'user', content: `${FOLLOW_THROUGH_PREFIX} — deleg_1] results`, timestamp: Date.now() / 1000, display_kind: 'async_delegation_complete' }] }))
+      return response.end(JSON.stringify({ object: 'list', data: [{ id: 7, role: 'user', content: `${FOLLOW_THROUGH_PREFIX} — deleg_1] results`, timestamp: completionAt, display_kind: 'async_delegation_complete' }] }))
     }
     if (request.url === '/v1/capabilities') {
       response.writeHead(200, { 'Content-Type': 'application/json' })

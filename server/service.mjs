@@ -25,10 +25,13 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
+import { readHelperStatuses } from './helper-status.mjs'
+import { resumeHelper } from './helper-resume.mjs'
+import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -437,6 +440,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           const session = sanitizeSessionRuntimePreview(rawSession)
           const truth = sessionTruth.get(session.id)
           const projected = { ...session }
+          if (truth?.helperStatus) projected.wizard_helper_status = truth.helperStatus
           delete projected.wizard_run_id
           if (truth?.lastUserAt) projected.wizard_last_user_at = truth.lastUserAt
           if (truth?.lastAssistantAt) projected.wizard_last_assistant_at = truth.lastAssistantAt
@@ -505,7 +509,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             }
             // A helper is still working for this thread (or its answer is in but the agent has not replied).
             // Keep the thread in Working so it reaches Ready only with the real answer.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered)
+            // The bounded helper projection also covers delivery followed by nonterminal FYI.
+            // Owner-held findings do not manufacture a new Working turn.
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered
+              || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
               projected.status = 'running'
@@ -2406,6 +2413,11 @@ export function createWizardServer(options = {}) {
     return record.completion
   }
 
+  const requireHelperContinuation = async (continuation) => {
+    if (hermesStatePath) return requireCurrentContinuation(hermesStatePath, continuation)
+    return requireHttpContinuation((path) => hermesJson(path), continuation, FOLLOW_THROUGH_PREFIX)
+  }
+
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let runQueueReady = Promise.resolve()
@@ -2423,6 +2435,9 @@ export function createWizardServer(options = {}) {
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+      if (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey)) {
+        await requireHelperContinuation(record.continuation)
+      }
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
       if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
@@ -2825,9 +2840,75 @@ export function createWizardServer(options = {}) {
     return file
   }))
 
+  // Private closure used by authenticated Continue and the watcher. It is not addressable by
+  // HTTP; headers/body fields never bypass Access or confer continuation authority.
+  const helperAdmissions = new Map()
+  const helperSessionActive = async (sessionId) => {
+    // Direct admission projections otherwise refresh only when a client polls the run.
+    // A detached native completion must not depend on an open browser to release that guard.
+    // Only an explicit terminal upstream status clears it; errors/unknown states stay held.
+    for (const [runId, tracked] of directRuns) {
+      if (tracked.sessionId !== sessionId || !ACTIVE_RUN_STATUSES.has(tracked.status)) continue
+      try {
+        const current = await hermesJson(`/v1/runs/${encodeURIComponent(runId)}`)
+        if (['completed', 'failed', 'cancelled', 'interrupted', 'expired'].includes(current.status)
+          && directRuns.get(runId) === tracked) directRuns.delete(runId)
+      } catch { /* unknown liveness is not permission to continue */ }
+    }
+    return [...(runQueue?.latestProjections([sessionId]) ?? []), ...directRuns.values()]
+      .some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))
+  }
+  const admitHelperContinuation = async (sessionId, input, key, continuation) => {
+    await requireHelperContinuation(continuation)
+    const existing = helperAdmissions.get(key)
+    if (existing) return existing
+    const admission = (async () => {
+      const contract = await assertJoinedDelegationCapability()
+      if (runQueue) await runQueueReady
+      // Portable installs cannot read a persisted selector. Keep the most recent locked
+      // native route on the private continuation, never silently use the default provider.
+      const locked = !hermesStatePath ? [...lockedBridge.entries.values()]
+        .filter(entry => entry.sessionId === sessionId)
+        .sort((a, b) => b.createdAt - a.createdAt)[0] : null
+      const raw = Buffer.from(JSON.stringify({ session_id: sessionId, input,
+        ...(locked ? { model: locked.model, provider: locked.provider, require_model_lock: true } : {}) }))
+      const prepared = await prepareRunBody(raw, resolveFiles, true)
+      const body = prepared.body
+      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote)
+      if (await helperSessionActive(sessionId)) {
+        throw Object.assign(new Error('Agent already active'), { status: 410 })
+      }
+      await requireHelperContinuation(continuation)
+      if (runQueue) {
+        const admitted = await runQueue.admit({ runtime: 'direct', sessionId, idempotencyKey: key,
+          requestHash: queueRequestHash('direct', body.toString('utf8')), body: body.toString('utf8'), trustedPaths: prepared.trustedPaths, continuation })
+        if (admitted.record.status === 'cancelled') throw Object.assign(new Error('Stale helper request'), { status: 410 })
+        return admitted.record
+      }
+      const result = await hermesJson('/v1/runs', { method: 'POST', body: projected, headers: { 'Idempotency-Key': key } })
+      const runId = result.run_id ?? result.id
+      if (typeof runId !== 'string' || !new RegExp(`^${ID}$`).test(runId)) throw Object.assign(new Error('Invalid helper admission'), { status: 502 })
+      directRuns.set(runId, { sessionId, runId, status: result.status ?? 'queued', createdAt: Date.now()/1000, updatedAt: Date.now()/1000 })
+      return result
+    })()
+    helperAdmissions.set(key, admission)
+    try { return await admission } finally { helperAdmissions.delete(key) }
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
+        const authenticated = requireAccess && await accessVerified(request, accessVerifier)
+        if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
+        const refusal = helperContinueRequestAllowed(request,{authenticated,trustedOrigins:options.helperContinueOrigins ?? []})
+        if (refusal) { sendJson(response,refusal,{error:refusal===415?'unsupported_media_type':'same_origin_required'}); return }
+        const body = parseJsonBody(await readBoundedBody(request, 1024));
+        if (typeof body.session_id !== 'string' || !/^wizard(?:_|-assistant-)[A-Za-z0-9._:-]+$/.test(body.session_id)) { sendJson(response,400,{error:'invalid_session'}); return }
+        if (await helperSessionActive(body.session_id)) { sendJson(response,409,{error:'agent_already_active'}); return }
+        const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:admitHelperContinuation});
+        sendJson(response,outcome.status,outcome.body); return
+      }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)
@@ -3683,6 +3764,8 @@ export function createWizardServer(options = {}) {
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           result = filterSessionList(
             result,
             operator,
@@ -3818,21 +3901,7 @@ export function createWizardServer(options = {}) {
         if (joinedDelegation === 'off') return true
         try { return !(await runContract()).join } catch { return false }
       },
-      admit: async (sessionId, input, idempotencyKey) => {
-        // Without a mounted state.db there is no persisted-selector reader. Keep the last admitted
-        // send's exact lock on its automatic continuation instead of falling back to the default route.
-        const locked = !hermesStatePath ? [...lockedBridge.entries.values()]
-          .filter(entry => entry.sessionId === sessionId)
-          .sort((a, b) => b.createdAt - a.createdAt)[0] : null
-        const response = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey, 'X-Wizard-Internal': 'follow-through' },
-          body: JSON.stringify({ session_id: sessionId, input,
-            ...(locked ? { model: locked.model, provider: locked.provider, require_model_lock: true } : {}) }),
-        })
-        await response.body?.cancel().catch(() => undefined)
-        if (!response.ok) throw new Error(`admission ${response.status}`)
-      },
+      admit: admitHelperContinuation,
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
     server.on('close', () => watcher.stop())

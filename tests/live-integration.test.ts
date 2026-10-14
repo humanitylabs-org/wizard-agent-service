@@ -38,13 +38,29 @@ function stateFixture(dir: string) {
   db.close()
   return path
 }
-async function upstreamFixture(reject = false) {
+async function upstreamFixture(reject = false, runStatus = 'completed') {
   const admissions: Array<{ path: string, body: any }> = []
+  let statusReads = 0
+  const completion = { pending: false, at: Date.now() / 1000 }
   const origin = await originFor(createServer(async (req, res) => {
     const path = new URL(req.url || '/', 'http://fixture').pathname
+    if (req.method === 'GET' && path === '/api/sessions') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ sessions: completion.pending ? [{ id: sessionId, last_active: completion.at }] : [] }))
+    }
+    if (req.method === 'GET' && path === `/api/sessions/${sessionId}/messages`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ data: completion.pending ? [{ id: 7, role: 'user', timestamp: completion.at,
+        content: '[ASYNC DELEGATION BATCH COMPLETE fixture]', display_kind: 'async_delegation_complete' }] : [] }))
+    }
     if (path === '/v1/capabilities') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       return res.end(JSON.stringify({ features: { delegation_delivery: { supported: true, modes: ['background', 'join'] }, markdown_rendering: true, run_instructions: true } }))
+    }
+    if (req.method === 'GET' && path.startsWith('/v1/runs/')) {
+      statusReads++
+      res.writeHead(runStatus === 'unavailable' ? 503 : 200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ status: runStatus, runtime: { ...route, model_lock: 'confirmed' } }))
     }
     if (req.method === 'POST' && (path === '/v1/runs' || path.endsWith('/chat/stream'))) {
       const chunks: Buffer[] = []
@@ -60,7 +76,7 @@ async function upstreamFixture(reject = false) {
     if (req.method === 'POST' && path.endsWith('/model')) return res.end(JSON.stringify({ runtime: route }))
     return res.end(JSON.stringify({ object: 'list', data: [], status: 'completed', runtime: { ...route, model_lock: 'confirmed' } }))
   }))
-  return { origin, admissions }
+  return { origin, admissions, completion, get statusReads() { return statusReads } }
 }
 async function send(base: string, extra: object = {}) {
   return fetch(`${base}/wizard/hermes/v1/runs`, {
@@ -72,7 +88,8 @@ async function send(base: string, extra: object = {}) {
 it('inherits live selector locks, keeps OS/view instructions, and recovers a dropped helper through the locked lane', async () => {
   const dir = temp(), state = stateFixture(dir), upstream = await upstreamFixture()
   const appsJsonPath = join(dir, 'apps.json')
-  writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'fixture-notes', name: 'Fixture Notes', status: 'running', provides: ['notes'] }] }))
+  writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'fixture-notes', name: 'Fixture Notes', status: 'running',
+    provides: ['notes'], mcp: { url: `${upstream.origin}/mcp`, transport: 'streamable-http' } }] }))
   const base = await originFor(createWizardServer({
     requireAccess: false, hermesKey: 'fixture-only', upstreamOrigin: upstream.origin,
     hermesStatePath: state, joinedDelegation: 'require', appsJsonPath, mcpToken: 'fixture-mcp',
@@ -94,6 +111,8 @@ it('inherits live selector locks, keeps OS/view instructions, and recovers a dro
   expect(upstream.admissions[1].body).toMatchObject({ ...route, require_model_lock: true })
   expect(upstream.admissions[1].body.message).toContain('Recovered helper receipt deleg_merge')
   expect(upstream.admissions[1].body.message).toContain('MUST-FIX')
+  expect(upstream.admissions[1].body.instructions).toContain('Fixture Notes')
+  expect(upstream.admissions[1].body.instructions).toContain('wizard')
   const ack = await fetch(`${base}/wizard/hermes/api/sessions/${sessionId}/model`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(route),
   })
@@ -103,16 +122,14 @@ it('inherits live selector locks, keeps OS/view instructions, and recovers a dro
 
 it('a no-state locked send keeps the same provider on its detached HTTP follow-through', async () => {
   const upstream = await upstreamFixture()
-  let pending = false
   const base = await originFor(createWizardServer({
     requireAccess: false, hermesKey: 'fixture-only', upstreamOrigin: upstream.origin,
     hermesStatePath: '', joinedDelegation: 'require',
-    followThroughFinder: async () => pending ? [{ sessionId, messageId: 7 }] : [],
   }))
   const response = await send(base, { ...route, require_model_lock: true })
   expect(response.status).toBe(202)
   await response.json()
-  pending = true
+  upstream.completion.pending = true
   await expect.poll(() => upstream.admissions.length, { timeout: 7000, interval: 50 }).toBe(2)
   for (const admission of upstream.admissions) {
     expect(admission.path).toBe(`/api/sessions/${sessionId}/chat/stream`)
@@ -130,3 +147,16 @@ it('an unavailable selected provider never falls back to an unlocked admission',
   expect(upstream.admissions).toHaveLength(1)
   expect(upstream.admissions[0].path).toBe(`/api/sessions/${sessionId}/chat/stream`)
 })
+
+it.each(['running', 'unknown', 'unavailable'])('does not clear a native active-run guard on %s liveness', async status => {
+  const upstream = await upstreamFixture(false, status)
+  const base = await originFor(createWizardServer({ requireAccess: false, hermesKey: 'fixture-only',
+    upstreamOrigin: upstream.origin, hermesStatePath: '', joinedDelegation: 'require' }))
+  const response = await send(base, { ...route, require_model_lock: true })
+  expect(response.status).toBe(202)
+  await response.json()
+  upstream.completion.pending = true
+  await new Promise(resolve => setTimeout(resolve, 6200)) // watcher has observed the completion
+  expect(upstream.statusReads).toBeGreaterThan(0)
+  expect(upstream.admissions).toHaveLength(1)
+}, 10000)
