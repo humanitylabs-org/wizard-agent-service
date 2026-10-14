@@ -2,8 +2,6 @@ name: Candidate image recipe
 # Candidate build/publish runs ONLY on Thales under the shared worker lock.
 # This workflow validates packaging lightly; no image publication or heavy build on hosted runners.
 on:
-  pull_request:
-    paths: [Dockerfile, wizard.md, runtipi/**, packaging/**, scripts/build-image.sh]
   workflow_dispatch:
 permissions:
   contents: read

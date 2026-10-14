@@ -122,9 +122,13 @@ it('inherits live selector locks, keeps OS/view instructions, and recovers a dro
 
 it('a no-state locked send keeps the same provider on its detached HTTP follow-through', async () => {
   const upstream = await upstreamFixture()
+  const appsJsonPath = join(temp(), 'apps.json')
+  writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'portable-notes', name: 'Portable Notes', status: 'running',
+    provides: ['notes'], mcp: { url: `${upstream.origin}/mcp`, transport: 'streamable-http' } }] }))
   const base = await originFor(createWizardServer({
     requireAccess: false, hermesKey: 'fixture-only', upstreamOrigin: upstream.origin,
     hermesStatePath: '', joinedDelegation: 'require',
+    appsJsonPath, mcpToken: 'fixture-mcp', bridgeWriteSkills: false, bridgeWatchMs: 0,
   }))
   const response = await send(base, { ...route, require_model_lock: true })
   expect(response.status).toBe(202)
@@ -134,6 +138,8 @@ it('a no-state locked send keeps the same provider on its detached HTTP follow-t
   for (const admission of upstream.admissions) {
     expect(admission.path).toBe(`/api/sessions/${sessionId}/chat/stream`)
     expect(admission.body).toMatchObject({ ...route, require_model_lock: true })
+    expect(admission.body.instructions).toContain('Portable Notes')
+    expect(admission.body.instructions).toContain('wizard')
   }
 }, 12000)
 

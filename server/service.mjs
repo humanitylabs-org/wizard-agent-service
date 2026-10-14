@@ -1679,6 +1679,15 @@ function staticHeaders(path) {
 }
 
 async function verifiedAccess(request, verifier) {
+  // Request-based verifiers (Tailscale Serve, see tailnet-access.mjs) read the request themselves.
+  if (verifier?.fromRequest) {
+    try {
+      const claims = await verifier(request)
+      return claims && (claims.sub || claims.email) ? { claims } : null
+    } catch {
+      return null
+    }
+  }
   const assertion = request.headers['cf-access-jwt-assertion']
   if (typeof assertion !== 'string' || !assertion || assertion.length > 16_384) return null
   try {
@@ -1843,7 +1852,7 @@ export function createWizardServer(options = {}) {
   const hermesKey = options.hermesKey ?? ''
   const requireAccess = options.requireAccess ?? true
   const accessVerifier = options.accessVerifier
-  if (requireAccess && typeof accessVerifier !== 'function') throw new Error('A Cloudflare Access verifier is required')
+  if (requireAccess && typeof accessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -1866,6 +1875,7 @@ export function createWizardServer(options = {}) {
     },
   })
   const fetchImpl = (url, init) => lockedBridge.fetch(url, init)
+
   // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
