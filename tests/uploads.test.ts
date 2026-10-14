@@ -293,6 +293,20 @@ describe('shares', () => {
     expect(status).toMatchObject({ share_id: share.share_id, status: 'delivered', thread_id: share.thread_id, agent: 'hermes' })
   })
 
+  it('delivers behind Cloudflare Access with its in-process token, which a client cannot forge', async () => {
+    const accessVerifier = async (token: string) => { if (token !== 'good-jwt') throw new Error('denied'); return { email: 'owner@example.com' } }
+    const { base, hermes } = await box({ requireAccess: true, accessVerifier })
+    const A = { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'good-jwt' }
+    expect((await post(base, '/wizard/v1/shares', { client_share_id: 'acc', files: [{ filename: 'a', bytes: 3 }] })).status).toBe(403)
+    const share = await (await fetch(`${base}/wizard/v1/shares`, { method: 'POST', headers: A, body: JSON.stringify({ client_share_id: 'acc', files: [{ filename: 'a', bytes: 3 }] }) })).json()
+    const up = share.uploads[0].upload_id
+    expect((await fetch(`${base}/wizard/v1/uploads/${up}`, { method: 'PATCH', headers: { ...A, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' }, body: Buffer.from('abc') })).status).toBe(204)
+    expect((await fetch(`${base}/wizard/v1/uploads/${up}/complete`, { method: 'POST', headers: A, body: '{}' })).status).toBe(200)
+    await waitFor(() => hermes.runs.length === 1)
+    const forged = await fetch(`${base}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'x', 'X-Wizard-Internal-Token': 'a'.repeat(64) }, body: JSON.stringify({ session_id: 'existing-thread', input: 'hi' }) })
+    expect(forged.status).toBe(403)
+  })
+
   it('uses a neutral line for an empty note and delivers into a given thread', async () => {
     const { base, hermes } = await box()
     const a = randomBytes(10)
