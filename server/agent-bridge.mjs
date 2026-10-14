@@ -313,14 +313,23 @@ export function gatewayToken({ osHome, env = process.env, create = true }) {
   }
 }
 
+/** The id the main agent is known by on the gateway (its token is the gateway's own). */
+export const GATEWAY_MAIN_AGENT = 'hermes'
+
 /**
  * The gateway. `handle(request, response, url)` serves /wizard/mcp; everything else is plain functions so
  * the kernel route, the per-run delta and the pointer skills share one apps.json read.
+ *
+ * Per-agent apps (wizard-os spec/AGENTS.md section 5, #58): each agent reaches the gateway with its own token.
+ * `token` is the main agent's; `agentForToken(token)` names any other agent's. `appsFor(agentId)` returns the
+ * Set of app ids that agent may use (null = every app, the gateway's behaviour before #58). The gateway lists,
+ * describes and calls only those apps for that agent.
  */
 export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
+  agentForToken = () => '', appsFor = () => null,
 }) {
   let mtime = null
   let apps = []
@@ -336,14 +345,19 @@ export function createAgentBridge({
     apps = bridgeApps(readJson(appsJsonPath), { mcpAddress })
     toolCache.clear()
     for (const id of [...clients.keys()]) if (!apps.some((a) => a.id === id)) clients.delete(id)
-    if (writeSkills && osHome) {
-      const written = writePointerSkills(osHome, apps, { harness })
-      log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
-      // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
-      const snapshot = apps
-      collectTools().then((tools) => { if (apps === snapshot) writePointerSkills(osHome, apps, { harness, tools }) }).catch(() => {})
-    }
+    rewriteSkills()
     return true
+  }
+
+  // The pointer skills in <osHome>/skills are the main agent's skills index: only the apps it may use (#58).
+  function rewriteSkills() {
+    if (!writeSkills || !osHome) return
+    const mine = visible(GATEWAY_MAIN_AGENT)
+    const written = writePointerSkills(osHome, mine, { harness })
+    log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
+    // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
+    const snapshot = apps
+    collectTools(mine).then((tools) => { if (apps === snapshot) writePointerSkills(osHome, mine, { harness, tools }) }).catch(() => {})
   }
 
   const notifyChanged = () => {
@@ -377,22 +391,29 @@ export function createAgentBridge({
     }
   }
 
-  async function collectNames() {
+  /** The apps one agent may use (#58). */
+  const visible = (agentId = GATEWAY_MAIN_AGENT) => {
+    let allowed = null
+    try { allowed = appsFor(agentId) } catch { allowed = new Set() }
+    return allowed ? apps.filter((app) => allowed.has(app.id)) : apps
+  }
+
+  async function collectNames(list = apps) {
     const out = {}
-    await Promise.all(apps.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
+    await Promise.all(list.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
     return out
   }
 
   /** Name + description per app tool, for the pointer skills. */
-  async function collectTools() {
+  async function collectTools(list = apps) {
     const out = {}
-    await Promise.all(apps.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => ({ name: t.name, description: t.description || '' })) }))
+    await Promise.all(list.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => ({ name: t.name, description: t.description || '' })) }))
     return out
   }
 
-  async function toolNames() {
+  async function toolNames(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
-    return collectNames()
+    return collectNames(visible(agentId))
   }
 
   function metaTool() {
@@ -403,10 +424,10 @@ export function createAgentBridge({
     }
   }
 
-  async function listTools() {
+  async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const out = [metaTool()]
-    const lists = await Promise.all(apps.map(async (app) => [app, await appTools(app)]))
+    const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
     for (const [app, tools] of lists) {
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
       for (const t of tools) {
@@ -418,26 +439,27 @@ export function createAgentBridge({
     return out
   }
 
-  async function wizardApps() {
-    const names = await toolNames()
-    const lines = apps.map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
+  async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
+    const names = await toolNames(agentId)
+    const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
     return { content: [{ type: 'text', text: lines.length ? `Installed Wizard apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
   }
 
   const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
 
-  async function callTool(name, args) {
+  async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const started = Date.now()
     if (name === META_TOOL) {
-      const r = await wizardApps()
-      log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, ms: Date.now() - started, ok: true }))
+      const r = await wizardApps(agentId)
+      log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
       return r
     }
-    const app = apps.find((a) => typeof name === 'string' && name.startsWith(`${a.prefix}__`))
+    // An app this agent may not use is answered exactly like an app that is not installed (#58).
+    const app = visible(agentId).find((a) => typeof name === 'string' && name.startsWith(`${a.prefix}__`))
     const tool = app ? name.slice(app.prefix.length + 2) : ''
     if (!app || !tool) {
-      log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), ms: 0, ok: false }))
+      log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
       return failure(`No installed Wizard app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
     }
     let result
@@ -456,17 +478,20 @@ export function createAgentBridge({
         if (!error?.rpc) c.ready = false
       } finally { c.timeoutMs = saved }
     }
-    log(JSON.stringify({ event: 'call', app: app.id, tool, ms: Date.now() - started, ok }))
+    log(JSON.stringify({ event: 'call', app: app.id, tool, agent: agentId, ms: Date.now() - started, ok }))
     return result
   }
 
   // ---------- streamable HTTP server side ----------
 
+  /** The agent this request speaks for: the main agent's token, or another agent's own token. '' = refused. */
   function authorized(request) {
-    if (!token) return false
     const header = String(request.headers.authorization || '')
     const m = /^Bearer\s+(.+)$/iu.exec(header)
-    return Boolean(m && safeEqual(m[1].trim(), token))
+    const supplied = m ? m[1].trim() : ''
+    if (!supplied) return ''
+    if (token && safeEqual(supplied, token)) return GATEWAY_MAIN_AGENT
+    try { return agentForToken(supplied) || '' } catch { return '' }
   }
 
   /** Requests that came through a proxy from outside the box (tailnet, tunnel) are refused: box-only. */
@@ -481,7 +506,7 @@ export function createAgentBridge({
     response.end(body)
   }
 
-  async function rpc(message, sessionId) {
+  async function rpc(message, agentId) {
     const { id, method, params } = message || {}
     const reply = (result) => ({ jsonrpc: '2.0', id, result })
     const error = (code, msg) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message: msg } })
@@ -494,12 +519,12 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(apps, { harness, filesRoot, jobMap }),
+          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap }),
         })
       }
       if (method === 'ping') return reply({})
-      if (method === 'tools/list') return reply({ tools: await listTools() })
-      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments))
+      if (method === 'tools/list') return reply({ tools: await listTools(agentId) })
+      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId))
       if (method === 'resources/list') return reply({ resources: [] })
       if (method === 'prompts/list') return reply({ prompts: [] })
       return error(-32601, `method not found: ${clean(method, 60)}`)
@@ -521,11 +546,14 @@ export function createAgentBridge({
 
   async function handle(request, response) {
     if (viaProxy(request)) { send(response, 403, { error: 'box_only' }); return }
-    if (!authorized(request)) { send(response, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': 'Bearer' }); return }
+    const agentId = authorized(request)
+    if (!agentId) { send(response, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': 'Bearer' }); return }
     const sid = String(request.headers['mcp-session-id'] || '')
+    // A session belongs to the agent that opened it; another agent's token cannot ride it.
+    const owned = (s) => Boolean(s) && s.agent === agentId
     if (request.method === 'GET') {
       const s = sessions.get(sid)
-      if (!s) { send(response, sid ? 404 : 400, { error: 'unknown_session' }); return }
+      if (!owned(s)) { send(response, sid ? 404 : 400, { error: 'unknown_session' }); return }
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' })
       response.write(': wizard-os\n\n')
       s.streams.add(response)
@@ -536,7 +564,7 @@ export function createAgentBridge({
     }
     if (request.method === 'DELETE') {
       const s = sessions.get(sid)
-      if (s) { for (const res of s.streams) res.end(); sessions.delete(sid) }
+      if (owned(s)) { for (const res of s.streams) res.end(); sessions.delete(sid) }
       send(response, 200, {})
       return
     }
@@ -551,33 +579,36 @@ export function createAgentBridge({
     let session = sid
     if (isInit) {
       session = randomUUID()
-      sessions.set(session, { streams: new Set() })
+      sessions.set(session, { streams: new Set(), agent: agentId })
       if (sessions.size > 200) sessions.delete(sessions.keys().next().value)
-    } else if (sid && !sessions.has(sid)) {
+    } else if (sid && !owned(sessions.get(sid))) {
       send(response, 404, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'session not found; initialize again' } })
       return
     }
-    const replies = (await Promise.all(batch.map((m) => rpc(m, session)))).filter(Boolean)
+    const replies = (await Promise.all(batch.map((m) => rpc(m, agentId)))).filter(Boolean)
     const headers = session ? { 'Mcp-Session-Id': session } : {}
     if (!replies.length) { response.writeHead(202, headers); response.end(); return }
     send(response, 200, Array.isArray(body) ? replies : replies[0], headers)
   }
 
-  async function kernel({ harness: h = harness } = {}) {
-    const tools = await toolNames()
-    const text = renderKernel(apps, { harness: h, filesRoot, jobMap })
+  async function kernel({ harness: h = harness, agent: agentId = GATEWAY_MAIN_AGENT } = {}) {
+    const tools = await toolNames(agentId)
+    const mine = visible(agentId)
+    const text = renderKernel(mine, { harness: h, filesRoot, jobMap })
     return {
       text, chars: text.length, harness: h, mcp_server: MCP_SERVER_NAME, job_map: Boolean(jobMap || h !== 'hermes'),
-      job_skills: jobsOf(apps).map(([job]) => jobSkillName(job)),
-      apps: apps.map((a) => ({ id: a.id, name: a.name, status: a.status, jobs: a.jobs, tools: (tools[a.id] || []).map((t) => `${a.prefix}__${t}`), skill: a.skill ? a.id : '' })),
+      job_skills: jobsOf(mine).map(([job]) => jobSkillName(job)),
+      apps: mine.map((a) => ({ id: a.id, name: a.name, status: a.status, jobs: a.jobs, tools: (tools[a.id] || []).map((t) => `${a.prefix}__${t}`), skill: a.skill ? a.id : '' })),
     }
   }
 
   refresh()
 
   return {
-    handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() },
-    kernelText: (h = harness) => { refresh(); return renderKernel(apps, { harness: h, filesRoot, jobMap }) },
+    handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() }, agentFor: authorized,
+    // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
+    appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
+    kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap }) },
     apps: () => { refresh(); return apps },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
     close: () => { if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },

@@ -5,9 +5,9 @@
 // own Hermes home (`<id>/home`, its HERMES_HOME), its own API key (`<id>/runtime.key`) and its own model route.
 // The Service never touches Docker: a runtime driver (agent-runtime helper on the host, see ops/agent-runtime)
 // installs, starts and stops the container.
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -208,8 +208,22 @@ export function parseAgentFile(value, id) {
 
 function yamlString(value) { return JSON.stringify(String(value)) }
 
+/** The apps an agent may use through the app gateway (#58): its Wizard apps plus its agent apps. */
+export function agentAppIds(agent) {
+  return new Set([...(agent?.permissions?.wizard_apps ?? []), ...(agent?.permissions?.agent_apps ?? [])])
+}
+
+/**
+ * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
+ * later appear without a restart); a private agent only once the owner ticks an app for it.
+ */
+export function wantsGateway(agent, gatewayUrl) {
+  if (!gatewayUrl) return false
+  return agent.privacy === 'standard' || agentAppIds(agent).size > 0
+}
+
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
-export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0 } = {}) {
+export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '' } = {}) {
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
@@ -232,21 +246,35 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0 } =
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   lines.push('agent:', `  disabled_toolsets: [${disabled.map(yamlString).join(', ')}]`)
   // agent.disabled_toolsets is applied last for every platform, the API server included (hermes_cli/tools_config).
-  // No app gateway, no shared skills for an agent without apps: nothing outside its own home is reachable.
-  if (!agent.permissions.wizard_apps.length && !agent.permissions.agent_apps.length) lines.push('mcp_servers: {}')
+  // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
+  // No gateway and no shared skills for an agent without one: nothing outside its own home is reachable.
+  if (wantsGateway(agent, gatewayUrl)) {
+    lines.push('mcp_servers:', '  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+  } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
   return `${lines.join('\n')}\n`
 }
 
-export function agentEnvFile({ apiKey }) {
+export function agentEnvFile({ apiKey, gatewayKey = '' }) {
   return [
     '# Managed by the Wizard OS Agent Service. Secrets for this agent only; the runtime adds provider keys below.',
     `API_SERVER_KEY=${apiKey}`,
     'API_SERVER_HOST=0.0.0.0',
     'API_SERVER_PORT=8642',
+    ...(gatewayKey ? [`WIZARD_MCP_TOKEN=${gatewayKey}`] : []),
     '',
   ].join('\n')
 }
+
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a))
+  const y = Buffer.from(String(b))
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y)
+}
+
+export const GRANT_SCOPES = ['titles', 'search', 'read']
+/** #59: a private agent is never a readable source. */
+const sealed = (detail) => fail(409, 'private_agent_sealed', 'agent.private_sealed', detail)
 
 /**
  * The registry. `runtime` is the driver ({ apply(id), start(id), stop(id) } -> Promise), or null when the box
@@ -266,26 +294,191 @@ export function createAgentRegistry(options = {}) {
   const startingGraceMs = options.startingGraceMs ?? 180_000
   const threadsPath = join(agentsDir, '.threads.json')
   const idempotencyPath = join(agentsDir, '.idempotency.json')
+  // #58: the main agent's app lists (absent = every installed app, its access before #58) and the apps already
+  // offered to agents, so an app that appears in apps.json later is added to standard agents only.
+  const mainPath = join(agentsDir, '.main-agent.json')
+  const appsSeenPath = join(agentsDir, '.apps-seen.json')
+  // #59: agent-data grants (reader -> source); a private source is refused.
+  const grantsPath = join(agentsDir, '.agent-grants.json')
+  const gatewayUrl = typeof options.gatewayUrl === 'string' ? options.gatewayUrl : ''
+  const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
 
+  const listIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id)) : [])
+  // The main agent is standard with every installed app ticked until the owner unticks one (#58, no regression).
+  const mainApps = () => {
+    const stored = readJson(mainPath)
+    if (stored && stored.schema === 1) return { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
+    const { wizardApps, agentApps } = installedApps()
+    return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
+  }
   const mainAgent = () => ({
     schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: mainLabel, harness: 'hermes', privacy: 'standard',
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
-    permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', wizard_apps: [], agent_apps: [], other_agents: 'none' },
+    permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', ...mainApps(), other_agents: 'none' },
     runtime: { kind: 'external' },
   })
 
   const folder = (id) => join(agentsDir, id)
-  const read = (id) => {
+  const readRaw = (id) => {
     if (id === MAIN_AGENT_ID) return mainAgent()
     if (typeof id !== 'string' || !ID_RE.test(id)) return null
     return parseAgentFile(readJson(join(folder(id), 'agent.json')), id)
   }
+  const folderIds = () => {
+    try { return readdirSync(agentsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort() } catch { return [] }
+  }
+  const read = (id) => { syncApps(); return readRaw(id) }
   const list = () => {
-    let names = []
-    try { names = readdirSync(agentsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort() } catch { names = [] }
-    return [mainAgent(), ...names.map(read).filter(Boolean)]
+    syncApps()
+    return [mainAgent(), ...folderIds().map(readRaw).filter(Boolean)]
+  }
+
+  // ---- #58: new apps join standard agents, never private ones ----
+  let appsSignature = null
+  function appsJsonSignature() {
+    try { const st = statSync(appsJsonPath); return `${st.mtimeMs}:${st.size}:${st.ino}` } catch { return 'missing' }
+  }
+  function appKinds() {
+    const { wizardApps, agentApps } = installedApps()
+    return new Map([...wizardApps.map((app) => [app.id, 'wizard_apps']), ...agentApps.map((app) => [app.id, 'agent_apps'])])
+  }
+  /** Runs when apps.json changed: apps not seen before are ticked for every standard agent (the main one too). */
+  function syncApps() {
+    if (!appsJsonPath) return
+    const signature = appsJsonSignature()
+    if (signature === appsSignature) return
+    appsSignature = signature
+    if (signature === 'missing') return
+    const kinds = appKinds()
+    const current = [...kinds.keys()].sort()
+    const seenFile = readJson(appsSeenPath)
+    const seen = new Set(seenFile?.schema === 1 ? listIds(seenFile.apps) : current)
+    const fresh = current.filter((id) => !seen.has(id))
+    try {
+      if (fresh.length) {
+        for (const id of folderIds()) {
+          const agent = readRaw(id)
+          if (!agent || agent.privacy !== 'standard') continue
+          const next = structuredClone(agent)
+          for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
+          if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
+          writeHarnessFiles(next)
+          writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+        }
+        queueMicrotask(appsChanged)
+        const stored = readJson(mainPath)
+        if (stored?.schema === 1) {
+          const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
+          for (const app of fresh) if (!apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
+          writeJsonAtomic(mainPath, { schema: 1, ...apps })
+        }
+      }
+      if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))) {
+        mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+        writeJsonAtomic(appsSeenPath, { schema: 1, apps: current })
+      }
+    } catch { appsSignature = null }   // retry on the next read
+  }
+
+  /**
+   * The app ids an agent may use through the gateway (#58). Unknown agent → empty. The main agent with no stored
+   * choice → null (every app, exactly the gateway's behaviour before #58).
+   */
+  function allowedApps(agentId) {
+    if (agentId === MAIN_AGENT_ID && readJson(mainPath)?.schema !== 1) { syncApps(); return null }
+    const agent = read(agentId)
+    return agent ? agentAppIds(agent) : new Set()
+  }
+
+  /** Which agents can use an app (the app's settings sheet / the install picker, #58). */
+  function appAgents(appId) {
+    const kind = appKinds().get(appId)
+    if (!kind) fail(404, 'app_not_found', 'app.id')
+    return {
+      app_id: appId, kind,
+      agents: list().map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === MAIN_AGENT_ID })),
+    }
+  }
+
+  /** Sets exactly which agents can use an app: ticked agents gain it, unticked agents lose it. */
+  async function setAppAgents(appId, body) {
+    const kind = appKinds().get(appId)
+    if (!kind) fail(404, 'app_not_found', 'app.id')
+    const ids = body?.agents
+    if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
+    const wanted = new Set(ids)
+    const all = list()
+    for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
+    for (const agent of all) {
+      const has = agentAppIds(agent).has(appId)
+      if (has === wanted.has(agent.id)) continue
+      const lists = { wizard_apps: [...agent.permissions.wizard_apps], agent_apps: [...agent.permissions.agent_apps] }
+      if (wanted.has(agent.id)) lists[kind].push(appId)
+      else for (const key of ['wizard_apps', 'agent_apps']) lists[key] = lists[key].filter((id) => id !== appId)
+      await update(agent.id, { permissions: lists })
+    }
+    return appAgents(appId)
+  }
+
+  // ---- #59: private agents are sealed ----
+  const grants = () => {
+    const stored = readJson(grantsPath)
+    return Array.isArray(stored?.grants) ? stored.grants.filter((grant) => grant && typeof grant.id === 'string') : []
+  }
+  function addGrant(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'grant.body')
+    if ((body.kind ?? 'agent-data') !== 'agent-data') fail(400, 'unknown_grant_kind', 'grant.kind')
+    const reader = read(String(body.reader ?? ''))
+    if (!reader) fail(404, 'agent_not_found', 'grant.reader')
+    const source = read(String(body.source ?? ''))
+    if (!source) fail(404, 'agent_not_found', 'grant.source')
+    if (source.privacy === 'private') sealed(`${source.id} is private; nothing can read it`)
+    if (reader.id === source.id) fail(400, 'invalid_grant', 'grant.source')
+    const scope = body.scope ?? 'titles'
+    if (!GRANT_SCOPES.includes(scope)) fail(400, 'invalid_grant', 'grant.scope')
+    const current = grants()
+    const existing = current.find((grant) => grant.reader === reader.id && grant.source === source.id)
+    const grant = { id: existing?.id ?? `grant_${randomBytes(6).toString('hex')}`, kind: 'agent-data', reader: reader.id, source: source.id, scope, created_at: Math.floor(now() / 1000) }
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(grantsPath, { schema: 1, grants: [...current.filter((item) => item.id !== grant.id), grant] })
+    return grant
+  }
+  function removeGrant(grantId) {
+    const current = grants()
+    if (!current.some((grant) => grant.id === grantId)) fail(404, 'grant_not_found', 'grant.id')
+    writeJsonAtomic(grantsPath, { schema: 1, grants: current.filter((grant) => grant.id !== grantId) })
+  }
+  /**
+   * What a reader may read of other agents: its `other_agents` level over every standard agent, plus explicit
+   * grants. A private agent is never a source, whatever a stored grant or level says (#59).
+   */
+  function readableSources(readerId) {
+    const reader = read(readerId)
+    if (!reader) return []
+    const agents = list()
+    const out = new Map()
+    if (reader.permissions.other_agents !== 'none') {
+      for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard') out.set(agent.id, reader.permissions.other_agents)
+    }
+    for (const grant of grants()) {
+      if (grant.reader !== reader.id) continue
+      const source = agents.find((agent) => agent.id === grant.source)
+      if (!source || source.privacy !== 'standard' || source.id === reader.id) continue
+      out.set(source.id, grant.scope)
+    }
+    return [...out.entries()].map(([source, scope]) => ({ source, scope }))
+  }
+
+  /** The agent whose own gateway token this is ('' when none). The main agent's token is the bridge's own. */
+  function agentForGatewayToken(token) {
+    if (!token) return ''
+    for (const id of folderIds()) {
+      const key = gatewayKey(id)
+      if (key && safeEqual(key, token) && readRaw(id)) return id
+    }
+    return ''
   }
   const serviceState = (id) => readJson(join(folder(id), 'service-state.json')) ?? {}
   const writeServiceState = (id, patch) => {
@@ -296,6 +489,9 @@ export function createAgentRegistry(options = {}) {
   }
   const apiKey = (id) => {
     try { return readFileSync(join(folder(id), 'runtime.key'), 'utf8').trim() } catch { return '' }
+  }
+  const gatewayKey = (id) => {
+    try { return readFileSync(join(folder(id), 'gateway.key'), 'utf8').trim() } catch { return '' }
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
@@ -403,9 +599,15 @@ export function createAgentRegistry(options = {}) {
       key = randomBytes(32).toString('base64url')
       writeTextAtomic(join(dir, 'runtime.key'), `${key}\n`)
     }
+    // The agent's own app-gateway token: the gateway serves this agent only its own apps (#58).
+    let gateway = gatewayKey(agent.id)
+    if (!gateway) {
+      gateway = randomBytes(32).toString('base64url')
+      writeTextAtomic(join(dir, 'gateway.key'), `${gateway}\n`)
+    }
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
-    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength }))
+    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, gatewayUrl) ? gateway : '' }))
+    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl }))
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
@@ -464,8 +666,25 @@ export function createAgentRegistry(options = {}) {
   async function update(id, body) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
-    if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main', 'the main agent is configured in Hermes itself')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (id === MAIN_AGENT_ID) {
+      // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
+      const keys = Object.keys(body)
+      const permKeys = Object.keys(body.permissions ?? {})
+      if (keys.some((key) => key !== 'permissions') || !permKeys.length || permKeys.some((key) => !['wizard_apps', 'agent_apps'].includes(key))) {
+        fail(409, 'main_agent_read_only', 'agent.main', 'the main agent is configured in Hermes itself; only its apps are set here')
+      }
+      const apps = normalizePermissions(agent.permissions, body.permissions)
+      mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+      writeJsonAtomic(mainPath, { schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
+      appsChanged()
+      return read(id)
+    }
+    if (agent.privacy === 'private') {
+      // #59: nothing turns a private agent into something another agent can read.
+      if (body.privacy !== undefined && body.privacy !== 'private') sealed('a private agent stays private')
+      for (const key of ['readable_by', 'shared_with', 'sources']) if (body.permissions?.[key] !== undefined || body[key] !== undefined) sealed('a private agent is never a source')
+    } else if (body.privacy !== undefined && body.privacy !== agent.privacy) fail(409, 'privacy_fixed', 'agent.privacy')
     const next = structuredClone(agent)
     if (body.label !== undefined) {
       next.label = cleanLabel(body.label)
@@ -481,12 +700,14 @@ export function createAgentRegistry(options = {}) {
       const confirm = body.confirm_downgrade === true
       next.model = validateModel({ ...agent.model, ...body.model, allowed_models: body.model?.allowed_models ?? (body.model?.model && body.model.model !== agent.model.model ? undefined : agent.model.allowed_models) }, await providers(), { privacy: agent.privacy, confirmDowngrade: confirm })
       if (agent.privacy === 'private' && !isConfidentialProvider(next.model.provider)) {
-        // Only an explicit downgrade gets here; the agent stops being private.
-        next.privacy = 'standard'
+        // #59: a downgrade would open the private agent's history to other agents. It stays private; move what the
+        // owner approves into a standard agent instead (the private agent publishes copies, spec/AGENTS.md 6).
+        sealed('a private agent cannot move to a public model')
       }
     }
     assertPrivateWalls(next)
     const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
+    if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
@@ -535,6 +756,8 @@ export function createAgentRegistry(options = {}) {
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken,
+    grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent)),
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId

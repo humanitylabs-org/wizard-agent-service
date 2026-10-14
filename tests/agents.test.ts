@@ -238,8 +238,12 @@ describe('per-agent threads and runs', () => {
     const mainNew = main.seen.slice(mainBefore)
     expect(mainNew.map((s) => `${s.method} ${s.path}`)).toEqual(['GET /api/sessions/wizard_private_1'])
     expect(JSON.stringify(main.seen)).not.toContain('secret plan')
-    // The thread is pinned: no agent param still reaches the private Hermes; naming the main agent is refused.
-    const messages = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_1/messages`)
+    // The thread is pinned to the private agent: read through its own Chats (agent named); by id alone it is sealed
+    // (#59); naming the main agent is refused.
+    const sealedRead = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_1/messages`)
+    expect(sealedRead.status).toBe(409)
+    expect(await sealedRead.json()).toMatchObject({ check: 'agent.private_sealed' })
+    const messages = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_1/messages?agent=private`)
     expect(await messages.json()).toMatchObject({ data: [{ content: 'private says hi' }] })
     const swap = await fetch(`${base}/wizard/hermes/v1/runs?agent=hermes`, json({ session_id: 'wizard_private_1', input: 'x' }))
     expect(swap.status).toBe(409)
@@ -314,7 +318,7 @@ describe('per-agent threads and runs', () => {
     expect(ok.status).toBe(200)
     expect(await ok.json()).toMatchObject({ verified: true, session_id: 'wizard_private_recording_abc', agent: { id: 'private' } })
     expect(deliveries).toEqual([{ id: 'private', payload }])
-    await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_recording_abc/messages`)
+    await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_recording_abc/messages?agent=private`)
     expect(priv.seen.some((s) => s.path.startsWith('/api/sessions/wizard_private_recording_abc/messages'))).toBe(true)
     expect(main.seen.some((s) => s.path.includes('wizard_private_recording_abc'))).toBe(false)
   })

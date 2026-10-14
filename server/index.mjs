@@ -108,5 +108,7 @@ const server = createWizardServer({
   agentUpstreamHost: process.env.WIZARD_AGENT_UPSTREAM_HOST || '127.0.0.1',
   ...(process.env.WIZARD_AGENT_BASE_PORT ? { agentBasePort: Number(process.env.WIZARD_AGENT_BASE_PORT) } : {}),
   ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
+  // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
+  agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))

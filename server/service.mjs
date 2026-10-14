@@ -1824,8 +1824,12 @@ export function createWizardServer(options = {}) {
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  // The agent registry (below) decides which apps each agent may use on the gateway (#58).
+  let gatewayAgents = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
+      agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
+      appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
       fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
@@ -1857,6 +1861,9 @@ export function createWizardServer(options = {}) {
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,
     mainLabel: options.mainAgentLabel,
+    // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
+    gatewayUrl: options.agentGatewayUrl || '',
+    onAppsChanged: () => bridge?.appsChanged(),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
       if (!result.ok) return []
@@ -1870,6 +1877,7 @@ export function createWizardServer(options = {}) {
       } catch { return { status: 'error', status_detail: 'not_responding' } }
     },
   }) : null
+  if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
   // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath })
@@ -3051,11 +3059,11 @@ export function createWizardServer(options = {}) {
       }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
-        const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
-        const tokenOk = Boolean(bearer) && bearer === (options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome, create: false }))
-        if (!tokenOk && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
+        const tokenAgent = bridge.agentFor(request)
+        if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
-        const context = await bridge.kernel({ harness })
+        const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
         if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
         else {
           const body = Buffer.from(context.text)
@@ -3064,7 +3072,7 @@ export function createWizardServer(options = {}) {
         }
         return
       }
-      if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents'))) {
+      if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents') || url.pathname.startsWith('/wizard/v1/agent-grants'))) {
         if (await handleAgentsApi(agentCtx, url, request, response)) return
       }
       if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
