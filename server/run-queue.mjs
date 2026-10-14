@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
@@ -116,6 +117,11 @@ export class DurableRunQueue {
 
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
+    // Normalize older terminal receipts without replaying or changing saved requests.
+    for (const record of this._rows("status = 'completed' AND payload_json LIKE '%Provider authentication failed:%'")) {
+      const payload = normalizeProviderPreflightFailure(record.payload)
+      if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
+    }
     await this.tick(true)
     if (this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
@@ -432,6 +438,8 @@ export class DurableRunQueue {
     if (!force && nowSeconds() - record.updatedAt < 0.7) return record
     try {
       const result = await this.lookup(record)
+      const payload = normalizeProviderPreflightFailure(result?.payload)
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
       return this._update(record.publicRunId, {
         status: capacityStatus,
@@ -451,6 +459,8 @@ export class DurableRunQueue {
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
+      const payload = normalizeProviderPreflightFailure(result?.payload)
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const status = safeStatus(result?.capacityStatus ?? result?.status ?? result?.payload?.status)
       current = this._update(record.publicRunId, {
         status,
