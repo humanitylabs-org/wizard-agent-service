@@ -75,6 +75,11 @@ const server = createWizardServer({
   mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
+  // Resumable uploads and shares (server/uploads.mjs). Size is bounded only by free disk minus the reserve.
+  uploadStatePath: process.env.WIZARD_UPLOAD_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'uploads.sqlite3'),
+  uploadStagingDir: process.env.WIZARD_UPLOAD_STAGING_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'upload-staging'),
+  ...(process.env.WIZARD_UPLOAD_RESERVE_BYTES ? { uploadReserveBytes: Number(process.env.WIZARD_UPLOAD_RESERVE_BYTES) } : {}),
+  ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
