@@ -209,7 +209,9 @@ export function parseAgentFile(value, id) {
 function yamlString(value) { return JSON.stringify(String(value)) }
 
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
-export function hermesConfigYaml(agent, { tinfoilUrl = 'http://tinfoil:3301/v1', contextLength = 0 } = {}) {
+export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0 } = {}) {
+  // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
+  tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
@@ -229,7 +231,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = 'http://tinfoil:3301/v1',
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   lines.push('agent:', `  disabled_toolsets: [${disabled.map(yamlString).join(', ')}]`)
-  lines.push('platform_toolsets:', '  api_server: [hermes-api-server]')
+  // agent.disabled_toolsets is applied last for every platform, the API server included (hermes_cli/tools_config).
   // No app gateway, no shared skills for an agent without apps: nothing outside its own home is reachable.
   if (!agent.permissions.wizard_apps.length && !agent.permissions.agent_apps.length) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')

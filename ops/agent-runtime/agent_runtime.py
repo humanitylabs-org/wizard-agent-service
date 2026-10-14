@@ -64,7 +64,7 @@ def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900
     return run
 
 
-def container_for(project: str, service: str = "hermes") -> str:
+def container_for(project: str, service: str) -> str:
     run = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}",
                   "--filter", f"label=com.docker.compose.service={service}"], timeout=60)
     ids = run.stdout.split()
@@ -133,9 +133,16 @@ class Agents:
 
 # ---------------------------------------------------------------- package
 
+def service_names(agent: dict) -> tuple[str, str]:
+    """Unique per agent: Runtipi puts every app on one shared network, where service names are DNS aliases."""
+    app_id = agent["runtime"]["app_id"]
+    return app_id, f"{app_id}-tinfoil"
+
+
 def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
+    main, proxy = service_names(agent)
     hermes = {
         "image": image,
         "command": ["gateway", "run"],
@@ -144,12 +151,12 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         "environment": {"HERMES_UID": str(uid), "HERMES_GID": str(gid)},
         "x-runtipi": {"is_main": True, "internal_port": 8642},
     }
-    services = {"hermes": hermes}
+    services = {main: hermes}
     if (agent.get("model") or {}).get("provider") == "tinfoil":
-        hermes["depends_on"] = ["tinfoil"]
-        services["tinfoil"] = {
+        hermes["depends_on"] = [proxy]
+        services[proxy] = {
             "image": proxy_image,
-            "command": ["--bind", "0.0.0.0", "--port", "3301", "--allowed-host", "tinfoil", "--log-format", "json"],
+            "command": ["--bind", "0.0.0.0", "--port", "3301", "--allowed-host", proxy, "--log-format", "json"],
             "read_only": True,
             "tmpfs": ["/tmp", "/root/.cache"],
             "security_opt": ["no-new-privileges:true"],
@@ -231,7 +238,7 @@ class ComposeDriver:
         running = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}"], timeout=60).stdout.split()
         docker(["compose", "-p", project, "-f", str(path), "up", "-d", "--remove-orphans"], timeout=1800)
         if running:
-            docker(["compose", "-p", project, "-f", str(path), "restart", "hermes"], timeout=300)
+            docker(["compose", "-p", project, "-f", str(path), "restart", service_names(agent)[0]], timeout=300)
         return {"ok": True, "driver": "compose", "project": project}
 
     def start(self, agent: dict) -> dict:
@@ -281,7 +288,7 @@ class RuntipiDriver:
             return
         home = self.agents.home(agent["id"])
         st = home.stat()
-        doc = {"services": {"hermes": {"volumes": [f"{home}:/opt/data"], "environment": {"HERMES_UID": str(st.st_uid), "HERMES_GID": str(st.st_gid)}}}}
+        doc = {"services": {service_names(agent)[0]: {"volumes": [f"{home}:/opt/data"], "environment": {"HERMES_UID": str(st.st_uid), "HERMES_GID": str(st.st_gid)}}}}
         rt.req("PUT", f"/user-config/{self.urn(agent)}", {"dockerCompose": json.dumps(doc, indent=2) + "\n", "appEnv": ""})
 
     def _install(self, agent: dict) -> dict:
@@ -386,7 +393,7 @@ def deliver(driver, agent: dict, payload: dict) -> dict:
     meta = payload.get("display_metadata") if isinstance(payload.get("display_metadata"), dict) else {}
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
-    cid = container_for(driver.project(agent["id"]))
+    cid = container_for(driver.project(agent["id"]), service_names(agent)[0])
     run = docker(["exec", "-i", "-u", "hermes", cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:

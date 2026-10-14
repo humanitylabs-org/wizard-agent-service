@@ -128,7 +128,7 @@ describe('agents registry and API', () => {
     expect(env).toContain(`API_SERVER_KEY=${key}`)
     expect(env).not.toContain('TINFOIL_API_KEY')
     const config = readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')
-    expect(config).toContain('base_url: "http://tinfoil:3301/v1"')
+    expect(config).toContain('base_url: "http://agent-private-tinfoil:3301/v1"')
     expect(config).toContain('fallback_providers: []')
     for (const tool of ['web', 'browser', 'image_gen', 'tts', 'vision', 'delegation', 'x_search']) expect(config).toContain(`"${tool}"`)
     expect(config).toContain('mcp_servers: {}')
