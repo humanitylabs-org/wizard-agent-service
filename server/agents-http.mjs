@@ -299,6 +299,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
+      result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
@@ -307,6 +308,16 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   }
   response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
   response.end(result)
+}
+
+/** Same visibility rule as the main list (chats the owner had, not internal sessions such as cron or titles). */
+function filterThreads(result, visible) {
+  if (typeof visible !== 'function') return result
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    for (const key of ['data', 'sessions']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].filter((session) => visible(session))
+    return Buffer.from(JSON.stringify(payload))
+  } catch { return result }
 }
 
 function sessionIdsIn(result) {

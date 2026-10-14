@@ -1870,6 +1870,7 @@ export function createWizardServer(options = {}) {
   }) : null
   const agentCtx = agents ? {
     registry: agents, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
     deliveryToken: options.agentDeliveryToken ?? '',

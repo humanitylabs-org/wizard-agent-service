@@ -216,7 +216,7 @@ describe('agents registry and API', () => {
 describe('per-agent threads and runs', () => {
   it('routes a private run to the private Hermes only, pins the thread, and never touches the main Hermes', async () => {
     const dir = box()
-    const main = await fakeHermes('main', ['main_thread'])
+    const main = await fakeHermes('main', ['wizard_main_1'])
     const priv = await fakeHermes('private')
     const { base } = await start(dir, main)
     await withPrivate(dir, base, priv.port)
@@ -243,7 +243,7 @@ describe('per-agent threads and runs', () => {
     expect(swap.status).toBe(409)
     expect(await swap.json()).toMatchObject({ error: 'thread_agent_pinned', check: 'thread.agent_pinned' })
     // A main thread cannot be continued under the private agent either.
-    const steal = await fetch(`${base}/wizard/hermes/v1/runs?agent=private`, json({ session_id: 'main_thread', input: 'x' }))
+    const steal = await fetch(`${base}/wizard/hermes/v1/runs?agent=private`, json({ session_id: 'wizard_main_1', input: 'x' }))
     expect(steal.status).toBe(409)
     expect(await steal.json()).toMatchObject({ check: 'thread.agent_pinned' })
     // Run status for the private run id goes to the private Hermes.
@@ -279,16 +279,16 @@ describe('per-agent threads and runs', () => {
 
   it('thread lists carry the server-side agent; each agent lists only its own threads', async () => {
     const dir = box()
-    const main = await fakeHermes('main', ['main_thread'])
-    const priv = await fakeHermes('private', ['wizard_private_9'])
+    const main = await fakeHermes('main', ['wizard_main_1'])
+    const priv = await fakeHermes('private', ['wizard_private_9', 'cron_job_1'])
     const { base } = await start(dir, main)
     await withPrivate(dir, base, priv.port)
     const privateList = await (await fetch(`${base}/wizard/hermes/api/sessions?agent=private`)).json()
-    expect(privateList.data.map((s: any) => s.id)).toEqual(['wizard_private_9'])
+    expect(privateList.data.map((s: any) => s.id)).toEqual(['wizard_private_9'])   // internal sessions hidden like the main list
     expect(privateList.data[0].agent).toEqual({ id: 'private', label: 'Private', privacy: 'private', appearance: { glyph: 'lock', hue: 160 } })
     const mainList = await (await fetch(`${base}/wizard/hermes/api/sessions`)).json()
     const ids = (mainList.data ?? mainList.sessions).map((s: any) => s.id)
-    expect(ids).toContain('main_thread')
+    expect(ids).toContain('wizard_main_1')
     expect(ids).not.toContain('wizard_private_9')
     expect((mainList.data ?? mainList.sessions)[0].agent).toMatchObject({ id: 'hermes', privacy: 'standard' })
     const unknown = await fetch(`${base}/wizard/hermes/api/sessions?agent=nobody`)
