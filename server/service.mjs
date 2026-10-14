@@ -2815,7 +2815,13 @@ export function createWizardServer(options = {}) {
   // own home inbox when an agents registry is present).
   const uploadTarget = (key) => {
     if (key === 'files') {
-      if (mediaFiles) return { kind: 'local', stagingDir: uploadStagingDir, finalize: async (path, meta) => safeFile(mediaFiles.adopt(path, meta)) }
+      if (mediaFiles) {
+        return {
+          kind: 'local', stagingDir: uploadStagingDir,
+          finalize: async (path, meta) => safeFile(mediaFiles.adopt(path, meta)),
+          recover: async (key) => { const found = mediaFiles.adopted(key); return found ? safeFile(found) : null },
+        }
+      }
       if (dropClient && uploadStagingDir) return { kind: 'drop', stagingDir: uploadStagingDir }
       return null
     }
@@ -2865,7 +2871,10 @@ export function createWizardServer(options = {}) {
       }
       if (!created.ok && created.status !== 409) throw Object.assign(new Error('share thread create failed'), { status: created.status })
     }
-    const body = { session_id: share.thread_id, input: shareMessageText(share.note, files), ...(routed.fileIds ? routed.fileIds(files) : { wizard_file_ids: files.map((item) => item.file.id) }) }
+    // The main agent resolves wizard_file_ids itself; another agent's router supplies its own run fields
+    // (the files as paths inside that agent's home).
+    const text = shareMessageText(share.note, files)
+    const body = { session_id: share.thread_id, input: text, ...(routed.runFields ? routed.runFields(text, files) : { wizard_file_ids: files.map((item) => item.file.id) }) }
     const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, body, `share-${share.id}`)
     if (!run.ok) throw Object.assign(new Error('share run admission failed'), { status: run.status })
     return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
