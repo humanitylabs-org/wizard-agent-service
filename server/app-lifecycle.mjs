@@ -205,6 +205,14 @@ export function createAppLifecycleRoutes({
     if (app) {
       if (appsOrigin) {
         if (!['GET', 'HEAD'].includes(req.method)) { send(res, 405, { error: 'method_not_allowed' }); return true }
+        // The launcher confirms with fetch(HEAD). Following a cross-origin redirect
+        // taints its Origin to null; do not authorize null origins to make it pass.
+        // Confirm the real upstream status here with HEAD's empty body. App GET
+        // documents still redirect and never execute on the control origin.
+        if (req.method === 'HEAD') {
+          await proxyApp(req, res, url, app[1], app[2], true)
+          return true
+        }
         res.writeHead(302, { Location: `${appsOrigin}${url.pathname}${url.search}`, 'Cache-Control': 'no-store' }); res.end(); return true
       }
       await proxyApp(req, res, url, app[1], app[2], true)
