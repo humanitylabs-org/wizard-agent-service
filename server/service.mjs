@@ -1990,6 +1990,14 @@ export function createWizardServer(options = {}) {
     : null
   const agentCtx = agents ? {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    projectAgentHistory: (result, agent) => {
+      // Routed agents have a host-side home and the runtime mounts it at /opt/data.
+      // Shared inbox roots still apply when a note mentions a main-agent attachment.
+      const roots = [...inboxTrustedRoots, join(agents.agentsDir, agent.id, 'home'), '/opt/data']
+      const projected = projectPrivateFilePaths(result, roots)
+      if (roots.some(root => projected.includes(Buffer.from(root)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
+      return projected
+    },
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),

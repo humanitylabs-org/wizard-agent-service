@@ -73,6 +73,20 @@ describe('incoming automatic run context', () => {
     expect(JSON.stringify(output)).not.toMatch(/sensitive[-]?value/)
   })
 
+  it.each([
+    '{"password":"first SECRET_CANARY last"}',
+    '[{"password":"first SECRET_CANARY last"}]',
+    '{"password":"first SECRET_CANARY last", "other": true}',
+    'passphrase=\'first SECRET_CANARY last\'',
+    'password="first \\" SECRET_CANARY last"',
+    'password="first SECRET_CANARY last',
+    'password=\'first SECRET_CANARY last',
+  ])('fully removes quoted and incomplete credential values: %s', secret => {
+    const output = project({ ...row, content: prefix + ' Credentials: ' + secret })
+    expect(output.run_context.redacted).toBe(true)
+    expect(JSON.stringify(output)).not.toContain('SECRET_CANARY')
+  })
+
   it('flags bounded originals and bounds source, summary and action', () => {
     const output = project({ ...row, content: `${prefix} Cross-thread note from the "${'T'.repeat(500)}" thread. Please ${'word '.repeat(4000)}` })
     expect(output.run_context.original_truncated).toBe(true)

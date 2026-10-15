@@ -98,6 +98,21 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('redacts shared and agent-local attachment roots in routed context', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const original = '[Wizard follow-through] Please inspect /private/attachments/PRIVATE_PATH_CANARY.wav and /opt/data/attachments/CONTAINER_PATH_CANARY.wav and ' + join(dir, 'agents/private/home/attachments/HOST_PATH_CANARY.wav')
+    const priv = await fakeHermes('private', ['wizard_private_paths'], [{ id: 4, role: 'user', timestamp: 42, content: original }])
+    const { base } = await start(dir, main, { inboxTrustedRoots: ['/private/attachments'] })
+    await withPrivate(dir, base, priv.port)
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_paths/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const payload = await response.json()
+    expect(payload.data[0].run_context.redacted).toBe(true)
+    expect(JSON.stringify(payload)).not.toMatch(/(?:PRIVATE|CONTAINER|HOST)_PATH_CANARY/)
+    expect(payload.data[0].run_context.original).toContain('[private attachment]')
+  })
+
   it('lists the main agent and only schema-1 agent folders', async () => {
     const dir = box()
     const main = await fakeHermes('main')
