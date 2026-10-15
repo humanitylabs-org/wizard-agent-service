@@ -9,6 +9,10 @@ const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stoppin
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
+// Only service-owned continuation metadata selects the background lane. Manual
+// Continue is an interactive request; model text never determines scheduling.
+export const isBackgroundContinuation = record => Boolean(record.continuation)
+  && record.continuation.kind !== 'background-recovery'
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
@@ -59,6 +63,7 @@ export class DurableRunQueue {
   constructor({
     statePath,
     maxActive = 8,
+    reservedInteractive = 0,
     pollIntervalMs = 1_500,
     retryDelayMs = 2_000,
     activeSessionIds = async () => [],
@@ -78,6 +83,8 @@ export class DurableRunQueue {
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
+    if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
+    this.reservedInteractive = reservedInteractive
     this.pollIntervalMs = Math.max(0, Number(pollIntervalMs) || 0)
     this.retryDelayMs = Math.max(50, Number(retryDelayMs) || 2_000)
     this.activeSessionIds = activeSessionIds
@@ -355,6 +362,7 @@ export class DurableRunQueue {
       dispatch_paused: !dispatchHealthy,
       liveness_available: livenessAvailable,
       lane: 'interactive',
+      interactive_reserved: this.reservedInteractive,
       provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
     }
   }
@@ -584,8 +592,17 @@ export class DurableRunQueue {
       return
     }
 
-    for (const record of this._rows("status = 'queued'")) {
+    const pending = this._rows("status = 'queued'")
+    if (this.reservedInteractive) pending.sort((a, b) => Number(isBackgroundContinuation(a)) - Number(isBackgroundContinuation(b)))
+    for (const record of pending) {
       if (activeSessions.size >= this.maxActive) break
+      // Background turns may consume only the nonreserved total occupancy.
+      // Existing turns are never preempted; two slots stay reachable by people.
+      if (this.reservedInteractive && isBackgroundContinuation(record)
+          && activeSessions.size >= this.maxActive - this.reservedInteractive) {
+        this._update(record.publicRunId, { waitingReason: 'interactive_reserve' })
+        continue
+      }
       const cooldown = this.database.prepare('SELECT retry_after FROM wizard_provider_backoff WHERE scope=?').get(providerScope(record))
       if (Number(cooldown?.retry_after || 0) > nowSeconds()) {
         this._update(record.publicRunId, { waitingReason: 'provider_busy' })

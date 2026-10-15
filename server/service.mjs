@@ -2760,6 +2760,7 @@ export function createWizardServer(options = {}) {
     runQueue = new DurableRunQueue({
       statePath: runQueueStatePath,
       maxActive,
+      reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
       activeSessionIds: activeSessionReader,
