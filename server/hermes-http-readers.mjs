@@ -52,9 +52,12 @@ export async function hermesRunTurnHeld(fetchImpl, origin, key, runId) {
   const raw = await response.text().catch(() => '')
   if (response.status === 404) return false
   if (!response.ok) throw new Error(`run status unknown (${response.status})`)
-  let status = ''
-  try { status = String(JSON.parse(raw)?.status ?? '') } catch { throw new Error('run status unreadable') }
+  let status = '', run
+  try { run = JSON.parse(raw); status = String(run?.status ?? '') } catch { throw new Error('run status unreadable') }
   if (RUN_TERMINAL.has(status)) return false
+  // Canonical admissions are authoritative even without a locally attached agent.
+  // An empty steer tests input validation, not canonical owner liveness.
+  if (run?.admission_id || Number.isSafeInteger(run?.execution_generation)) return true
   if (status !== 'running') return true
   return hermesRunHasAgent(fetchImpl, origin, key, runId)
 }

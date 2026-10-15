@@ -4,8 +4,8 @@ import { dirname } from 'node:path'
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
 const THREAD_KEY = /^[A-Za-z0-9._:-]{1,320}$/
-const RUN_STATUSES = new Set(['idle', 'submitting', 'queued', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'])
-const READY_OR_ATTENTION_STATUSES = new Set(['completed', 'failed', 'interrupted', 'waiting_for_approval'])
+const RUN_STATUSES = new Set(['idle', 'submitting', 'queued', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'])
+const READY_OR_ATTENTION_STATUSES = new Set(['completed', 'failed', 'interrupted', 'waiting_for_approval', 'unknown'])
 
 function validRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
