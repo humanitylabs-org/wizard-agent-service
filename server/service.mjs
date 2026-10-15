@@ -2165,10 +2165,14 @@ export function createWizardServer(options = {}) {
   const operatorWorkerModel = String(options.operatorWorkerModel ?? '').trim()
   const operatorWorkers = new Map()
   const operatorWorkerStatePath = options.operatorWorkerStatePath ? resolve(String(options.operatorWorkerStatePath)) : ''
-  // Subscription quota reads use the host's own provider sign-ins. Paths and
+  // Subscription quota reads: installed AI connection apps from apps.json, then
+  // the host's own provider sign-ins for any provider no app covers. Paths and
   // endpoints are fixed here; no request may influence either.
   const aiUsageReader = options.aiUsageReader ?? createAiUsageReader({
     fetchImpl,
+    appsJsonPath,
+    // 'local' (loopback, service on host network) or 'internal' (container network).
+    aiConnectionAddress: options.aiConnectionAddress || (options.appsMcpAddress === 'internal' ? 'internal' : 'local'),
     claudeCredentialsPath: options.claudeCredentialsPath,
     codexAuthPath: options.codexAuthPath,
     // Where the host's own Hermes profile keeps its ChatGPT subscriptions.
