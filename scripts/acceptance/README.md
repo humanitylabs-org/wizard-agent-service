@@ -38,7 +38,13 @@ HERMES_HOME="$ACCEPTANCE_ROOT/upstream-home" "$ACCEPTANCE_ROOT/venv/bin/python" 
   tests/gateway/test_api_source_binding.py
 ```
 
-Run broad WAS regression separately with `npm test -- --maxWorkers=2`. The final run passed 578 tests with 3 platform-skipped tests. An earlier load-sensitive `voice-context-parity` queued-note test failed both the unchanged base and the candidate on the tested Mac; it uses the real host dispatch-health gate without a deterministic health reader. Preserve those baseline logs alongside the passing final rerun rather than hiding the transient failure. Focused compatibility tests inject health and exercise actual transport boundaries.
+Run broad WAS regression separately with `npm test -- --maxWorkers=2`. On the narrow live-baseline candidate this passed 447 tests with 1 platform-skipped test; the focused slice passed 33 tests. Focused compatibility tests inject health and exercise actual transport boundaries.
+
+### Narrow live-release source
+
+`fix/hermes-0221-live` is based on the deployed `e401bf2b48688ccef3f9360d2faf559009e87c1d`, not the newer main baseline used by `feature/hermes-0221-compat`. It ports only the compatibility delta from `47031b8`, `ae8d36c` and `9c502a4`. The feature branch remains intact for upstream review.
+
+The deployed baseline has no background-results/manual-Continue module or HTTP helper-continuation reader. This port retains its existing `requireCurrentContinuation` first-dispatch gate, while replaying already-frozen wire bytes without re-admitting an ambiguous request. It adds the optional upstream-status preservation argument only for the compatibility recovery lookup; the older helper and follow-through implementation stays in place. No newer Tailscale auth, AI Connections, stock-builder, deployment, or voice modules are imported. Recheck the deployed release marker at activation: this candidate is valid only against that exact base or a separately reviewed reconciliation.
 
 ### What the evidence means
 
