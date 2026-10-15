@@ -52,12 +52,7 @@ class ManagedMaintenance:
   if not found:raise MaintenanceError('runtime_inventory_unknown')
   return found
  def reservations(self):
-  held=set()
-  for p in (self.root/'launch').iterdir():
-   with p.open() as f:
-    try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError:held.add(p.name)
-  return held
+  return {name for c in self.containers() if c['managed'] and c['running'] for name in self.control(c,'snapshot')['reservations']}
  def control(self,c,action,**kw):
   # private interpreter is root-only; normal Docker exec/CLI uses the guard.
   # Original stock uv interpreter is index zero in the pinned two-inode image.
@@ -144,30 +139,46 @@ class ManagedMaintenance:
  def release(self,token):
   with self.lock('operation.lock'):return self._release(token)
  def _release(self,token):
-  lease=self.read()
-  if not lease:return {'ok':True}
+  lease=self.read();resume=self.root/'resume.json'
+  if lease is None:
+   if not resume.exists():return {'ok':True}
+   lease=json.loads(resume.read_text())
   if lease['token']!=token:raise MaintenanceError('maintenance_token_mismatch')
-  lease['phase']='releasing';self.save(lease)
+  current={c['name']:c for c in self.containers()}
   for r in lease['runtimes']:
+   name=r['container']['name']
+   if name not in current or not current[name]['managed']:raise MaintenanceError('runtime_replacement_unknown')
+   r['container']=current[name]
+  if self.read():
+   lease['phase']='releasing';self.save(lease)
+   for r in lease['runtimes']:
+    c=r['container']
+    if not c['running']:raise MaintenanceError('runtime_restart_required_before_release')
+    if r['role']=='gateway':self.control(c,'clear-drain',home=r['home'])
+    elif r.get('permit'):
+     if not self.control(c,'alive',runtime=r)['alive']:continue
+     if r.get('committed'):
+      # Commit cannot be cancelled; replace this proven-idle backend.
+      self.control(c,'stop-backend',runtime=r)
+     else:self.control(c,'backend',verb='cancel',body={'token':r['permit']})
+   with resume.open('w') as f:json.dump(lease,f);f.flush();os.fsync(f.fileno())
+   os.chmod(resume,0o600);self.sync()
+   # The sole reopening edge: explicit token release, never restart or expiry.
+   with self.lock('admission.lock'):
+    (self.root/'lease.json').unlink();self.sync()
+  # Persist restoration intent across a lost response or helper restart. Do not
+  # guess that a container replacement has the old PID or its old retirement token.
+  for r in lease['runtimes']:
+   if r['role']!='gateway' or not r.get('drainAcknowledged'):continue
    c=r['container']
-   if not c['running']:continue
-   if r['role']=='gateway':
-    # May already have exited: clear the supported file via controller, not a kill.
-    self.control(c,'clear-drain',home=r['home'])
-   elif r.get('permit') and not r.get('committed'):
-    self.control(c,'backend',verb='cancel',body={'token':r['permit']})
-   elif r.get('committed'):
-    # Commit is irreversible. Cancellation must replace that idle backend rather
-    # than leave an apparently healthy process permanently refusing every turn.
-    self.control(c,'stop-backend',runtime=r)
-  # Explicit release is the sole reopening edge, including reboot and rollback.
-  with self.lock('admission.lock'):
-   (self.root/'lease.json').unlink();self.sync()
-  # Stock s6 daemon slots recover on their normal retries. Gateway pause also
-  # marks its slot down, so explicitly restore only previously running homes.
-  for r in lease['runtimes']:
-   if r['role']=='gateway' and r.get('drainAcknowledged'):
-    self.run(['docker','exec','-u','hermes','-e','HERMES_HOME='+r['home'],r['container']['id'],'hermes','gateway','start'],timeout=45)
+   for attempt in range(30):
+    rows=self.control(c,'snapshot')['processes']
+    if any(x['role']=='gateway' and x['home']==r['home'] for x in rows):break
+    if attempt in [2,8,16]:
+     subprocess.run(['docker','exec','-u','hermes','-e','HERMES_HOME='+r['home'],c['id'],'hermes','gateway','start'],capture_output=True,timeout=15)
+    time.sleep(1)
+   else:raise MaintenanceError('runtime_resume_pending_retry_release')
+  if resume.exists():resume.unlink();self.sync()
   return {'ok':True}
  def enter(self):
   with self.lock('admission.lock'):
