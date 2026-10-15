@@ -16,6 +16,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
@@ -122,6 +123,8 @@ const allowed = [
   { method: 'GET', pattern: new RegExp(`^/v1/runs/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/v1/runs/${ID}/events$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/approval$`), query: new Set() },
+  { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/clarify$`), query: new Set() },
+  { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/resolve-unknown$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/steer$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/stop$`), query: new Set() },
 ]
@@ -279,7 +282,7 @@ export function supportsJoinedDelegation(payload) {
 }
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const FAILED_RUN_STATUSES = new Set(['failed', 'interrupted'])
@@ -2215,7 +2218,7 @@ export function createWizardServer(options = {}) {
     if (init.body) headers.set('Content-Type', 'application/json')
     const result = await fetchImpl(`${upstreamOrigin}${path}`, { ...init, headers, redirect: 'manual' })
     const raw = Buffer.from(await result.arrayBuffer())
-    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: preserveStatus ? result.status : 502 })
+    if (!result.ok) throw upstreamError(preserveStatus ? result.status : 502, raw, result.headers.get('retry-after'))
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
@@ -2234,6 +2237,7 @@ export function createWizardServer(options = {}) {
         const payload = await hermesJson('/v1/capabilities')
         hermesContract = {
           join: supportsJoinedDelegation(payload), markdown: supportsMarkdownRendering(payload),
+          unknownResolution: payload?.features?.run_unknown_resolution === true,
           checked: true, expiresAt: Date.now() + 30_000,
         }
         return hermesContract
@@ -2676,9 +2680,12 @@ export function createWizardServer(options = {}) {
       if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
         await requireHelperContinuation(record.continuation)
       }
+      // Persist the actual decorated wire payload, not just the UI input: capability and
+      // instruction changes across a restart must not change an attempted idempotency key.
+      queuedBody = Buffer.from(runQueue.freezeDispatchBody(record.publicRunId, queuedBody.toString('utf8')))
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
-      if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
+      if (!result.ok) throw upstreamError(result.status, raw, result.headers.get('retry-after'))
       let payload
       try { payload = JSON.parse(raw.toString('utf8')) }
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
@@ -4037,7 +4044,7 @@ export function createWizardServer(options = {}) {
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
-        const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval))?$/) : null
+        const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval|clarify|resolve-unknown))?$/) : null
         let queuedProxyRecord = queuedPath ? runQueue.get(queuedPath[1]) : null
         const operatorSteerRecord = operator && queuedProxyRecord?.upstreamRunId && queuedPath?.[2] === 'steer'
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
@@ -4090,6 +4097,12 @@ export function createWizardServer(options = {}) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
+        if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
+          if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
+          const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
+          try { validateRecoveryIdentity(parseJsonBody(body), current) }
+          catch (error) { sendJson(response, error.status, { error: { code: error.code, message: error.message } }); return }
+        }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
@@ -4203,6 +4216,8 @@ export function createWizardServer(options = {}) {
         }
         const replayed = upstream.headers.get('idempotency-replayed')
         if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
+        const retryAfter = upstream.headers.get('retry-after')
+        if (retryAfter) responseHeaders['Retry-After'] = retryAfter
         const runPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)/)?.[1]
         const responseTrustedPaths = runPathId ? runTrustedPaths.get(runPathId) ?? queuedProxyRecord?.trustedPaths ?? [] : []
         if (contentType.includes('text/event-stream') && upstream.body) {
@@ -4213,6 +4228,7 @@ export function createWizardServer(options = {}) {
           return
         }
         let result = Buffer.from(await upstream.arrayBuffer())
+        if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
         if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
           const ack = JSON.parse(result.toString('utf8'))
           const selected = lockedBridge.sessionRoute(decodeURIComponent(upstreamPath.split('/')[3]))
