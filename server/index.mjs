@@ -82,6 +82,16 @@ const server = createWizardServer({
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
+  // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
+  heavyStatePath: process.env.WIZARD_HEAVY_STATE_PATH || '',
+  heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
+  heavyWorker: {
+    host: process.env.WIZARD_HEAVY_SSH_HOST,
+    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
+    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
+    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
+    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
+  },
   requireAccess,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,

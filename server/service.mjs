@@ -16,6 +16,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
@@ -335,6 +336,18 @@ export function wizardDispatchHealthy({ cpuCount = cpus().length, oneMinuteLoad 
     cpuPressure = Number(source.match(/some\s+avg10=([0-9.]+)/)?.[1] ?? 0)
   } catch { cpuPressure = 0 }
   return oneMinuteLoad < Math.max(2, cpuCount * 1.5) && cpuPressure < 60
+}
+
+// Remote-model turns need memory, not an idle local CPU. Heavy CPU/disk work
+// belongs to the external worker lock; retain a bounded model-turn cap separately.
+export function wizardInteractiveHealthy({ memoryText, pressureText } = {}) {
+  try {
+    const memory = memoryText ?? readFileSync('/proc/meminfo', 'utf8')
+    const pressure = pressureText ?? readFileSync('/proc/pressure/memory', 'utf8')
+    const availableKiB = Number(memory.match(/^MemAvailable:\s+(\d+)/m)?.[1])
+    const full = Number(pressure.match(/full\s+avg10=([0-9.]+)/)?.[1] ?? 0)
+    return Number.isFinite(availableKiB) && availableKiB >= 512 * 1024 && full < 20
+  } catch { return process.platform !== 'linux' }
 }
 
 // A new turn in an archived thread must surface its result (James, 14 Oct 2026: replies
@@ -2604,6 +2617,7 @@ export function createWizardServer(options = {}) {
 
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
+  let heavyWork = null
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -2669,12 +2683,15 @@ export function createWizardServer(options = {}) {
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
-      if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
+      if (record.continuation?.kind === HEAVY_KIND) {
+        if (!heavyWork) throw Object.assign(new Error('heavy continuation unavailable'), { status: 503 })
+        await heavyWork.validate(record)
+      } else if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
         await requireHelperContinuation(record.continuation)
       }
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
-      if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
+      if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status, retryAfter: result.headers.get('retry-after') })
       let payload
       try { payload = JSON.parse(raw.toString('utf8')) }
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
@@ -2722,7 +2739,7 @@ export function createWizardServer(options = {}) {
     // Turns started on other surfaces (Telegram, TUI) are visible only in state.db; without it the
     // queue counts its own runs, which Hermes serialises per session anyway.
     const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveHumanSessionIds(hermesStatePath) : []))
-    const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
+    const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardInteractiveHealthy())
     const turnHeldCache = new Map()
     const runTurnHeld = async (runId) => {
       const cached = turnHeldCache.get(runId)
@@ -2769,7 +2786,9 @@ export function createWizardServer(options = {}) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, request: path => hermesJson(path) })
   if (runQueue) runQueueReady = runQueue.initialize()
+  if (heavyWork) void runQueueReady.then(() => heavyWork.start())
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
@@ -3501,6 +3520,13 @@ export function createWizardServer(options = {}) {
         await bridge.handle(request, response)
         return
       }
+      if (url.pathname.startsWith('/wizard/internal/heavy/')) {
+        if (!heavyWork) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
+        sendJson(response, 200, await heavyWork.handle(request, url.pathname, value))
+        return
+      }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
@@ -3552,7 +3578,7 @@ export function createWizardServer(options = {}) {
           await upstream.body?.cancel().catch(() => undefined)
         } catch { reachable = false }
         finally { clearTimeout(timer) }
-        const queue = runQueue ? await runQueue.summary() : undefined
+        const queue = runQueue ? { ...await runQueue.summary(), ...(heavyWork ? { heavy: heavyWork.summary() } : {}) } : undefined
         sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
         return
       }
@@ -4039,6 +4065,7 @@ export function createWizardServer(options = {}) {
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
           : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (queuedProxyRecord && request.method === 'POST' && ['steer', 'stop'].includes(queuedPath[2])) heavyWork?.supersede(queuedProxyRecord.sessionId)
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
           return
@@ -4140,6 +4167,7 @@ export function createWizardServer(options = {}) {
             sendQueuedRun(response, 202, retainedVoice, { 'Idempotency-Replayed': 'true' })
             return
           }
+          heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
@@ -4460,7 +4488,10 @@ export function createWizardServer(options = {}) {
       else response.destroy()
     }
   })
-  if (runQueue) server.once('close', () => runQueue.close())
+  if (runQueue) server.once('close', () => {
+    if (heavyWork) void heavyWork.close().finally(() => runQueue.close())
+    else runQueue.close()
+  })
   if (uploads) server.once('close', () => uploads.close())
   server.on('listening', () => {
     const address = server.address()

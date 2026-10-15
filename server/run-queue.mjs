@@ -14,6 +14,17 @@ const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
 
 const nowSeconds = () => Date.now() / 1000
+const providerScope = record => {
+  const body = parseJson(record.body, {})
+  return JSON.stringify([record.runtime, body.provider || 'configured', body.model || 'configured'])
+}
+export function retryAfterSeconds(value, now = Date.now()) {
+  if (value === null || value === undefined || value === '') return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds
+  const date = Date.parse(String(value))
+  return Number.isFinite(date) ? Math.max(0, (date - now) / 1000) : 0
+}
 const safeStatus = (value) => {
   const status = String(value ?? '').toLowerCase()
   if (['accepted', 'pending', 'queued', 'submitting', 'started'].includes(status)) return 'running'
@@ -88,6 +99,9 @@ export class DurableRunQueue {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 5000;
+      CREATE TABLE IF NOT EXISTS wizard_provider_backoff (
+        scope TEXT PRIMARY KEY, retry_after REAL NOT NULL, failures INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS wizard_run_queue (
         public_run_id TEXT PRIMARY KEY,
         runtime TEXT NOT NULL,
@@ -334,6 +348,8 @@ export class DurableRunQueue {
       queued: this._rows("status = 'queued'").length,
       dispatch_paused: !dispatchHealthy,
       liveness_available: livenessAvailable,
+      lane: 'interactive',
+      provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
     }
   }
 
@@ -484,6 +500,7 @@ export class DurableRunQueue {
         retryAfter: 0,
         terminalAt: TERMINAL.has(status) ? nowSeconds() : null,
       })
+      this.database.prepare('DELETE FROM wizard_provider_backoff WHERE scope=?').run(providerScope(current))
       return current
     } catch (error) {
       const status = Number(error?.status)
@@ -491,8 +508,16 @@ export class DurableRunQueue {
         return this._update(record.publicRunId, { status: 'cancelled', payload: { status: 'cancelled', safe_error: 'The helper request is no longer current.' }, waitingReason: '', terminalAt: nowSeconds() })
       }
       const retry = error instanceof TypeError || RETRIABLE.has(status)
+      let delay = this.retryDelayMs / 1000
+      if (retry && (status === 429 || error?.retryAfter)) {
+        const scope = providerScope(current)
+        const previous = this.database.prepare('SELECT failures FROM wizard_provider_backoff WHERE scope=?').get(scope)
+        const failures = Math.min(10, Number(previous?.failures || 0) + 1)
+        delay = Math.max(retryAfterSeconds(error.retryAfter), Math.min(60, delay * 2 ** (failures - 1)))
+        this.database.prepare('INSERT OR REPLACE INTO wizard_provider_backoff VALUES(?,?,?)').run(scope, nowSeconds() + delay, failures)
+      }
       return this._update(record.publicRunId, retry
-        ? { status: 'queued', waitingReason: status === 429 ? 'provider_busy' : 'capacity', retryAfter: nowSeconds() + this.retryDelayMs / 1000 }
+        ? { status: 'queued', waitingReason: status === 429 || error?.retryAfter ? 'provider_busy' : 'admission_retry', retryAfter: nowSeconds() + delay }
         : { status: 'failed', payload: { status: 'failed', safe_error: 'Wizard could not start this queued work.' }, terminalAt: nowSeconds() })
     }
   }
@@ -555,7 +580,13 @@ export class DurableRunQueue {
 
     for (const record of this._rows("status = 'queued'")) {
       if (activeSessions.size >= this.maxActive) break
-      if (record.retryAfter > nowSeconds() || activeSessions.has(record.sessionId)) {
+      const cooldown = this.database.prepare('SELECT retry_after FROM wizard_provider_backoff WHERE scope=?').get(providerScope(record))
+      if (Number(cooldown?.retry_after || 0) > nowSeconds()) {
+        this._update(record.publicRunId, { waitingReason: 'provider_busy' })
+        continue
+      }
+      if (record.retryAfter > nowSeconds()) continue
+      if (activeSessions.has(record.sessionId)) {
         this._update(record.publicRunId, { waitingReason: 'capacity' })
         continue
       }
