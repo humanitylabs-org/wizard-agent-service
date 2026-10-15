@@ -67,7 +67,7 @@ try {
   await listen(server, '127.0.0.1', 0)
   origin = `http://127.0.0.1:${server.address().port}`
   event('staging_started', { pid: process.pid, origin, remoteSpool })
-  for (const id of [session, questionSession]) await request('/wizard/hermes/api/sessions', { id, title: 'Resource lanes · disposable canary', source: 'wizard-mobile' })
+  for (const id of [session, questionSession]) await request('/wizard/hermes/api/sessions', { id, title: `Resource lanes · canary ${id}`, source: 'wizard-mobile' })
   const originRun = await request('/wizard/hermes/v1/runs', { session_id: session, input:
     'This is an authorized isolated scheduler canary. A test controller will submit two remote worker jobs for this thread. For this turn, answer only: Canary origin acknowledged. Do not call tools or start work. When later given a heavy-work completion receipt, briefly report only its job ID and state, without tools or claiming any wider task complete.' })
   event('origin_admitted', originRun)
