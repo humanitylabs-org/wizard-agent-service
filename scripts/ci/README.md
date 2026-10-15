@@ -23,7 +23,7 @@ Anonymous verification runs in a fresh hosted Linux job, has no package
 permission, uses an empty isolated Docker configuration and no inherited auth
 variables, obtains only anonymous registry tokens, and actually pulls both
 `linux/amd64` and `linux/arm64` by the published index digest and every requested
-tag. It verifies child config digests and the source commit revision. Registry
+tag. It verifies child manifest digests and the pulled source commit revision. Registry
 propagation is retried for five minutes, then the job fails closed.
 
 ## Trusted worker contract

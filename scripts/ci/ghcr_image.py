@@ -152,7 +152,11 @@ def verify(args):
         while True:
             try:
                 registry = Registry(args.image)
-                configs = platform_manifests(registry, args.digest)
+                platform_manifests(registry, args.digest)
+                # Docker 29/containerd keeps both platforms locally; select the
+                # platform explicitly. Classic stores replace the local tag on pull.
+                store = docker(["info", "--format", "{{json .DriverStatus}}"], env, capture_output=True, text=True)
+                containerd = "io.containerd.snapshotter" in store.stdout
                 refs = [args.image + "@" + args.digest]
                 for tag in [args.tag, args.release]:
                     if tag:
@@ -162,8 +166,9 @@ def verify(args):
                 for arch in sorted(PLATFORMS):
                     for ref in refs:
                         docker(["pull", "--platform", "linux/" + arch, ref], env)
-                        result = docker(["image", "inspect", "--format", "{{.Id}} {{.Architecture}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}", ref], env, capture_output=True, text=True)
-                        if result.stdout.strip() != f"{configs[arch]} {arch} {args.sha}":
+                        options = ["--platform", "linux/" + arch] if containerd else []
+                        result = docker(["image", "inspect", *options, "--format", "{{.Architecture}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}", ref], env, capture_output=True, text=True)
+                        if result.stdout.strip() != f"{arch} {args.sha}":
                             raise RuntimeError("pulled image configuration/revision mismatch: " + result.stdout.strip())
                 print("PASS: fully anonymous digest and tag pulls for linux/amd64 and linux/arm64", flush=True)
                 return

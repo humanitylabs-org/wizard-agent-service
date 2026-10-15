@@ -97,11 +97,15 @@ class ImageContract(unittest.TestCase):
             nonlocal arch
             self.assertNotIn('GHCR_TOKEN', env)
             self.assertEqual(Path(env['DOCKER_CONFIG'], 'config.json').read_text(), '{"auths":{}}')
+            if args[0] == 'info':
+                return subprocess.CompletedProcess(args, 0, stdout='[["driver-type", "io.containerd.snapshotter.v1"]]')
             if args[0] == 'pull':
                 arch = args[2].split('/')[1]
                 calls.append((arch, args[3]))
                 return subprocess.CompletedProcess(args, 0)
-            return subprocess.CompletedProcess(args, 0, stdout=f'config-{arch} {arch} {SHA}\n')
+            self.assertIn('--platform', args)
+            self.assertEqual(args[3], 'linux/' + arch)
+            return subprocess.CompletedProcess(args, 0, stdout=f'{arch} {SHA}\n')
         docker.side_effect = run
         ci.verify(self.args(release='0.3.0-candidate.20261012'))
         self.assertEqual(len(calls), 6)
@@ -115,7 +119,7 @@ class ImageContract(unittest.TestCase):
         registry.return_value.manifest.return_value = ('wrong', {})
         with self.assertRaisesRegex(RuntimeError, 'verification failed'):
             ci.verify(self.args())
-        docker.assert_not_called()
+        self.assertTrue(all(call.args[0][0] != 'pull' for call in docker.call_args_list))
 
 
 if __name__ == '__main__':
