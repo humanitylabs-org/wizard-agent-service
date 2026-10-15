@@ -76,6 +76,7 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
     const agent = registry.read(agentId)
     if (!agent) throw new UploadError(409, 'agent_unavailable', { agent: agentId })
     if (agent.id === MAIN_AGENT_ID) return agent
+    if (agent.permissions.files === 'none') throw new UploadError(409, 'agent_files_not_allowed', { agent: agentId })
     const status = await registry.status(agent, { fresh: delivering })
     if (!LIVE.has(status.status) || (delivering && status.status !== 'running')) {
       // At delivery a stopped agent is a transient failure (retried), never a reason to deliver elsewhere.

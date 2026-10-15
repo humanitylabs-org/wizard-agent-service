@@ -35,7 +35,7 @@ async function fakeHermes(name: string, sessions: string[] = []) {
   return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known, runs: () => seen.filter((s) => s.method === 'POST' && s.path === '/v1/runs') }
 }
 
-async function start() {
+async function start(extra: Record<string, any> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'share-agents-'))
   writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [] }))
   const main = await fakeHermes('main', ['main-thread'])
@@ -48,6 +48,7 @@ async function start() {
     mediaRoot: join(dir, 'media'), mediaAgentRoot: '/files', mediaIndexPath: join(dir, 'state', 'media-files.json'),
     uploadStatePath: join(dir, 'state', 'uploads.sqlite3'), uploadReserveBytes: 0,
     runQueueStatePath: join(dir, 'state', 'queue.sqlite3'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
+    ...extra,
   })
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
@@ -134,6 +135,71 @@ describe('shares with an agents registry', () => {
     expect(main.runs()).toHaveLength(1)
     expect(main.runs()[0].body.input).toContain('/files/Inbox/')
     expect(existsSync(join(dir, 'media', 'Inbox'))).toBe(true)
+  })
+
+  it('replays exactly once, binds the recipient and note, and seals the private thread and file from main routes', async () => {
+    const { dir, main, base } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const bytes = Buffer.from('synthetic private fixture')
+    const input = { client_share_id: 'replay', agent: agent.id, note: 'Private only', files: [{ filename: 'secret.txt', bytes: bytes.length, sha256: sha(bytes) }] }
+    const { share } = await sendShare(base, input, [bytes])
+    const original = await delivered(base, share.share_id)
+    const replay = await post(base, '/wizard/v1/shares', input)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replay.json()).toMatchObject({ share_id: share.share_id, thread_id: share.thread_id, agent: agent.id, run_id: original.run_id })
+    expect((await post(base, `/wizard/v1/uploads/${share.uploads[0].upload_id}/complete`, {})).status).toBe(200)
+    for (const changed of [{ agent: 'hermes' }, { agent: undefined }, { note: 'Changed' }, { thread: share.thread_id }, { files: [{ ...input.files[0], filename: 'other.txt' }] }]) {
+      const result = await post(base, '/wizard/v1/shares', { ...input, ...changed })
+      expect(result.status).toBe(409)
+      expect(await result.json()).toMatchObject({ error: 'client_share_id_conflict' })
+    }
+    const path = `/wizard/hermes/api/sessions/${share.thread_id}`
+    expect((await fetch(`${base}${path}?agent=${agent.id}`)).status).toBe(200)
+    expect((await fetch(`${base}${path}`)).status).toBe(409)
+    expect((await fetch(`${base}${path}?agent=hermes`)).status).toBe(409)
+    expect((await fetch(`${base}${path}?agent=${agent.id}&view=operator`)).status).toBeGreaterThanOrEqual(400)
+    const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
+    expect((await fetch(`${base}/wizard/files/${upload.file.id}/content`)).status).toBe(404)
+    expect(agentHermes.runs()).toHaveLength(1)
+    expect(main.seen.filter((s) => s.method === 'POST')).toEqual([])
+  })
+
+  it('cannot replay a main upload handle as a private share', async () => {
+    const { dir, base } = await start()
+    const { agent } = await addPrivate(dir, base)
+    const input = { client_share_id: 'main-to-private', files: [{ filename: 'same.txt', bytes: 5 }] }
+    expect((await post(base, '/wizard/v1/shares', input)).status).toBe(201)
+    const switched = await post(base, '/wizard/v1/shares', { ...input, agent: agent.id })
+    expect(switched.status).toBe(409)
+    expect(await switched.json()).toEqual({ error: 'client_share_id_conflict' })
+  })
+
+  it('refuses shares when agent file permission is none', async () => {
+    const { dir, main, base } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const file = join(dir, 'agents', agent.id, 'agent.json')
+    const value = JSON.parse(readFileSync(file, 'utf8'))
+    value.permissions.files = 'none'
+    writeFileSync(file, JSON.stringify(value))
+    const result = await post(base, '/wizard/v1/shares', { client_share_id: 'no-files', agent: agent.id, files: [{ filename: 'x', bytes: 5 }] })
+    expect(result.status).toBe(409)
+    expect(await result.json()).toMatchObject({ error: 'agent_files_not_allowed' })
+    expect(agentHermes.runs()).toEqual([])
+    expect(main.runs()).toEqual([])
+  })
+
+  it('denies unauthenticated share, upload status and bytes before accessing private data', async () => {
+    const { main, base } = await start({ requireAccess: true, accessVerifier: async () => false })
+    const upload = 'up_' + 'a'.repeat(32), share = 'sh_' + 'a'.repeat(32)
+    const requests = [
+      post(base, '/wizard/v1/shares', { client_share_id: 'unauth', agent: 'private', files: [{ filename: 'x', bytes: 5 }] }),
+      fetch(`${base}/wizard/v1/shares/${share}`),
+      fetch(`${base}/wizard/v1/uploads/${upload}`),
+      fetch(`${base}/wizard/v1/uploads/${upload}`, { method: 'PATCH', headers: { 'Content-Type': 'application/octet-stream', 'Upload-Offset': '0' }, body: 'secret' }),
+      post(base, `/wizard/v1/uploads/${upload}/complete`, {}),
+    ]
+    for (const result of await Promise.all(requests)) expect(result.status).toBe(403)
+    expect(main.seen.filter((s) => s.method === 'POST')).toEqual([])
   })
 
   it('a stopped or unknown agent → 409, never another agent; a thread of another agent → 409', async () => {
