@@ -191,7 +191,7 @@ class ManagedMaintenance:
    # Keep an operation + executable recovery fence until backend readiness is
    # proved. Only the owned stock s6 bootstrap/service tree may restore here.
    with resume.open('w') as f:json.dump(lease,f);f.flush();os.fsync(f.fileno())
-   os.chmod(resume,0o600)
+   os.chmod(resume,0o600);os.chown(resume,1000,1000)
    for c in current.values():
     if c['managed']:
      p=self.root/('resume-'+c['hostname']);p.write_text(lease['token']);os.chmod(p,0o600);os.chown(p,1000,1000)

@@ -37,6 +37,12 @@ class Transport(ManagedMaintenance):
    assert s['committed'];s['alive']=False;self.state.write_text(json.dumps(s));return {'ok':True}
   if action=='backend-ready':
    assert (self.root/'resume.json').exists()
+   assert (self.root/'resume.json').stat().st_uid==1000
+   child=os.fork()
+   if child==0:
+    os.setgid(1000);os.setuid(1000)
+    json.loads((self.root/'resume.json').read_text());os._exit(0)
+   assert os.waitpid(child,0)[1]==0,'normal supervisor cannot resume root-created recovery'
    with self.assert_fenced():pass
    return {'ok':True}
   raise AssertionError(action)
