@@ -121,8 +121,9 @@ def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
     eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id) and pins.get(sid, '') in ('', 'main')]
     ceiling = ceiling or c.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0]
     # Fetch metadata first; do not read tool content or excluded/private messages.
-    # Use the canonical main inventory's session index, never scan tool content.
-    rows = c.execute("SELECT id,session_id,role,timestamp,display_kind,_compressed_summary,(tool_calls IS NOT NULL AND tool_calls NOT IN ('','[]','null')) AS has_tools,platform_message_id FROM messages WHERE session_id IN (" + ','.join('?' for _ in eligible_ids) + ") AND role IN ('user','assistant') AND coalesce(_compressed_summary,0)=0 AND coalesce(display_kind,'') IN ('','final') AND (role='user' OR coalesce(tool_calls,'') IN ('','[]','null')) AND id>? AND id<=? ORDER BY id LIMIT ?", (*eligible_ids, cursor, ceiling, limit)).fetchall()
+    # Force the integer primary-key range walk: repeated session-index scans sort
+    # the entire remaining history on each page. No excluded content is selected.
+    rows = c.execute("SELECT id,session_id,role,timestamp,display_kind,_compressed_summary,(tool_calls IS NOT NULL AND tool_calls NOT IN ('','[]','null')) AS has_tools,platform_message_id FROM messages NOT INDEXED WHERE session_id IN (" + ','.join('?' for _ in eligible_ids) + ") AND role IN ('user','assistant') AND coalesce(_compressed_summary,0)=0 AND coalesce(display_kind,'') IN ('','final') AND (role='user' OR coalesce(tool_calls,'') IN ('','[]','null')) AND id>? AND id<=? ORDER BY id LIMIT ?", (*eligible_ids, cursor, ceiling, limit)).fetchall()
     counts = {'scanned': len(rows), 'eligible': 0, 'matched': 0, 'excluded': 0}
     reasons = {}; evidence = []
     for m in rows:
