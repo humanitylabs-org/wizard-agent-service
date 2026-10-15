@@ -73,7 +73,7 @@ export class DurableHeavyQueue {
     }
     const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, origin, spec, route, watermark,
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
-      remote_ack: false, resume: '', receipt: null }
+      remote_ack: false, resume: '', continuation_invalidated: false, receipt: null }
     this.db.prepare('INSERT INTO heavy_jobs VALUES(?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job))
     return job
   }
@@ -81,13 +81,17 @@ export class DurableHeavyQueue {
     const job = this.get(id)
     if (!job || job.sessionId !== sessionId) throw fail('heavy job not found', 404)
     job.cancel_requested = true
+    job.continuation_invalidated = true
     job.resume = job.resume || 'suppressed'
     // Do not assume an RPC that lost its response failed to create remote work.
     job.reason = terminal.has(job.state) ? job.reason : 'cancellation_pending'
     return this.save(job)
   }
   supersede(sessionId) {
-    for (const job of this.rows()) if (job.sessionId === sessionId && !job.resume) this.save({ ...job, resume: 'suppressed' })
+    // Admission is a receipt, not permission to launch. Fence even terminal jobs
+    // with an admitted continuation, retaining the run ID for diagnosis/replay.
+    for (const job of this.rows()) if (job.sessionId === sessionId) this.save({ ...job,
+      continuation_invalidated: true, resume: job.resume || 'suppressed' })
   }
   summary() {
     const rows = this.rows()
@@ -145,13 +149,13 @@ export class DurableHeavyQueue {
         }
       }
       job = this.get(job.job_id)
-      if (terminal.has(job.state) && !job.resume && !job.cancel_requested) {
+      if (terminal.has(job.state) && !job.resume && !job.cancel_requested && !job.continuation_invalidated) {
         try {
           if (!await this.current(job)) { this.save({ ...this.get(job.job_id), resume: 'superseded' }); continue }
           const result = await this.continuation(job)
           job = this.get(job.job_id)
           // Preserve supersession/cancel arriving during admission.
-          this.save({ ...job, resume: job.resume || result.publicRunId })
+          this.save({ ...job, resume: result.publicRunId })
         } catch (error) {
           if (error?.status === 410) this.save({ ...this.get(job.job_id), resume: 'superseded' })
           // Admission unknown: same job key will replay the durable run receipt.

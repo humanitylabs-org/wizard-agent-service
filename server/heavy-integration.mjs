@@ -30,14 +30,14 @@ export function createHeavyIntegration({ options, queue, request }) {
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
     const fresh = heavy.get(job.job_id)
-    if (!fresh || fresh.cancel_requested || ['suppressed', 'superseded'].includes(fresh.resume)) return false
+    if (!fresh || fresh.cancel_requested || fresh.continuation_invalidated || ['suppressed', 'superseded'].includes(fresh.resume)) return false
     const latest = queue.latestForSession(job.sessionId)
     if (!sameGeneration(latest, job)) return false
     if (JSON.stringify(await watermark(job.sessionId)) !== JSON.stringify(job.watermark)) return false
     // Recheck after the history request: steering/admission may have raced it.
     const after = heavy.get(job.job_id)
     const last = queue.latestForSession(job.sessionId)
-    return !after.cancel_requested && !['suppressed', 'superseded'].includes(after.resume)
+    return !after.cancel_requested && !after.continuation_invalidated && !['suppressed', 'superseded'].includes(after.resume)
       && sameGeneration(last, job)
   }
   heavy = new DurableHeavyQueue({ statePath: options.heavyStatePath,
@@ -64,7 +64,8 @@ export function createHeavyIntegration({ options, queue, request }) {
     },
   })
   const view = job => ({ job_id: job.job_id, state: job.state, reason: job.reason,
-    cancel_requested: job.cancel_requested, continuation: job.resume || 'pending', receipt: job.receipt,
+    cancel_requested: job.cancel_requested, continuation: job.resume || 'pending',
+    continuation_invalidated: Boolean(job.continuation_invalidated), receipt: job.receipt,
     instruction: terminal.has(job.state) ? 'Use the receipt as evidence; do not repeat the job.' :
       'Submission is durable. End this turn with the job receipt; do not wait or poll in a loop. The service resumes this thread when the worker finishes.' })
   return {

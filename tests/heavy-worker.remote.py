@@ -35,10 +35,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         return json.loads(proc.stdout)
 
-    def submit(self, code):
+    def submit(self, code, timeout=15):
         job_id = 'heavy_' + uuid.uuid4().hex
         self.ids.append(job_id)
-        spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', code], 'timeout_seconds': 15}
+        spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', code], 'timeout_seconds': timeout}
         self.rpc('submit', job_id, spec)
         return job_id, spec
 
@@ -88,17 +88,113 @@ class WorkerTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while not (self.base / 'once').exists() and time.monotonic() < deadline:
             time.sleep(0.02)
-        with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
-            child = db.execute('SELECT pid FROM jobs WHERE id=?', (a,)).fetchone()[0]
-        parent = int(subprocess.check_output(['/bin/ps', '-o', 'ppid=', '-p', str(child)], text=True).strip())
-        os.kill(parent, signal.SIGKILL)
+        self.crash_dispatcher(a)
         self.rpc('submit', a, spec_a)
         b, _ = self.submit("print('after crash')")
         self.assertEqual(self.rpc('status', b)['state'], 'queued')
-        self.wait(a, ('interrupted',))
+        self.wait(a, ('completed',))
         self.wait(b, ('completed',))
         self.rpc('submit', a, spec_a)
         self.assertEqual((self.base / 'once').read_text(), 'x')
+
+    def crash_dispatcher(self, job_id):
+        with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+            dispatcher, executor, deadline = db.execute(
+                'SELECT dispatcher_pid,pid,deadline FROM jobs WHERE id=?', (job_id,)).fetchone()
+        self.assertIsNotNone(deadline)
+        self.assertGreater(deadline, time.time())
+        self.assertNotEqual(dispatcher, executor)
+        os.kill(dispatcher, signal.SIGKILL)
+        return executor, deadline
+
+    def wait_file(self, name):
+        deadline = time.monotonic() + 5
+        while not (self.base / name).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue((self.base / name).exists(), name)
+        return self.base / name
+
+    def assert_group_gone(self, pgid):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f'execution group {pgid} is still alive')
+
+    def recovery_job(self, timeout=15):
+        # TERM-resistant grandchild proves whole-group termination, not just the
+        # immediate process. This job is never permitted to reach its 60s sleep.
+        descendant = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('grandchild').write_text(str(os.getpid())); time.sleep(60)"
+        code = f"import subprocess,sys,time; from pathlib import Path; Path('once').open('a').write('x'); subprocess.Popen([sys.executable,'-c',{descendant!r}]); time.sleep(60)"
+        a, spec = self.submit(code, timeout=timeout)
+        self.wait(a, ('running',)); self.wait_file('grandchild')
+        b, _ = self.submit("from pathlib import Path; Path('next-ran').write_text('yes')")
+        self.assertEqual(self.rpc('status', b)['state'], 'queued')
+        return a, b, spec
+
+    def test_crash_then_cancel_kills_group_and_advances_without_duplicate(self):
+        a, b, spec = self.recovery_job()
+        executor, _ = self.crash_dispatcher(a)
+        # Deliberately poison the persisted diagnostic PID with an unrelated
+        # live session leader. Recovery must never signal a database PID.
+        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        try:
+            with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+                db.execute('UPDATE jobs SET pid=? WHERE id=?', (unrelated.pid, a))
+            began = time.monotonic()
+            self.rpc('cancel', a)
+            self.assertEqual(self.wait(a, ('cancelled',))['receipt']['state'], 'cancelled')
+            self.wait(b, ('completed',))
+            self.assertLess(time.monotonic() - began, 6)
+            self.assert_group_gone(executor)
+            self.assertIsNone(unrelated.poll())
+            self.rpc('submit', a, spec)
+            self.assertEqual((self.base / 'once').read_text(), 'x')
+            self.assertEqual((self.base / 'next-ran').read_text(), 'yes')
+        finally:
+            unrelated.kill(); unrelated.wait()
+
+    def test_recovered_deadline_kills_group_and_starts_next(self):
+        a, b, spec = self.recovery_job(timeout=8)
+        executor, deadline = self.crash_dispatcher(a)
+        # A status RPC starts the replacement dispatcher, not another command.
+        self.rpc('status', a)
+        result = self.wait(a, ('failed',))
+        self.assertEqual(result['reason'], 'deadline')
+        self.assertEqual(result['receipt']['reason'], 'deadline')
+        self.assertGreaterEqual(result['receipt']['finished_at'], deadline)
+        self.assertLess(result['receipt']['finished_at'] - deadline, 6)
+        self.assert_group_gone(executor)
+        self.wait(b, ('completed',))
+        self.rpc('submit', a, spec)
+        self.assertEqual((self.base / 'once').read_text(), 'x')
+        with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT deadline FROM jobs WHERE id=?', (a,)).fetchone()[0], deadline)
+
+    def test_ambiguous_claim_with_reused_pid_is_never_signalled_or_reexecuted(self):
+        # Reproduce a pre-spawn crash using the OLD schema as well: migration is
+        # additive and never interprets an unverified PID as process ownership.
+        self.root.mkdir()
+        a = 'heavy_' + uuid.uuid4().hex
+        self.ids.append(a)
+        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        try:
+            with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+                db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,spec TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,pid INTEGER,cancel INTEGER NOT NULL DEFAULT 0,receipt TEXT,reason TEXT NOT NULL DEFAULT '')")
+                spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', "from pathlib import Path; Path('must-not-run').touch()"], 'timeout_seconds': 1}
+                db.execute('INSERT INTO jobs(id,spec,state,created,updated,pid,cancel) VALUES(?,?,?,?,?,?,?)',
+                           (a, json.dumps(spec), 'running', time.time() - 10, time.time() - 10, unrelated.pid, 1))
+            self.rpc('status', a)
+            self.wait(a, ('interrupted',))
+            b, _ = self.submit("print('after ambiguous claim')")
+            self.wait(b, ('completed',))
+            self.assertIsNone(unrelated.poll())
+            self.assertFalse((self.base / 'must-not-run').exists())
+        finally:
+            unrelated.kill(); unrelated.wait()
 
     def test_android_helper_uses_inherited_lock_not_recursive_wait(self):
         helper = SCRIPT.parent / 'android-build-thales.py'

@@ -33,6 +33,15 @@ def connect(root):
       created REAL NOT NULL, updated REAL NOT NULL, pid INTEGER,
       cancel INTEGER NOT NULL DEFAULT 0, receipt TEXT, reason TEXT NOT NULL DEFAULT ''
     );''')
+    # Additive migration; receipts and ambiguous old claims are never replayed.
+    columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
+    for name, kind in [('deadline', 'REAL'), ('execution_result', 'TEXT'), ('dispatcher_pid', 'INTEGER')]:
+        if name not in columns:
+            try:
+                db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {kind}')
+            except sqlite3.OperationalError:
+                if name not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    raise
     return db
 
 
@@ -56,14 +65,64 @@ def validate(spec):
     return {**spec, 'cwd': str(cwd)}
 
 
-def alive(pid):
-    if not pid:
-        return False
+def execution_lock(root, job_id):
+    return (root / (job_id + '.execution.lock')).open('a')
+
+
+def execute(root, job_id, worker_fd, execution_fd):
+    """Per-command group owner, independent of the replaceable dispatcher.
+
+    The inherited locks bridge claim -> spawn without a PID-based lease. This
+    process is its own session/group leader until it kills its OWN group. Neither
+    recovery nor cancellation signals a persisted PID (which may have been reused).
+    """
+    if os.getpid() != os.getpgrp() or os.getsid(0) != os.getpid():
+        raise RuntimeError('executor must own its process group')
+    # Verify both inherited leases before launching anything.
+    os.fstat(worker_fd)
+    os.fstat(execution_fd)
+    db = connect(root)
+    row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+    state, code, reason = 'failed', None, 'worker_execution_error'
     try:
-        os.killpg(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+        spec = validate(json.loads(row['spec']))
+        if row['deadline'] is None:
+            raise ValueError('missing durable deadline')
+        deadline = time.monotonic() + max(0, min(spec['timeout_seconds'], row['deadline'] - time.time()))
+        if row['cancel']:
+            state, reason = 'cancelled', ''
+        elif time.monotonic() >= deadline:
+            state, reason = 'failed', 'deadline'
+        else:
+            with (root / (job_id + '.log')).open('ab', buffering=0) as log:
+                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd)}
+                # The command and all non-detached descendants stay in OUR group.
+                process = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
+                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
+                while True:
+                    cancelled = db.execute('SELECT cancel FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+                    if cancelled:
+                        state, reason = 'cancelled', ''
+                        break
+                    if time.monotonic() >= deadline or time.time() >= row['deadline']:
+                        state, reason = 'failed', 'deadline'
+                        break
+                    code = process.poll()
+                    if code is not None:
+                        state, reason = ('completed' if code == 0 else 'failed'), ''
+                        break
+                    time.sleep(0.2)
+    finally:
+        try:
+            # This is NOT a terminal receipt yet. The dispatcher finalizes only
+            # after the execution lease is released by process-group termination.
+            db.execute('UPDATE jobs SET execution_result=? WHERE id=?',
+                       (json.dumps({'state': state, 'code': code, 'reason': reason}), job_id))
+            db.close()
+        finally:
+            # Atomic self-group signal: the caller itself pins this PGID. No
+            # check-then-kill race with a recycled PID, even after dispatcher death.
+            os.killpg(os.getpgrp(), signal.SIGKILL)
 
 
 def resource_wait(root):
@@ -103,14 +162,26 @@ def dispatch(root, lock_path):
         db = connect(root)
         while True:
             # A crash after durable claim, including before Popen, is ambiguous.
-            # Never repeat it. If its process group lives, retain the worker lane.
+            # The executor retains both locks across dispatcher loss and still
+            # enforces the durable cancellation/deadline. Never retry a claim or
+            # signal its diagnostic PID: it may now belong to an unrelated process.
             orphan = db.execute("SELECT * FROM jobs WHERE state='running' ORDER BY created LIMIT 1").fetchone()
             if orphan:
-                if alive(orphan['pid']):
-                    db.execute("UPDATE jobs SET reason='orphan_process' WHERE id=?", (orphan['id'],))
-                    time.sleep(1)
-                    continue
-                finish(db, root, orphan, 'interrupted', reason='worker_restarted_no_retry')
+                with execution_lock(root, orphan['id']) as lease:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        db.execute("UPDATE jobs SET reason='orphan_process' WHERE id=?", (orphan['id'],))
+                        time.sleep(0.2)
+                        continue
+                    # Refresh after acquiring: executor may have committed its
+                    # result between our SELECT and release of the lease.
+                    orphan = db.execute('SELECT * FROM jobs WHERE id=?', (orphan['id'],)).fetchone()
+                    result = json.loads(orphan['execution_result']) if orphan['execution_result'] else None
+                    if result:
+                        finish(db, root, orphan, result['state'], result['code'], result['reason'])
+                    else:
+                        finish(db, root, orphan, 'interrupted', reason='worker_restarted_no_retry')
             row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created,id LIMIT 1").fetchone()
             if not row:
                 return  # each RPC ensures a dispatcher, including submit/exit races
@@ -129,58 +200,34 @@ def dispatch(root, lock_path):
                     db.execute("UPDATE jobs SET reason=? WHERE id=?", (reason, row['id']))
                     time.sleep(5)
                     continue
-                db.execute('BEGIN IMMEDIATE')
-                current = db.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone()
-                if current['cancel']:
+                # Claim + deadline precede execution. The per-job lease is already
+                # held when Popen inherits it, closing the claim/spawn recovery gap.
+                with execution_lock(root, row['id']) as lease:
+                    fcntl.flock(lease, fcntl.LOCK_EX)
+                    db.execute('BEGIN IMMEDIATE')
+                    current = db.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone()
+                    if current['cancel']:
+                        db.execute('COMMIT')
+                        continue
+                    timeout = json.loads(current['spec'])['timeout_seconds']
+                    now = time.time()
+                    db.execute("UPDATE jobs SET state='running',reason='',updated=?,deadline=?,dispatcher_pid=? WHERE id=?",
+                               (now, now + timeout, os.getpid(), row['id']))
                     db.execute('COMMIT')
-                    continue
-                db.execute("UPDATE jobs SET state='running',reason='',updated=? WHERE id=?", (time.time(), row['id']))
-                db.execute('COMMIT')
-                process = None
-                try:
-                    spec = validate(json.loads(row['spec']))
-                    with (root / (row['id'] + '.log')).open('ab', buffering=0) as log:
-                        env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_lock.fileno())}
-                        process = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            start_new_session=True, pass_fds=(worker_lock.fileno(),))
+                    try:
+                        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                            '--root', str(root), '--lock', str(lock_path), '--execute', row['id'],
+                            '--worker-fd', str(worker_lock.fileno()), '--execution-fd', str(lease.fileno())],
+                            start_new_session=True, pass_fds=(worker_lock.fileno(), lease.fileno()),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         db.execute('UPDATE jobs SET pid=? WHERE id=?', (process.pid, row['id']))
-                        deadline = time.monotonic() + spec['timeout_seconds']
-                        state, reason = 'completed', ''
-                        while process.poll() is None:
-                            cancelled = db.execute('SELECT cancel FROM jobs WHERE id=?', (row['id'],)).fetchone()[0]
-                            if cancelled or time.monotonic() >= deadline:
-                                state, reason = ('cancelled', '') if cancelled else ('failed', 'deadline')
-                                os.killpg(process.pid, signal.SIGTERM)
-                                try:
-                                    process.wait(timeout=5)
-                                except subprocess.TimeoutExpired:
-                                    pass
-                                # Kill descendants even if the direct child exits first.
-                                try:
-                                    os.killpg(process.pid, signal.SIGKILL)
-                                except ProcessLookupError:
-                                    pass
-                                process.wait()
-                                break
-                            time.sleep(0.2)
-                        # Commands must not detach grandchildren. Clean their group
-                        # before releasing the exclusive worker resource.
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        if state == 'completed' and process.returncode:
-                            state = 'failed'
-                        finish(db, root, row, state, process.returncode, reason)
-                except Exception:
-                    if process and process.poll() is None:
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
                         process.wait()
-                    finish(db, root, row, 'failed', reason='worker_execution_error')
+                        # Finalize on the next iteration, through the same recovered
+                        # result path. Closing (not LOCK_UN) preserves inherited leases.
+                    except Exception:
+                        # Unknown launch/monitor outcome must not be retried or kill
+                        # an unverified PID. Recovery checks the inherited lease.
+                        pass
 
 
 def rpc(root, lock_path, value):
@@ -214,10 +261,17 @@ if __name__ == '__main__':
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--lock', required=True, type=Path)
     parser.add_argument('--dispatch', action='store_true')
+    parser.add_argument('--execute')
+    parser.add_argument('--worker-fd', type=int)
+    parser.add_argument('--execution-fd', type=int)
     args = parser.parse_args()
     if not args.root.resolve().is_relative_to('/Volumes/ThalesMedia') or not args.lock.resolve().is_relative_to('/Volumes/ThalesMedia'):
         raise SystemExit('worker storage must be on external volume')
-    if args.dispatch:
+    if args.execute:
+        if not re.fullmatch(r'heavy_[0-9a-f]{32}', args.execute):
+            raise SystemExit('invalid job identity')
+        execute(args.root, args.execute, args.worker_fd, args.execution_fd)
+    elif args.dispatch:
         dispatch(args.root, args.lock)
     else:
         try:

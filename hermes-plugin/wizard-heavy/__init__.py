@@ -1,6 +1,6 @@
 """Supported Hermes plugin: no monkey patching, no credentials in model args."""
 import json
-import os
+from agent.secret_scope import get_secret
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -13,11 +13,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def call(action, args, session_id=None, **kwargs):
     try:
-        origin = os.environ['WIZARD_HEAVY_ORIGIN'].rstrip('/')
+        origin = (get_secret('WIZARD_HEAVY_ORIGIN') or '').rstrip('/')
         parsed = urllib.parse.urlparse(origin)
         if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
             return json.dumps({'error': 'heavy endpoint must be loopback'})
-        token = os.environ['WIZARD_HEAVY_TOKEN']
+        token = get_secret('WIZARD_HEAVY_TOKEN')
+        if not token:
+            return json.dumps({'error': 'heavy service is not configured for this profile'})
         if not session_id:
             return json.dumps({'error': 'a stateful originating session is required'})
         value = {**args, 'session_id': session_id}
@@ -49,6 +51,17 @@ def cancel(args, **kwargs):
     return call('cancel', args, **kwargs)
 
 
+def configured():
+    # Evaluated inside each turn's scope, not when the gateway imports the plugin.
+    # A scoped miss must never fall back to another profile's process environment.
+    try:
+        origin = urllib.parse.urlparse(get_secret('WIZARD_HEAVY_ORIGIN') or '')
+        return (origin.scheme == 'http' and origin.hostname in ('127.0.0.1', 'localhost', '::1')
+                and bool(get_secret('WIZARD_HEAVY_TOKEN')))
+    except Exception:
+        return False
+
+
 def register(ctx):
     if hasattr(ctx, 'register_system_prompt_section'):
         ctx.register_system_prompt_section('wizard-heavy.execution', lambda _session:
@@ -58,7 +71,7 @@ def register(ctx):
             'is an authorized turn boundary: acknowledge the job and finish this turn, even though the '
             'overall task is unfinished. The service resumes this same thread on completion. Never '
             'start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.'
-            if os.environ.get('WIZARD_HEAVY_ORIGIN') else '', position='after_memory', max_chars=1200)
+            if configured() else '', position='after_memory', max_chars=1200)
     specs = [
         ('wizard_heavy_submit', submit,
          'Submit authorized sustained tests/builds to the durable Thales resource queue. '
