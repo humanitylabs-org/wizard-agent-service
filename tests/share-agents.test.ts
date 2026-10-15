@@ -4,6 +4,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 
@@ -160,6 +161,43 @@ describe('global ordinary control request boundary', () => {
     expect(main.seen.filter(s => s.method === 'POST')).toHaveLength(1)
     // Token routes are not owner-authorized by the exception: forged token still fails.
     expect((await post(base, '/wizard/v1/agents/hermes/deliveries', {}, { Host: 'machine.test', Authorization: 'Bearer forged' })).status).toBe(403)
+  })
+})
+
+describe('maintenance HTTP admission (runtime barrier fixture, real activity DBs)', () => {
+  it('checks secondary activity and rejects a new run racing the acquisition', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'maintenance-http-'))
+    const mainPath = join(root, 'state.db')
+    const makeState = (path: string, busy = false) => {
+      const db = new DatabaseSync(path)
+      db.exec("CREATE TABLE session_turn_leases(conversation_id TEXT, expires_at REAL); CREATE TABLE sessions(last_activity_description TEXT, last_activity_at REAL)")
+      if (busy) db.prepare('INSERT INTO session_turn_leases VALUES (?,?)').run('hidden-worker', Date.now()/1000+300)
+      db.close()
+    }
+    makeState(mainPath)
+    let finish: () => void, entered: () => void
+    const ready = new Promise<void>(r => entered = r)
+    let waiting = true
+    const barrier = { acquire: async () => { if (waiting) { entered!(); await new Promise<void>(r => finish = r) } return async () => {} }, release: async () => {} }
+    const { dir, base } = await start({ hermesStatePath: mainPath, maintenanceBarrier: barrier })
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const privatePath = join(dir, 'agents', agent.id, 'home', 'state.db')
+    makeState(privatePath, true)
+    const token = '12345678-1234-1234-1234-123456789abc'
+    const acquiring = post(base, '/wizard/v1/maintenance', {token})
+    await ready
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'race',input:'must wait'})).status).toBe(409)
+    expect(agentHermes.runs()).toHaveLength(0)
+    finish!();expect((await acquiring).status).toBe(409)
+    waiting = false
+    const db = new DatabaseSync(privatePath);db.exec('DELETE FROM session_turn_leases');db.close()
+    const held = await post(base, '/wizard/v1/maintenance', {token})
+    expect(held.status).toBe(201);expect((await held.json()).agents).toEqual(['hermes',agent.id])
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'race',input:'must wait'})).status).toBe(409)
+    expect((await fetch(base+'/wizard/v1/maintenance', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:'wrong'})})).status).toBe(409)
+    expect((await fetch(base+'/wizard/v1/maintenance', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})})).status).toBe(200)
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'after-release',input:'now allowed'})).status).toBe(202)
+    expect(agentHermes.runs()).toHaveLength(1)
   })
 })
 
