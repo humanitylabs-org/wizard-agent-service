@@ -170,6 +170,11 @@ def verify(args):
                         result = docker(["image", "inspect", *options, "--format", "{{.Architecture}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}", ref], env, capture_output=True, text=True)
                         if result.stdout.strip() != f"{arch} {args.sha}":
                             raise RuntimeError("pulled image configuration/revision mismatch: " + result.stdout.strip())
+                        # Classic Docker cannot associate one index digest with
+                        # two platform-specific local images. This job's daemon is
+                        # disposable: remove only the exact tested ref before the
+                        # next pull (never prune global caches or other images).
+                        docker(["image", "rm", "--force", ref], env)
                 print("PASS: fully anonymous digest and tag pulls for linux/amd64 and linux/arm64", flush=True)
                 return
             except (urllib.error.URLError, RuntimeError, subprocess.CalledProcessError) as error:
