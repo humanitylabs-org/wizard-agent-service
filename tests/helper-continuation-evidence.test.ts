@@ -10,17 +10,17 @@ const status = path => readHelperStatuses(path,[sid]).get(sid)
 const complete = ({message,sec}) => message('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_review]\nSaved sanitized findings',sec-250)
 const capture = path => captureContinuation(path,findPendingFollowThroughs(path)[0])
 
-// Production-shaped: Hermes removes delivered async_delegations but preserves completion rows.
-for(const removeBeforeCapture of [true,false]) test(`surviving immutable completion authorizes cleaned receipt (before=${removeBeforeCapture})`,()=>fixture(async(ctx)=>{
+// Only a service witness captured before cleanup retains the original boundary.
+for(const removeBeforeCapture of [true,false]) test(`receipt cleanup preserves captured authority only (before=${removeBeforeCapture})`,()=>fixture(async(ctx)=>{
  const {path,db}=ctx;complete(ctx)
  if(removeBeforeCapture)db.exec('DELETE FROM async_delegations')
  const token=capture(path)
  if(!removeBeforeCapture)db.exec('DELETE FROM async_delegations')
- assert.equal(continuationCurrent(path,token),true)
+ assert.equal(continuationCurrent(path,token),!removeBeforeCapture)
  let calls=0;const watcher=startDelegationFollowThrough({sessionDbPath:path,intervalMs:60000,enabled:async()=>true,admit:async(s,input,key,t)=>{
   assert.equal(continuationCurrent(path,t),true);assert.equal(key,'wizard-helper-receipt-deleg_review');assert.match(input,/Saved sanitized findings/);calls++
  }})
- try{await watcher.tick();await watcher.tick();assert.equal(calls,1)}finally{watcher.stop()}
+ try{await watcher.tick();await watcher.tick();assert.equal(calls,0)}finally{watcher.stop()} // fresh captures lack original provenance
 }))
 for(const mutation of ['content','delegation','session','inactive','deleted'])test(`cleaned receipt rejects changed completion: ${mutation}`,()=>fixture(ctx=>{
  const {db,path}=ctx;const row=complete(ctx);const token=capture(path);db.exec('DELETE FROM async_delegations')
@@ -31,8 +31,8 @@ for(const mutation of ['content','delegation','session','inactive','deleted'])te
  if(mutation==='deleted')db.prepare('DELETE FROM messages WHERE id=?').run(row.lastInsertRowid)
  assert.equal(continuationCurrent(path,token),false)
 }))
-test('missing receipt without captured completion evidence fails closed',()=>fixture(({path,db})=>{
- const token=captureContinuation(path,findIdleUndeliveredHelperReceipts(path)[0]);db.exec('DELETE FROM async_delegations')
+test('old queued token without captured receipt provenance fails closed',()=>fixture(({path,db})=>{
+ const token=captureContinuation(path,findIdleUndeliveredHelperReceipts(path)[0]);delete token.receipt;db.exec('DELETE FROM async_delegations')
  assert.equal(continuationCurrent(path,token),false)
 }))
 for(const guard of ['owner','approval','lease','stale','duplicate','wrong-origin','running'])test(`completion fallback preserves ${guard} guard`,()=>fixture(ctx=>{

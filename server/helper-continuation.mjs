@@ -37,6 +37,15 @@ function completionEvidence(db, sessionId, messageId, delegationId) {
     || (delegationId && completionDelegationId(row.content) !== delegationId)) return null
   return { id: Number(messageId), at: Number(row.timestamp), fingerprint: fingerprint(row.content) }
 }
+function receiptEvidence(row) {
+  if (!['completed','failed','interrupted'].includes(row.state)) return null
+  const sessionId = row.origin_session_id || row.parent_session_id || row.origin_ui_session_id || ''
+  const completedAt = Number(row.completed_at)
+  if (!sessionId || !Number.isFinite(completedAt) || completedAt <= 0 || typeof row.result_json !== 'string') return null
+  let results; try { results = JSON.parse(row.result_json)?.results } catch { return null }
+  if (!Array.isArray(results) || !results.some(r => typeof r?.summary === 'string' && r.summary.trim())) return null
+  return { delegationId: row.delegation_id, sessionId, completedAt, resultFingerprint: fingerprint(row.result_json) }
+}
 export function captureContinuation(path, pending) {
   let db
   try {
@@ -44,10 +53,16 @@ export function captureContinuation(path, pending) {
     const watermark = requestWatermark(db, pending.sessionId)
     if (!watermark) return null
     const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='async_delegations'").get()
-    const row = pending.delegationId && exists ? db.prepare('SELECT completed_at FROM async_delegations WHERE delegation_id=?').get(pending.delegationId) : null
+    const row = pending.delegationId && exists ? db.prepare('SELECT * FROM async_delegations WHERE delegation_id=?').get(pending.delegationId) : null
+    const receipt = row ? receiptEvidence(row) : null
+    // Delivery time is not completion time. A newly captured orphan message has
+    // no original age/request boundary; only a previously persisted service token
+    // may carry that authority across ledger cleanup.
+    if (pending.delegationId && (!receipt || receipt.sessionId !== pending.sessionId)) return null
     const completion = completionEvidence(db,pending.sessionId,pending.messageId,pending.delegationId)
     return { sessionId: pending.sessionId, delegationId: pending.delegationId || '', messageId: pending.messageId || 0,
-      completedAt: row ? Number(row.completed_at) : completion?.at ?? pending.at, request: watermark, ...(completion ? { completion } : {}) }
+      completedAt: receipt ? receipt.completedAt : completion?.at ?? pending.at, request: watermark,
+      ...(receipt ? { receipt } : {}), ...(completion ? { completion } : {}) }
   } catch { return null } finally { db?.close() }
 }
 export function helperAnswerAfter(db, sessionId, completedAt, delegationId) {
@@ -79,12 +94,14 @@ export function continuationCurrent(path, token, now = Date.now(), { allowActive
         if (origin !== token.sessionId) return false
         at = Number(row.completed_at)
         if (at !== Number(token.completedAt)) return false
+        if (token.receipt && JSON.stringify(receiptEvidence(row)) !== JSON.stringify(token.receipt)) return false
       } else {
-        // Hermes may delete a delivered receipt. Only the exact saved completion
-        // captured at admission can replace it; absence alone never authorizes work.
-        const completion = completionEvidence(db,token.sessionId,token.messageId,token.delegationId)
-        if (!token.completion || JSON.stringify(completion) !== JSON.stringify(token.completion)
-          || completion.at < at) return false
+        // The queue persists this service-created witness BEFORE delivery. Its
+        // original origin/time/result identity survives normal ledger cleanup;
+        // a later delivery timestamp never renews age or request authority.
+        const receipt = token.receipt
+        if (!receipt || receipt.delegationId !== token.delegationId || receipt.sessionId !== token.sessionId
+          || receipt.completedAt !== at || !/^[a-f0-9]{64}$/.test(receipt.resultFingerprint || '')) return false
       }
       if (receiptConsumed(db, token.sessionId, token.delegationId, at)) return false
       const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
