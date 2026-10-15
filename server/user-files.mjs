@@ -78,7 +78,15 @@ export function createUserFiles({ root, indexPath, now = () => new Date() }) {
     if (!inside(realpathSync(existing), top)) throw new UploadError(400, 'invalid_request', { field: 'destination.folder' })
     if (existing !== target) {
       if (!create) throw new UploadError(404, 'folder_not_found')
-      mkdirSync(target, { recursive: true, mode: 0o755 })
+      // One level at a time, each made 0755 explicitly: the service's umask (often 077) would otherwise
+      // hide new folders from the Files app and the other apps that share the root.
+      const missing = target.slice(existing.length + 1).split(sep)
+      let at = existing
+      for (const part of missing) {
+        at = join(at, part)
+        try { mkdirSync(at, { mode: 0o755 }) } catch (error) { if (error?.code !== 'EEXIST') throw error; continue }
+        try { chmodSync(at, 0o755) } catch { /* keep */ }
+      }
     }
     const real = realpathSync(target)
     if (!inside(real, top)) throw new UploadError(400, 'invalid_request', { field: 'destination.folder' })

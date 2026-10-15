@@ -87,12 +87,16 @@ describe('upload destination', () => {
     expect(sha(readFileSync(join(files, 'Projects', 'Clips', 'clip (2).mp4')))).toBe(sha(other))
   })
 
-  it('without a folder lands in Inbox/<today in the owner time zone>', async () => {
+  it('without a folder lands in Inbox/<today in the owner time zone>, folders readable whatever the umask', async () => {
     const { base, files } = await box()
     const data = randomBytes(4096)
-    const done = await upload(base, data, { client_upload_id: 'inbox-1', filename: 'note.txt', destination: {} })
+    const umask = process.umask(0o077)
+    let done
+    try { done = await upload(base, data, { client_upload_id: 'inbox-1', filename: 'note.txt', destination: {} }) } finally { process.umask(umask) }
     expect(done.body.file.path).toBe('Inbox/2026-10-15/note.txt')
     expect(sha(readFileSync(join(files, 'Inbox', '2026-10-15', 'note.txt')))).toBe(sha(data))
+    expect(statSync(join(files, 'Inbox')).mode & 0o777).toBe(0o755)
+    expect(statSync(join(files, 'Inbox', '2026-10-15')).mode & 0o777).toBe(0o755)
     const again = await upload(base, data, { client_upload_id: 'inbox-2', filename: 'note.txt', destination: { folder: '' } })
     expect(again.body.file.path).toBe('Inbox/2026-10-15/note (2).txt')
   })
