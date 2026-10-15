@@ -337,6 +337,8 @@ export class DurableRunQueue {
     }
   }
 
+  // `continuation` is service authority (helper tokens; {kind:'background-recovery'} lets a manual Continue skip the
+  // automatic helper check). Never pass a caller-supplied value here.
   async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)

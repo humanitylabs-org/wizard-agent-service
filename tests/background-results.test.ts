@@ -416,8 +416,9 @@ describe('manual Continue authority: only the service can mark a run as an owner
     db.close()
     f.resume(); await f.open()
     const deadline = Date.now() + 3000
-    while (!['cancelled', 'failed'].includes(queueRow(f)[0]?.status) && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
-    expect(['cancelled', 'failed']).toContain(queueRow(f)[0].status)
+    while (queueRow(f)[0]?.status !== 'cancelled' && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
+    // Receipt key without a service continuation: the ordinary helper check refuses it (410 -> cancelled).
+    expect(queueRow(f)[0].status).toBe('cancelled')
     expect(f.calls).toHaveLength(0)
   })
   it('a service continuation that does not match the body marker fails closed', async () => {

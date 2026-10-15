@@ -3104,6 +3104,8 @@ export function createWizardServer(options = {}) {
       .some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))
   }
   const admitHelperContinuation = async (sessionId, input, key, continuation) => {
+    // Only the manual Continue route may write a background-recovery continuation (see queueHermesAdmission).
+    if (continuation?.kind === BACKGROUND_RECOVERY_KIND) throw Object.assign(new Error('Stale helper request'), { status: 410 })
     await requireHelperContinuation(continuation)
     const existing = helperAdmissions.get(key)
     if (existing) return existing

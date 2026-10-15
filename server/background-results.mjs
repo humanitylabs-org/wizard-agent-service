@@ -228,14 +228,17 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const marker = body[MARKER]
       // Never forward the reserved key, whatever its value; only the service writes a plain-object marker.
       if (!marker || typeof marker !== 'object' || Array.isArray(marker)) throw error('invalid recovery marker', 400)
-      let rows, leased
-      try { rows = await threadRows(body.session_id, marker.read_id, true); leased = busy(body.session_id) || busy(marker.read_id) }
+      // A turn holds the thread right now: wait (retryable, no history read while it is held) and re-check
+      // everything once it ends, rather than failing the owner's Continue for good. Nothing dispatches meanwhile.
+      let leased
+      try { leased = busy(body.session_id) || busy(marker.read_id) }
+      catch { throw error('lease information is temporarily unavailable', 503) }
+      if (leased) throw error('the thread is busy', 503)
+      let rows
+      try { rows = await threadRows(body.session_id, marker.read_id, true) }
       catch (failure) { throw error(Number(failure?.status) === 404 ? 'the thread no longer exists' : 'history is temporarily unavailable', Number(failure?.status) === 404 ? 400 : 503) }
       const snap = snapshot(rows, marker.at)
       if (snap.moved || snap.gated || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
-      // A turn holds the thread right now: wait (retryable) and re-check everything once it ends, rather than
-      // failing the owner's Continue for good. Nothing is dispatched while the lease is held.
-      if (leased) throw error('the thread is busy', 503)
       const { [MARKER]: _internal, ...forward } = body
       return forward
     },
