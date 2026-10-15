@@ -2786,7 +2786,7 @@ export function createWizardServer(options = {}) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, request: path => hermesJson(path) })
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, request: path => hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) })
   if (runQueue) runQueueReady = runQueue.initialize()
   if (heavyWork) void runQueueReady.then(() => heavyWork.start())
 
