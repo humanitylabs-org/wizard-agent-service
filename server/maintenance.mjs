@@ -37,7 +37,12 @@ export function createMaintenanceLease({ path, activity, barrier = null, externa
     },
     async acquire(token) {
       if (!/^[a-f0-9-]{36}$/i.test(token)) throw denied('invalid_maintenance_token')
-      if (held?.token === token) { await barrier?.acquire(token); return held }
+      if (held?.token === token) {
+        if (!barrier) throw denied('runtime_maintenance_barrier_unavailable')
+        const result = await barrier.acquire(token)
+        if (typeof result !== 'function' && !(result?.phase === 'held' && result?.known === true && result?.active === 0 && result?.token === token && Array.isArray(result.agents))) throw denied('runtime_maintenance_receipt_invalid')
+        return held
+      }
       if (held || checking || inFlight) throw denied('admission_in_flight')
       checking = true // close admission synchronously, BEFORE the first awaited probe
       let releaseBarrier = null
@@ -62,6 +67,7 @@ export function createMaintenanceLease({ path, activity, barrier = null, externa
       } finally { checking = false }
     },
     async release(token) {
+      if (blocked() && !barrier) throw denied('runtime_maintenance_barrier_unavailable')
       if (held && held.token !== token) throw denied('maintenance_token_mismatch')
       await barrier?.release(token)
       if (path && existsSync(path)) unlinkSync(path)

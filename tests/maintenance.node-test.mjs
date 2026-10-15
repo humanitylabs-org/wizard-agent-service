@@ -1,11 +1,41 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createMaintenanceLease, localRuntimeActivity } from '../server/maintenance.mjs'
 const token = '12345678-1234-1234-1234-123456789abc'
+
+test('supervisor receipt replaces stale activity but not authority checks', async () => {
+  let probes = 0, releases = 0
+  const receipt = { token, phase: 'held', known: true, active: 0, agents: ['main', 'secondary'] }
+  const barrier = { acquire: async () => receipt, release: async supplied => { assert.equal(supplied, token); releases++ } }
+  const lease = createMaintenanceLease({ barrier, activity: async () => { probes++; throw Error('stale UI description') } })
+  assert.deepEqual((await lease.acquire(token)).agents, ['main', 'secondary'])
+  assert.equal(probes, 0)
+  await lease.release(token)
+  assert.equal(releases, 1)
+  receipt.active = 1
+  await assert.rejects(lease.acquire(token), /runtime_maintenance_receipt_invalid/)
+})
+
+test('external durable lease blocks after lost Service-local state, exact release still reaches supervisor', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'external-maintenance-'))
+  try {
+    const externalPath = join(root, 'lease.json')
+    writeFileSync(externalPath, JSON.stringify({ token }))
+    const lease = createMaintenanceLease({ externalPath, barrier: { release: async supplied => {
+      if (supplied !== token) throw Error('maintenance_token_mismatch')
+      unlinkSync(externalPath)
+    } } })
+    assert.throws(() => lease.enter(), /maintenance_active/)
+    await assert.rejects(lease.release('wrong'), /maintenance_token_mismatch/)
+    assert.equal(lease.blocked(), true)
+    await lease.release(token)
+    lease.enter()()
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('unknown runtime barrier fails closed, never uses queue-only truth', async () => {
   const lease = createMaintenanceLease({ activity: async () => [{ id: 'hermes', known: true, active: 0 }] })
