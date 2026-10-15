@@ -1,6 +1,6 @@
 // Shares with an agents registry: per-agent routing and private-agent storage (AGENT_SERVICE_API.md "Shares").
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -147,9 +147,13 @@ describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)
 describe('global ordinary control request boundary', () => {
   it('denies hostile authority/origin/fetch metadata on reads and writes before routing', async () => {
     const { base, main } = await start()
+    const raw = (path: string, headers: Record<string,string>, method = 'GET') => new Promise<number>((resolve, reject) => {
+      const req = httpRequest(base + path, { method, headers: { 'Content-Type':'application/json', ...headers } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)) })
+      req.on('error', reject); req.end(method === 'POST' ? JSON.stringify({ id: 'must-not-create' }) : undefined)
+    })
     for (const headers of [ { Host: 'attacker.test' }, { Origin: 'http://attacker.test' }, { Origin: 'null' }, { 'Sec-Fetch-Site': 'cross-site' }, { 'Sec-Fetch-Site': 'same-site' }, { Host: '127.0.0.1:1' } ]) {
-      for (const path of ['/wizard/files', '/wizard/v1/agents', '/wizard/bootstrap']) expect((await fetch(base + path, { headers })).status).toBe(403)
-      expect((await post(base, '/wizard/hermes/api/sessions', { id: 'must-not-create' }, headers)).status).toBe(403)
+      for (const path of ['/wizard/files', '/wizard/v1/agents', '/wizard/bootstrap']) expect(await raw(path, headers as Record<string,string>), JSON.stringify(headers)).toBe(403)
+      expect(await raw('/wizard/hermes/api/sessions', headers as Record<string,string>, 'POST')).toBe(403)
     }
     expect((await post(base, '/wizard/hermes/api/sessions', { id: 'valid' }, { Origin: base, 'Sec-Fetch-Site': 'same-origin' })).status).toBe(201)
     expect((await fetch(base + '/wizard/v1/agents')).status).toBe(200)
