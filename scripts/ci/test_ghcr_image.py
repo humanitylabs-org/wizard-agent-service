@@ -103,12 +103,17 @@ class ImageContract(unittest.TestCase):
                 arch = args[2].split('/')[1]
                 calls.append((arch, args[3]))
                 return subprocess.CompletedProcess(args, 0)
+            if args[:2] == ['image', 'rm']:
+                self.assertEqual(args[2], '--force')
+                return subprocess.CompletedProcess(args, 0)
             self.assertIn('--platform', args)
             self.assertEqual(args[3], 'linux/' + arch)
             return subprocess.CompletedProcess(args, 0, stdout=f'{arch} {SHA}\n')
         docker.side_effect = run
         ci.verify(self.args(release='0.3.0-candidate.20261012'))
         self.assertEqual(len(calls), 6)
+        removed = [call.args[0][3] for call in docker.call_args_list if call.args[0][:2] == ['image', 'rm']]
+        self.assertEqual(removed, [ref for arch, ref in calls])
         self.assertEqual({arch for arch, ref in calls}, ci.PLATFORMS)
         self.assertEqual(len({ref for arch, ref in calls}), 3)
 
