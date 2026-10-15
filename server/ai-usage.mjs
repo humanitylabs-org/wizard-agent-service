@@ -1,6 +1,9 @@
 // Read-only subscription quota reads for Settings → AI usage.
 //
-// Both providers are read with the sign-in the host already keeps for its own
+// Installed AI connection apps (apps.json `provides: ai-connection`, contract
+// wizard.ai-connection/1) are read first: each one owns its provider's sign-in
+// and reports status and usage on its own `/api/connection`. A provider with no
+// connection app falls back to the sign-in the host already keeps for its own
 // CLIs. Credentials stay inside this process: nothing here writes, refreshes,
 // or echoes a token, no endpoint or credential path is reachable from client
 // input, and the client only ever receives the normalized shape built below.
@@ -76,7 +79,7 @@ function unavailable(provider, code, message, plan = null) {
   return { ...provider, status: 'unavailable', plan, fetchedAt: null, limits: [], paid: null, error: { code, message } }
 }
 
-async function getJson(fetchImpl, url, headers, timeoutMs) {
+async function getJson(fetchImpl, url, headers, timeoutMs, { authFailureExpired = true } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -84,7 +87,7 @@ async function getJson(fetchImpl, url, headers, timeoutMs) {
     const raw = Buffer.from(await response.arrayBuffer())
     if (raw.length > MAX_RESPONSE_BYTES) throw Object.assign(new Error('usage response too large'), { code: PROVIDER_ERROR })
     if (!response.ok) {
-      const expired = response.status === 401 || response.status === 403
+      const expired = authFailureExpired && (response.status === 401 || response.status === 403)
       throw Object.assign(new Error(`usage request failed (${response.status})`), { code: expired ? EXPIRED : PROVIDER_ERROR })
     }
     try { return JSON.parse(raw.toString('utf8')) ?? {} }
@@ -446,7 +449,171 @@ function codexSources(options, now) {
   return accounts.map((account) => codexAccountSource(account, options))
 }
 
+/* AI connection apps ----------------------------------------------------
+ *
+ * Decision #61: each provider is its own connection app. The app answers a
+ * read-only `GET /api/connection` (never a token) and this reader maps it onto
+ * the provider row shape the shell already renders. The URL comes only from
+ * apps.json, pinned to the app's own loopback or container address; no request
+ * input reaches it.
+ */
+
+export const AI_CONNECTION_CONTRACT = 'wizard.ai-connection/1'
+const AI_CONNECTION_PROVIDES = 'ai-connection'
+const CONNECTION_ERROR_CODES = new Set([SIGNED_OUT, EXPIRED, UNREACHABLE, PROVIDER_ERROR])
+const CONNECTION_STATUS_CODES = new Map([['not_connected', SIGNED_OUT], ['expired', EXPIRED], ['error', PROVIDER_ERROR]])
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+// A connection app for one of these providers replaces the matching host-file reader.
+const CLAUDE_PROVIDERS = new Set(['claude'])
+const CODEX_PROVIDERS = new Set(['chatgpt', 'codex', 'openai-codex'])
+const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/u
+
+const text = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, max) : ''
+
+function originOf(value) {
+  try {
+    const parsed = new URL(String(value ?? ''))
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : null
+  } catch { return null }
+}
+
+/**
+ * Where this service reaches an app's `/api/connection`. 'local' (the default,
+ * and what alongside boxes need: the service runs with host networking) uses the
+ * loopback origin of `view.local` or `health`. 'internal' (service in its own
+ * container on the apps' network) uses the origin of `mcp.internal`, whose host
+ * must be the app id. Anything else is refused rather than followed.
+ */
+export function aiConnectionUrl(app, address = 'local') {
+  const id = text(app?.id, 64)
+  if (!SLUG.test(id)) return ''
+  if (address === 'internal') {
+    const internal = originOf(app?.mcp?.internal)
+    return internal && internal.hostname === id ? `${internal.origin}/api/connection` : ''
+  }
+  for (const candidate of [app?.view?.local, app?.health]) {
+    const parsed = originOf(candidate)
+    if (parsed && LOOPBACK_HOSTS.has(parsed.hostname)) return `${parsed.origin}/api/connection`
+  }
+  return ''
+}
+
+// The provider row id comes from apps.json (`<provider>-subscription` or
+// `<provider>-api-key`, else the app id), so the row and its cache stay put
+// even while the app is unreachable.
+function connectionProvider(provides, id) {
+  for (const job of provides) {
+    const match = /^([a-z0-9][a-z0-9-]*?)-(subscription|api-key)$/u.exec(job)
+    if (match && SLUG.test(match[1])) return match[1]
+  }
+  return id
+}
+
+export function aiConnectionApps(registry, address = 'local') {
+  const byProvider = new Map()
+  const apps = (Array.isArray(registry?.apps) ? registry.apps : [])
+    .filter((app) => app && typeof app === 'object')
+    .sort((a, b) => text(a.id, 64).localeCompare(text(b.id, 64)))
+  for (const app of apps) {
+    if (app.status !== 'running') continue
+    const provides = Array.isArray(app.provides) ? app.provides.map((job) => text(job, 40)).filter(Boolean) : []
+    if (!provides.includes(AI_CONNECTION_PROVIDES)) continue
+    const url = aiConnectionUrl(app, address)
+    if (!url) continue
+    const appId = text(app.id, 64)
+    const provider = connectionProvider(provides, appId)
+    if (byProvider.has(provider)) continue
+    byProvider.set(provider, { appId, provider, name: text(app.name, 40) || titleFromSlug(provider), url })
+  }
+  return [...byProvider.values()]
+}
+
+function connectionLimits(usage) {
+  const rows = []
+  for (const [index, entry] of arrayOf(usage?.limits).entries()) {
+    if (!entry || typeof entry !== 'object') continue
+    const row = usageRow(text(entry.id, 80) || `limit:${index}`, text(entry.label, 60) || 'Limit', entry.usedPercent, entry.resetsAt)
+    if (row) rows.push(row)
+    if (rows.length >= 20) break
+  }
+  return rows
+}
+
+function connectionPaid(paid) {
+  if (!paid || typeof paid !== 'object') return null
+  const minor = (value) => isFiniteNumber(value) ? Math.round(value) : null
+  return {
+    type: paid.type === 'credits' ? 'credits' : 'spend',
+    enabled: paid.enabled === true,
+    currency: text(paid.currency, 8) || 'USD',
+    exponent: isFiniteNumber(paid.exponent) ? Math.min(6, Math.max(0, Math.round(paid.exponent))) : 2,
+    usedMinor: minor(paid.usedMinor),
+    limitMinor: minor(paid.limitMinor),
+    balanceMinor: minor(paid.balanceMinor),
+    unlimited: paid.unlimited === true,
+  }
+}
+
+export function connectionRow(identity, payload, now) {
+  if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT) {
+    return unavailable(identity, PROVIDER_ERROR, `${identity.name} app answered with an unknown contract.`)
+  }
+  const plan = text(payload.plan, 40) || null
+  const reported = payload.error && typeof payload.error === 'object' ? payload.error : null
+  const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage : null
+  if (payload.status === 'connected' && usage) {
+    const row = {
+      ...identity,
+      status: 'ok',
+      plan,
+      fetchedAt: isoTime(usage.fetchedAt) ?? new Date(now()).toISOString(),
+      limits: connectionLimits(usage),
+      paid: connectionPaid(usage.paid),
+      error: null,
+    }
+    // The app is serving its own last good read through a provider outage.
+    if (reported) {
+      const code = CONNECTION_ERROR_CODES.has(reported.code) ? reported.code : UNREACHABLE
+      return { ...row, status: 'stale', error: { code, message: text(reported.message, 200) || `Couldn't reach ${identity.name}.` } }
+    }
+    return row
+  }
+  if (payload.status === 'connected' && !reported) {
+    // Signed in, but this provider has no usage API: connected, nothing to chart.
+    return { ...identity, status: 'ok', plan, fetchedAt: null, limits: [], paid: null, error: null }
+  }
+  const code = CONNECTION_ERROR_CODES.has(reported?.code) ? reported.code : (CONNECTION_STATUS_CODES.get(payload.status) ?? PROVIDER_ERROR)
+  const fallback = code === SIGNED_OUT ? `${identity.name} is not connected.`
+    : code === EXPIRED ? `${identity.name} sign-in has expired.`
+    : `Couldn't reach ${identity.name}.`
+  return unavailable(identity, code, text(reported?.message, 200) || fallback, plan)
+}
+
+function connectionSource(app) {
+  const identity = { id: app.provider, name: app.name }
+  return {
+    id: identity.id,
+    name: identity.name,
+    // Its own cache cell: switching between a host reader and an app never
+    // carries one source's last good numbers into the other.
+    cacheKey: `app:${app.appId}:${app.provider}`,
+    async read({ fetchImpl, now, timeoutMs }) {
+      const payload = await getJson(fetchImpl, app.url, { Accept: 'application/json' }, timeoutMs, { authFailureExpired: false })
+      return connectionRow(identity, payload, now)
+    },
+  }
+}
+
+function readConnectionApps(options) {
+  const path = trimmed(options.appsJsonPath)
+  if (!path) return []
+  const registry = readJsonFile(resolve(path))
+  return registry ? aiConnectionApps(registry, options.aiConnectionAddress === 'internal' ? 'internal' : 'local') : []
+}
+
 /* Reader --------------------------------------------------------------- */
+
+const cellKey = (source) => source.cacheKey ?? source.id
 
 export function createAiUsageReader(options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch
@@ -464,17 +631,23 @@ export function createAiUsageReader(options = {}) {
 
   const sourcesNow = () => {
     if (enumerated.sources.length && now() - enumerated.at < cacheMs) return enumerated.sources
-    enumerated = { sources: [claude, ...codexSources(options, now())], at: now() }
-    const live = new Set(enumerated.sources.map((source) => source.id))
+    // Installed connection apps first; a host-file reader runs only for a
+    // provider no connection app covers, so host-signed-in boxes keep working.
+    const apps = readConnectionApps(options)
+    const covered = new Set(apps.map((app) => app.provider))
+    const hostClaude = [...CLAUDE_PROVIDERS].some((id) => covered.has(id)) ? [] : [claude]
+    const hostCodex = [...CODEX_PROVIDERS].some((id) => covered.has(id)) ? [] : codexSources(options, now())
+    enumerated = { sources: [...hostClaude, ...hostCodex, ...apps.map(connectionSource)], at: now() }
+    const live = new Set(enumerated.sources.map(cellKey))
     for (const id of [...cells.keys()]) if (!live.has(id)) cells.delete(id)
     return enumerated.sources
   }
 
   const cellFor = (source) => {
-    const existing = cells.get(source.id)
+    const existing = cells.get(cellKey(source))
     if (existing) return existing
     const created = { snapshot: null, at: 0, lastGood: null, lastGoodAt: 0, inflight: null }
-    cells.set(source.id, created)
+    cells.set(cellKey(source), created)
     return created
   }
 
