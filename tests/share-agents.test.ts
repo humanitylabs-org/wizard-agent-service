@@ -172,6 +172,15 @@ describe('global ordinary control request boundary', () => {
 })
 
 describe('maintenance HTTP admission (runtime barrier fixture, real activity DBs)', () => {
+  it('does not let a loopback proxy bypass a configured access verifier', async () => {
+    let entered = false
+    const { base } = await start({ requireAccess: true, accessVerifier: async () => { throw new Error('denied') },
+      maintenanceBarrier: { acquire: async () => { entered = true }, release: async () => {} } })
+    const token = '11111111-1111-4111-8111-111111111111'
+    expect((await post(base, '/wizard/v1/maintenance', { token })).status).toBe(403)
+    expect((await fetch(base + '/wizard/v1/maintenance', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })).status).toBe(403)
+    expect(entered).toBe(false)
+  })
   it('checks secondary activity and rejects a new run racing the acquisition', async () => {
     const root = mkdtempSync(join(tmpdir(), 'maintenance-http-'))
     const mainPath = join(root, 'state.db')

@@ -3431,7 +3431,7 @@ export function createWizardServer(options = {}) {
         sendJson(response, 403, { error: 'access_required' }); return
       }
       if (url.pathname === '/wizard/v1/maintenance') {
-        if (!boxOwner(request) || !['POST', 'DELETE'].includes(request.method)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (!boxOwner(request) || (requireAccess && !await accessVerified(request, accessVerifier)) || !['POST', 'DELETE'].includes(request.method)) { sendJson(response, 403, { error: 'owner_required' }); return }
         const body = parseJsonBody(await readBoundedBody(request, 1024))
         try {
           if (request.method === 'POST') { const lease = await maintenance.acquire(body.token); sendJson(response, 201, { ok: true, token: lease.token, agents: lease.agents }) }
