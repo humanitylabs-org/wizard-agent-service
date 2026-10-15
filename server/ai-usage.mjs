@@ -84,8 +84,26 @@ async function getJson(fetchImpl, url, headers, timeoutMs, { authFailureExpired 
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetchImpl(url, { headers, redirect: 'error', signal: controller.signal })
-    const raw = Buffer.from(await response.arrayBuffer())
-    if (raw.length > MAX_RESPONSE_BYTES) throw Object.assign(new Error('usage response too large'), { code: PROVIDER_ERROR })
+    // Enforce the cap while consuming the body, not after arrayBuffer() has
+    // already allocated an unbounded response from an installed app.
+    const chunks = []
+    let bytes = 0
+    const body = response.body?.getReader()
+    if (body) {
+      try {
+        while (true) {
+          const { done, value } = await body.read()
+          if (done) break
+          bytes += value.byteLength
+          if (bytes > MAX_RESPONSE_BYTES) {
+            await body.cancel().catch(() => {})
+            throw Object.assign(new Error('usage response too large'), { code: PROVIDER_ERROR })
+          }
+          chunks.push(Buffer.from(value))
+        }
+      } finally { body.releaseLock() }
+    }
+    const raw = Buffer.concat(chunks, bytes)
     if (!response.ok) {
       const expired = authFailureExpired && (response.status === 401 || response.status === 403)
       throw Object.assign(new Error(`usage request failed (${response.status})`), { code: expired ? EXPIRED : PROVIDER_ERROR })
@@ -473,7 +491,7 @@ const text = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-
 function originOf(value) {
   try {
     const parsed = new URL(String(value ?? ''))
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : null
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !parsed.username && !parsed.password ? parsed : null
   } catch { return null }
 }
 
@@ -485,8 +503,8 @@ function originOf(value) {
  * must be the app id. Anything else is refused rather than followed.
  */
 export function aiConnectionUrl(app, address = 'local') {
-  const id = text(app?.id, 64)
-  if (!SLUG.test(id)) return ''
+  const id = app?.id
+  if (typeof id !== 'string' || !SLUG.test(id)) return ''
   if (address === 'internal') {
     const internal = originOf(app?.mcp?.internal)
     return internal && internal.hostname === id ? `${internal.origin}/api/connection` : ''
@@ -516,11 +534,11 @@ export function aiConnectionApps(registry, address = 'local') {
     .sort((a, b) => text(a.id, 64).localeCompare(text(b.id, 64)))
   for (const app of apps) {
     if (app.status !== 'running') continue
-    const provides = Array.isArray(app.provides) ? app.provides.map((job) => text(job, 40)).filter(Boolean) : []
+    const provides = Array.isArray(app.provides) ? app.provides.filter((job) => typeof job === 'string' && SLUG.test(job)) : []
     if (!provides.includes(AI_CONNECTION_PROVIDES)) continue
     const url = aiConnectionUrl(app, address)
     if (!url) continue
-    const appId = text(app.id, 64)
+    const appId = app.id
     const provider = connectionProvider(provides, appId)
     if (byProvider.has(provider)) continue
     byProvider.set(provider, { appId, provider, name: text(app.name, 40) || titleFromSlug(provider), url })
@@ -555,12 +573,18 @@ function connectionPaid(paid) {
 }
 
 export function connectionRow(identity, payload, now) {
-  if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT) {
+  if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT || payload.provider !== identity.id) {
     return unavailable(identity, PROVIDER_ERROR, `${identity.name} app answered with an unknown contract.`)
   }
   const plan = text(payload.plan, 40) || null
   const reported = payload.error && typeof payload.error === 'object' ? payload.error : null
   const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage : null
+  // An auth failure revokes cached usage even if the app also supplied an old
+  // connected snapshot. Only transport/provider failures can be stale.
+  const authCode = CONNECTION_STATUS_CODES.get(payload.status) ?? reported?.code
+  if (authCode === SIGNED_OUT || authCode === EXPIRED) {
+    return unavailable(identity, authCode, text(reported?.message, 200) || `${identity.name} needs reconnecting.`, plan)
+  }
   if (payload.status === 'connected' && usage) {
     const row = {
       ...identity,
