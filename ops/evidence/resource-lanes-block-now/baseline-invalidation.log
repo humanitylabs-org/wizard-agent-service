@@ -1,0 +1,138 @@
+
+> wizard-agent-service@0.2.0 test
+> vitest run --maxWorkers=1 tests/heavy-invalidation.test.ts
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.3 [39m[90m/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e[39m
+
+(node:66813) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [31m❯[39m tests/heavy-invalidation.test.ts [2m([22m[2m5 tests[22m[2m | [22m[31m5 failed[39m[2m)[22m[32m 68[2mms[22m[39m
+[31m   [31m×[31m fences both already-admitted completed siblings after stop, restart=false[39m[32m 22[2mms[22m[39m
+[31m   [31m×[31m fences both already-admitted completed siblings after stop, restart=true[39m[32m 13[2mms[22m[39m
+[31m   [31m×[31m fences both already-admitted completed siblings after steer, restart=false[39m[32m 12[2mms[22m[39m
+[31m   [31m×[31m fences both already-admitted completed siblings after steer, restart=true[39m[32m 14[2mms[22m[39m
+[31m   [31m×[31m retains an admission receipt when stop races an in-flight admission, but never revives permission[39m[32m 6[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 5 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m tests/heavy-invalidation.test.ts[2m > [22mfences both already-admitted completed siblings after stop, restart=false
+[31m[1mAssertionError[22m: expected [ Array(1) ] to deeply equal [][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [][39m
+[31m+ [[39m
+[31m+   "heavy_0f1caa2ba8734d4d97b7e70d9d4ba29a",[39m
+[31m+ ][39m
+
+[36m [2m❯[22m tests/heavy-invalidation.test.ts:[2m60:22[22m[39m
+    [90m 58|[39m     canDispatch = true
+    [90m 59|[39m     await runs.tick(true); await runs.tick(true); await integration.qu…
+    [90m 60|[39m     expect(launched).toEqual([])
+    [90m   |[39m                      [31m^[39m
+    [90m 61|[39m     for (let n = 0; n < jobs.length; n++) {
+    [90m 62|[39m       const saved = integration.queue.get(jobs[n].job_id)
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/heavy-invalidation.test.ts[2m > [22mfences both already-admitted completed siblings after stop, restart=true
+[31m[1mAssertionError[22m: expected [ Array(1) ] to deeply equal [][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [][39m
+[31m+ [[39m
+[31m+   "heavy_155ab4b2f51a4c55a626d978bb738719",[39m
+[31m+ ][39m
+
+[36m [2m❯[22m tests/heavy-invalidation.test.ts:[2m60:22[22m[39m
+    [90m 58|[39m     canDispatch = true
+    [90m 59|[39m     await runs.tick(true); await runs.tick(true); await integration.qu…
+    [90m 60|[39m     expect(launched).toEqual([])
+    [90m   |[39m                      [31m^[39m
+    [90m 61|[39m     for (let n = 0; n < jobs.length; n++) {
+    [90m 62|[39m       const saved = integration.queue.get(jobs[n].job_id)
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/heavy-invalidation.test.ts[2m > [22mfences both already-admitted completed siblings after steer, restart=false
+[31m[1mAssertionError[22m: expected [ …(2) ] to deeply equal [][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [][39m
+[31m+ [[39m
+[31m+   "heavy_8622dcaff1d849c08a937e56775e1df6",[39m
+[31m+   "heavy_9aaae06af7184586b15038b7b324a485",[39m
+[31m+ ][39m
+
+[36m [2m❯[22m tests/heavy-invalidation.test.ts:[2m60:22[22m[39m
+    [90m 58|[39m     canDispatch = true
+    [90m 59|[39m     await runs.tick(true); await runs.tick(true); await integration.qu…
+    [90m 60|[39m     expect(launched).toEqual([])
+    [90m   |[39m                      [31m^[39m
+    [90m 61|[39m     for (let n = 0; n < jobs.length; n++) {
+    [90m 62|[39m       const saved = integration.queue.get(jobs[n].job_id)
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/heavy-invalidation.test.ts[2m > [22mfences both already-admitted completed siblings after steer, restart=true
+[31m[1mAssertionError[22m: expected [ …(2) ] to deeply equal [][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [][39m
+[31m+ [[39m
+[31m+   "heavy_8e7cd3f011e3498b94077ccb9594264c",[39m
+[31m+   "heavy_40aa7fb5a3a9481a80c736dfb7e4b76c",[39m
+[31m+ ][39m
+
+[36m [2m❯[22m tests/heavy-invalidation.test.ts:[2m60:22[22m[39m
+    [90m 58|[39m     canDispatch = true
+    [90m 59|[39m     await runs.tick(true); await runs.tick(true); await integration.qu…
+    [90m 60|[39m     expect(launched).toEqual([])
+    [90m   |[39m                      [31m^[39m
+    [90m 61|[39m     for (let n = 0; n < jobs.length; n++) {
+    [90m 62|[39m       const saved = integration.queue.get(jobs[n].job_id)
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/heavy-invalidation.test.ts[2m > [22mretains an admission receipt when stop races an in-flight admission, but never revives permission
+[31m[1mAssertionError[22m: expected { …(12) } to match object { resume: 'admitted-receipt', …(1) }
+(14 matching properties omitted from actual)[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "continuation_invalidated": true,[39m
+[32m-   "resume": "admitted-receipt",[39m
+[31m+   "resume": "suppressed",[39m
+[2m  }[22m
+
+[36m [2m❯[22m tests/heavy-invalidation.test.ts:[2m82:29[22m[39m
+    [90m 80|[39m   q.supersede('s')
+    [90m 81|[39m   release({ publicRunId: 'admitted-receipt' }); await pending
+    [90m 82|[39m   expect(q.get(job.job_id)).toMatchObject({ resume: 'admitted-receipt'…
+    [90m   |[39m                             [31m^[39m
+    [90m 83|[39m })
+    [90m 84|[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m5 failed[39m[22m[90m (5)[39m
+[2m   Start at [22m 02:36:58
+[2m   Duration [22m 331ms[2m (transform 47%, tests 36%, import 16%, worker 1%)[22m
+
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice
