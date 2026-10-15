@@ -125,6 +125,10 @@ const server = createWizardServer({
   userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
+  // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
+  // service with host networking) or 'internal' (app hostnames on the container network).
+  // Defaults to 'internal' when WIZARD_APPS_MCP_ADDRESS is 'internal', else 'local'.
+  ...(process.env.WIZARD_AI_CONNECTION_ADDRESS ? { aiConnectionAddress: process.env.WIZARD_AI_CONNECTION_ADDRESS } : {}),
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
   wizardOsHome: osHome,
   ...(process.env.WIZARD_MCP_TOKEN ? { mcpToken: process.env.WIZARD_MCP_TOKEN } : {}),
