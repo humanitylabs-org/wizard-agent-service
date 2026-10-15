@@ -40,6 +40,7 @@ import { requireCurrentContinuation, helperContinueRequestAllowed } from './help
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { createMaintenanceLease, localRuntimeActivity } from './maintenance.mjs'
 import { controlBoundary, machineCapabilityPath } from './control-boundary.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -2616,6 +2617,19 @@ export function createWizardServer(options = {}) {
   }
 
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
+  const maintenance = createMaintenanceLease({
+    path: options.maintenanceStatePath || (runQueueStatePath ? `${runQueueStatePath}.maintenance` : ''),
+    barrier: options.maintenanceBarrier || null,
+    activity: async () => {
+      const rows = [{ id: MAIN_AGENT_ID, ...localRuntimeActivity(hermesStatePath) }]
+      for (const agent of agents?.list() || []) {
+        if (agent.id === MAIN_AGENT_ID) continue
+        // Missing/stopped/unreachable is not proof of zero work. Every local home must be readable.
+        rows.push({ id: agent.id, ...localRuntimeActivity(join(agents.agentsDir, agent.id, 'home', 'state.db')) })
+      }
+      return rows
+    },
+  })
   let runQueue = null
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
@@ -2651,6 +2665,7 @@ export function createWizardServer(options = {}) {
       } catch { /* the run proceeds; Restore stays available */ }
     }
     const queueHermesAdmission = async (record) => {
+      if (maintenance.blocked()) throw Object.assign(new Error('maintenance_active'), { status: 503 })
       let queuedBody = Buffer.from(record.body, 'utf8')
       // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Its authority
       // is the service-written queue continuation {kind:'background-recovery'} (no client path can set the
@@ -2755,7 +2770,7 @@ export function createWizardServer(options = {}) {
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
       activeSessionIds: activeSessionReader,
-      canDispatch: dispatchHealthReader,
+      canDispatch: () => !maintenance.blocked() && dispatchHealthReader(),
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
@@ -3119,6 +3134,7 @@ export function createWizardServer(options = {}) {
       .some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))
   }
   const admitHelperContinuation = async (sessionId, input, key, continuation) => {
+    if (maintenance.blocked()) throw Object.assign(new Error('maintenance_active'), { status: 503 })
     // Only the manual Continue route may write a background-recovery continuation (see queueHermesAdmission).
     if (continuation?.kind === BACKGROUND_RECOVERY_KIND) throw Object.assign(new Error('Stale helper request'), { status: 410 })
     await requireHelperContinuation(continuation)
@@ -3403,7 +3419,7 @@ export function createWizardServer(options = {}) {
         if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
         url.pathname = '/' + route
       }
-      if (url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
+      if (options.appRole !== 'apps' && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
         && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: appRouteOptions.controlOrigins,
           selfOrigin, appsOrigin: options.appsOrigin || '' })) {
         sendJson(response, 403, { error: 'same_origin_required' }); return
@@ -3412,6 +3428,19 @@ export function createWizardServer(options = {}) {
       // owner's. Containers on the box (installed apps, other services) get no sessions/runs/files authority here.
       if (!requireAccess && !options.appLifecycleAccess && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !boxOwner(request)) {
         sendJson(response, 403, { error: 'access_required' }); return
+      }
+      if (url.pathname === '/wizard/v1/maintenance') {
+        if (!boxOwner(request) || !['POST', 'DELETE'].includes(request.method)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        const body = parseJsonBody(await readBoundedBody(request, 1024))
+        try {
+          if (request.method === 'POST') { const lease = await maintenance.acquire(body.token); sendJson(response, 201, { ok: true, token: lease.token, agents: lease.agents }) }
+          else { await maintenance.release(body.token); sendJson(response, 200, { ok: true }) }
+        } catch (e) { sendJson(response, 409, { error: String(e.message || 'maintenance_unavailable') }) }
+        return
+      }
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        const leave = maintenance.enter()
+        response.once('finish', leave); response.once('close', leave)
       }
       if (await appsViews(request, response, url)) return
       if (await appLifecycle(request, response, url)) return
@@ -3490,8 +3519,8 @@ export function createWizardServer(options = {}) {
             }
             if (parts.length >= 2 && UPLOAD_ID.test(parts[1])) {
               const record = await uploads.getUpload(parts[1])
-              const agent = url.searchParams.get('agent') || 'hermes'
               const expected = record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes'
+              const agent = url.searchParams.get('agent') || (record.shareId ? expected : 'hermes')
               if (agent !== expected) throw new UploadError(409, 'upload_agent_mismatch')
               await resolveShareAgent(agent)
             }
@@ -4106,9 +4135,13 @@ export function createWizardServer(options = {}) {
             if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
               const value = JSON.parse(agentResolution.body.toString('utf8'))
               if (value.wizard_file_ids) {
-                const routed = await resolveShareAgent(agentResolution.agentId, { delivering: true })
-                const files = shareRouting.filesForAgent(agentResolution.agentId, value.wizard_file_ids)
-                Object.assign(value, routed.runFields(value.input || '', files))
+                await resolveShareAgent(agentResolution.agentId, { delivering: true })
+                if (inputContainsMarker(value.input)) throw new UploadError(400, 'reserved_file_marker')
+                const files = shareRouting.filesForAgent(agentResolution.agentId, value.wizard_file_ids).map(({ file }) => ({
+                  id: file.id, agent: agentResolution.agentId, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+                  trusted_path: `/opt/data/${file.path}`, localPath: join(agents.agentsDir, agentResolution.agentId, 'home', file.path),
+                }))
+                value.input = appendFileMarker(value.input || '', files, true)
                 delete value.wizard_file_ids
                 agentResolution.body = Buffer.from(JSON.stringify(value))
               }

@@ -40,7 +40,7 @@ async function start(extra: Record<string, any> = {}) {
   writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [] }))
   const main = await fakeHermes('main', ['main-thread'])
   const runtime = { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }), deliver: async () => ({ verified: true }) }
-  const svc = createWizardServer({
+  const options = {
     requireJoinedDelegationCapability: false,
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false, followThrough: false,
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
@@ -49,11 +49,12 @@ async function start(extra: Record<string, any> = {}) {
     uploadStatePath: join(dir, 'state', 'uploads.sqlite3'), uploadReserveBytes: 0,
     runQueueStatePath: join(dir, 'state', 'queue.sqlite3'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     ...extra,
-  })
+  }
+  const svc = createWizardServer(options)
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
   const base = `http://127.0.0.1:${address.port}`
-  return { dir, main, base }
+  return { dir, main, base, svc, options }
 }
 
 const post = (base: string, path: string, value: unknown, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) })
@@ -89,6 +90,69 @@ const delivered = async (base: string, id: string) => {
   throw new Error(`not delivered: ${JSON.stringify(await (await fetch(`${base}/wizard/v1/shares/${id}`)).json())}`)
 }
 
+describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)', () => {
+  it('binds before bytes, survives Service restart, sends only to the selected private agent', async () => {
+    const { dir, main, base, svc, options } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const data = Buffer.from('private ordinary paperclip fixture')
+    const body = { client_upload_id: 'paperclip-fixed-id', filename: 'private.txt', mime: 'text/plain', bytes: data.length, agent: agent.id }
+    const created = await post(base, '/wizard/v1/uploads', body)
+    expect(created.status).toBe(201)
+    const up = await created.json(), path = `/wizard/v1/uploads/${up.upload_id}`, q = `?agent=${agent.id}`
+    expect((await post(base, '/wizard/v1/uploads', { ...body, agent: 'hermes' })).status).toBe(409)
+    expect((await fetch(base + path, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data })).status).toBe(409)
+    expect((await fetch(base + path + q, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data.subarray(0, 8) })).status).toBe(204)
+    const stage = join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging', up.upload_id + '.part')
+    expect(readFileSync(stage).equals(data.subarray(0, 8))).toBe(true)
+    await new Promise<void>(resolve => svc.close(() => resolve()))
+    servers.splice(servers.indexOf(svc), 1)
+    const restarted = createWizardServer(options); servers.push(restarted)
+    const address = await listen(restarted) as import('node:net').AddressInfo
+    const next = `http://127.0.0.1:${address.port}`
+    expect((await (await fetch(next + path + q)).json()).offset).toBe(8)
+    expect((await fetch(next + path + q, { method: 'PATCH', headers: { 'Upload-Offset': '8', 'Content-Type': 'application/offset+octet-stream' }, body: data.subarray(8) })).status).toBe(204)
+    const complete = await post(next, path + '/complete' + q, {})
+    expect(complete.status).toBe(200)
+    const file = (await complete.json()).file
+    const session = await post(next, '/wizard/hermes/api/sessions' + q, { id: 'private-paperclip-thread' })
+    expect(session.status).toBe(201)
+    const sent = await post(next, '/wizard/hermes/v1/runs' + q, { session_id: 'private-paperclip-thread', input: 'read this', wizard_file_ids: [file.id] })
+    expect(sent.status).toBe(202)
+    expect(agentHermes.runs()[0].body.input).toContain('/opt/data/inbox/')
+    expect(agentHermes.runs()[0].body.wizard_file_ids).toBeUndefined()
+    expect((await post(next, '/wizard/hermes/v1/runs' + q, { session_id: 'private-paperclip-thread', input: 'wrong', wizard_file_ids: ['af_' + 'a'.repeat(32)] })).status).toBe(409)
+    expect(existsSync(join(dir, 'media', 'Inbox'))).toBe(false)
+    expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
+    expect(main.seen.filter(s => s.method === 'POST')).toEqual([])
+  })
+  it('one-shot outbox audio is stored only in selected agent home', async () => {
+    const { dir, main, base } = await start()
+    const { agent } = await addPrivate(dir, base)
+    const data = Buffer.from('private audio fixture')
+    const response = await fetch(`${base}/wizard/files/upload?agent=${agent.id}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Wizard-Filename': 'voice.webm', 'X-Wizard-Mime': 'audio/webm' }, body: data })
+    expect(response.status).toBe(201)
+    expect((await response.json()).file.id).toMatch(/^af_/)
+    expect(readFileSync(join(dir, 'agents', agent.id, 'home', 'inbox', new Date().toISOString().slice(0,10), 'voice.webm')).equals(data)).toBe(true)
+    expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
+    expect(main.seen.filter(s => s.method === 'POST')).toEqual([])
+  })
+})
+
+describe('global ordinary control request boundary', () => {
+  it('denies hostile authority/origin/fetch metadata on reads and writes before routing', async () => {
+    const { base, main } = await start()
+    for (const headers of [ { Host: 'attacker.test' }, { Origin: 'http://attacker.test' }, { Origin: 'null' }, { 'Sec-Fetch-Site': 'cross-site' }, { 'Sec-Fetch-Site': 'same-site' }, { Host: '127.0.0.1:1' } ]) {
+      for (const path of ['/wizard/files', '/wizard/v1/agents', '/wizard/bootstrap']) expect((await fetch(base + path, { headers })).status).toBe(403)
+      expect((await post(base, '/wizard/hermes/api/sessions', { id: 'must-not-create' }, headers)).status).toBe(403)
+    }
+    expect((await post(base, '/wizard/hermes/api/sessions', { id: 'valid' }, { Origin: base, 'Sec-Fetch-Site': 'same-origin' })).status).toBe(201)
+    expect((await fetch(base + '/wizard/v1/agents')).status).toBe(200)
+    expect(main.seen.filter(s => s.method === 'POST')).toHaveLength(1)
+    // Token routes are not owner-authorized by the exception: forged token still fails.
+    expect((await post(base, '/wizard/v1/agents/hermes/deliveries', {}, { Host: 'machine.test', Authorization: 'Bearer forged' })).status).toBe(403)
+  })
+})
+
 describe('shares with an agents registry', () => {
   it('a share to the Private agent lands only in its home inbox and its own Hermes; main history and media/ untouched', async () => {
     const { dir, main, base } = await start()
@@ -119,7 +183,7 @@ describe('shares with an agents registry', () => {
     const pins = JSON.parse(readFileSync(join(dir, 'agents', '.threads.json'), 'utf8'))
     expect(pins.threads[share.thread_id]).toBe(agent.id)
     // staging is outside the agent's home and empty
-    expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
+    expect(readdirSync(join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path
     const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
     expect(JSON.stringify(upload)).not.toContain(dir)

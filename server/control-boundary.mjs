@@ -28,5 +28,5 @@ export function controlBoundary(req, { allowedHosts = [], controlOrigins = [], s
 
 export function machineCapabilityPath(path) {
   return ['/wizard/mcp', '/wizard/v1/agent-context'].includes(path)
-    || /^\/wizard\/v1\/agents\/[a-z][a-z0-9-]{0,30}\/deliver$/u.test(path)
+    || /^\/wizard\/v1\/(?:agents|apps)\/[a-z][a-z0-9-]{0,30}\/deliveries$/u.test(path)
 }
