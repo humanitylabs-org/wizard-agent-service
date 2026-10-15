@@ -92,6 +92,20 @@ describe('agent bridge: kernel', () => {
     expect(renderKernel(bridgeApps({ apps: [app('hello-wizard', 1)] }), { harness: 'generic' })).toContain('- diagnostics -> Hello Wizard (`hello_wizard__*`)')
   })
 
+  it('routes app development to the OS builder before ordinary job routing, including an empty box', () => {
+    for (const apps of [[], bridgeApps({ apps: [app('hello-wizard', 1)] })]) {
+      const text = renderKernel(apps)
+      expect(text).toContain('To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view')
+      expect(text.indexOf('wizard-builder')).toBeLessThan(text.indexOf('wizard-job-<job>'))
+      expect(text).toContain('follow its coding and wam workflow')
+      expect(text).toContain('For ordinary app use: Never search the disk')
+      expect(text).toContain('Use the installed app for its job.')
+      expect(text).not.toContain('An installed app beats')
+    }
+    // Non-Hermes harnesses retain their own discovery path, not a nonexistent skill_view tool.
+    expect(renderKernel([], { harness: 'generic' })).not.toContain('skill_view')
+  })
+
   it('writes one pointer skill per job, names real tools, and removes stale ones', () => {
     const dir = box([])
     const apps = bridgeApps({ apps: [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription'], skill: '' })] })

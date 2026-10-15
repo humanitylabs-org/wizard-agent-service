@@ -104,17 +104,18 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
   const text = [
-    'Wizard OS: you are the owner\'s agent on this box. Installed apps do jobs for the owner.',
-    `The owner's files are in the Files root, ${filesRoot}. App tools take paths relative to it.`,
+    'Wizard OS: you are the owner\'s agent.',
+    ...(hermes ? ['To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow.'] : []),
+    `Files root: ${filesRoot}; app tool paths are relative to it.`,
     hermes
       ? 'When a request matches a wizard-job-<job> skill in your skills list:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load that skill with skill_view. It lists the app\'s tools and what each does.'] : ['1. Use the app named for that job.']),
+    ...(hermes ? ['1. Load that skill with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
-    '3. Never search the disk, read apps.json, run wam or write a client to find or reach an app.',
-    'An installed app beats your built-in tools for its job (its browser, not yours).',
-    `"What apps do I have?": call \`${meta}\`. If an app tool fails, tell the owner it is not reachable (\`wam doctor\`).`,
-    'Save only short pointer skills for app jobs, never an app\'s workflow.',
+    '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
+    'Use the installed app for its job.',
+    `"What apps do I have?": call \`${meta}\`. Report unreachable tools (\`wam doctor\`).`,
+    'Save routing-only app-job skills.',
   ]
   if (jobMap || !hermes) {
     const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
