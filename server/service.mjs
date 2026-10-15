@@ -40,7 +40,7 @@ import { requireCurrentContinuation, helperContinueRequestAllowed } from './help
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
-import { createMaintenanceLease, localRuntimeActivity } from './maintenance.mjs'
+import { createMaintenanceLease, localRuntimeActivity, maintenanceReason } from './maintenance.mjs'
 import { controlBoundary, machineCapabilityPath } from './control-boundary.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -3437,7 +3437,7 @@ export function createWizardServer(options = {}) {
         try {
           if (request.method === 'POST') { const lease = await maintenance.acquire(body.token); sendJson(response, 201, { ok: true, token: lease.token, agents: lease.agents }) }
           else { await maintenance.release(body.token); sendJson(response, 200, { ok: true }) }
-        } catch (e) { sendJson(response, 409, { error: String(e.message || 'maintenance_unavailable') }) }
+        } catch (e) { const error = String(e.message || 'maintenance_unavailable'); sendJson(response, 409, { error, message: maintenanceReason(error) }) }
         return
       }
       if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {

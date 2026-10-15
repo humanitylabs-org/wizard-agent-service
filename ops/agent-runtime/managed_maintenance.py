@@ -48,9 +48,16 @@ class ManagedMaintenance:
     if [x.split()[0] for x in hashes]==expected:continue
    # Includes stock secondary runtimes (e.g. transcriber), not only the main agent.
    candidate=managed or c['Image']==STOCK or service in ['hermes-agent-engine','transcriber-engine'] or (service.startswith(('wizard-agent-','agent-')) and not service.endswith('-tinfoil')) or 'hermes' in c['Config'].get('Image','')
-   if candidate:found.append({'id':c['Id'],'name':c['Name'].lstrip('/'),'managed':managed,'image':c['Image'],'running':c['State']['Running']})
+   if candidate:found.append({'id':c['Id'],'name':c['Name'].lstrip('/'),'hostname':c['Config']['Hostname'],'managed':managed,'image':c['Image'],'running':c['State']['Running']})
   if not found:raise MaintenanceError('runtime_inventory_unknown')
   return found
+ def reservations(self):
+  held=set()
+  for p in (self.root/'launch').iterdir():
+   with p.open() as f:
+    try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:held.add(p.name)
+  return held
  def control(self,c,action,**kw):
   # private interpreter is root-only; normal Docker exec/CLI uses the guard.
   # Original stock uv interpreter is index zero in the pinned two-inode image.
@@ -90,6 +97,9 @@ class ManagedMaintenance:
       if not r['managed']:raise MaintenanceError('unmanaged_session_busy_close_Hermes_sessions_and_retry')
       if r['role']=='session':raise MaintenanceError('standalone_session_busy_close_CLI_or_TUI_and_retry')
       lease['runtimes'].append({'container':c,**r})
+    daemon_reservations={r['container']['hostname']+'-'+str(r['pid']) for r in lease['runtimes']}
+    if self.reservations()-daemon_reservations:
+     raise MaintenanceError('standalone_session_busy_close_CLI_or_TUI_and_retry')
     self.save(lease)
     # Drain every gateway before any irreversible backend commit or process stop.
     for r in lease['runtimes']:
@@ -121,7 +131,7 @@ class ManagedMaintenance:
      else:self.control(r['container'],'stop-backend',runtime=r)
     for _ in range(100):
      rows=[r for c in cs if c['running'] for r in self.control(c,'snapshot')['processes']]
-     if not rows:break
+     if not rows and not self.reservations():break
      time.sleep(.1)
     else:raise MaintenanceError('runtime_did_not_retire')
     lease['phase']='held';self.save(lease);return self.receipt(lease)
@@ -146,6 +156,10 @@ class ManagedMaintenance:
     self.control(c,'clear-drain',home=r['home'])
    elif r.get('permit') and not r.get('committed'):
     self.control(c,'backend',verb='cancel',body={'token':r['permit']})
+   elif r.get('committed'):
+    # Commit is irreversible. Cancellation must replace that idle backend rather
+    # than leave an apparently healthy process permanently refusing every turn.
+    self.control(c,'stop-backend',runtime=r)
   # Explicit release is the sole reopening edge, including reboot and rollback.
   with self.lock('admission.lock'):
    (self.root/'lease.json').unlink();self.sync()

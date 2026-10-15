@@ -2,6 +2,13 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkS
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
+export function maintenanceReason(code) {
+  if (code === 'unmanaged_session_busy_close_Hermes_sessions_and_retry') return 'A Hermes session was started outside managed launching. Close that session normally, then retry. It has not been interrupted.'
+  if (code === 'standalone_session_busy_close_CLI_or_TUI_and_retry') return 'A Hermes command-line or terminal session is still open. Finish and close it normally, then retry. It has not been interrupted.'
+  if (code === 'agent_busy_finish_current_work_and_retry' || code === 'backend_busy_or_unknown') return 'A local agent is still working. Let it finish, then retry the update.'
+  return 'The local runtime could not safely enter maintenance. No update was authorized. ' + code
+}
+
 // Unlike the UX queue projection this counts ALL leases, including cron and delegated workers.
 export function localRuntimeActivity(path, now = Date.now()) {
   if (!path || !existsSync(path)) throw new Error('activity_unknown')
@@ -40,6 +47,7 @@ export function createMaintenanceLease({ path, activity, barrier = null, externa
         if (!barrier) throw denied('runtime_maintenance_barrier_unavailable')
         const result = await barrier.acquire(token)
         releaseBarrier = typeof result === 'function' ? result : () => barrier.release(token)
+        if (typeof result !== 'function' && !(result?.phase === 'held' && result?.known === true && result?.active === 0 && result?.token === token && Array.isArray(result.agents))) throw denied('runtime_maintenance_receipt_invalid')
         // The supervisor proves retirement under closed executable admission. A
         // lingering UI activity description is not authority over that receipt.
         const agents = result?.phase === 'held' && result?.known === true && result?.active === 0 && result?.token === token && Array.isArray(result.agents)
