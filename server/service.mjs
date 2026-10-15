@@ -37,6 +37,8 @@ import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
+import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
+import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
@@ -715,7 +717,7 @@ function historyTimestamp(value) {
   return null
 }
 
-function durableInlineImage(part) {
+export function durableInlineImage(part) {
   if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
   const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
   if (!match || !match[2]) return null
@@ -832,7 +834,25 @@ function safeAttachment(value) {
   return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256 }
 }
 
-function projectWizardFileMarkers(result, userMessagesOnly = false) {
+export function createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots }) {
+  return async ids => Promise.all(ids.map(async id => {
+    if (!FILE_ID.test(id)) throw new Error('invalid attachment id')
+    if (mediaFiles) {
+      const record = mediaFiles.get(id, true)
+      if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
+      const file = safeFile(record, true)
+      if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
+      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
+    }
+    const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
+    const file = safeFile(payload.file, true)
+    if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
+    if (!inboxTrustedRoots.some(root => file.trusted_path.startsWith(root))) throw Object.assign(new Error('Wizard file escaped the trusted root'), { status: 502 })
+    return file
+  }))
+}
+
+export function projectWizardFileMarkers(result, userMessagesOnly = false) {
   const strings = []
   const collect = (value) => {
     if (typeof value === 'string') strings.push(value)
@@ -1565,15 +1585,25 @@ function trustedAgentSource(sourcePath, artifactRoots, aliases = []) {
   return { source, details }
 }
 
-function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
-  if (!artifactDir || !artifactRoots.length) return null
+export function resolveAgentImage(sourcePath, artifactRoots, aliases = [], deniedRoots = []) {
+  const denied = path => /(?:^|[/\\])(?:profiles|sealed|private-agents|agent-vault|agents)(?:[/\\]|$)|[/\\]app-data[/\\]agent-/i.test(path)
+    || deniedRoots.some(root => path === root || path.startsWith(`${root}${sep}`))
+  if (denied(String(sourcePath))) return null
   const trusted = trustedAgentSource(sourcePath, artifactRoots, aliases)
-  if (!trusted || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  if (!trusted || denied(trusted.source) || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
   const { source } = trusted
   let bytes
-  try { bytes = readFileSync(source) } catch { return null }
+  try { bytes = readPhotoBytes(source) } catch { return null }
   const mime = imageMime(bytes)
   if (!mime) return null
+  return { bytes, mime, source }
+}
+
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
+  if (!artifactDir || !artifactRoots.length) return null
+  const resolved = resolveAgentImage(sourcePath, artifactRoots, aliases)
+  if (!resolved) return null
+  const { bytes, mime, source } = resolved
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const id = sha256.slice(0, 32)
   const cleanName = basename(source).replace(/[\\/\p{Cc}]/gu, '_').trim().slice(-120) || `wizard-image.${mime.split('/')[1]}`
@@ -1662,12 +1692,14 @@ function readAgentArtifact(id, artifactDir) {
   } catch { return null }
 }
 
-export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = []) {
+export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const projectText = (value, userImageReferences = false) => {
     const artifacts = []
+    const fences = []
+    value = value.replace(/```[^\n]*\n[\s\S]*?```/g, block => `\u0000photo-fence-${fences.push(block) - 1}\u0000`)
     const durableImageHashes = new Set()
     if (userImageReferences) value.replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/gi, (_marker, raw) => {
       try {
@@ -1678,7 +1710,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       return _marker
     })
     const register = (_line, sourcePath) => {
-      const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
+      const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
         ?? registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases)
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
@@ -1686,9 +1718,13 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       return ''
     }
     let text = value.replace(AGENT_MEDIA_LINE, register)
+    // Historical visible image forms use the very same image resolver as MEDIA.
+    text = text.replace(/!\[[^\]\n]*\]\((\/[^)\s]+)\)/g, register)
     if (userImageReferences) {
+      text = text.replace(/^\s*\[Image(?: attached at)?:\s*(\/[^\]\n]+)\]\s*$/gm, register)
       text = text.replace(AGENT_IMAGE_REFERENCE_LINE, (_line, backtick, doubleQuote, singleQuote, bare) => {
-        const artifact = registerAgentArtifact(backtick || doubleQuote || singleQuote || bare, artifactDir, artifactRoots, aliases)
+        const sourcePath = backtick || doubleQuote || singleQuote || bare
+        const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
         if (artifact && !durableImageHashes.has(artifact.sha256)
             && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
         return ''
@@ -1697,6 +1733,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
     if ((artifacts.length || durableImageHashes.size) && userImageReferences) text = text.replace(/^\s*\[screenshot\]\s*$/gmi, '')
     if (userImageReferences) text = text.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     text = text.replace(/\n{3,}/g, '\n\n').trim()
+    text = text.replace(/\u0000photo-fence-(\d+)\u0000/g, (_, i) => fences[Number(i)])
     if (!artifacts.length) return text
     const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
     return text ? `${text}\n\n${envelope}` : envelope
@@ -1719,6 +1756,44 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
   }
   visit(payload)
   return Buffer.from(JSON.stringify(payload))
+}
+
+// Helm AttachmentStore.resolve's fixed ID+suffix inventory (png, jpg, webp).
+// Explicit read-only root; never an envelope-supplied path or a directory scan.
+export function readLegacyHelmImage(id, root) {
+  if (!root || !/^[0-9a-f]{32}$/.test(id)) return null
+  try { if (realpathSync(root) !== resolve(root)) return null } catch { return null }
+  for (const suffix of ['png', 'jpg', 'webp']) {
+    const path = join(root, `${id}.${suffix}`)
+    const photo = resolveAgentImage(path, [root])
+    if (!photo) continue
+    const sha256 = createHash('sha256').update(photo.bytes).digest('hex')
+    return { id, name: `screenshot.${suffix}`, mime: photo.mime, bytes: photo.bytes.length, sha256, kind: 'image', contentPath: path }
+  }
+  return null
+}
+
+// Same resolution routes as GET /wizard/attachments/:id; no arbitrary URLs.
+export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, legacyRoot = '', fetchImpl = fetch }) {
+  return async id => {
+    if (!/^[0-9a-f]{32}$/.test(id)) return null
+    const artifact = readAgentArtifact(id, artifactDir) || readLegacyHelmImage(id, legacyRoot)
+    let bytes
+    if (artifact) {
+      if (artifact.kind !== 'image') return null
+      bytes = readPhotoBytes(artifact.contentPath)
+      if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) return null
+    } else {
+      if (legacyRoot || !helmOrigin) return null
+      const response = await fetchImpl(`${helmOrigin}/helm/api/attachments/${id}`, { redirect: 'manual', signal: AbortSignal.timeout(8000) })
+      if (!response.ok) { await response.body?.cancel(); if (response.status >= 500) throw new Error('helm_transient'); return null }
+      const chunks = []; let size = 0
+      for await (const chunk of response.body) { size += chunk.length; if (size > WIZARD_AGENT_IMAGE_LIMIT) { await response.body.cancel().catch(() => {}); return null }; chunks.push(chunk) }
+      bytes = Buffer.concat(chunks)
+    }
+    const mime = imageMime(bytes)
+    return mime ? { bytes, mime } : null
+  }
 }
 
 function sendJson(response, status, value, headers = {}) {
@@ -2201,6 +2276,7 @@ export function createWizardServer(options = {}) {
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
   // Wizard Inbox service is configured.
+  let chatPhotos = null
   const mediaFiles = !inboxToken && options.mediaRoot
     ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
     : null
@@ -2762,6 +2838,7 @@ export function createWizardServer(options = {}) {
         persistOperatorWorkers()
       }
       await unarchiveForNewTurn(record.sessionId)
+      chatPhotos?.kick('accepted_user') // accepted user message; never upload completion
       return {
         upstreamRunId,
         workerRunId: pendingWorker?.workerRunId ?? '',
@@ -2772,6 +2849,7 @@ export function createWizardServer(options = {}) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+      if (payload.status === 'completed') chatPhotos?.kick('completed_assistant')
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -3142,28 +3220,26 @@ export function createWizardServer(options = {}) {
     const raw = Buffer.from(await result.arrayBuffer())
     if (raw.length > 2 * 1024 * 1024) throw Object.assign(new Error('Wizard Inbox response too large'), { status: 502 })
     if (inboxToken && raw.includes(Buffer.from(inboxToken))) throw Object.assign(new Error('unsafe Wizard Inbox response'), { status: 502 })
-    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus })
+    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus, upstreamStatus: result.status })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Wizard Inbox returned invalid JSON'), { status: 502 }) }
   }
 
-  const resolveFiles = async (ids) => Promise.all(ids.map(async (id) => {
-    if (mediaFiles) {
-      const record = mediaFiles.get(id, true)
-      if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
-      const file = safeFile(record, true)
-      if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
-      // The service reads its own copy from the same record the agent path came from (never the agent path).
-      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
-    }
-    const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
-    const file = safeFile(payload.file, true)
-    if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
-    if (!inboxTrustedRoots.some((root) => file.trusted_path.startsWith(root))) {
-      throw Object.assign(new Error('Wizard file escaped the trusted root'), { status: 502 })
-    }
-    return file
-  }))
+  const resolveFiles = createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots })
+
+  if (options.chatPhotos?.enabled === true) {
+    if (!hermesStatePath || !options.userFilesRoot || !options.chatPhotos.statePath || !agents) throw new Error('chat photos require explicit owner media, registry and state paths')
+    const authorityId = photoAuthorityId({ database: hermesStatePath, runtimeHome: bridgeOsHome, registryPath: agents.agentsDir, upstreamOrigin, hermesKey, ownerId: options.chatPhotos.ownerId, singleOwner: options.chatPhotos.singleOwner })
+    chatPhotos = createChatPhotoReconciler({ database: hermesStatePath, registryPath: agents.agentsDir,
+      verifyAuthority: createPhotoRuntimeVerifier({ database: hermesStatePath, registry: agents, ownerId: options.chatPhotos.ownerId, upstreamOrigin, hermesKey, fetchImpl }),
+      statePath: options.chatPhotos.statePath, ownerId: options.chatPhotos.ownerId, authorityId,
+      projection: createPhotoProjection({ root: options.userFilesRoot, ownerId: options.chatPhotos.ownerId, authorityId,
+        ownerLabel: options.chatPhotos.ownerLabel, agentLabel: options.chatPhotos.agentLabel, maxBytes: options.chatPhotos.maxBytes }),
+      resolveMessage: createCanonicalChatPhotoResolver({ database: hermesStatePath, ownerId: options.chatPhotos.ownerId, authorityId,
+        registry: agents, resolveFiles, artifactRoots: agentArtifactRoots, aliases: agentPathAliases,
+        resolveHelm: createCanonicalHelmPhotoResolver({ artifactDir: agentArtifactDir, helmOrigin, legacyRoot: options.helmAttachmentsRoot, fetchImpl }) }),
+    })
+  }
 
   // Private closure used by authenticated Continue and the watcher. It is not addressable by
   // HTTP; headers/body fields never bypass Access or confer continuation authority.
@@ -3761,7 +3837,7 @@ export function createWizardServer(options = {}) {
       const helmAttachmentMatch = url.pathname.match(/^\/wizard\/attachments\/([0-9a-f]{32})$/)
       if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir)
+        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir) || readLegacyHelmImage(helmAttachmentMatch[1], options.helmAttachmentsRoot)
         if (artifact) {
           // Images, audio and video play in place; everything else (APK, PDF, archives, documents)
           // downloads with its real type so the phone offers the right app, e.g. the APK installer.
@@ -4498,6 +4574,7 @@ export function createWizardServer(options = {}) {
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
+        if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick(request.method === 'GET' ? 'delivered_history' : 'accepted_main')
         return
       }
 
@@ -4570,6 +4647,10 @@ export function createWizardServer(options = {}) {
     else runQueue.close()
   })
   if (uploads) server.once('close', () => uploads.close())
+  if (chatPhotos) {
+    server.once('listening', () => chatPhotos.start())
+    server.once('close', () => chatPhotos.stop())
+  }
   server.on('listening', () => {
     const address = server.address()
     if (!address || typeof address !== 'object') return

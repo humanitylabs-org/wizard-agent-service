@@ -19,9 +19,17 @@ async function setup() {
  const q=new DurableRunQueue(options);queues.push(q);await q.initialize()
  return {q,options,launches,states,enable:()=>{dispatch=true}}
 }
+async function admitOrderedBackground(q: any, count: number) {
+ // FIFO fixture must not rely on a wall clock tick between adjacent SQLite writes.
+ const start = Date.now() / 1000
+ for (let i = 0; i < count; i++) {
+  await q.admit(request('bg' + i, { kind: 'external-heavy', job_id: 'job' + i }))
+  q.database.prepare('UPDATE wizard_run_queue SET created_at=? WHERE session_id=?').run(start + i / 1000, 'bg' + i)
+ }
+}
 it('protects two live question slots when background work saturates its share',async()=>{
  const s=await setup()
- for(let i=0;i<4;i++)await s.q.admit(request('bg'+i,{kind:'external-heavy',job_id:'job'+i}))
+ await admitOrderedBackground(s.q,4)
  s.enable();await s.q.tick(true);expect(s.launches).toEqual(['bg0','bg1'])
  await s.q.admit(request('question1'));await s.q.admit(request('question2'));await s.q.tick(true)
  expect(s.launches).toEqual(['bg0','bg1','question1','question2'])
@@ -33,7 +41,7 @@ it('prioritizes new human input ahead of already queued automatic completions',a
  s.enable();await s.q.tick(true);expect(s.launches).toEqual(['human','older-background'])
 })
 it('preserves reservation across restart and lets background work make progress',async()=>{
- const s=await setup();for(let i=0;i<3;i++)await s.q.admit(request('bg'+i,{kind:'external-heavy'}))
+ const s=await setup();await admitOrderedBackground(s.q,3)
  s.enable();await s.q.tick(true);s.q.close();queues.splice(queues.indexOf(s.q),1)
  const reopened=new DurableRunQueue(s.options);queues.push(reopened);await reopened.initialize();expect(s.launches).toEqual(['bg0','bg1'])
  s.states.set('bg0','completed');await reopened.tick(true);expect(s.launches).toEqual(['bg0','bg1','bg2'])
