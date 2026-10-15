@@ -815,7 +815,8 @@ function safeFile(value, trusted = false) {
 
 function safeAttachment(value) {
   const file = safeFile(value)
-  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256 }
+  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+    ...(typeof value?.agent === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(value.agent) ? { agent: value.agent } : {}) }
 }
 
 function projectWizardFileMarkers(result, userMessagesOnly = false) {

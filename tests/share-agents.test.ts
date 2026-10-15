@@ -24,6 +24,7 @@ async function fakeHermes(name: string, sessions: string[] = []) {
     const json = (code: number, value: unknown) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)) }
     if (url.pathname === '/health') return json(200, { status: 'ok' })
     if (url.pathname === '/v1/capabilities') return json(200, { features: {} })
+    if (req.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(url.pathname)) return json(200, { messages: seen.filter(x => x.method === 'POST' && x.path === '/v1/runs').map((x, i) => ({ id: i + 1, role: 'user', content: x.body.input })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (req.method === 'GET' && sessionMatch) return known.has(sessionMatch[1]) ? json(200, { session: { id: sessionMatch[1] } }) : json(404, {})
     if (req.method === 'POST' && url.pathname === '/api/sessions') { if (known.has(body.id)) return json(409, {}); known.add(body.id); return json(201, { session: { id: body.id, title: body.title } }) }
@@ -127,6 +128,12 @@ describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)
     expect(sent.status).toBe(202)
     expect(agentHermes.runs()[0].body.input).toContain('/opt/data/inbox/')
     expect(agentHermes.runs()[0].body.wizard_file_ids).toBeUndefined()
+    const history = await fetch(next + '/wizard/hermes/api/sessions/private-paperclip-thread/messages' + q + '&view=wizard')
+    expect(history.status).toBe(200)
+    const content = (await history.json()).messages[0].content
+    expect(content).toContain('WIZARD_FILE_CHIPS_V1')
+    expect(content).toContain(`"agent":"${agent.id}"`)
+    expect(content).not.toContain('/opt/data/')
     expect((await post(next, '/wizard/hermes/v1/runs' + q, { session_id: 'private-paperclip-thread', input: 'wrong', wizard_file_ids: ['af_' + 'a'.repeat(32)] })).status).toBe(409)
     expect(existsSync(join(dir, 'media', 'Inbox'))).toBe(false)
     expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
