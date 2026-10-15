@@ -9,11 +9,26 @@ const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stoppin
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
+// Only service-owned continuation metadata selects the background lane. Manual
+// Continue is an interactive request; model text never determines scheduling.
+export const isBackgroundContinuation = record => Boolean(record.continuation)
+  && record.continuation.kind !== 'background-recovery'
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
 
 const nowSeconds = () => Date.now() / 1000
+const providerScope = record => {
+  const body = parseJson(record.body, {})
+  return JSON.stringify([record.runtime, body.provider || 'configured', body.model || 'configured'])
+}
+export function retryAfterSeconds(value, now = Date.now()) {
+  if (value === null || value === undefined || value === '') return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds
+  const date = Date.parse(String(value))
+  return Number.isFinite(date) ? Math.max(0, (date - now) / 1000) : 0
+}
 const safeStatus = (value) => {
   const status = String(value ?? '').toLowerCase()
   if (['accepted', 'pending', 'queued', 'submitting', 'started'].includes(status)) return 'running'
@@ -48,6 +63,7 @@ export class DurableRunQueue {
   constructor({
     statePath,
     maxActive = 8,
+    reservedInteractive = 0,
     pollIntervalMs = 1_500,
     retryDelayMs = 2_000,
     activeSessionIds = async () => [],
@@ -67,6 +83,8 @@ export class DurableRunQueue {
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
+    if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
+    this.reservedInteractive = reservedInteractive
     this.pollIntervalMs = Math.max(0, Number(pollIntervalMs) || 0)
     this.retryDelayMs = Math.max(50, Number(retryDelayMs) || 2_000)
     this.activeSessionIds = activeSessionIds
@@ -88,6 +106,9 @@ export class DurableRunQueue {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 5000;
+      CREATE TABLE IF NOT EXISTS wizard_provider_backoff (
+        scope TEXT PRIMARY KEY, retry_after REAL NOT NULL, failures INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS wizard_run_queue (
         public_run_id TEXT PRIMARY KEY,
         runtime TEXT NOT NULL,
@@ -316,6 +337,12 @@ export class DurableRunQueue {
     }))
   }
 
+  // Durable insertion order rather than UUID order for same-millisecond admissions.
+  latestForSession(sessionId) {
+    const row = this.database.prepare('SELECT * FROM wizard_run_queue WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(sessionId)
+    return row ? this._record(row) : null
+  }
+
   async summary() {
     await this.tick(false)
     let external = []
@@ -334,6 +361,9 @@ export class DurableRunQueue {
       queued: this._rows("status = 'queued'").length,
       dispatch_paused: !dispatchHealthy,
       liveness_available: livenessAvailable,
+      lane: 'interactive',
+      interactive_reserved: this.reservedInteractive,
+      provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
     }
   }
 
@@ -484,6 +514,7 @@ export class DurableRunQueue {
         retryAfter: 0,
         terminalAt: TERMINAL.has(status) ? nowSeconds() : null,
       })
+      this.database.prepare('DELETE FROM wizard_provider_backoff WHERE scope=?').run(providerScope(current))
       return current
     } catch (error) {
       const status = Number(error?.status)
@@ -491,8 +522,16 @@ export class DurableRunQueue {
         return this._update(record.publicRunId, { status: 'cancelled', payload: { status: 'cancelled', safe_error: 'The helper request is no longer current.' }, waitingReason: '', terminalAt: nowSeconds() })
       }
       const retry = error instanceof TypeError || RETRIABLE.has(status)
+      let delay = this.retryDelayMs / 1000
+      if (retry && (status === 429 || error?.retryAfter)) {
+        const scope = providerScope(current)
+        const previous = this.database.prepare('SELECT failures FROM wizard_provider_backoff WHERE scope=?').get(scope)
+        const failures = Math.min(10, Number(previous?.failures || 0) + 1)
+        delay = Math.max(retryAfterSeconds(error.retryAfter), Math.min(60, delay * 2 ** (failures - 1)))
+        this.database.prepare('INSERT OR REPLACE INTO wizard_provider_backoff VALUES(?,?,?)').run(scope, nowSeconds() + delay, failures)
+      }
       return this._update(record.publicRunId, retry
-        ? { status: 'queued', waitingReason: status === 429 ? 'provider_busy' : 'capacity', retryAfter: nowSeconds() + this.retryDelayMs / 1000 }
+        ? { status: 'queued', waitingReason: status === 429 || error?.retryAfter ? 'provider_busy' : 'admission_retry', retryAfter: nowSeconds() + delay }
         : { status: 'failed', payload: { status: 'failed', safe_error: 'Wizard could not start this queued work.' }, terminalAt: nowSeconds() })
     }
   }
@@ -553,9 +592,24 @@ export class DurableRunQueue {
       return
     }
 
-    for (const record of this._rows("status = 'queued'")) {
+    const pending = this._rows("status = 'queued'")
+    if (this.reservedInteractive) pending.sort((a, b) => Number(isBackgroundContinuation(a)) - Number(isBackgroundContinuation(b)))
+    for (const record of pending) {
       if (activeSessions.size >= this.maxActive) break
-      if (record.retryAfter > nowSeconds() || activeSessions.has(record.sessionId)) {
+      // Background turns may consume only the nonreserved total occupancy.
+      // Existing turns are never preempted; two slots stay reachable by people.
+      if (this.reservedInteractive && isBackgroundContinuation(record)
+          && activeSessions.size >= this.maxActive - this.reservedInteractive) {
+        this._update(record.publicRunId, { waitingReason: 'interactive_reserve' })
+        continue
+      }
+      const cooldown = this.database.prepare('SELECT retry_after FROM wizard_provider_backoff WHERE scope=?').get(providerScope(record))
+      if (Number(cooldown?.retry_after || 0) > nowSeconds()) {
+        this._update(record.publicRunId, { waitingReason: 'provider_busy' })
+        continue
+      }
+      if (record.retryAfter > nowSeconds()) continue
+      if (activeSessions.has(record.sessionId)) {
         this._update(record.publicRunId, { waitingReason: 'capacity' })
         continue
       }

@@ -66,7 +66,7 @@ test('manual and automatic watcher share token/key; watcher rechecks after async
  assert.equal(ordinary.key,manual[0][2]);assert.equal(ordinary.input,manual[0][1])
  let entered,release;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r);let launch=0
  const watcher=startDelegationFollowThrough({sessionDbPath:path,intervalMs:60000,enabled:async()=>true,admit:async(s,input,key,token)=>{
-  assert.deepEqual(token,manual[0][3]);entered();await gate;requireCurrentContinuation(path,token);launch++
+  assert.deepEqual(token.request,manual[0][3].request);assert.equal(token.delegationId,manual[0][3].delegationId);assert.ok(token.completion);entered();await gate;requireCurrentContinuation(path,token);launch++
  }})
  try{const tick=watcher.tick();await ready;message('user','The owner moved on',Date.now()/1000);release();await tick;await watcher.tick();assert.equal(launch,0)}finally{watcher.stop()}
 }))

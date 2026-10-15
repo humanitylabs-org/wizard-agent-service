@@ -19,8 +19,9 @@ export function currentOwnerResult(db, sessionId) {
     inspected++
     if (internal(row.content) || ['async_delegation_complete','internal_notification','system','commentary','hidden'].includes(row.display_kind)) continue
     if (row.role==='user' && !userAt) userAt=Number(row.timestamp)
-    if (row.role==='assistant' && !assistant) assistant=row
-    if (assistant && userAt) break
+    if (row.role==='assistant' && !assistant && /\[\/WIZARD_STATUS_V1\]\s*$/u.test(row.content || '')
+      && ['done','needs_you','check'].includes(parseStatus(row.content)?.state)) assistant=row
+    if (userAt) break // older outcomes cannot gate the latest genuine request
   }
   if (inspected>512 && (!assistant || !userAt)) return 'unknown'
   const state=parseStatus(assistant?.content)?.state
@@ -34,16 +35,24 @@ export function ownerGate(db, sessionId) {
   const state = currentOwnerResult(db, sessionId)
   return state==='unknown' || OWNER_GATES.has(state) ? state : null
 }
+// Delivery is not an integrated outcome. A checkpoint, a tool argument, or a
+// delegation status lookup cannot prove that the model received the findings.
+export function isReceiptDelivery(row, id) {
+  if (row.role === 'user') return String(row.content || '').startsWith(RECEIPT_PREFIX + id + '\n')
+  if (row.role !== 'tool') return false
+  try {
+    const result = JSON.parse(row.content)
+    return result?.delegation_id === id && ['completed','failed','interrupted'].includes(result.status)
+      && Array.isArray(result.results) && result.results.some(r => typeof r?.summary === 'string' && r.summary.trim())
+  } catch { return false }
+}
 export function receiptConsumed(db, sessionId, id, completedAt) {
   const after = Number.isFinite(Number(completedAt)) ? Number(completedAt) : 0
-  if (db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND role='user'
-    AND timestamp>=? AND instr(COALESCE(content,''),?)>0 LIMIT 1`).get(sessionId, after, RECEIPT_PREFIX+id+'\n')) return true
-  // The agent fetched this delegation itself after it finished (a tool call or tool result names it).
-  // Prose in a final reply ("review deleg_x is running") deliberately does not count.
-  if (!Number.isFinite(Number(completedAt))) return false
-  return Boolean(db.prepare(`SELECT 1 FROM messages WHERE session_id=? AND timestamp>?
-    AND ((role='tool' AND instr(COALESCE(content,''),?)>0) OR (role='assistant' AND instr(COALESCE(tool_calls,''),?)>0))
-    LIMIT 1`).get(sessionId, Number(completedAt), id, id))
+  const rows = db.prepare(`SELECT role,content FROM messages WHERE session_id=? AND timestamp>=?
+    AND role IN ('user','tool') AND instr(COALESCE(content,''),?)>0
+    ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId,after,id)
+  // Incomplete evidence blocks automatic redelivery, never proves integration.
+  return rows.length > 512 || rows.some(row => isReceiptDelivery(row,id))
 }
 export function continuationAllowed(path, sessionId, id, now=Date.now()) {
   if(!path || !existsSync(path)) return false
