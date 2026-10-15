@@ -31,6 +31,7 @@ import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createMediaFiles } from './media-files.mjs'
+import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
@@ -1501,6 +1502,37 @@ function trustedAgentSource(sourcePath, artifactRoots) {
   return { source, details }
 }
 
+// Resolve only references emitted by the stored-message scanner. Explicit replay
+// roots must be narrower than the artifact-serving root (often the whole home).
+// No HTTP fetching, arbitrary filesystem search, profile switching or sealed-store access.
+export function createChatPhotoReferenceResolver({ resolveFiles, replayRoots = [] }) {
+  const roots = replayRoots.map(p => resolve(p))
+  if (roots.some(p => p === sep || p === homedir())) throw new Error('photo replay roots must be narrow')
+  return async (ref) => {
+    let path = ''
+    let expected = ''
+    if (ref.kind === 'wizard') {
+      if (!/^drop_[0-9a-f]{32}$/.test(ref.id || '') || !/^[0-9a-f]{64}$/.test(ref.sha256 || '')) throw new Error('invalid stored attachment identity')
+      const [file] = await resolveFiles([ref.id])
+      if (!file || !file.mime.startsWith('image/') || file.sha256 !== ref.sha256) throw new Error('stored attachment mismatch')
+      path = file.trusted_path; expected = file.sha256
+    } else if (['agent', 'received', 'helm'].includes(ref.kind)) {
+      path = String(ref.path || '')
+      if (ref.kind === 'helm' && (!/^[0-9a-f]{32}$/.test(ref.id || '') || !basename(path).startsWith(`${ref.id}.`))) throw new Error('invalid Helm attachment identity')
+    } else throw new Error('remote or inline attachment requires canonical replay resolver')
+    // Refuse private-profile/sealed paths before any filesystem access, including
+    // misleading references in otherwise legitimate owner conversation content.
+    if (/(?:^|[/\\])(?:profiles|sealed|private-agents|agent-vault)(?:[/\\]|$)/i.test(path)) throw new Error('private attachment denied')
+    if (!roots.some(root => path.startsWith(`${root}${sep}`))) throw new Error('outside photo replay allowlist')
+    const trusted = trustedAgentSource(path, roots)
+    if (!trusted || trusted.source !== path) throw new Error('unsafe or unavailable photo path')
+    const bytes = readPhotoBytes(trusted.source)
+    const mime = imageMime(bytes)
+    if (!mime || expected && createHash('sha256').update(bytes).digest('hex') !== expected) throw new Error('photo bytes mismatch')
+    return { bytes, mime }
+  }
+}
+
 function registerAgentArtifact(sourcePath, artifactDir, artifactRoots) {
   if (!artifactDir || !artifactRoots.length) return null
   const trusted = trustedAgentSource(sourcePath, artifactRoots)
@@ -2047,6 +2079,7 @@ export function createWizardServer(options = {}) {
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
   // Wizard Inbox service is configured.
+  let chatPhotos = null
   const mediaFiles = !inboxToken && options.mediaRoot
     ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
     : null
@@ -2563,6 +2596,7 @@ export function createWizardServer(options = {}) {
         persistOperatorWorkers()
       }
       await unarchiveForNewTurn(record.sessionId)
+      chatPhotos?.kick() // accepted user message; never upload completion
       return {
         upstreamRunId,
         workerRunId: pendingWorker?.workerRunId ?? '',
@@ -2573,6 +2607,7 @@ export function createWizardServer(options = {}) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+      if (payload.status === 'completed') chatPhotos?.kick()
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -2949,6 +2984,17 @@ export function createWizardServer(options = {}) {
     }
     return file
   }))
+
+  if (options.chatPhotos?.enabled === true) {
+    if (typeof options.chatPhotos.authorizeEvidence !== 'function') throw new Error('chat photo activation requires a reviewed delivery-evidence adapter')
+    if (!hermesStatePath || !options.userFilesRoot || !options.chatPhotos.statePath) throw new Error('chat photos require explicit owner media and state paths')
+    chatPhotos = createChatPhotoReconciler({ database: hermesStatePath,
+      statePath: options.chatPhotos.statePath, ownerId: options.chatPhotos.ownerId,
+      authorizeEvidence: options.chatPhotos.authorizeEvidence,
+      projection: createPhotoProjection({ root: options.userFilesRoot, ownerLabel: options.chatPhotos.ownerLabel, agentLabel: options.chatPhotos.agentLabel }),
+      resolveReference: createChatPhotoReferenceResolver({ resolveFiles, replayRoots: options.chatPhotos.replayRoots }),
+    })
+  }
 
   // Private closure used by authenticated Continue and the watcher. It is not addressable by
   // HTTP; headers/body fields never bypass Access or confer continuation authority.
@@ -4221,6 +4267,7 @@ export function createWizardServer(options = {}) {
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
+        if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick()
         return
       }
 
@@ -4286,6 +4333,10 @@ export function createWizardServer(options = {}) {
   })
   if (runQueue) server.once('close', () => runQueue.close())
   if (uploads) server.once('close', () => uploads.close())
+  if (chatPhotos) {
+    server.once('listening', () => chatPhotos.start())
+    server.once('close', () => chatPhotos.stop())
+  }
   server.on('listening', () => {
     const address = server.address()
     if (!address || typeof address !== 'object') return

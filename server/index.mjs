@@ -94,6 +94,14 @@ const server = createWizardServer({
   // upload created with a destination is placed there, and the Files app can list it. Separate from
   // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
   userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
+  chatPhotos: {
+    enabled: process.env.WIZARD_CHAT_PHOTOS_ENABLED === '1',
+    statePath: process.env.WIZARD_CHAT_PHOTOS_STATE_PATH || '',
+    ownerId: process.env.WIZARD_CHAT_PHOTOS_OWNER_ID || '',
+    ownerLabel: process.env.WIZARD_CHAT_PHOTOS_OWNER_LABEL || '',
+    agentLabel: process.env.WIZARD_CHAT_PHOTOS_AGENT_LABEL || '',
+    replayRoots: (process.env.WIZARD_CHAT_PHOTOS_REPLAY_ROOTS || '').split(':').filter(Boolean),
+  },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.

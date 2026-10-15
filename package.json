@@ -9,7 +9,7 @@
     "start": "node server/index.mjs",
     "start:local": "node --env-file=.env.local server/index.mjs",
     "fixture": "node scripts/run-fixture.mjs",
-    "test": "vitest run"
+    "test": "vitest run && node --test tests/chat-photo-projection.node.mjs && python3 tests/test_chat_photo_reader.py"
   },
   "dependencies": {
     "jose": "^6.2.12"
