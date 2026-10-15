@@ -21,17 +21,19 @@ export function createHeavyIntegration({ options, queue, request }) {
     return { id: row.id, hash: createHash('sha256').update(String(row.content)).digest('hex') }
   }
   let heavy
+  const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
+    || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
     const fresh = heavy.get(job.job_id)
     if (!fresh || fresh.cancel_requested || ['suppressed', 'superseded'].includes(fresh.resume)) return false
-    const latest = queue.latestProjections([job.sessionId])[0]
-    if (!latest || (latest.publicRunId !== job.origin && queue.get(latest.publicRunId)?.continuation?.job_id !== job.job_id)) return false
+    const latest = queue.latestForSession(job.sessionId)
+    if (!sameGeneration(latest, job)) return false
     if (JSON.stringify(await watermark(job.sessionId)) !== JSON.stringify(job.watermark)) return false
     // Recheck after the history request: steering/admission may have raced it.
     const after = heavy.get(job.job_id)
-    const last = queue.latestProjections([job.sessionId])[0]
+    const last = queue.latestForSession(job.sessionId)
     return !after.cancel_requested && !['suppressed', 'superseded'].includes(after.resume)
-      && (last?.publicRunId === job.origin || queue.get(last?.publicRunId)?.continuation?.job_id === job.job_id)
+      && sameGeneration(last, job)
   }
   heavy = new DurableHeavyQueue({ statePath: options.heavyStatePath,
     transport: options.heavyTransport ?? heavySshTransport(options.heavyWorker),
@@ -55,6 +57,10 @@ export function createHeavyIntegration({ options, queue, request }) {
     close: () => heavy.close(),
     summary: () => heavy.summary(),
     supersede: id => heavy.supersede(id),
+    stopSession: id => {
+      heavy.supersede(id)
+      for (const job of heavy.rows()) if (job.sessionId === id && !terminal.has(job.state)) heavy.cancel(job.job_id, id)
+    },
     async validate(record) {
       const job = heavy.get(record.continuation?.job_id)
       if (!job || record.runtime !== 'direct' || job.sessionId !== record.sessionId || !terminal.has(job.state)
@@ -70,14 +76,13 @@ export function createHeavyIntegration({ options, queue, request }) {
       const sessionId = value.session_id
       if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw fail('session required', 400)
       if (path === '/wizard/internal/heavy/submit') {
-        const latest = queue.latestProjections([sessionId])[0]
-        const origin = latest && queue.get(latest.publicRunId)
+        const origin = queue.latestForSession(sessionId)
         // Do not infer a private/operator route or let callers substitute a model.
         if (!origin || origin.runtime !== 'direct' || !['running', 'launching'].includes(origin.status)) throw fail('no mutation-owning direct run', 409)
         const body = JSON.parse(origin.body)
         const route = Object.fromEntries(['model', 'provider', 'require_model_lock'].filter(k => body[k] !== undefined).map(k => [k, body[k]]))
         const mark = await watermark(sessionId)
-        if (queue.latestProjections([sessionId])[0]?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
+        if (queue.latestForSession(sessionId)?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
         return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))
       }
       const job = heavy.get(value.job_id)

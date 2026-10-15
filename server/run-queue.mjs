@@ -330,6 +330,12 @@ export class DurableRunQueue {
     }))
   }
 
+  // Durable insertion order rather than UUID order for same-millisecond admissions.
+  latestForSession(sessionId) {
+    const row = this.database.prepare('SELECT * FROM wizard_run_queue WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(sessionId)
+    return row ? this._record(row) : null
+  }
+
   async summary() {
     await this.tick(false)
     let external = []

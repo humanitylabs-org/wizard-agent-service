@@ -4065,7 +4065,8 @@ export function createWizardServer(options = {}) {
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
           : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (queuedProxyRecord && request.method === 'POST' && ['steer', 'stop'].includes(queuedPath[2])) heavyWork?.supersede(queuedProxyRecord.sessionId)
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
           return
