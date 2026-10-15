@@ -104,7 +104,7 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
   const text = [
-    'Wizard OS: you are the owner\'s agent.',
+    'Wizard OS: you are the owner\'s agent on this box. Installed apps do jobs for the owner.',
     ...(hermes ? ['To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
     hermes
