@@ -22,9 +22,9 @@ function redact(text) {
     .replace(/\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b/gu, '[redacted secret]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/giu, '$1 [redacted]')
-    // Consume quoted values independently of the following JSON delimiter.
-    // An unclosed quote consumes the remainder, rather than leaking later words.
-    .replace(/((?:["']?)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|passphrase|secret|authorization)(?:["']?)\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;}\]]+)/giu, '$1[redacted]')
+    // Credential assignments can be nested, malformed, or truncated. Discard
+    // the remainder instead of trying to parse just a scalar with a regex.
+    .replace(/((?:["']?)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|passphrase|secret|authorization)(?:["']?)\s*[:=]\s*)[\s\S]*/giu, '$1[redacted sensitive remainder]')
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/giu, '$1[redacted]@')
 }
 

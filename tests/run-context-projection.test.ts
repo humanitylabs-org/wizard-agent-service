@@ -74,6 +74,9 @@ describe('incoming automatic run context', () => {
   })
 
   it.each([
+    '{"password":["first SECRET_CANARY last"]}',
+    '{"password":{"nested":["SECRET_CANARY"]}}',
+    'password="first SECRET_CANARY last' + String.fromCharCode(92),
     '{"password":"first SECRET_CANARY last"}',
     '[{"password":"first SECRET_CANARY last"}]',
     '{"password":"first SECRET_CANARY last", "other": true}',
