@@ -21,6 +21,8 @@ const session = `wizard_resource_canary_${run}`
 const questionSession = `wizard_resource_question_${run}`
 const remoteSpool = `${remote}/canary-${run}`
 const gate = `${remote}/release-${run}`
+const lightweight = process.env.CANARY_LIGHTWEIGHT === '1'
+const busyOnly = process.env.CANARY_BUSY_ONLY === '1'
 const results = { kind: 'real-model-real-worker-isolated-service', session, questionSession,
   handler: 'registered plugin handler invoked by canary harness, not yet installed in live Hermes', events: [] }
 const server = createWizardServer({ upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
@@ -28,7 +30,7 @@ const server = createWizardServer({ upstreamOrigin: process.env.HERMES_ORIGIN ||
   runQueueStatePath: join(base, 'runs.sqlite3'), runQueueMaxActive: 2, runQueuePollIntervalMs: 250,
   heavyStatePath: join(base, 'heavy.sqlite3'), heavyToken: token, heavyPollIntervalMs: 250,
   heavyWorker: { host: process.env.CANARY_SSH_HOST || 'thales', script: `${remote}/scripts/heavy-worker.py`,
-    root: remoteSpool, lock: '/Volumes/ThalesMedia/AndroidBuilds/worker.lock' },
+    root: remoteSpool, lock: lightweight ? `${remoteSpool}/test-only.lock` : '/Volumes/ThalesMedia/AndroidBuilds/worker.lock' },
   settingsPath: join(base, 'settings.json'), appsJsonPath: join(base, 'apps.json'), launcherPath: join(base, 'launcher.json'),
   threadTitleStatePath: join(base, 'titles.json'), threadStatusBackfillPath: join(base, 'status.json'),
   threadDispositionStatePath: join(base, 'dispositions.json'), threadSeenStatePath: join(base, 'seen.json'),
@@ -75,12 +77,13 @@ try {
     const messages = await request(`/wizard/hermes/api/sessions/${session}/messages?order=latest&limit=5`)
     return messages.data?.some(row => row.role === 'user')
   }, 30000)
-  const code = `import pathlib,subprocess,time; print('real targeted suite starting',flush=True); subprocess.run(['/opt/homebrew/bin/node','node_modules/vitest/vitest.mjs','run','tests/heavy-queue.test.ts','tests/run-queue.test.ts','tests/proxy-queue.test.ts'],check=True); print('suite passed; holding canary barrier',flush=True); deadline=time.monotonic()+150\nwhile not pathlib.Path(${JSON.stringify(gate)}).exists() and time.monotonic()<deadline: time.sleep(.2)\nprint('barrier released',flush=True)`
+  const workload = lightweight ? "print('lightweight process/receipt canary; no build lock bypass',flush=True)" : "subprocess.run(['/opt/homebrew/bin/node','node_modules/vitest/vitest.mjs','run','tests/heavy-queue.test.ts','tests/run-queue.test.ts','tests/proxy-queue.test.ts'],check=True)"
+  const code = `import pathlib,subprocess,time; ${workload}; print('holding canary barrier',flush=True); deadline=time.monotonic()+150\nwhile not pathlib.Path(${JSON.stringify(gate)}).exists() and time.monotonic()<deadline: time.sleep(.2)\nprint('barrier released',flush=True)`
   const first = await tool('submit', { key: 'canary-first', cwd: remote, argv: ['/opt/homebrew/bin/python3', '-c', code], timeout_seconds: 180 })
   const second = await tool('submit', { key: 'canary-second', cwd: remote, argv: ['/usr/bin/printf', 'second-real-command\n'], timeout_seconds: 30 })
   await wait('real running plus queued', async () => {
     const a = await tool('status', { job_id: first.job_id }); const b = await tool('status', { job_id: second.job_id })
-    return a.state === 'running' && b.state === 'queued'
+    return (a.state === 'running' || busyOnly && a.state === 'queued' && a.reason === 'worker_busy') && b.state === 'queued'
   })
   await wait('origin terminal', async () => {
     const value = await request(`/wizard/hermes/v1/runs/${originRun.run_id}`)
@@ -95,9 +98,17 @@ try {
     return value.status === 'completed' && value
   })
   const stillFirst = await tool('status', { job_id: first.job_id }); const stillSecond = await tool('status', { job_id: second.job_id })
-  if (stillFirst.state !== 'running' || stillSecond.state !== 'queued') throw new Error('question did not finish within occupied-worker barrier')
+  if (!(stillFirst.state === 'running' || busyOnly && stillFirst.state === 'queued' && stillFirst.reason === 'worker_busy') || stillSecond.state !== 'queued') throw new Error('question did not finish within occupied-worker barrier')
   event('responsive_real_answer', { latency_ms: Date.now() - started, answer,
     worker_state: stillFirst.state, second_state: stillSecond.state, health: await request('/wizard/health') })
+  if (busyOnly) {
+    for (const receipt of [first, second]) {
+      await tool('cancel', { job_id: receipt.job_id })
+      await wait('own queued job cancelled', async () => (await tool('status', { job_id: receipt.job_id })).state === 'cancelled')
+    }
+    results.scope = 'real shared-worker contention, interactive answer, and cancellation; no build executed'
+    results.passed = true
+  } else {
   await exec('ssh', ['thales', `/usr/bin/touch '${gate}'`])
   for (const receipt of [first, second]) {
     const result = await wait('worker completion and originating continuation', async () => {
@@ -117,6 +128,8 @@ try {
   database.close()
   if (counts.length !== 2 || counts.some(r => r.count !== 1)) throw new Error('logical continuation count mismatch')
   results.passed = true; event('verified', { counts })
+  results.scope = lightweight ? 'real remote lightweight processes, real model answer and two real origin continuations; isolated test-only lock' : 'shared worker full canary'
+  }
 } catch (error) {
   results.passed = false; results.error = error.message; event('failed', { error: error.message }); process.exitCode = 1
 } finally {

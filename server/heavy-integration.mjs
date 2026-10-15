@@ -80,7 +80,14 @@ export function createHeavyIntegration({ options, queue, request }) {
         // Do not infer a private/operator route or let callers substitute a model.
         if (!origin || origin.runtime !== 'direct' || !['running', 'launching'].includes(origin.status)) throw fail('no mutation-owning direct run', 409)
         const body = JSON.parse(origin.body)
-        const route = Object.fromEntries(['model', 'provider', 'require_model_lock'].filter(k => body[k] !== undefined).map(k => [k, body[k]]))
+        // A default-config turn still needs an immutable route snapshot. Otherwise
+        // a global selector change during the build silently changes its resume.
+        const observed = origin.upstreamRunId ? await request(`/v1/runs/${encodeURIComponent(origin.upstreamRunId)}`) : null
+        const runtime = observed?.runtime || origin.payload?.runtime
+        const model = body.model || runtime?.model
+        const provider = body.provider || runtime?.requested?.provider || runtime?.provider
+        if (!model || !provider || provider === 'custom') throw fail('origin model route not ready', 409)
+        const route = { model, provider, require_model_lock: true }
         const mark = await watermark(sessionId)
         if (queue.latestForSession(sessionId)?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
         return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))

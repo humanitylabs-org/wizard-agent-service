@@ -119,7 +119,7 @@ it('integrates origin route, generation fencing, continuation idempotency, and a
   await expect(integration.handle({ headers: {} }, '/wizard/internal/heavy/submit', { session_id: 'wizard_test', key: 'one', spec })).rejects.toMatchObject({ status: 403 })
   const receipt = await integration.handle(req, '/wizard/internal/heavy/submit', { session_id: 'wizard_test', key: 'one', spec })
   const job = integration.queue.get(receipt.job_id)
-  expect(job.route).toEqual({ model: 'unchanged', provider: 'private' })
+  expect(job.route).toEqual({ model: 'unchanged', provider: 'private', require_model_lock: true })
   await runs.tick(true); await integration.queue.tick()
   const continued = runs.get(integration.queue.get(receipt.job_id).resume)
   expect(continued.continuation.job_id).toBe(receipt.job_id)
