@@ -54,26 +54,7 @@ if (process.argv[2] === '--survey') {
 } else if (process.argv[2] === '--backfill') {
   if (e.WIZARD_CHAT_PHOTOS_ENABLED !== '1') throw new Error('explicit activation required')
   const projection = createPhotoProjection({ root: e.WIZARD_USER_FILES_ROOT, ownerId, authorityId, ownerLabel: e.WIZARD_CHAT_PHOTOS_OWNER_LABEL, agentLabel: e.WIZARD_CHAT_PHOTOS_AGENT_LABEL, maxBytes: Number(e.WIZARD_CHAT_PHOTOS_MAX_BYTES) })
-  // A completed read-only survey can seed candidate pages without rescanning a
-  // multi-million-row DB. It confers no authority: resolver rereads every source.
-  let scanBatch
-  if (e.WIZARD_CHAT_PHOTOS_ENUMERATION) {
-    const dir = e.WIZARD_CHAT_PHOTOS_ENUMERATION
-    const enumeration = JSON.parse(readFileSync(resolve(dir, 'enumeration-state.json')))
-    if (!enumeration.done || !Number.isSafeInteger(enumeration.ceiling)) throw new Error('completed enumeration required')
-    const byId = new Map()
-    for (const name of readdirSync(dir).filter(p => /^evidence-.*\.json$/.test(p)).sort()) {
-      for (const m of JSON.parse(readFileSync(resolve(dir, name))).evidence) byId.set(Number(m.message_id), m)
-    }
-    const candidates = [...byId.values()].sort((a, b) => Number(a.message_id) - Number(b.message_id))
-    scanBatch = async state => {
-      if (state.cursor >= enumeration.ceiling) return { evidence: [], counts: {}, cursor: state.cursor, ceiling: state.cursor, done: true }
-      const remaining = candidates.filter(m => Number(m.message_id) > state.cursor && Number(m.message_id) <= enumeration.ceiling)
-      const evidence = remaining.slice(0, 250), done = remaining.length <= 250
-      return { evidence, counts: {}, cursor: done ? enumeration.ceiling : Number(evidence.at(-1).message_id), ceiling: enumeration.ceiling, done }
-    }
-  }
-  const reconciler = createChatPhotoReconciler({ database, registryPath: registry.agentsDir, ownerId, authorityId, verifyAuthority, scanBatch, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
+  const reconciler = createChatPhotoReconciler({ database, registryPath: registry.agentsDir, ownerId, authorityId, verifyAuthority, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
   for (let i = 0; i < 2000; i++) {
     const result = await reconciler.step(); console.log(JSON.stringify(result))
     if (result?.done) break
