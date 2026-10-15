@@ -155,6 +155,8 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         "x-runtipi": {"is_main": True, "internal_port": 8642},
     }
     services = {main: hermes}
+    if os.environ.get('WIZARD_MANAGED_RUNTIME_STATE'):
+        hermes['volumes'].append(os.environ['WIZARD_MANAGED_RUNTIME_STATE'] + ':/wizard-managed-state')
     if (agent.get("model") or {}).get("provider") == "tinfoil":
         hermes["depends_on"] = [proxy]
         services[proxy] = {
@@ -451,7 +453,7 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
 
 # ---------------------------------------------------------------- HTTP
 
-def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
+def make_handler(token: str, agents: Agents, driver, main_container: str = "", maintenance=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
 
@@ -478,7 +480,8 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
                 self._json(401, {"error": "unauthorized"})
                 return
             m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver)", self.path)
-            if not m:
+            maintenance_action = self.path.removeprefix('/maintenance/') if self.path.startswith('/maintenance/') else None
+            if not m and maintenance_action not in ['acquire', 'release']:
                 self._json(404, {"error": "not_found"})
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -490,8 +493,20 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
             except ValueError:
                 self._json(400, {"error": "invalid_json"})
                 return
+            if maintenance_action:
+                if maintenance is None:
+                    self._json(409, {'error': 'managed_maintenance_unconfigured'}); return
+                try:
+                    self._json(200, getattr(maintenance, maintenance_action)(payload.get('token')))
+                except Exception as error:
+                    from managed_maintenance import MaintenanceError
+                    self._json(409, {'error': str(error) if isinstance(error, MaintenanceError) else 'maintenance_runtime_unknown'})
+                return
             agent_id, action = m.groups()
+            reservation = None
             try:
+                if maintenance:
+                    reservation = maintenance.enter()
                 if agent_id == "hermes" and action == "deliver":
                     # The main agent is not an agent folder; it is delivered to only when the box names its container.
                     if not main_container:
@@ -510,6 +525,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
             except Exception as error:  # noqa: BLE001
                 sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}: {str(error)[:300]}\n")
                 self._json(502, {"error": "runtime_failed"})
+            finally:
+                if reservation:
+                    reservation.close()
 
     return Handler
 
@@ -526,6 +544,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
+    ap.add_argument("--managed-maintenance-dir", type=Path)
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:
@@ -537,7 +556,12 @@ def main(argv: list[str] | None = None) -> int:
         driver = RuntipiDriver(agents, args.image, args.proxy_image, args.wam, args.home_mount)
     else:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container))
+    maintenance = None
+    if args.managed_maintenance_dir:
+        os.environ['WIZARD_MANAGED_RUNTIME_STATE'] = str(args.managed_maintenance_dir)
+        from managed_maintenance import ManagedMaintenance
+        maintenance = ManagedMaintenance(args.managed_maintenance_dir)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, maintenance))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
     return 0

@@ -2620,7 +2620,8 @@ export function createWizardServer(options = {}) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   const maintenance = createMaintenanceLease({
     path: options.maintenanceStatePath || (runQueueStatePath ? `${runQueueStatePath}.maintenance` : ''),
-    barrier: options.maintenanceBarrier || null,
+    barrier: options.maintenanceBarrier || agentRuntime?.maintenance || null,
+    externalPath: options.maintenanceExternalPath || '',
     activity: async () => {
       const rows = [{ id: MAIN_AGENT_ID, ...localRuntimeActivity(hermesStatePath) }]
       for (const agent of agents?.list() || []) {

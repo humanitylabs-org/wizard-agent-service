@@ -141,6 +141,7 @@ const server = createWizardServer({
   ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
   ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),
   agentRuntimeUrl: process.env.WIZARD_AGENT_RUNTIME_URL || '',
+  maintenanceExternalPath: process.env.WIZARD_MAINTENANCE_LEASE_PATH || '',
   agentRuntimeToken: process.env.WIZARD_AGENT_RUNTIME_TOKEN || secretFile(process.env.WIZARD_AGENT_RUNTIME_TOKEN_FILE),
   agentDeliveryToken: process.env.WIZARD_AGENT_DELIVERY_TOKEN || secretFile(process.env.WIZARD_AGENT_DELIVERY_TOKEN_FILE),
   agentUpstreamMode: process.env.WIZARD_AGENT_UPSTREAM === 'network' ? 'network' : 'host',
