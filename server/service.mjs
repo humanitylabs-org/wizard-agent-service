@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { basename, dirname, extname, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
@@ -34,6 +34,7 @@ import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
+import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
@@ -3205,6 +3206,14 @@ export function createWizardServer(options = {}) {
       if (dropClient && uploadStagingDir) return { kind: 'drop', stagingDir: uploadStagingDir }
       return null
     }
+    if (userFiles && typeof key === 'string' && key.startsWith(USER_FILES_TARGET)) {
+      const folder = userFiles.folderOf(key)
+      return {
+        kind: 'local', stagingDir: userFiles.stagingDir,
+        finalize: async (path, meta) => userFiles.place(path, folder, meta),
+        recover: async (id) => userFiles.placed(id),
+      }
+    }
     return options.uploadTargets?.(key) ?? null
   }
   const deliveryCall = async (path, body, idempotencyKey = '') => {
@@ -3260,6 +3269,21 @@ export function createWizardServer(options = {}) {
     return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
   })
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
+  // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
+  let userFiles = null
+  if (options.userFilesRoot) {
+    try {
+      userFiles = createUserFiles({
+        root: options.userFilesRoot,
+        indexPath: options.userFilesIndexPath || (uploadStatePath ? join(dirname(uploadStatePath), 'user-files-placements.json') : join(String(options.userFilesRoot), '.wizard-uploads', 'placements.json')),
+        ...(options.uploadNow ? { now: () => new Date(options.uploadNow()) } : {}),
+      })
+    } catch (error) {
+      console.error(`[uploads] user-files root disabled: ${error?.code || error?.message || 'unavailable'}`)
+      userFiles = null
+    }
+  }
+  const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
   let uploads = null
@@ -3291,6 +3315,40 @@ export function createWizardServer(options = {}) {
       return
     }
     throw error
+  }
+
+  // A user file, inline or as a download, with single byte ranges (video seeking).
+  const USER_FILE_TYPES = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.flac': 'audio/flac', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.json': 'application/json', '.csv': 'text/csv; charset=utf-8' }
+  const sendUserFile = (request, response, found, download) => {
+    const ext = extname(found.name).toLowerCase()
+    const type = USER_FILE_TYPES[ext] ?? 'application/octet-stream'
+    const inline = !download && type !== 'application/octet-stream'
+    const headers = {
+      'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; media-src 'self'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(found.name)}`,
+      'Last-Modified': new Date(found.mtime).toUTCString(),
+    }
+    let start = 0
+    let end = found.size - 1
+    let status = 200
+    const range = String(request.headers.range ?? '')
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/u.exec(range.trim())
+      if (match && (match[1] !== '' || match[2] !== '')) {
+        if (match[1] === '') { start = Math.max(0, found.size - Number(match[2])) } else { start = Number(match[1]); if (match[2] !== '') end = Math.min(Number(match[2]), found.size - 1) }
+      }
+      if (!match || start >= found.size || start > end) { response.writeHead(416, { 'Content-Range': `bytes */${found.size}` }); response.end(); return }
+      status = 206
+      headers['Content-Range'] = `bytes ${start}-${end}/${found.size}`
+    }
+    headers['Content-Length'] = String(found.size ? end - start + 1 : 0)
+    response.writeHead(status, headers)
+    if (request.method === 'HEAD' || !found.size) { response.end(); return }
+    const stream = userFiles.open(found.path, start, end)
+    stream.on('error', () => response.destroy())
+    response.on('close', () => stream.destroy())
+    stream.pipe(response)
   }
 
   const server = createServer(async (request, response) => {
@@ -3330,6 +3388,21 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      if (url.pathname === '/wizard/v1/user-files' || url.pathname === '/wizard/v1/user-files/content') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!userFiles) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+        if (request.method !== 'GET' && request.method !== 'HEAD') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        try {
+          if (url.pathname === '/wizard/v1/user-files') {
+            sendJson(response, 200, userFiles.list(normalizeFolder(url.searchParams.get('folder') ?? '')), { 'Cache-Control': 'no-store' })
+            return
+          }
+          const found = userFiles.file(url.searchParams.get('path') ?? '')
+          if (!found) { sendJson(response, 404, { error: 'not_found' }); return }
+          sendUserFile(request, response, found, url.searchParams.get('download') === '1')
+        } catch (error) { sendUploadError(response, error) }
+        return
+      }
       if (url.pathname === '/wizard/v1/uploads' || url.pathname.startsWith('/wizard/v1/uploads/') || url.pathname === '/wizard/v1/shares' || url.pathname.startsWith('/wizard/v1/shares/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!uploads) { sendJson(response, 503, { error: 'service_unavailable' }); return }
@@ -3338,7 +3411,17 @@ export function createWizardServer(options = {}) {
           if (parts[0] === 'uploads') {
             if (parts.length === 1 && request.method === 'POST') {
               if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-              const { record, replayed } = await uploads.createUpload(parseJsonBody(await readBoundedBody(request, 16 * 1024)))
+              const input = parseJsonBody(await readBoundedBody(request, 16 * 1024))
+              // A destination (the Files app) places the finished file in the user-files root: in the
+              // given folder, or Inbox/<YYYY-MM-DD> in the owner's time zone when no folder is given.
+              let targetKey = 'files'
+              const destination = parseDestination(input?.destination)
+              if (destination) {
+                if (!userFiles) throw new UploadError(409, 'destination_unavailable')
+                if (destination.folder) userFiles.checkFolder(destination.folder)
+                targetKey = userFiles.targetKey({ folder: destination.folder, timeZone: ownerTimeZone() })
+              }
+              const { record, replayed } = await uploads.createUpload(input, { targetKey })
               sendJson(response, 201, uploads.publicUpload(record), { 'Idempotency-Replayed': String(replayed) })
               return
             }
@@ -3403,7 +3486,7 @@ export function createWizardServer(options = {}) {
           settings: publicSettings, settingsSource: source,
           capabilities: {
             voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
-            resumable_uploads: Boolean(uploads),
+            resumable_uploads: Boolean(uploads), upload_destinations: Boolean(uploads && userFiles),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })
