@@ -44,6 +44,7 @@ class WorkerTests(unittest.TestCase):
 
     def wait(self, job_id, states):
         deadline = time.monotonic() + 20
+        result = None
         while time.monotonic() < deadline:
             result = self.rpc('status', job_id)
             if result and result['state'] in states:
@@ -102,6 +103,7 @@ class WorkerTests(unittest.TestCase):
     def test_android_helper_uses_inherited_lock_not_recursive_wait(self):
         helper = SCRIPT.parent / 'android-build-thales.py'
         module = importlib.util.spec_from_file_location('android_helper', helper)
+        assert module is not None and module.loader is not None
         loaded = importlib.util.module_from_spec(module); module.loader.exec_module(loaded)
         self.assertTrue(callable(loaded.shared_worker_lock))
         code = f"import importlib.util; s=importlib.util.spec_from_file_location('a',{str(helper)!r}); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.BASE={str(self.base)!r};\nwith m.shared_worker_lock(True): print('inherited lock acquired')"

@@ -8,6 +8,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { createHeavyRpcServer } from '../server/heavy-rpc-server.mjs'
+import { heavySshTransport } from '../server/heavy-queue.mjs'
 
 const exec = promisify(execFile)
 const base = process.env.CANARY_STATE_DIR
@@ -25,12 +27,16 @@ const lightweight = process.env.CANARY_LIGHTWEIGHT === '1'
 const busyOnly = process.env.CANARY_BUSY_ONLY === '1'
 const results = { kind: 'real-model-real-worker-isolated-service', session, questionSession,
   handler: 'registered plugin handler invoked by canary harness, not yet installed in live Hermes', events: [] }
+const worker = { host: process.env.CANARY_SSH_HOST || 'thales', script: `${remote}/scripts/heavy-worker.py`,
+  root: remoteSpool, lock: lightweight ? `${remoteSpool}/test-only.lock` : '/Volumes/ThalesMedia/AndroidBuilds/worker.lock' }
+const bridge = process.env.CANARY_RPC_BRIDGE === '1' ? createHeavyRpcServer({ token, transport: heavySshTransport(worker) }) : null
+if (bridge) await listen(bridge, '127.0.0.1', 0)
+const rpcOrigin = bridge ? `http://127.0.0.1:${bridge.address().port}` : ''
 const server = createWizardServer({ upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   hermesKey: key, requireAccess: false, followThrough: false, joinedDelegation: 'off',
   runQueueStatePath: join(base, 'runs.sqlite3'), runQueueMaxActive: 2, runQueuePollIntervalMs: 250,
   heavyStatePath: join(base, 'heavy.sqlite3'), heavyToken: token, heavyPollIntervalMs: 250,
-  heavyWorker: { host: process.env.CANARY_SSH_HOST || 'thales', script: `${remote}/scripts/heavy-worker.py`,
-    root: remoteSpool, lock: lightweight ? `${remoteSpool}/test-only.lock` : '/Volumes/ThalesMedia/AndroidBuilds/worker.lock' },
+  heavyWorker: worker, heavyRpcOrigin: rpcOrigin,
   settingsPath: join(base, 'settings.json'), appsJsonPath: join(base, 'apps.json'), launcherPath: join(base, 'launcher.json'),
   threadTitleStatePath: join(base, 'titles.json'), threadStatusBackfillPath: join(base, 'status.json'),
   threadDispositionStatePath: join(base, 'dispositions.json'), threadSeenStatePath: join(base, 'seen.json'),
@@ -81,6 +87,14 @@ try {
   const code = `import pathlib,subprocess,time; ${workload}; print('holding canary barrier',flush=True); deadline=time.monotonic()+150\nwhile not pathlib.Path(${JSON.stringify(gate)}).exists() and time.monotonic()<deadline: time.sleep(.2)\nprint('barrier released',flush=True)`
   const first = await tool('submit', { key: 'canary-first', cwd: remote, argv: ['/opt/homebrew/bin/python3', '-c', code], timeout_seconds: 180 })
   const second = await tool('submit', { key: 'canary-second', cwd: remote, argv: ['/usr/bin/printf', 'second-real-command\n'], timeout_seconds: 30 })
+  const container = process.env.CANARY_CONTAINER_NAME
+  if (bridge && container) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(container)) throw new Error('invalid canary container name')
+    const probe = `fetch(process.env.CANARY_RPC_ORIGIN+"/rpc",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+process.env.CANARY_RPC_TOKEN},body:JSON.stringify({action:"status",job_id:"${first.job_id}"})}).then(async r=>{if(!r.ok)throw Error(String(r.status));console.log(JSON.stringify({container_bridge_status:r.status,receipt:await r.json()}))}).catch(e=>{console.error(e.message);process.exitCode=1})`
+    const result = await exec('sg', ['docker', '-c', `docker exec -e CANARY_RPC_TOKEN -e CANARY_RPC_ORIGIN ${container} node -e '${probe}'`],
+      { env: { ...process.env, CANARY_RPC_TOKEN: token, CANARY_RPC_ORIGIN: rpcOrigin } })
+    event('actual_container_bridge_probe', JSON.parse(result.stdout))
+  }
   await wait('real running plus queued', async () => {
     const a = await tool('status', { job_id: first.job_id }); const b = await tool('status', { job_id: second.job_id })
     return (a.state === 'running' || busyOnly && a.state === 'queued' && a.reason === 'worker_busy') && b.state === 'queued'
@@ -143,4 +157,5 @@ try {
   writeFileSync(join(base, 'canary-evidence.json'), JSON.stringify(results, null, 2), { mode: 0o600 })
   server.closeAllConnections()
   await new Promise(r => server.close(r))
+  if (bridge) { bridge.closeAllConnections(); await new Promise(r => bridge.close(r)) }
 }
