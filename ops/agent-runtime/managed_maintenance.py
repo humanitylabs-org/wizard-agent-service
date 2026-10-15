@@ -39,6 +39,13 @@ class ManagedMaintenance:
   for c in all_:
    label=c['Config'].get('Labels') or {};service=label.get('com.docker.compose.service','')
    managed=label.get('ai.wizards.managed-launch')=='1'
+   # The shipped Parakeet worker reuses this image for Python/ffmpeg, not Hermes.
+   # Its immutable, audited entrypoint has no agent launch path. Keep its existing
+   # no-new-privileges/cap-drop sandbox; never replace it with the Hermes launcher.
+   if service=='transcriber-engine' and c['Image']==STOCK and c['Config'].get('Entrypoint')==['sh','/voice/start.sh']:
+    expected=['4ebecc27d764040668699455e35793bb58f7c556f1283ca0275a7bc9e623f514','fa03c1ec7cbb7cf25fb855c41f5963af1ecee557046e49aaf86bf65908ea5955']
+    hashes=self.run(['docker','exec','-u','1000',c['Id'],'sha256sum','/voice/engine.py','/voice/start.sh']).splitlines() if c['State']['Running'] else []
+    if [x.split()[0] for x in hashes]==expected:continue
    # Includes stock secondary runtimes (e.g. transcriber), not only the main agent.
    candidate=managed or c['Image']==STOCK or service in ['hermes-agent-engine','transcriber-engine'] or (service.startswith(('wizard-agent-','agent-')) and not service.endswith('-tinfoil')) or 'hermes' in c['Config'].get('Image','')
    if candidate:found.append({'id':c['Id'],'name':c['Name'].lstrip('/'),'managed':managed,'image':c['Image'],'running':c['State']['Running']})
