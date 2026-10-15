@@ -55,8 +55,11 @@ class ManagedMaintenance:
   # private interpreter is root-only; normal Docker exec/CLI uses the guard.
   # Original stock uv interpreter is index zero in the pinned two-inode image.
   args=['docker','exec','-i','-u','0','-e','PYTHONPATH=/opt/hermes:/opt/hermes/.venv/lib/python3.13/site-packages',c['id'],'/opt/wizard-managed/private/0/bin/python3.13','/opt/wizard-managed/control.py']
-  out=self.run(args,json.dumps({'action':action,**kw}));result=json.loads(out)
+  proc=subprocess.run(args,input=json.dumps({'action':action,**kw}),text=True,capture_output=True,timeout=30)
+  try:result=json.loads(proc.stdout)
+  except ValueError:raise MaintenanceError('runtime_control_failed')
   if 'error' in result:raise MaintenanceError(result['error'])
+  if proc.returncode:raise MaintenanceError('runtime_control_failed')
   return result
  def acquire(self,token):
   if not re.fullmatch(r'[a-fA-F0-9-]{36}',token or ''):raise MaintenanceError('invalid_maintenance_token')
