@@ -54,26 +54,21 @@ describe('when a title changes', () => {
     expect((titleToApply as any)({ currentTitle: 'A', proposed: 'B project', record: { appliedFor: 7 }, assistantAt: 7 })).toBe('')
   })
 
-  it('remembers the old title for the list and the thread, quietly for a barely-seen opener title', async () => {
+  it('marks renames in the thread, quietly for a barely-seen opener title', async () => {
     let now = 1_000_000
     const path = join(await tempDir(), 'titles.json')
     const store: any = new ThreadTitleStore(path, { now: () => now })
-    // The opener's sentence title, replaced minutes after the thread started: no breadcrumb.
+    // The opener's sentence title, replaced minutes after the thread started: nothing to mark.
     store.recordRename('s1', { from: 'Send voice note with text', to: 'Wizard OS · Voice notes', by: 'agent', assistantAt: 1, since: now - 120 })
-    expect(store.breadcrumb('s1', 'Wizard OS · Voice notes')).toBeNull()
     expect(store.visibleHistory('s1')).toEqual([])
-    // Days later the work moves: the anchor title shows as "was" for three days.
+    // Days later the work moves: the thread marks where.
     now += 2 * 86400
     store.recordRename('s1', { from: 'Wizard OS · Voice notes', to: 'DeFleur · Captions', by: 'agent', assistantAt: 2 })
-    expect(store.breadcrumb('s1', 'DeFleur · Captions')).toEqual({ was: 'Wizard OS · Voice notes', at: now })
     expect(store.visibleHistory('s1').map((r: any) => r.from)).toEqual(['Wizard OS · Voice notes'])
     expect(new ThreadTitleStore(path).get('s1')?.title).toBe('DeFleur · Captions')
-    now += 3 * 86400 + 1
-    expect(store.breadcrumb('s1', 'DeFleur · Captions')).toBeNull()
-    // James renames: locked, no breadcrumb.
+    // James renames: locked.
     store.recordRename('s1', { from: 'DeFleur · Captions', to: 'Captions', by: 'you' })
     expect(store.get('s1')?.locked).toBe(true)
-    expect(store.breadcrumb('s1', 'Captions')).toBeNull()
     expect(ANCHOR_SECONDS).toBe(1800)
   })
 
@@ -151,14 +146,14 @@ describe('the Agent Service applies titles through Hermes', () => {
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 150))
 
-  it('renames a sentence-titled thread from the status line once, then shows the old name', async () => {
+  it('renames a sentence-titled thread from the status line once, then marks it in the thread only', async () => {
     const { list, patches } = await fixture()
     await list(); await settle()
     expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'DeFleur · Video pipeline' } }])
     const row = await list(); await settle()
     expect(row.title).toBe('DeFleur · Video pipeline')
-    expect(row.wizard_title_was).toBe('Review 0xMovez post on X')
-    expect(row.wizard_title_renames).toHaveLength(1)
+    expect(row.wizard_title_was).toBeUndefined()
+    expect(row.wizard_title_renames).toEqual([expect.objectContaining({ from: 'Review 0xMovez post on X', to: 'DeFleur · Video pipeline', by: 'agent' })])
     expect(patches).toHaveLength(1)
   })
 

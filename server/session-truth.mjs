@@ -1,5 +1,8 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
+import { replyAppId } from './thread-status.mjs'
+import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -50,6 +53,23 @@ function visibleAssistantReply(content, displayKind, finishReason) {
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
+// Script publishers append canonical assistant reports with metadata, but without
+// model finish_reason/display_kind. Only explicit publisher metadata qualifies;
+// keep existing activity/attention semantics unchanged and reject internal/tool rows.
+function visibleProvenanceReply(row) {
+  if (row.role !== 'assistant' || hasAppToolCalls(row)) return false
+  if (visibleAssistantReply(row.content, row.display_kind, row.finish_reason)) return true
+  const kind = String(row.display_kind || ''), finish = String(row.finish_reason || '')
+  const text = typeof row.content === 'string' ? row.content.trim() : ''
+  if (!text || text === '(empty)' || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')
+    || ['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(finish)
+    || INTERNAL_USER_PREFIXES.some(prefix => text.startsWith(prefix))) return false
+  let meta = row.display_metadata
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta) } catch { return false } }
+  return !!meta && typeof meta === 'object' && !Array.isArray(meta)
+    && (Object.hasOwn(meta, 'app_id') || (typeof meta.report_id === 'string' && meta.report_id.trim().length > 0))
+}
+
 const ROUTE_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[[0-9a-z]{1,8}\])?(?![\s\S])/
 
 function lockedRoute(modelConfig) {
@@ -58,7 +78,7 @@ function lockedRoute(modelConfig) {
     const lock = JSON.parse(modelConfig)?.browser_model_lock
     const model = typeof lock?.model === 'string' ? lock.model : ''
     const provider = typeof lock?.provider === 'string' ? lock.provider : ''
-    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider } : null
+    return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider, updatedAt: Number(lock.updated_at) || 0 } : null
   } catch { return null }
 }
 
@@ -86,33 +106,92 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       for (const row of routeRows) {
         const current = truth.get(String(row.id))
         const lock = lockedRoute(row.model_config)
-        if (current && lock && lock.model === row.model) current.route = lock
+        if (current && lock && lock.model === row.model) {
+          current.route = { model: lock.model, provider: lock.provider }
+          current.routeUpdatedAt = lock.updatedAt
+        }
       }
     } catch { /* older state schemas carry no model lock */ }
     // Seek newest-first within each session's existing indexed range. Loading
     // every historical body for a whole Work page blocks the shared HTTP loop;
     // only the newest visible request and completed reply determine this view.
+    const messageColumns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
+    const metadataColumn = messageColumns.has('display_metadata') ? 'display_metadata' : 'NULL AS display_metadata'
+    const toolsColumn = messageColumns.has('tool_calls') ? 'tool_calls' : 'NULL AS tool_calls'
+    // Real Hermes tables have rowid for equal-timestamp arrival order. A view may
+    // not; do not force a sort/materialization of old bodies in that fallback.
+    const messageTable = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name = 'messages'").get()
+    const tieOrder = messageTable?.type === 'table' && !/WITHOUT ROWID/iu.test(messageTable.sql || '') ? ', rowid DESC' : ''
     const recentMessages = db.prepare(`
-      SELECT role, finish_reason, timestamp, content, display_kind
+      SELECT role, finish_reason, timestamp, content, display_kind, ${metadataColumn}, ${toolsColumn}
       FROM messages
       WHERE session_id = ?
         AND role IN ('user', 'assistant')
         AND active = 1
         AND trim(COALESCE(content, '')) <> ''
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC${tieOrder}
     `)
+    const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
+    const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
+    const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
+    const provenanceTip = (id) => {
+      if (!hasLineage) return id
+      const seen = new Set()
+      for (let depth = 0; depth < 1000; depth++) {
+        if (seen.has(id)) return null
+        seen.add(id)
+        if (lineageParent.get(id)?.end_reason !== 'compression') return id
+        const children = lineageChildren.all(id).filter(child => {
+          if (child.source === 'tool') return false
+          let config = {}
+          try { config = JSON.parse(child.model_config || '{}') } catch { return false }
+          // Fork markers inherited from an older ancestor are not forks of this parent.
+          return !['_branched_from', '_delegate_from', '_reset_from'].some(marker => config?.[marker] === id)
+        })
+        // Ambiguous/missing continuation fails closed, never reuse a stale ancestor icon.
+        if (children.length !== 1) return null
+        id = children[0].id
+      }
+      return null
+    }
     for (const [id, current] of truth) {
+      let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
+        const provenanceAssistant = visibleProvenanceReply(row)
+        if (!provenanceAt && (visibleUser || provenanceAssistant)) {
+          provenanceAt = timestamp
+          if (provenanceAssistant) current.appId = replyAppId(row.content, row.display_metadata)
+        }
+        if (!latestVisibleRole && (visibleUser || visibleAssistant)) latestVisibleRole = row.role
         if (!current.activityAt && (visibleUser || visibleAssistant)) current.activityAt = timestamp
         if (!current.lastUserAt && visibleUser) {
           current.lastUserAt = timestamp
           current.requestPreview = row.content.trim()
         }
-        if (!current.lastAssistantAt && visibleAssistant) current.lastAssistantAt = timestamp
+        if (!current.lastAssistantAt && visibleAssistant) {
+          current.lastAssistantAt = timestamp
+        }
         if (current.lastUserAt && current.lastAssistantAt) break
+      }
+      // Provenance alone follows compression. Leave existing status/activity semantics intact.
+      const tip = provenanceTip(id)
+      if (tip !== id) {
+        const rootAppId = current.appId
+        delete current.appId
+        if (tip) for (const row of recentMessages.iterate(tip)) {
+          const user = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
+          const assistant = visibleProvenanceReply(row)
+          if (!user && !assistant) continue
+          // An explicit publisher can append a newer report to the root; prefer it
+          // over older tip history, but never resurrect root work after a newer tip user.
+          if (provenanceAt > Number(row.timestamp)) current.appId = rootAppId
+          else if (assistant) current.appId = replyAppId(row.content, row.display_metadata)
+          break
+        }
       }
     }
     // Helpers the agent dispatched in the background (stock Hermes delegate_task). While one runs, or its
@@ -129,9 +208,15 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current) current.helpersRunning = Number(row.n) || 0
+        if (current && !ownerGate(db, String(row.id))) current.helpersRunning = Number(row.n) || 0
       }
     } catch { /* agents without background delegation */ }
+    // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
+    // Read delivery receipts independently of the latest transcript row and execution state.
+    for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
+      const current = truth.get(receipt.sessionId)
+      if (current) current.helperResultUnanswered = true
+    }
     try {
       const newestRow = db.prepare(`
         SELECT role, content, timestamp FROM messages
@@ -140,8 +225,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `)
       for (const [id, current] of truth) {
         const row = newestRow.get(id)
+        const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
-          && Number(row.timestamp) > nowSeconds - 6 * 3600) current.helperResultUnanswered = true
+          && Number(row.timestamp) > nowSeconds - 6 * 3600 && !ownerGate(db, id)
+          && !(delegationId && receiptConsumed(db, id, delegationId))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`

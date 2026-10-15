@@ -9,12 +9,14 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
+import { SUBJECT_RULE } from './thread-subjects.mjs'
+import { normalizeAppId, metadataAppId } from './thread-app-provenance.mjs'
 
 export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
 const OPEN_MARKER = /\[WIZARD_STATUS_V1\][\s\S]*$/u
 
-export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (the work cannot move until the user decides, approves, replies, installs, or does something), check (you shipped something the user should try or QA), done (the request is finished and nothing is required), fyi (an answer, report, or update with no action). ask is one plain sentence under 90 characters: for needs_you and check, start with the verb and name the exact action; for done and fyi, state the outcome. subject is a one-to-three-word project or topic name; reuse the subject this thread or related threads already use. ' + TITLE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers.'
+export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (only when the work cannot move until the user does one specific thing: decide, approve, reply, install, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi), done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check), check (only when the user\'s own judgment is the missing piece: whether a new feature or design is what they meant, whether they like it (look, feel, wording, taste), or a real-device behaviour you could not verify yourself), fyi (an answer, report, or update with no action). ask is one plain sentence under 90 characters: for needs_you, it is the exact action the user takes, starting with the verb and naming the thing (\"Reply merge to ship thread titles to every install\", \"Pick desks layout A or B\"), never a vague \"Review this\" or \"Let me know\", and the reply itself ends with that same ask in plain words; for check, name what to judge ("Say if the 11 groups feel right"), never "Test that X works"; for done and fyi, state the outcome. ' + SUBJECT_RULE + ' ' + TITLE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers. A background handoff is still agent-owned work, never a done/FYI result. Before saying work is running, verify the actual worker and its continuation/delivery handle. If a terminal tool says completion notifications are unsupported, stay in the owning turn and wait for its result or arrange and verify a durable continuation; an untracked background process does not finish the request. Return to the owner with a self-contained verified outcome or one concrete owner-only gate, not a promise to resume.'
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -30,7 +32,8 @@ export function normalizeStatus(value) {
   if (!ask) return null
   const subject = clip(value.subject ?? value.project, 40)
   const title = normalizeTitle(value.title)
-  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}) }
+  const appId = normalizeAppId(value.app_id)
+  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}) }
 }
 
 // The last status marker in a reply, or null.
@@ -41,6 +44,24 @@ export function parseStatus(text) {
     try { found = normalizeStatus(JSON.parse(match[1])) ?? found } catch { /* malformed: ignore */ }
   }
   return found
+}
+
+// Provenance is independent of attention: publishers may send an app-only marker.
+// Only the last marker counts; a malformed/omitted final app_id must not revive an older one.
+export function parseStatusAppId(text) {
+  if (typeof text !== 'string' || !text.includes('[WIZARD_STATUS_V1]')) return null
+  let id = null
+  for (const match of text.matchAll(MARKER)) {
+    id = null
+    try { id = normalizeAppId(JSON.parse(match[1])?.app_id) } catch { /* malformed: ignore */ }
+  }
+  if (text.replace(MARKER, '').match(OPEN_MARKER)) return null
+  return id
+}
+
+export function replyAppId(text, metadata) {
+  const publisher = metadataAppId(metadata)
+  return publisher.present ? publisher.id : parseStatusAppId(text)
 }
 
 // Remove status markers (and a trailing unterminated one) from user-visible text.

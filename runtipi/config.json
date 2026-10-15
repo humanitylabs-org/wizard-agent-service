@@ -1,17 +1,17 @@
 {
-  "name": "Wizard",
-  "id": "wizard-shell",
-  "wizard_type": "view",
+  "name": "Wizard Agent Service",
+  "id": "wizard-agent-service",
+  "wizard_type": "service",
   "available": true,
-  "short_desc": "The Wizard shell: chats, launcher, voice and apps on top of Hermes Agent.",
+  "short_desc": "Wizard API, durable runs and single app gateway.",
   "author": "Humanity Labs",
-  "port": 8796,
+  "port": 8797,
   "categories": [
     "utilities"
   ],
-  "description": "The Wizard front end (Wizard UX) and the Wizard Agent Service in one container. Talks to the hermes-agent app; reads Hermes session history read-only; saves attachments into the shared media folder.",
+  "description": "Headless Wizard API; independently installed shell. Host Hermes in alongside mode.",
   "tipi_version": 2,
-  "version": "0.2.0",
+  "version": "0.3.0-candidate.20261012",
   "source": "https://github.com/humanitylabs-org/wizard-agent-service",
   "exposable": false,
   "supported_architectures": [

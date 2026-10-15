@@ -478,9 +478,13 @@ export function createUploadStore(options) {
       try {
         const files = uploads.map((u) => ({ upload_id: u.id, filename: u.filename, mime: u.mime, bytes: u.bytes, file: fileOf(u) }))
         const result = await options.deliverShare(current, files)
+        // The store was closed (shutdown) while Hermes answered: the share stays 'delivering' and the
+        // next start re-delivers it under the same idempotency key.
+        if (closed) return null
         touchShare(id, { status: 'delivered', run_id: String(result?.run_id ?? ''), delivered_at: now(), error: '' })
         log(`share ${id} delivered`)
       } catch (error) {
+        if (closed) return null
         const attempts = current.attempts + 1
         const status = Number(error?.status ?? 0)
         const code = error instanceof UploadError ? error.payload.error : PERMANENT.has(status) ? `delivery_rejected_${status}` : 'delivery_failed'
@@ -491,7 +495,7 @@ export function createUploadStore(options) {
           schedule(() => { void maybeDeliver(id) }, RETRY_MS[Math.min(attempts - 1, RETRY_MS.length - 1)])
         }
       }
-      return shareRow(id)
+      return closed ? null : shareRow(id)
     })().finally(() => delivering.delete(id))
     delivering.set(id, run)
     return run

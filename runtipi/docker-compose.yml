@@ -1,6 +1,6 @@
 services:
-  wizard-shell:
-    image: ${WIZARD_SHELL_IMAGE:-ghcr.io/humanitylabs-org/wizard-shell:0.2.0}
+  wizard-agent-service:
+    image: ${WIZARD_AGENT_SERVICE_IMAGE:-ghcr.io/humanitylabs-org/wizard-agent-service:0.3.0-candidate.20261012}
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
@@ -13,7 +13,7 @@ services:
       HERMES_ORIGIN: http://hermes-agent-engine:8642
       WIZARD_STT_ORIGIN: http://transcriber:8000
       WIZARD_HELM_ORIGIN: http://127.0.0.1:9
-      WIZARD_HERMES_STATE_PATH: /hermes/state.db
+      WIZARD_HERMES_STATE_PATH: ""
       WIZARD_HELM_DB_PATH: ""
       WIZARD_MEDIA_ROOT: /media
       WIZARD_MEDIA_AGENT_ROOT: /media
@@ -27,7 +27,7 @@ services:
     volumes:
       - ${APP_DATA_DIR}/data:/state
       # Hermes's own data (hermes-agent app, same store): session history only, never written.
-      - ${APP_DATA_DIR}/../hermes-agent/data:/hermes:ro
+      - ${ROOT_FOLDER_HOST}/app-data/wizard-os/hermes-view:/hermes:ro
       # The box's user-files folder (what the Files app shows).
       - ${ROOT_FOLDER_HOST}/media:/media
       # The App Manager's list of installed apps (apps.json + skills/), read-only.

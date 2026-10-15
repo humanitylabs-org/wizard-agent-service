@@ -1,4 +1,5 @@
 import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
+import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { wizardOsHome } from './wizard-os-settings.mjs'
@@ -25,7 +26,16 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 }
 
 const port = Number(process.env.WIZARD_PORT || 8787)
-const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
+// Who may use the service: 'tailscale' (Tailscale Serve identity, the Wizard OS default), 'cloudflare'
+// (Cloudflare Access JWTs) or 'none' (box-only, e.g. behind a gateway that checks identity itself).
+// Unset keeps the earlier behaviour: tailscale when WIZARD_TAILNET_ORIGIN is set, else WIZARD_REQUIRE_CF_ACCESS.
+const authMode = process.env.WIZARD_AUTH_MODE
+  || (process.env.WIZARD_TAILNET_ORIGIN ? 'tailscale' : process.env.WIZARD_REQUIRE_CF_ACCESS === '0' ? 'none' : 'cloudflare')
+if (!['tailscale', 'cloudflare', 'none'].includes(authMode)) {
+  process.stderr.write('WIZARD_AUTH_MODE must be tailscale, cloudflare or none; the service was not started.\n')
+  process.exit(1)
+}
+const requireAccess = authMode !== 'none'
 // Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
 // spec/AGENT_BRIDGE.md "Agent adapter" lists them.
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
@@ -35,7 +45,13 @@ const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
 const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL ? {
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
-const accessVerifier = requireAccess ? createCloudflareAccessVerifier({
+// In a container, Tailscale Serve on the box reaches the published 127.0.0.1 port and the request arrives
+// from the container network's gateway; on a bare box it arrives from loopback.
+const accessVerifier = authMode === 'tailscale' ? createTailnetAccessVerifier({
+  origin: process.env.WIZARD_TAILNET_ORIGIN,
+  logins: process.env.WIZARD_TAILNET_LOGIN,
+  proxyPeers: [...['127.0.0.1', '::1'], ...(container ? [process.env.WIZARD_TAILNET_PROXY_PEER || containerGateway()] : [])].filter(Boolean),
+}) : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
@@ -67,13 +83,17 @@ const server = createWizardServer({
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   requireAccess,
+  helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
   settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
+  subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
+  // Headless Agent Service behind a separate shell container: keep the shell's sidecar API paths.
+  uxApiCompat: process.env.WIZARD_UX_API_COMPAT === '1',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,
@@ -88,6 +108,11 @@ const server = createWizardServer({
   ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
+  // The owner's user-files root on this host (Runtipi's media/ folder on a Wizard OS box). When set, an
+  // upload created with a destination is placed there, and the Files app can list it. Separate from
+  // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
+  userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
+  userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
   wizardOsHome: osHome,
