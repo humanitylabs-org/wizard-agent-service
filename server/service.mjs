@@ -2456,18 +2456,20 @@ export function createWizardServer(options = {}) {
       await hermesJson('/api/sessions', { method: 'POST', body: sessionBody })
     }
     await hermesJson(`/api/sessions/${encodeURIComponent(workerSessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+    let workerBody = (durableIdentity && runQueue?.get(durableIdentity)?.workerDispatchBody) || JSON.stringify({
+      session_id: workerSessionId,
+      input,
+      model: operatorWorkerModel,
+      provider: 'custom:tinfoil-operator',
+      require_model_lock: true,
+      model_options: { reasoning_effort: 'max' },
+      instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
+      ...runContractFields(await assertJoinedDelegationCapability()),
+    })
+    if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
     const admission = await hermesJson('/v1/runs', {
       method: 'POST',
-      body: JSON.stringify({
-        session_id: workerSessionId,
-        input,
-        model: operatorWorkerModel,
-        provider: 'custom:tinfoil-operator',
-        require_model_lock: true,
-        model_options: { reasoning_effort: 'max' },
-        instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
-        ...runContractFields(await assertJoinedDelegationCapability()),
-      }),
+      body: workerBody,
       headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
     })
     const workerRunId = typeof admission.run_id === 'string' ? admission.run_id : typeof admission.id === 'string' ? admission.id : ''

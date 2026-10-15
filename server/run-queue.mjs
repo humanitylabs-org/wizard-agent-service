@@ -19,7 +19,7 @@ const safeStatus = (value) => {
   const status = String(value ?? '').toLowerCase()
   if (['accepted', 'pending', 'queued', 'submitting', 'started'].includes(status)) return 'running'
   if (['running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(status)) return status
-  return 'unknown'
+  return value === 'unknown' ? 'unknown' : 'running'
 }
 
 const parseJson = (value, fallback) => {
@@ -121,6 +121,9 @@ export class DurableRunQueue {
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_body')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_body TEXT")
     }
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'worker_dispatch_body')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN worker_dispatch_body TEXT")
+    }
   }
 
   async initialize() {
@@ -157,6 +160,7 @@ export class DurableRunQueue {
       body: row.body,
       dispatchAttempted: Boolean(row.dispatch_attempted),
       dispatchBody: row.dispatch_body ?? null,
+      workerDispatchBody: row.worker_dispatch_body ?? null,
       continuation: parseJson(row.continuation_json, null),
       trustedPaths: parseJson(row.trusted_paths_json, []),
       status: row.status,
@@ -236,8 +240,15 @@ export class DurableRunQueue {
   }
 
   freezeDispatchBody(publicRunId, body) {
-    this.database.prepare('UPDATE wizard_run_queue SET dispatch_body=COALESCE(dispatch_body, ?) WHERE public_run_id=?').run(String(body), publicRunId)
+    // The transport calls this after preflight, immediately before run admission.
+    this.database.prepare('UPDATE wizard_run_queue SET dispatch_attempted=1, dispatch_body=COALESCE(dispatch_body, ?) WHERE public_run_id=?').run(String(body), publicRunId)
     return this.get(publicRunId).dispatchBody
+  }
+
+  freezeWorkerDispatchBody(publicRunId, body) {
+    // Operator work can start before the parent acknowledgement is admitted.
+    this.database.prepare('UPDATE wizard_run_queue SET dispatch_attempted=1, worker_dispatch_body=COALESCE(worker_dispatch_body, ?) WHERE public_run_id=?').run(String(body), publicRunId)
+    return this.get(publicRunId).workerDispatchBody
   }
 
   publicPayload(record) {
@@ -478,8 +489,6 @@ export class DurableRunQueue {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
     if (fresh.upstreamRunId) return this._refresh(fresh, true)
-    // Persist before crossing any launch boundary (including ambiguous network failure).
-    this.database.prepare('UPDATE wizard_run_queue SET dispatch_attempted=1 WHERE public_run_id=?').run(record.publicRunId)
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
