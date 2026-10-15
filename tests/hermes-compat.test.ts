@@ -28,8 +28,8 @@ it.each(['permission_denied', 'idempotency_key_conflict', 'admission_conflict'])
   const path = q.statePath; q.close(); q = await make(options, path); expect(attempts).toBe(1); expect(q.latestProjections()[0].safeError).toBeTruthy()
 })
 it.each([429, 503])('Retry-After %s survives queue restart and cannot be steered', async status => {
-  let attempts = 0; const options = { launch: async () => { attempts++; throw upstreamError(status, '{}', '120') } }
-  let q = await make(options); const { record } = await q.admit(request('one', 'retry')); expect(q.get(record.publicRunId).retryAfter).toBeGreaterThan(Date.now()/1000 + 115)
+  let attempts = 0, q: any; const options = { launch: async (r: any) => { q.freezeDispatchBody(r.publicRunId, r.body); attempts++; throw upstreamError(status, '{}', '120') } }
+  q = await make(options); const { record } = await q.admit(request('one', 'retry')); expect(q.get(record.publicRunId).retryAfter).toBeGreaterThan(Date.now()/1000 + 115)
   await expect(q.appendGuidance(record.publicRunId, 'changed')).rejects.toMatchObject({ status: 409 })
   const path = q.statePath; q.close(); q = await make(options, path); expect(attempts).toBe(1)
 })
@@ -51,10 +51,23 @@ it('legacy migration freezes old rows without changing keys or payloads', async 
   q = await make({ canDispatch: () => false }, path); expect(q.get(id)).toMatchObject({ body: before.body, idempotencyKey: before.idempotencyKey, requestHash: before.requestHash, dispatchAttempted: true })
   await expect(q.appendGuidance(id, 'mutate')).rejects.toMatchObject({ status: 409 }); const fresh = await q.admit(request('new', 'new-key')); await expect(q.appendGuidance(fresh.record!.publicRunId, 'safe edit')).resolves.toBeTruthy()
 })
-it('many unknown and unsupported states fence sessions, not global worker capacity', async () => {
-  const launched: string[] = []; const q = await make({ launch: async (r: any) => { launched.push(r.sessionId); return { upstreamRunId: 'up-'+r.idempotencyKey, payload: { status: r.sessionId === 'healthy' ? 'running' : 'future_unknown_state' } } }, lookup: async () => ({ payload: { status: 'unknown' } }) })
+it('many exact unknown states fence sessions, not global worker capacity', async () => {
+  const launched: string[] = []; const q = await make({ launch: async (r: any) => { launched.push(r.sessionId); return { upstreamRunId: 'up-'+r.idempotencyKey, payload: { status: r.sessionId === 'healthy' ? 'running' : 'unknown' } } }, lookup: async (r: any) => ({ payload: { status: r.sessionId === 'healthy' ? 'running' : 'unknown' } }) })
   for (const id of ['a','b','c']) { await q.admit(request(id, id)); await q.admit(request(id, id+'-follower')) }
   await q.admit(request('healthy','healthy')); expect(launched).toEqual(['a','b','c','healthy']); expect((await q.summary()).active).toBe(1)
+})
+it.each([undefined, '', 'future_unknown_state'])('legacy status %s retains running fallback and normal polling', async status => {
+  let current = status
+  const launched: string[] = []
+  const q = await make({ maxActive: 2, launch: async (r: any) => { launched.push(r.idempotencyKey); return {upstreamRunId:'up-'+r.idempotencyKey,payload:{status:r.sessionId==='healthy'?'completed':current}} }, lookup: async () => ({payload:{status:current}}) })
+  const head = await q.admit(request('legacy','head'))
+  await q.admit(request('legacy','follower'));await q.admit(request('healthy','healthy'))
+  expect(q.get(head.record!.publicRunId)!.status).toBe('running')
+  expect(q.latestProjections(['legacy'])[0].status).not.toBe('unknown')
+  expect((await q.summary()).active).toBe(1)
+  expect(launched).toEqual(['head','healthy'])
+  current='completed';await q.tick(true)
+  expect(launched).toEqual(['head','healthy','follower'])
 })
 it('legacy transient conflict retries with the same identity', async () => {
   const seen: string[] = []; const q = await make({ launch: async (r: any) => { seen.push(r.idempotencyKey); if (seen.length === 1) throw upstreamError(409, '{}'); return { upstreamRunId: 'old-run', payload: { status: 'running' } } } })
