@@ -153,7 +153,8 @@ class ManagedMaintenance:
    lease['phase']='releasing';self.save(lease)
    for r in lease['runtimes']:
     c=r['container']
-    if not c['running']:raise MaintenanceError('runtime_restart_required_before_release')
+    if not c['running']:
+     self.run(['docker','start',c['id']]);c['running']=True # entrypoint still waits behind this lease
     if r['role']=='gateway':self.control(c,'clear-drain',home=r['home'])
     elif r.get('permit'):
      if not self.control(c,'alive',runtime=r)['alive']:continue
