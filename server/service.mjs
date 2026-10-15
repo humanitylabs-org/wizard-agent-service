@@ -3419,7 +3419,7 @@ export function createWizardServer(options = {}) {
         if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
         url.pathname = '/' + route
       }
-      if (options.appRole !== 'apps' && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
+      if (url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
         && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: appRouteOptions.controlOrigins,
           selfOrigin, appsOrigin: options.appsOrigin || '' })) {
         sendJson(response, 403, { error: 'same_origin_required' }); return
@@ -3859,7 +3859,7 @@ export function createWizardServer(options = {}) {
       }
 
       const fileContentMatch = url.pathname.match(/^\/wizard\/files\/([A-Za-z0-9._:-]+)\/content$/)
-      if (fileContentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
+      if (fileContentMatch && !fileContentMatch[1].startsWith('af_') && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const id = fileContentMatch[1]
         if (mediaFiles) {
@@ -3908,6 +3908,26 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      const privateContent = url.pathname.match(/^\/wizard\/files\/(af_[0-9a-f]{32})\/content$/u)
+      if (privateContent && ['GET', 'HEAD'].includes(request.method)) {
+        if (!shareRouting) throw new UploadError(404, 'file_not_found')
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const { agent, file } = shareRouting.locateFile(privateContent[1], url.searchParams.get('agent') || '')
+        const root = realpathSync(join(agents.agentsDir, agent, 'home'))
+        const path = realpathSync(join(root, file.path))
+        if (!path.startsWith(root + sep)) throw new UploadError(409, 'file_agent_mismatch')
+        const fd = openSync(path, 'r')
+        try {
+          const hash = createHash('sha256'), chunk = Buffer.alloc(1024 * 1024)
+          let length = 0, n
+          while ((n = readSync(fd, chunk, 0, chunk.length, length)) > 0) { hash.update(chunk.subarray(0, n)); length += n }
+          if (length !== file.bytes || hash.digest('hex') !== file.sha256) throw new UploadError(409, 'file_changed')
+          response.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': length, 'Content-Disposition': contentDisposition(file.filename), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+          if (request.method === 'HEAD') response.end()
+          else await pipeline(createReadStream(path, { fd, autoClose: false, start: 0 }), response)
+        } finally { closeSync(fd) }
+        return
+      }
       if (url.pathname === '/wizard/files/upload' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/octet-stream')) { sendJson(response, 415, { error: 'bytes_required' }); return }
@@ -4132,7 +4152,7 @@ export function createWizardServer(options = {}) {
         if (agentCtx) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
-            if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
+            if (request.method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) && agentResolution.body) {
               const value = JSON.parse(agentResolution.body.toString('utf8'))
               if (value.wizard_file_ids) {
                 await resolveShareAgent(agentResolution.agentId, { delivering: true })
