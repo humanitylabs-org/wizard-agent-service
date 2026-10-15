@@ -66,6 +66,19 @@ def alive(pid):
         return False
 
 
+def resource_wait(root):
+    # Reuse the existing Android helper's 20 GiB disk floor. Let macOS define
+    # critical memory pressure instead of inventing another concurrency quota.
+    if shutil.disk_usage(root).free < 20 * 1024**3:
+        return 'disk_pressure'
+    try:
+        pressure = int(subprocess.check_output(['/usr/sbin/sysctl', '-n',
+            'kern.memorystatus_vm_pressure_level'], text=True, timeout=2).strip())
+        return 'memory_pressure' if pressure >= 4 else ''
+    except Exception:
+        return 'worker_health_unknown'
+
+
 def finish(db, root, row, state, code=None, reason=''):
     log = root / (row['id'] + '.log')
     digest = hashlib.sha256()
@@ -111,8 +124,9 @@ def dispatch(root, lock_path):
                     db.execute("UPDATE jobs SET reason='worker_busy' WHERE id=?", (row['id'],))
                     time.sleep(1)
                     continue
-                if shutil.disk_usage(root).free < 20 * 1024**3:
-                    db.execute("UPDATE jobs SET reason='disk_pressure' WHERE id=?", (row['id'],))
+                reason = resource_wait(root)
+                if reason:
+                    db.execute("UPDATE jobs SET reason=? WHERE id=?", (reason, row['id']))
                     time.sleep(5)
                     continue
                 db.execute('BEGIN IMMEDIATE')

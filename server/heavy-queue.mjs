@@ -28,6 +28,18 @@ export function heavySshTransport({ host, script, root, lock, python = '/opt/hom
   })
 }
 
+export function heavyRpcTransport({ origin, token }) {
+  const url = new URL(origin)
+  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.username || url.password) throw new Error('heavy RPC must be loopback')
+  return async payload => {
+    const response = await fetch(new URL('/rpc', url), { method: 'POST', redirect: 'error',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload), signal: AbortSignal.timeout(15000) })
+    if (!response.ok) throw fail('worker_unavailable', 503)
+    return response.json()
+  }
+}
+
 /** Durable outbox + continuation receipt. It never owns an interactive slot. */
 export class DurableHeavyQueue {
   constructor({ statePath, transport, continuation, current, intervalMs = 1500 }) {
@@ -79,7 +91,13 @@ export class DurableHeavyQueue {
   }
   summary() {
     const rows = this.rows()
+    const workerState = rows.some(r => !terminal.has(r.state) && r.reason === 'worker_unavailable') ? 'unavailable'
+      : rows.some(r => r.state === 'running') ? 'running'
+        : rows.some(r => r.state === 'queued' && r.reason === 'worker_busy') ? 'busy_external'
+          : rows.some(r => r.state === 'queued' && ['disk_pressure', 'memory_pressure', 'worker_health_unknown'].includes(r.reason)) ? 'resource_wait'
+            : rows.some(r => r.state === 'queued') ? 'pending' : 'idle'
     return { lane: 'external_heavy', max_active: 1, active: rows.filter(r => r.state === 'running').length,
+      worker_state: workerState,
       queued: rows.filter(r => r.state === 'queued').length,
       unavailable: rows.some(r => !terminal.has(r.state) && r.reason === 'worker_unavailable'),
       cancellation_pending: rows.filter(r => r.cancel_requested && !terminal.has(r.state)).length }

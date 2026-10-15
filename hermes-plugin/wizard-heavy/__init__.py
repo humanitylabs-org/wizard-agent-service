@@ -6,6 +6,11 @@ import urllib.error
 import urllib.parse
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def call(action, args, session_id=None, **kwargs):
     try:
         origin = os.environ['WIZARD_HEAVY_ORIGIN'].rstrip('/')
@@ -24,7 +29,7 @@ def call(action, args, session_id=None, **kwargs):
             data=json.dumps(value).encode(), method='POST', headers={
                 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
         # A slow/offline remote worker never extends this request: submission is local.
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
             return response.read(131072).decode()
     except urllib.error.HTTPError as error:
         return json.dumps({'error': 'heavy admission refused', 'status': error.code})
@@ -45,6 +50,15 @@ def cancel(args, **kwargs):
 
 
 def register(ctx):
+    if hasattr(ctx, 'register_system_prompt_section'):
+        ctx.register_system_prompt_section('wizard-heavy.execution', lambda _session:
+            'For authorized sustained builds/tests, stage source on Thales and use wizard_heavy_submit. '
+            'Do not hold a terminal or model turn open waiting for the shared worker. For Android, use '
+            'android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt '
+            'is an authorized turn boundary: acknowledge the job and finish this turn, even though the '
+            'overall task is unfinished. The service resumes this same thread on completion. Never '
+            'start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.'
+            if os.environ.get('WIZARD_HEAVY_ORIGIN') else '', position='after_memory', max_chars=1200)
     specs = [
         ('wizard_heavy_submit', submit,
          'Submit authorized sustained tests/builds to the durable Thales resource queue. '

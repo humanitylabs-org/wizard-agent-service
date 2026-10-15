@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { DurableHeavyQueue, heavySshTransport } from './heavy-queue.mjs'
+import { DurableHeavyQueue, heavySshTransport, heavyRpcTransport } from './heavy-queue.mjs'
 import { queueRequestHash } from './run-queue.mjs'
 import { isHumanRequest } from './helper-continuation.mjs'
 
@@ -41,7 +41,8 @@ export function createHeavyIntegration({ options, queue, request }) {
       && sameGeneration(last, job)
   }
   heavy = new DurableHeavyQueue({ statePath: options.heavyStatePath,
-    transport: options.heavyTransport ?? heavySshTransport(options.heavyWorker),
+    transport: options.heavyTransport ?? (options.heavyRpcOrigin
+      ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavySshTransport(options.heavyWorker)),
     intervalMs: options.heavyPollIntervalMs ?? 1500, current,
     continuation: async job => {
       if (!job.route) {

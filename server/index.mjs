@@ -85,6 +85,7 @@ const server = createWizardServer({
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
   heavyStatePath: process.env.WIZARD_HEAVY_STATE_PATH || '',
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
+  heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
   heavyWorker: {
     host: process.env.WIZARD_HEAVY_SSH_HOST,
     script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
