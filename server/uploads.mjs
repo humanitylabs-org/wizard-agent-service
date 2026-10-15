@@ -155,7 +155,7 @@ export function createUploadStore(options) {
   const publicUpload = (record, mapFile = (file) => file) => {
     const file = record.status === 'complete' ? fileOf(record) : null
     return {
-      upload_id: record.id, offset: record.offset, bytes: record.bytes, chunk_bytes: chunkBytes,
+      upload_id: record.id, agent: record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes', offset: record.offset, bytes: record.bytes, chunk_bytes: chunkBytes,
       status: record.status === 'complete' ? 'complete' : record.status === 'uploading' ? 'uploading' : 'failed',
       ...(file ? { file: mapFile(file) } : {}),
       ...(record.status !== 'complete' && record.status !== 'uploading' ? { error: record.error || record.status } : {}),

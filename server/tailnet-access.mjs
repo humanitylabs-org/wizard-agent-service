@@ -70,5 +70,7 @@ export function createTailnetAccessVerifier({ origin = '', logins = '', proxyPee
   }
   // The service passes request-based verifiers the whole request (Cloudflare Access verifiers get the JWT).
   verify.fromRequest = true
+  // Explicit verifier configuration, not identity or forwarded headers, defines browser authority.
+  verify.controlOrigins = Object.freeze([url.origin])
   return verify
 }

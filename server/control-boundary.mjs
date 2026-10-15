@@ -13,15 +13,18 @@ export function controlBoundary(req, { allowedHosts = [], controlOrigins = [], s
   if (appsOrigin && raw === new URL(appsOrigin).host) return false
   if (!authorities.has(raw)) return false
   const site = req.headers['sec-fetch-site']
-  if (site && !['same-origin', 'none'].includes(site)) return false
+  const entry = ['GET', 'HEAD'].includes(req.method) && req.headers['sec-fetch-mode'] === 'navigate'
+    && req.headers['sec-fetch-dest'] === 'document' && ['/wizard', '/wizard/', '/wizard-os-home', '/wizard-os-home/'].includes(String(req.url || '').split('?')[0])
+  if (site && !['same-origin', 'none'].includes(site) && !(site === 'cross-site' && entry)) return false
   const origin = req.headers.origin
   if (!origin) return !site || ['GET', 'HEAD'].includes(req.method) // CLI/native; browser writes need Origin
   try {
     const u = new URL(origin)
     const expected = req.socket?.encrypted ? 'https:' : 'http:'
     // HTTPS termination is explicit in the configured canonical control origins.
-    const schemes = new Set([expected])
-    for (const o of controlOrigins) { try { const c = new URL(o); if (c.host === raw) schemes.add(c.protocol) } catch {} }
+    const schemes = new Set()
+    for (const o of [...controlOrigins, selfOrigin]) { try { const c = new URL(o); if (c.host === raw) schemes.add(c.protocol) } catch {} }
+    if (!schemes.size) schemes.add(expected)
     return u.origin === origin && !u.username && !u.password && u.host === raw && schemes.has(u.protocol)
   } catch { return false }
 }

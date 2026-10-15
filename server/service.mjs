@@ -2019,7 +2019,7 @@ export function createWizardServer(options = {}) {
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
     : null
   const agentCtx = agents ? {
-    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory, projectWizardFileMarkers,
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
@@ -3398,7 +3398,7 @@ export function createWizardServer(options = {}) {
     access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
     allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [], managerHosts: options.appManagerHosts || [],
     reservedPorts: options.appReservedPorts || [],
-    controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || ''],
+    controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || '', ...(accessVerifier?.controlOrigins || [])],
   }
   const appLifecycle = createAppLifecycleRoutes(appRouteOptions)
   // Only the configured isolated app origin may frame into the shell. It never
@@ -3421,7 +3421,7 @@ export function createWizardServer(options = {}) {
         url.pathname = '/' + route
       }
       if (url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
-        && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: appRouteOptions.controlOrigins,
+        && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: [...appRouteOptions.controlOrigins, ...(url.pathname === '/wizard/helper-continue' ? (options.helperContinueOrigins || []) : [])],
           selfOrigin, appsOrigin: options.appsOrigin || '' })) {
         sendJson(response, 403, { error: 'same_origin_required' }); return
       }
