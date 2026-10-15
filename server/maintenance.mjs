@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 export function maintenanceReason(code) {
@@ -25,7 +25,7 @@ export function createMaintenanceLease({ path, activity, barrier = null, externa
   if (path && existsSync(path)) {
     try { held = JSON.parse(readFileSync(path, 'utf8')) } catch { held = { token: 'corrupt' } }
   }
-  const blocked = () => Boolean(held || checking || (externalPath && existsSync(externalPath)))
+  const blocked = () => Boolean(held || checking || (externalPath && (existsSync(externalPath) || existsSync(join(dirname(externalPath), 'resume.json')))))
   const denied = message => Object.assign(new Error(message), { status: 409 })
   return {
     blocked,

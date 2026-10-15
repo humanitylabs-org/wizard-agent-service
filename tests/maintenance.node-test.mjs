@@ -37,6 +37,26 @@ test('external durable lease blocks after lost Service-local state, exact releas
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('durable recovery fence blocks after Service restart until backend proof completes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'recovering-maintenance-'))
+  try {
+    const resume = join(root, 'resume.json')
+    writeFileSync(resume, JSON.stringify({ token }))
+    let ready = false
+    const lease = createMaintenanceLease({ externalPath: join(root, 'lease.json'), barrier: { release: async supplied => {
+      assert.equal(supplied, token)
+      if (!ready) throw Error('backend_resume_pending_retry_release')
+      unlinkSync(resume)
+    } } })
+    assert.throws(() => lease.enter(), /maintenance_active/)
+    await assert.rejects(lease.release(token), /backend_resume_pending/)
+    assert.throws(() => lease.enter(), /maintenance_active/)
+    ready = true
+    await lease.release(token)
+    lease.enter()()
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('unknown runtime barrier fails closed, never uses queue-only truth', async () => {
   const lease = createMaintenanceLease({ activity: async () => [{ id: 'hermes', known: true, active: 0 }] })
   await assert.rejects(lease.acquire(token), /runtime_maintenance_barrier_unavailable/)

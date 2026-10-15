@@ -82,6 +82,7 @@ class ManagedMaintenance:
   with self.lock('operation.lock'):
    with self.lock('admission.lock'):
     old=self.read()
+    if not old and (self.root/'resume.json').exists():raise MaintenanceError('maintenance_recovery_required_cancel_with_same_token')
     if old:
      if old['token']!=token:raise MaintenanceError('maintenance_token_mismatch')
      if old['phase']=='held':return self.receipt(old)
@@ -126,12 +127,14 @@ class ManagedMaintenance:
      r['drainAcknowledged']=True;self.save(lease)
     for r in lease['runtimes']:
      if r['role']!='backend':continue
-     result=self.control(r['container'],'backend',verb='prepare')
+     result=self.control(r['container'],'backend',runtime=r,verb='prepare')
      if result.get('ok') is not True or not result.get('token'):raise MaintenanceError('backend_busy_or_unknown')
      r['permit']=result['token'];self.save(lease)
     for r in lease['runtimes']:
      if r['role']=='backend':
-      result=self.control(r['container'],'backend',verb='commit',body={'token':r['permit']})
+      # Write-ahead: a crash/lost reply must never turn commit into cancel.
+      r['commitIntent']=True;self.save(lease)
+      result=self.control(r['container'],'backend',runtime=r,verb='commit',body={'token':r['permit']})
       if result.get('ok') is not True:raise MaintenanceError('backend_retirement_failed')
       r['committed']=True;self.save(lease)
     for r in lease['runtimes']:
@@ -164,6 +167,7 @@ class ManagedMaintenance:
   for r in lease['runtimes']:
    name=r['container']['name']
    if name not in current or not current[name]['managed']:raise MaintenanceError('runtime_replacement_unknown')
+   if r['container']['id']!=current[name]['id']:r['containerReplaced']=True
    r['container']=current[name]
   if self.read():
    lease['phase']='releasing';self.save(lease)
@@ -173,14 +177,25 @@ class ManagedMaintenance:
      self.run(['docker','start',c['id']]);c['running']=True # entrypoint still waits behind this lease
     if r['role']=='gateway':self.control(c,'clear-drain',home=r['home'])
     elif r.get('permit'):
-     if not self.control(c,'alive',runtime=r)['alive']:continue
-     if r.get('committed'):
-      # Commit cannot be cancelled; replace this proven-idle backend.
+     if r.get('containerReplaced') or not self.control(c,'alive',runtime=r)['alive']:continue
+     if r.get('commitIntent') or r.get('committed'):
+      # Replay only this exact process epoch and permit, never prepare a new
+      # permit as a substitute for unknown authority. Stock commit is idempotent.
+      ack=self.control(c,'backend',runtime=r,verb='commit',body={'token':r['permit']})
+      if ack.get('ok') is not True:raise MaintenanceError('backend_commit_reconciliation_unknown')
+      r['committed']=True;self.save(lease)
       self.control(c,'stop-backend',runtime=r)
-     else:self.control(c,'backend',verb='cancel',body={'token':r['permit']})
+     else:
+      ack=self.control(c,'backend',runtime=r,verb='cancel',body={'token':r['permit']})
+      if ack.get('ok') is not True:raise MaintenanceError('backend_cancel_reconciliation_unknown')
+   # Keep an operation + executable recovery fence until backend readiness is
+   # proved. Only the owned stock s6 bootstrap/service tree may restore here.
    with resume.open('w') as f:json.dump(lease,f);f.flush();os.fsync(f.fileno())
-   os.chmod(resume,0o600);self.sync()
-   # The sole reopening edge: explicit token release, never restart or expiry.
+   os.chmod(resume,0o600)
+   for c in current.values():
+    if c['managed']:
+     p=self.root/('resume-'+c['hostname']);p.write_text(lease['token']);os.chmod(p,0o600);os.chown(p,1000,1000)
+   self.sync()
    with self.lock('admission.lock'):
     (self.root/'lease.json').unlink();self.sync()
   # Persist restoration intent across a lost response or helper restart. Do not
@@ -192,13 +207,29 @@ class ManagedMaintenance:
     rows=self.control(c,'snapshot')['processes']
     if any(x['role']=='gateway' and x['home']==r['home'] for x in rows):break
     if attempt in [2,8,16]:
-     subprocess.run(['docker','exec','-u','hermes','-e','HERMES_HOME='+r['home'],c['id'],'hermes','gateway','start'],capture_output=True,timeout=15)
+     self.control(c,'resume-gateway',runtime=r)
     time.sleep(1)
    else:raise MaintenanceError('runtime_resume_pending_retry_release')
-  if resume.exists():resume.unlink();self.sync()
+  # A process/HTTP-health sample alone cannot detect a stranded retirement
+  # fence. A fresh prepare followed by checked cancel proves stock admission.
+  for r in lease['runtimes']:
+   if r['role']!='backend':continue
+   c=r['container']
+   for _ in range(60):
+    try:
+     rows=self.control(c,'snapshot')['processes']
+     candidates=[x for x in rows if x['role']=='backend' and x['managed'] and x['home']==r['home']]
+     if len(candidates)!=1:raise MaintenanceError('backend_resume_pending')
+     self.control(c,'backend-ready',runtime=candidates[0]);break
+    except MaintenanceError:time.sleep(1)
+   else:raise MaintenanceError('backend_resume_pending_retry_release')
+  with self.lock('admission.lock'):
+   if resume.exists():resume.unlink()
+   for p in self.root.glob('resume-*'):p.unlink()
+   self.sync()
   return {'ok':True}
  def enter(self):
   with self.lock('admission.lock'):
-   if self.read():raise MaintenanceError('maintenance_active')
+   if self.read() or (self.root/'resume.json').exists():raise MaintenanceError('maintenance_active')
    p=self.root/'operations'/str(uuid.uuid4());f=p.open('w+')
    fcntl.flock(f,fcntl.LOCK_EX);return f
