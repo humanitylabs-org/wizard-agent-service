@@ -6,7 +6,7 @@ import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
@@ -34,6 +34,10 @@ import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
+import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
+import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { createAppBindings } from './app-bindings.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -329,6 +333,21 @@ export function wizardDispatchHealthy({ cpuCount = cpus().length, oneMinuteLoad 
     cpuPressure = Number(source.match(/some\s+avg10=([0-9.]+)/)?.[1] ?? 0)
   } catch { cpuPressure = 0 }
   return oneMinuteLoad < Math.max(2, cpuCount * 1.5) && cpuPressure < 60
+}
+
+// A new turn in an archived thread must surface its result (James, 14 Oct 2026: replies
+// and follow-ups landed straight in Archive, unseen). Read the one flag we need.
+export function readSessionArchived(sessionDbPath, sessionId) {
+  if (!sessionDbPath || !sessionId || !existsSync(sessionDbPath)) return false
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    const row = database.prepare('SELECT archived FROM sessions WHERE id = ?').get(sessionId)
+    return Boolean(row?.archived)
+  } catch {
+    return false
+  } finally {
+    database.close()
+  }
 }
 
 export function readArchivedSessions(sessionDbPath) {
@@ -1923,8 +1942,12 @@ export function createWizardServer(options = {}) {
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  // The agent registry (below) decides which apps each agent may use on the gateway (#58).
+  let gatewayAgents = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
+      agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
+      appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
       fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
@@ -1946,6 +1969,56 @@ export function createWizardServer(options = {}) {
     return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
   }
   const appCatalog = () => appProvenanceCatalog(readApps({ appsJsonPath, launcherPath }).apps)
+  // Agents (wizard-os spec/AGENTS.md): <wizard-os home>/agents/<id>/agent.json; the main agent is this Hermes.
+  const agentsDir = options.agentsDir ? resolve(String(options.agentsDir)) : (bridgeOsHome ? resolve(bridgeOsHome, 'agents') : '')
+  const agentRuntime = options.agentRuntime ?? (options.agentRuntimeUrl && options.agentRuntimeToken
+    ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
+    : null)
+  const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath,
+    upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
+    basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
+    contextLength: options.agentContextLength,
+    mainLabel: options.mainAgentLabel,
+    // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
+    gatewayUrl: options.agentGatewayUrl || '',
+    onAppsChanged: () => bridge?.appsChanged(),
+    mainProviders: async () => {
+      const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      if (!result.ok) return []
+      return (await result.json())?.providers ?? []
+    },
+    mainStatus: async () => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok ? { status: 'running', status_detail: '' } : { status: 'error', status_detail: 'not_responding' }
+      } catch { return { status: 'error', status_detail: 'not_responding' } }
+    },
+  }) : null
+  if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
+  // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
+  const appBindings = agents && bridgeOsHome && options.appBindings !== false
+    ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
+    : null
+  const agentCtx = agents ? {
+    registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    isThreadVisible: (session) => isHumanSession(session, false),
+    mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
+    accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
+    deliveryToken: options.agentDeliveryToken ?? '',
+    deliver: async (agent, payload) => {
+      if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
+      try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
+    },
+    mainHasSession: async (sessionId) => {
+      try {
+        const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        await result.body?.cancel().catch(() => undefined)
+        return result.ok
+      } catch { return false }
+    },
+  } : null
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
@@ -2058,6 +2131,7 @@ export function createWizardServer(options = {}) {
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
   // "Agent adapter" keeps the list.
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
+  const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (!options.canonicalSessionListing ? null
       : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => readCanonicalSessions(hermesStatePath, helmDbPath)
@@ -2069,12 +2143,12 @@ export function createWizardServer(options = {}) {
   const inboxToken = options.inboxToken ?? ''
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
-  if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
   // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
   // Wizard Inbox service is configured.
   const mediaFiles = !inboxToken && options.mediaRoot
     ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
     : null
+  if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
   const agentArtifactDir = options.agentArtifactDir ? resolve(String(options.agentArtifactDir)) : ''
   const agentArtifactRoots = canonicalArtifactRoots(options.agentArtifactRoots)
   // Where the agent's view of the user-files folder differs from ours, its paths map back onto ours.
@@ -2531,6 +2605,36 @@ export function createWizardServer(options = {}) {
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
+    // Every admitted turn (typed or voice reply, share, follow-through) brings an archived
+    // thread back: it shows in Working and its result lands in Ready, never silently in Archive.
+    // Best effort: a failed un-archive must never fail the run itself.
+    const unarchiveForNewTurn = async (sessionId) => {
+      try {
+        if (!sessionId) return
+        const archived = sessionArchivedReader
+          ? sessionArchivedReader(sessionId)
+          : (await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`))?.session?.archived === true
+        if (!archived) return
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 5_000)
+        try {
+          const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+            method: 'PATCH',
+            headers: { Authorization: ['Bearer', hermesKey].join(' '), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ archived: false }),
+            signal: controller.signal,
+            redirect: 'manual',
+          })
+          await result.body?.cancel().catch(() => undefined)
+          if (result.ok) {
+            canonicalSessionCache.expiresAt = 0
+            console.log(`[threads] new turn re-opened archived thread ${sessionId}`)
+          }
+        } finally {
+          clearTimeout(timer)
+        }
+      } catch { /* the run proceeds; Restore stays available */ }
+    }
     const queueHermesAdmission = async (record) => {
       let queuedBody = Buffer.from(record.body, 'utf8')
       // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Only the
@@ -2575,6 +2679,7 @@ export function createWizardServer(options = {}) {
         operatorWorkers.set(upstreamRunId, { ...pendingWorker, ackRunId: upstreamRunId })
         persistOperatorWorkers()
       }
+      await unarchiveForNewTurn(record.sessionId)
       return {
         upstreamRunId,
         workerRunId: pendingWorker?.workerRunId ?? '',
@@ -3025,6 +3130,157 @@ export function createWizardServer(options = {}) {
     try { return await admission } finally { helperAdmissions.delete(key) }
   }
 
+  // ---- Resumable uploads and shares (uploads.mjs; wizard-os spec/AGENT_SERVICE_API.md "Uploads"/"Shares").
+  // Chat attachments and shares use one chunked upload path with no size cap but the disk. A finished
+  // share is delivered here, server-side, through this service's own chat-send path (session create +
+  // run admission with an idempotency key), exactly like a Wizard client send.
+  const MAIN_SHARE_AGENT = 'hermes'
+  const internalToken = randomBytes(32).toString('hex')
+  const internalCall = (request) => {
+    const supplied = request.headers['x-wizard-internal-token']
+    if (typeof supplied !== 'string' || supplied.length !== internalToken.length) return false
+    return timingSafeEqual(Buffer.from(supplied), Buffer.from(internalToken))
+  }
+  let selfOrigin = ''
+  const dropClient = inboxToken ? {
+    maxChunk: 4 * 1024 * 1024,
+    create: async (payload) => {
+      const result = await inboxRequest('/v1/drop/uploads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, note: '' }) })
+      const raw = await result.text()
+      if (result.status === 413) throw new UploadError(413, 'file_too_large')
+      if (!result.ok) throw Object.assign(new Error('Wizard Inbox upload create failed'), { status: 502 })
+      const created = JSON.parse(raw)
+      const uploadId = typeof created.upload_id === 'string' && /^upl_[0-9a-f]{32}$/.test(created.upload_id) ? created.upload_id : ''
+      if (!uploadId || !Number.isSafeInteger(created.offset) || created.offset < 0) throw Object.assign(new Error('invalid upload receipt'), { status: 502 })
+      return { upload_id: uploadId, offset: created.offset, status: created.status, drop_id: created.drop_id ?? '' }
+    },
+    status: async (remoteId) => {
+      const value = await inboxJson(`/v1/drop/uploads/${remoteId}`)
+      return { offset: Number(value.offset), status: value.status }
+    },
+    chunk: async (remoteId, offset, buffer) => {
+      const result = await inboxRequest(`/v1/drop/uploads/${remoteId}/chunks`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Upload-Offset': String(offset) }, body: buffer })
+      const next = Number(result.headers.get('upload-offset'))
+      await result.body?.cancel().catch(() => undefined)
+      if (result.status === 409 && Number.isSafeInteger(next)) throw Object.assign(new UploadError(409, 'offset_mismatch', { offset: next }), { remoteOffset: next })
+      if (!result.ok || !Number.isSafeInteger(next)) throw Object.assign(new Error('Wizard upload failed'), { status: 502 })
+      return next
+    },
+    complete: async (remoteId, { bytes, sha256 }) => {
+      const result = await inboxRequest(`/v1/drop/uploads/${remoteId}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Wizard-Admission': 'defer' }, body: JSON.stringify({ bytes, sha256, note: '' }) })
+      const raw = await result.text()
+      if (result.status === 422) throw Object.assign(new Error('integrity'), { integrity: true, status: 422 })
+      if (!result.ok) throw Object.assign(new Error('Wizard Inbox completion failed'), { status: 502 })
+      const dropId = JSON.parse(raw).drop_id
+      if (typeof dropId !== 'string' || !FILE_ID.test(dropId)) throw Object.assign(new Error('invalid drop receipt'), { status: 502 })
+      return dropId
+    },
+    file: async (dropId) => safeFile((await inboxJson(`/v1/internal/files/${encodeURIComponent(dropId)}`)).file),
+    cancel: async (remoteId) => { const result = await inboxRequest(`/v1/drop/uploads/${remoteId}`, { method: 'DELETE' }); await result.body?.cancel().catch(() => undefined) },
+  } : null
+  const uploadStagingDir = mediaFiles ? mediaFiles.stagingDir : options.uploadStagingDir ? resolve(String(options.uploadStagingDir)) : ''
+  // Where a finished upload goes. 'files' is Wizard Files; options.uploadTargets adds more (an agent's
+  // own home inbox when an agents registry is present).
+  const uploadTarget = (key) => {
+    if (key === 'files') {
+      if (mediaFiles) {
+        return {
+          kind: 'local', stagingDir: uploadStagingDir,
+          finalize: async (path, meta) => safeFile(mediaFiles.adopt(path, meta)),
+          recover: async (key) => { const found = mediaFiles.adopted(key); return found ? safeFile(found) : null },
+        }
+      }
+      if (dropClient && uploadStagingDir) return { kind: 'drop', stagingDir: uploadStagingDir }
+      return null
+    }
+    return options.uploadTargets?.(key) ?? null
+  }
+  const deliveryCall = async (path, body, idempotencyKey = '') => {
+    if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
+    const result = await fetchImpl(`${selfOrigin}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+      body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
+    })
+    const raw = await result.text()
+    let payload = {}
+    try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
+    return { status: result.status, ok: result.ok, payload }
+  }
+  // Which agent a share goes to, and where its files are stored. Without an agents registry only the
+  // main agent exists; options.resolveShareAgent replaces this when one is present.
+  const resolveShareAgent = options.resolveShareAgent ?? (async (agentId) => {
+    if (agentId && agentId !== MAIN_SHARE_AGENT) throw new UploadError(409, 'agent_unavailable', { agent: agentId })
+    return { agent: MAIN_SHARE_AGENT, agent_label: '', target: 'files', query: '' }
+  })
+  const shareThreadExists = options.shareThreadExists ?? (async (threadId, routed) => {
+    if (routed.agent !== MAIN_SHARE_AGENT) return true
+    const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(threadId)}`, {
+      headers: hermesKey ? { Authorization: ['Bearer', hermesKey].join(' ') } : {}, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+    })
+    await result.body?.cancel().catch(() => undefined)
+    if (result.status === 404) return false
+    if (!result.ok) throw Object.assign(new Error('thread check failed'), { status: 503 })
+    return true
+  })
+  // One user-authored message with every file attached, then the run: the same calls a Wizard client
+  // makes for a new chat (POST sessions, 409 = already made) and a send (POST runs + Idempotency-Key).
+  // The key is the share id, so a re-driven delivery replays the admitted run instead of posting twice.
+  const deliverShare = options.deliverShare ?? (async (share, files) => {
+    const routed = await resolveShareAgent(share.agent === MAIN_SHARE_AGENT ? '' : share.agent, { delivering: true })
+    const query = routed.query || ''
+    if (share.thread_new) {
+      const title = files[0]?.filename ? files[0].filename.replace(/\s+/gu, ' ').slice(0, 80) : ''
+      let created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { source: 'wizard-mobile', id: share.thread_id, ...(title ? { title } : {}) })
+      if (created.status === 400 && title) created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { source: 'wizard-mobile', id: share.thread_id })
+      if (created.ok && title && routed.agent === MAIN_SHARE_AGENT) {
+        // The file name names the thread until the agent's first title replaces it (not a user lock).
+        try { threadTitleStore.recordRename(share.thread_id, { from: '', to: created.payload?.session?.title || title, by: 'agent' }) } catch { /* title stays */ }
+      }
+      if (!created.ok && created.status !== 409) throw Object.assign(new Error('share thread create failed'), { status: created.status })
+    }
+    // The main agent resolves wizard_file_ids itself; another agent's router supplies its own run fields
+    // (the files as paths inside that agent's home).
+    const text = shareMessageText(share.note, files)
+    const body = { session_id: share.thread_id, input: text, ...(routed.runFields ? routed.runFields(text, files) : { wizard_file_ids: files.map((item) => item.file.id) }) }
+    const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, body, `share-${share.id}`)
+    if (!run.ok) throw Object.assign(new Error('share run admission failed'), { status: run.status })
+    return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
+  })
+  const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
+  // A box whose state or staging folder is not writable (a sandboxed unit without the path in
+  // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
+  let uploads = null
+  if (uploadStatePath && uploadTarget('files')) {
+    try {
+      mkdirSync(uploadStagingDir, { recursive: true, mode: 0o700 })
+      uploads = createUploadStore({
+        statePath: uploadStatePath,
+        target: uploadTarget,
+        drop: dropClient,
+        deliverShare,
+        reserveBytes: options.uploadReserveBytes,
+        maxBytes: options.uploadMaxBytes,
+        expiryMs: options.uploadExpiryMs,
+        sweepIntervalMs: options.uploadSweepIntervalMs,
+        statfs: options.uploadStatfs,
+        now: options.uploadNow,
+      })
+    } catch (error) {
+      console.error(`[uploads] resumable uploads disabled: ${error?.code || error?.message || 'state unavailable'}`)
+      uploads = null
+    }
+  }
+  const sendUploadError = (response, error) => {
+    if (response.headersSent) { response.destroy(); return }
+    if (error instanceof UploadError) {
+      const headers = error.payload.error === 'offset_mismatch' ? { 'Upload-Offset': String(error.payload.offset) } : {}
+      sendJson(response, error.status, error.payload, headers)
+      return
+    }
+    throw error
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
@@ -3062,6 +3318,68 @@ export function createWizardServer(options = {}) {
         return
       }
 
+      if (url.pathname === '/wizard/v1/uploads' || url.pathname.startsWith('/wizard/v1/uploads/') || url.pathname === '/wizard/v1/shares' || url.pathname.startsWith('/wizard/v1/shares/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!uploads) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+        const parts = url.pathname.split('/').slice(3)
+        try {
+          if (parts[0] === 'uploads') {
+            if (parts.length === 1 && request.method === 'POST') {
+              if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
+              const { record, replayed } = await uploads.createUpload(parseJsonBody(await readBoundedBody(request, 16 * 1024)))
+              sendJson(response, 201, uploads.publicUpload(record), { 'Idempotency-Replayed': String(replayed) })
+              return
+            }
+            if (parts.length >= 2 && !UPLOAD_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
+            if (parts.length === 2 && request.method === 'GET') {
+              const { upload_id, offset, bytes, chunk_bytes, status, file, error } = uploads.publicUpload(await uploads.getUpload(parts[1]))
+              sendJson(response, 200, { upload_id, offset, bytes, chunk_bytes, status, ...(file ? { file } : {}), ...(error ? { error } : {}) }, { 'Upload-Offset': String(offset) })
+              return
+            }
+            if (parts.length === 2 && request.method === 'PATCH') {
+              const type = String(request.headers['content-type'] ?? '').toLowerCase()
+              if (!type.startsWith('application/offset+octet-stream') && !type.startsWith('application/octet-stream')) { sendJson(response, 415, { error: 'bytes_required' }); return }
+              const header = String(request.headers['upload-offset'] ?? '')
+              if (!/^\d{1,16}$/.test(header) || !Number.isSafeInteger(Number(header))) { sendJson(response, 400, { error: 'invalid_request', field: 'Upload-Offset' }); return }
+              const offset = await uploads.patchUpload(parts[1], Number(header), request)
+              if (!response.headersSent && !response.destroyed) {
+                response.writeHead(204, { 'Upload-Offset': String(offset), 'Cache-Control': 'no-store' })
+                response.end()
+              }
+              return
+            }
+            if (parts.length === 3 && parts[2] === 'complete' && request.method === 'POST') {
+              await readBoundedBody(request, 16 * 1024)
+              const record = await uploads.completeUpload(parts[1])
+              sendJson(response, 200, { file: uploads.publicUpload(record).file })
+              return
+            }
+          }
+          if (parts[0] === 'shares') {
+            if (parts.length === 1 && request.method === 'POST') {
+              if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
+              const input = parseShareRequest(parseJsonBody(await readBoundedBody(request, 64 * 1024)))
+              const replay = uploads.replayShare(input)
+              if (replay) { sendJson(response, 201, uploads.publicShare(replay), { 'Idempotency-Replayed': 'true' }); return }
+              const routed = await resolveShareAgent(input.agent)
+              let threadId = input.thread
+              if (threadId) {
+                if (!await shareThreadExists(threadId, routed)) throw new UploadError(404, 'thread_not_found')
+              } else threadId = `wizard_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}`
+              const { share, replayed } = await uploads.createShare(input, { ...routed, thread_id: threadId, thread_new: !input.thread })
+              sendJson(response, 201, uploads.publicShare(share), { 'Idempotency-Replayed': String(replayed) })
+              return
+            }
+            if (parts.length === 2 && request.method === 'GET') {
+              if (!SHARE_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
+              sendJson(response, 200, uploads.publicShare(uploads.getShare(parts[1])))
+              return
+            }
+          }
+          sendJson(response, parts.length <= 3 ? 405 : 404, { error: parts.length <= 3 ? 'method_not_allowed' : 'not_found' })
+        } catch (error) { sendUploadError(response, error) }
+        return
+      }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const { settings, source } = readSettings(settingsPath)
@@ -3073,6 +3391,7 @@ export function createWizardServer(options = {}) {
           settings: publicSettings, settingsSource: source,
           capabilities: {
             voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
+            resumable_uploads: Boolean(uploads),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
         }), { 'Cache-Control': 'no-store' })
@@ -3085,11 +3404,11 @@ export function createWizardServer(options = {}) {
       }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
-        const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
-        const tokenOk = Boolean(bearer) && bearer === (options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome, create: false }))
-        if (!tokenOk && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
+        const tokenAgent = bridge.agentFor(request)
+        if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
-        const context = await bridge.kernel({ harness })
+        const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
         if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
         else {
           const body = Buffer.from(context.text)
@@ -3097,6 +3416,12 @@ export function createWizardServer(options = {}) {
           response.end(body)
         }
         return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents') || url.pathname.startsWith('/wizard/v1/agent-grants'))) {
+        if (await handleAgentsApi(agentCtx, url, request, response)) return
+      }
+      if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
+        if (await handleAppBindingApi(agentCtx, url, request, response)) return
       }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -3592,8 +3917,20 @@ export function createWizardServer(options = {}) {
         : url.pathname.startsWith(PROXY_PREFIX) ? PROXY_PREFIX : ''
       if (proxyPrefix) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (requireAccess && !(!operator && internalCall(request)) && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
+        let agentResolution = null
+        if (agentCtx) {
+          agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
+          if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            await proxyToAgent(agentCtx, {
+              agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+            })
+            return
+          }
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -3649,7 +3986,7 @@ export function createWizardServer(options = {}) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? await readBoundedBody(request) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
@@ -3926,6 +4263,10 @@ export function createWizardServer(options = {}) {
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
           result = decorateSessionTitles(result, operator)
+          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+        }
+        if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]
@@ -4009,6 +4350,10 @@ export function createWizardServer(options = {}) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof AgentError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })
@@ -4017,15 +4362,21 @@ export function createWizardServer(options = {}) {
     }
   })
   if (runQueue) server.once('close', () => runQueue.close())
+  if (uploads) server.once('close', () => uploads.close())
+  server.on('listening', () => {
+    const address = server.address()
+    if (!address || typeof address !== 'object') return
+    const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
+    selfOrigin = `http://${host}:${address.port}`
+  })
   if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
-  if (options.followThrough !== false) {
+  if (options.followThrough !== false && hermesStatePath) {
     let selfOrigin = ''
     server.on('listening', () => {
       const address = server.address()
       if (address && typeof address === 'object') selfOrigin = `http://127.0.0.1:${address.port}`
     })
-    const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
     const watcher = startDelegationFollowThrough({
       sessionDbPath: hermesStatePath,
       // Receipt delivery/gates are not exposed by stock HTTP. Retain the live recovery path
