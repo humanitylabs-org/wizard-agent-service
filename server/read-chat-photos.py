@@ -19,6 +19,11 @@ def session_reason(s, owner_id):
     try:
         if json.loads(s['model_config'] or '{}').get('_delegate_from'):
             return 'delegated'
+        origin = json.loads(s.get('origin_json') or '{}')
+        provenance = ' '.join(str(s.get(k) or '') for k in ('created_source', 'transport_profile'))
+        provenance += ' ' + ' '.join(str(origin.get(k) or '') for k in ('source', 'kind', 'type', 'runtime', 'visibility'))
+        if any(x in provenance.lower() for x in ('cron', 'subagent', 'helper', 'internal', 'synthetic', 'canary', 'worker', 'test', 'private')):
+            return 'internal_origin'
     except (ValueError, AttributeError):
         return 'invalid_session_metadata'
     if TEST.search((s['title'] or '') + ' ' + s['id']):
@@ -47,7 +52,7 @@ def photo_refs(content, role):
                         continue
                     if part.get('type') == 'text':
                         result.extend(photo_refs(part.get('text', ''), role))
-                    elif part.get('type') == 'image_url' and role == 'user':
+                    elif part.get('type') == 'image_url':
                         url = part.get('image_url', {}).get('url', '')
                         if isinstance(url, str):
                             result.append({'kind': 'inline'})
@@ -85,6 +90,8 @@ def photo_refs(content, role):
         for match in re.finditer(r'!\[[^\]\n]*\]\(([^)\s]+)\)', content):
             out.append({'kind': 'agent', 'path': match[1]})
     else:
+        for match in re.finditer(r'^\s*@image:\s*([^\n]+)\s*$', content, re.M):
+            out.append({'kind': 'received', 'path': match[1].strip().strip('`\"\'')})
         for match in re.finditer(r'^\[Image(?: attached at)?:\s*([^\]\n]+)\]\s*$', content, re.M):
             out.append({'kind': 'received', 'path': match[1].strip()})
     return list({json.dumps(ref, sort_keys=True): ref for ref in out}.values())
@@ -94,16 +101,18 @@ def scan(path, cursor, ceiling, owner_id, limit=250):
     c = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=2)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA query_only=ON')
-    sessions = {s['id']: dict(s) for s in c.execute('SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,archived,parent_session_id,title,model_config FROM sessions')}
+    sessions = {s['id']: dict(s) for s in c.execute('SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,archived,parent_session_id,title,model_config,origin_json,created_source,transport_profile FROM sessions')}
+    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id)]
     ceiling = ceiling or c.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0]
     # Fetch metadata first; do not read tool content or excluded/private messages.
-    rows = c.execute("SELECT id,session_id,role,timestamp,display_kind,_compressed_summary,(tool_calls IS NOT NULL AND tool_calls NOT IN ('','[]','null')) AS has_tools,platform_message_id FROM messages WHERE id>? AND id<=? ORDER BY id LIMIT ?", (cursor, ceiling, limit)).fetchall()
+    # Use the canonical main inventory's session index, never scan tool content.
+    rows = c.execute("SELECT id,session_id,role,timestamp,display_kind,_compressed_summary,(tool_calls IS NOT NULL AND tool_calls NOT IN ('','[]','null')) AS has_tools,platform_message_id FROM messages WHERE session_id IN (" + ','.join('?' for _ in eligible_ids) + ") AND role IN ('user','assistant') AND coalesce(_compressed_summary,0)=0 AND coalesce(display_kind,'') IN ('','final') AND (role='user' OR coalesce(tool_calls,'') IN ('','[]','null')) AND id>? AND id<=? ORDER BY id LIMIT ?", (*eligible_ids, cursor, ceiling, limit)).fetchall()
     counts = {'scanned': len(rows), 'eligible': 0, 'matched': 0, 'excluded': 0}
     reasons = {}; evidence = []
     for m in rows:
         s = sessions.get(m['session_id'])
         reason = session_reason(s, owner_id) if s else 'missing_session'
-        if not reason and (m['role'] not in ('user', 'assistant') or m['_compressed_summary'] or m['display_kind'] or (m['role'] == 'assistant' and m['has_tools'])):
+        if not reason and (m['role'] not in ('user', 'assistant') or m['_compressed_summary'] or m['display_kind'] not in (None, '', 'final') or (m['role'] == 'assistant' and m['has_tools'])):
             reason = 'not_delivered_human_message'
         if reason:
             counts['excluded'] += 1; reasons[reason] = reasons.get(reason, 0) + 1

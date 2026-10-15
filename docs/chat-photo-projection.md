@@ -1,91 +1,31 @@
-# Owner chat-photo projection (draft; activation blocked)
+# Owner chat-photo projection
 
-This branch contains tested projection/storage and bounded enumeration components.
-It is **not a deployed or complete photo backfill**. It must not be activated until
-an independently reviewed delivery-evidence adapter and the retry/durability gates
-below are implemented. An environment flag alone cannot activate it: service
-construction rejects a missing `authorizeEvidence` function before projection
-folders are created.
+Default off. The Agent Service owns accepted-message, completed-run and delivered-history hooks and a bounded in-service crash-repair interval. There is no Hermes cron and no change to original messages or attachment bytes.
 
-## Storage contract v1
+## Authority and delivery
 
-The trusted Agent Service producer writes exactly
-`<owner media root>/.wizard/photo-provenance.json`:
+Activation requires an explicit single-owner main-runtime binding. The seal includes the configured immutable owner ID, actual history DB, actual session-agent registry directory, upstream origin and hash of the existing runtime credential. A bounded authenticated session request must match an eligible ID in that DB before any projection or cursor write. The seal is immutable in both checkpoint and manifest; changing owner/runtime/registry fails closed rather than relabeling existing photos.
 
-```json
-{"schema":1,"owner_label":"Owner","agent_labels":{"main":"Assistant"},"files":[{"path":"Photos/Chats/<sha256>.png","sha256":"<sha256>","sources":[{"role":"user","agent_id":"main","sender_label":"Owner","thread_id":"<canonical session>","message_id":"<canonical message>","sent_at":"<ISO-8601>"}]}]}
-```
+The canonical registry is checked before reading message content: a non-main pin never routes into its store. Session metadata rejects hidden, parented/delegated, non-default profile and synthetic/helper/cron/private provenance. Title checks are additional defense only. Archived human conversations remain eligible. Owner Telegram DM IDs must match. Missing owner fields on older Wizard conversations are covered by the explicit single-owner runtime binding, not fabricated per-row metadata.
 
-Files are immutable, content-addressed copies under `Photos/Chats`. SHA binds
-provenance to bytes; identical bytes keep all distinct thread/message/role sources.
-Replay of the same source does not duplicate attribution. Both sender filters must
-match an image with both roles. Readers do not receive database, inbox, private
-agent or arbitrary host filesystem access. The original messages and files are
-never mutated. Unknown existing photos stay unknown. `.wizard` remains hidden
-from every normal Files listing; read this one fixed metadata path using no-follow
-and bounded validation. Readers must verify SHA/path and handle unavailable or
-invalid metadata safely. Labels are configurable display metadata, not identity.
+Integer-ID pages enumerate eligible retained human history, with no recent cutoff. Candidate syntax is not delivery authority: each candidate is reread, role/timestamp/finality verified, and passed through the same visible-history projection and image resolver used by Wizard. Resolved owner-visible Wizard history is delivery on Wizard, not a claim about an external Telegram send or a phone read receipt. Mere unresolved MEDIA intentions remain unavailable.
 
-Writer limits: raster images only; 20 MiB per image, 900 MiB aggregate projection,
-16 MiB metadata. The total storage cap is a stop condition, not permission to spill
-onto another host or import other owner files. A deployment exceeding its host
-storage budget requires its existing approved storage route, not a whole-library
-migration. No filesystem sweep is performed.
+Supported resolution: durable Wizard file identities through the shared canonical file resolver, main local image references through the shared history image registrar, canonical Helm attachment IDs and inline image data through the existing magic/size validator. Arbitrary remote URLs are not fetched. A retired Helm server can use an explicitly configured retained attachment root: the old AttachmentStore.resolve contract is fixed ID plus png/jpg/webp suffixes, no directory scan or envelope-supplied path. The same resolver serves GET `/wizard/attachments/:id`.
 
-## Enumeration and service integration
+## Storage and durability
 
-`read-chat-photos.py` opens the default history database read-only. Integer message
-primary-key pages cover all retained rows through a fixed high-water mark, without
-a recent-history window or giant text search. It fetches content only for candidate
-human messages. Archived chats remain candidates; hidden/internal/delegated/private
-profiles and unsupported sources are excluded. Owner Telegram DM metadata is
-checked; ambiguous legacy Telegram sessions are excluded rather than guessed.
-Wizard IDs and visible webui source are **candidate selection, not owner proof**.
-No sealed database is opened.
+The manifest remains schema 1 at `<owner media root>/.wizard/photo-provenance.json`, adding producer-only `owner_id` and `authority_id`. Existing Files readers use the unchanged `owner_label`, `agent_labels.main`, and `files[{path,sha256,sources}]` contract. Every source has role, main agent, sender label, thread/message identity and ISO timestamp. Content dedupe retains all sources, including both sender roles. Unknown unrelated photos are untouched.
 
-Only recognized stored attachment envelopes, inbound image markers and assistant
-rendered media syntax produce candidates; prose paths and fenced examples do not.
-Candidates are **not yet authorized delivery records**. A canonical attachment
-identity must be bound to owner, main agent, message and verified delivery before
-publication. Telegram assistant MEDIA text without a send receipt is intent, not
-proof of external delivery. An old path, upload completion or magic bytes alone is
-never enough.
+Projection metadata and Chats directories are owner-only; image bytes are owner-readable. Existing broad permissions or unexpected owners fail closed. No recursive permission change to unrelated media is performed. Source/target symlinks and private-store paths are denied. Image and manifest writes fsync bytes, atomic replacement and parent directories. A Python flock helper releases locks on parent pipe EOF, including SIGKILL. Manifest publication precedes cursor commit and is idempotent; resolution totals are recomputed from the manifest's source inventory after replay.
 
-The candidate service integration kicks reconciliation on accepted queued runs,
-completed queued runs and successful main-agent history responses. An explicitly
-service-owned bounded timer covers other supported gateways and crash windows;
-there is no Hermes cron. Lifecycle construction is disabled by default and stops
-with the service. No private-agent route was modified. Config names:
-`WIZARD_CHAT_PHOTOS_ENABLED`, `WIZARD_CHAT_PHOTOS_STATE_PATH`,
-`WIZARD_CHAT_PHOTOS_OWNER_ID`, `WIZARD_CHAT_PHOTOS_OWNER_LABEL`,
-`WIZARD_CHAT_PHOTOS_AGENT_LABEL`, `WIZARD_CHAT_PHOTOS_REPLAY_ROOTS`.
-Do not set the flag on this draft: the production evidence adapter is not present.
+Transient errors remain in a durable bounded queue with capped hourly backoff, including beyond six attempts. Backpressure stops scanning rather than discarding retries. Definitive unavailable reasons have aggregate counts and at most 50 examples. Cursor and retry queue commit together. Corrupt binding/manifest, permissions or storage placement errors stop the batch without advancing the cursor.
 
-## Activation gates from independent review
+Survey aggregate and largest-file bytes before materializing. Set an explicit deployment storage budget; exceeding it is a reported placement gate, never silent truncation. Use the existing approved shared storage framework when required, not symlink bypasses or relocation of the entire owner root. Canonical local images retain the history route's size validation; larger/unresolved candidates are counted unavailable.
 
-1. Implement authenticated owner/main-agent/delivery binding for each gateway.
-   Visible-source and filename heuristics cannot replace this. Legacy replay must
-   use the canonical replay allowlist/attachment resolver, not broaden filesystem
-   roots. Neither root inbox enumeration nor upload-only indexing is allowed.
-2. Retained Telegram assistant messages lack per-image send receipts in the
-   inspected history. Do not publish those as delivered. The inspected delivery
-   obligation table has no media-bearing receipts. Resolve trustworthy evidence
-   if retained elsewhere; otherwise report them unavailable/ambiguous explicitly.
-3. Implement an OS-released lock or rigorously checked lease, durable bounded retry
-   queue with backoff and stable reason codes, directory fsync, and crash/concurrency
-   tests. Current exclusive-file lock and advancing failed-candidate cursor are not
-   sufficient for production reliability.
-4. Bound/aggregate failure detail rather than an unbounded array. Validate every
-   existing source object. Bind private state to immutable owner identity.
-5. Complete canonical remote/inline replay support; current resolver deliberately
-   rejects those instead of fetching through a new provider or custom URL client.
-6. Add live accepted-send/delivered-image integration tests, a disabled-state
-   no-effects test, then a fresh independent privacy review of the exact revision.
-7. Reinspect the active release and merge concurrent changes. Use an idle-safe
-   service release window; never blindly restart an active owner run.
+## Configuration and operation
 
-Fixtures exercise storage/dedupe/source roles, corrupt metadata, symlinks, byte
-mismatch, private denial, limits and scanner grammar/eligibility. They are not
-actual-history delivery proof. Build/tests run on the designated development host.
-Run `node --test tests/chat-photo-projection.node.mjs` and
-`python3 tests/test_chat_photo_reader.py`, followed by the service test suite.
+Required opt-ins: `WIZARD_CHAT_PHOTOS_ENABLED=1`, `WIZARD_CHAT_PHOTOS_SINGLE_OWNER=1`, `WIZARD_CHAT_PHOTOS_OWNER_ID`, `WIZARD_CHAT_PHOTOS_OWNER_LABEL`, `WIZARD_CHAT_PHOTOS_AGENT_LABEL`, `WIZARD_CHAT_PHOTOS_STATE_PATH`, `WIZARD_CHAT_PHOTOS_MAX_BYTES`. Existing `WIZARD_HERMES_STATE_PATH`, main runtime credentials, agent registry and `WIZARD_USER_FILES_ROOT` supply the actual deployment. Optional `WIZARD_HELM_ATTACHMENTS_ROOT` must be the existing main Helm delivery store.
+
+`scripts/chat-photo-backfill.mjs --survey <saved enumeration dir> <receipt>` revalidates retained candidate evidence without writing owner media. `--backfill` performs bounded resumable reconciliation only with explicit activation. The live producer continues from that same checkpoint. Checkpoint `event_counts` distinguishes startup/repair, accepted user, completed assistant and delivered history triggers. The owner manifest—not attempt counters—is the source of unique file and sender totals.
+
+Run `npm test` on the designated development host. Focused node tests cover both sender dedupe, immutable owner/registry, wrong agent/owner, actual runtime authentication, private/fenced denial, legacy/inline resolution, process-crash lock release, durable retry, publication-before-cursor replay and permissions. Fixtures are separate from actual owner-history/live-release evidence. A fresh independent review of full integration and deployment binding is required before activation. Preserve concurrent main/live changes and use an idle-safe service release; never restart active owner work blindly.
