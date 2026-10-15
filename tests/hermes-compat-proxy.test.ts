@@ -52,7 +52,7 @@ it('capability preflight failure before a run POST remains editable and cancella
   db.close()
   expect((await fetch(base+'/v1/runs/'+item.run_id+'/steer', post({input:'before delivery'}))).status).toBe(202)
   const stopped = await fetch(base+'/v1/runs/'+item.run_id+'/stop', post({}))
-  expect(stopped.status).toBe(200)
+  expect(stopped.status).toBe(202)
   expect((await stopped.json()).status).toBe('cancelled')
   expect(runPosts).toEqual([])
 })
