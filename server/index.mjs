@@ -90,6 +90,11 @@ const server = createWizardServer({
   ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
+  // The owner's user-files root on this host (Runtipi's media/ folder on a Wizard OS box). When set, an
+  // upload created with a destination is placed there, and the Files app can list it. Separate from
+  // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
+  userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
+  userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
   wizardOsHome: osHome,

@@ -225,6 +225,7 @@ export function bootstrapPayload({ settings, settingsSource, capabilities }) {
       upload: capabilities.files ? '/wizard/files/upload' : '',
       uploads: capabilities.resumable_uploads ? '/wizard/v1/uploads' : '',
       shares: capabilities.resumable_uploads ? '/wizard/v1/shares' : '',
+      user_files: capabilities.upload_destinations ? '/wizard/v1/user-files' : '',
     },
   }
 }
