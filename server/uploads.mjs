@@ -409,7 +409,15 @@ export function createUploadStore(options) {
     const existing = db.prepare('SELECT * FROM shares WHERE client_share_id = ?').get(input.client_share_id)
     if (!existing) return null
     const uploads = shareUploads(existing.id)
-    if (uploads.length !== specs.length || uploads.some((u, i) => !sameSpec(u, specs[i]))) throw new UploadError(409, 'client_share_id_conflict')
+    // A retry cannot change its recipient (especially private ↔ main), thread, note or filenames.
+    // Checking bytes alone could return a main-agent upload handle to a newly selected private share.
+    const requestedAgent = input.agent || 'hermes'
+    const sameThread = input.thread ? input.thread === existing.thread_id && !existing.thread_new : Boolean(existing.thread_new)
+    if (requestedAgent !== existing.agent || !sameThread || input.note !== existing.note
+      || uploads.length !== specs.length
+      || uploads.some((u, i) => !sameSpec(u, specs[i]) || u.filename !== specs[i].filename || u.mime !== specs[i].mime)) {
+      throw new UploadError(409, 'client_share_id_conflict')
+    }
     return existing
   }
   // A replay is answered before any routing (the client may retry after the thread was created).
