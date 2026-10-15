@@ -14,6 +14,7 @@ import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
+import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -1097,8 +1098,7 @@ function legacyInternalHistoryMessage(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) return false
   const role = message.role ?? message.author
   if (typeof role !== 'string') return false
-  const content = message.content ?? message.text ?? message.output ?? ''
-  if (typeof content !== 'string') return false
+  const content = runContextText(message.content ?? message.text ?? message.output ?? '')
   if (historyProcessWakeup(message, content)) return false
   const trimmed = content.trimStart().replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '').trimStart()
   const normalized = trimmed.trim()
@@ -1258,7 +1258,7 @@ export function historyQuestion(args, content) {
   return text ? { text, choices: historyQuestionChoices(first.choices), state: 'waiting' } : null
 }
 
-export function projectWizardMessageHistory(result) {
+export function projectWizardMessageHistory(result, sourceResult = result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
     const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
@@ -1272,13 +1272,19 @@ export function projectWizardMessageHistory(result) {
       ...(question ? { question } : {}),
     }
   }
-  const slimMessage = (message) => {
+  const slimMessage = (message, sourceMessage = message) => {
     if (!message || typeof message !== 'object' || Array.isArray(message)) return message
     const role = message.role ?? message.author
     if (typeof role !== 'string') return message
     const projected = {}
     for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id']) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
+    }
+    const runContext = historyRunContext(sourceMessage)
+    if (runContext) {
+      // Never carry arbitrary source metadata or machine text into a human bubble.
+      delete projected.tool_call_id
+      return { ...projected, role: 'system', author: 'system', display_kind: 'run_context', content: '', display_content: '', shareable: false, run_context: runContext }
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
     if (role === 'tool') {
@@ -1305,16 +1311,38 @@ export function projectWizardMessageHistory(result) {
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
     return projected
   }
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.filter((item) => !legacyInternalHistoryMessage(item)).map(visit)
+  const visit = (value, source = value) => {
+    if (Array.isArray(value)) {
+      const seen = new Set()
+      return value.flatMap((item, index) => {
+        const sourceItem = source?.[index] ?? item
+        if (legacyInternalHistoryMessage(item) && !historyRunContext(sourceItem)) return []
+        const projected = visit(item, sourceItem)
+        if (projected?.display_kind === 'run_context') {
+          // Only repeated stable IDs in this page are duplicates. Identical notes
+          // with different IDs/times can be distinct run starts; retain them.
+          const id = projected.id ?? projected.message_id
+          if (id !== undefined && id !== null) {
+            const key = JSON.stringify([projected.session_id ?? '', id])
+            if (seen.has(key)) return []
+            seen.add(key)
+          }
+        }
+        return [projected]
+      })
+    }
     if (!value || typeof value !== 'object') return value
-    if (legacyInternalHistoryMessage(value)) return null
-    if (typeof (value.role ?? value.author) === 'string') return slimMessage(value)
+    if (legacyInternalHistoryMessage(value) && !historyRunContext(source)) return null
+    if (typeof (value.role ?? value.author) === 'string') return slimMessage(value, source)
     const projected = { ...value }
-    for (const key of Object.keys(projected)) projected[key] = visit(projected[key])
+    for (const key of Object.keys(projected)) projected[key] = visit(projected[key], source?.[key])
     return projected
   }
-  try { return Buffer.from(JSON.stringify(visit(JSON.parse(result.toString('utf8'))))) }
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    const source = sourceResult === result ? payload : JSON.parse(sourceResult.toString('utf8'))
+    return Buffer.from(JSON.stringify(visit(payload, source)))
+  }
   catch { throw Object.assign(new Error('invalid message history'), { status: 502 }) }
 }
 
@@ -4202,10 +4230,14 @@ export function createWizardServer(options = {}) {
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
+          // These display transforms retain row order/identity. Keep the original
+          // only for startup excerpts, so omissions are flagged without changing
+          // the existing marker/media/shareability projection order.
+          const historySource = result
           result = projectWizardFileMarkers(result, messageHistory)
           if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots)
-          if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
+          if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file
