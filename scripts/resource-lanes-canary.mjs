@@ -37,7 +37,7 @@ const server = createWizardServer({ upstreamOrigin: process.env.HERMES_ORIGIN ||
 let origin
 const event = (name, value) => { const item = { name, at: new Date().toISOString(), ...value }; results.events.push(item); console.log(JSON.stringify(item)) }
 const request = async (path, body) => {
-  const response = await fetch(origin + path, { ...(body ? { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } } : {}) })
+  const response = await fetch(origin + path, { ...(body ? { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `canary-${run}-${randomBytes(8).toString('hex')}` } } : {}) })
   const value = await response.json()
   if (!response.ok) throw new Error(`${path} ${response.status}: ${JSON.stringify(value)}`)
   return value
