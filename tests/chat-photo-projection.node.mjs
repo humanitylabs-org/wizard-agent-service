@@ -57,7 +57,7 @@ test('durable transient retry survives cursor advance and process reconstruction
   const { root, projection } = setup(t); const statePath = join(root, 'state.json')
   const message = { thread_id: provenance.thread_id, message_id: '1', role: 'user', timestamp: 1792022400, refs: [{}] }
   const scanBatch = async state => ({ evidence: state.cursor ? [] : [message], counts: {}, cursor: 1, ceiling: 1, done: true })
-  const r = createChatPhotoReconciler({ database: '', statePath, ...binding, projection, scanBatch, resolveMessage: async () => { throw new Error('temporary network') } })
+  const r = createChatPhotoReconciler({ database: '', statePath, ...binding, projection, scanBatch, resolveMessage: async () => { throw Object.assign(new Error('temporary network'), { code: 'ECONNRESET' }) } })
   await r.step(); let state = JSON.parse(readFileSync(statePath)); assert.equal(state.cursor, 1); assert.equal(state.pending.length, 1)
   state.pending[0].after = 0; atomicPhotoJson(statePath, state)
   const r2 = createChatPhotoReconciler({ database: '', statePath, ...binding, projection, scanBatch, resolveMessage: async () => ({ photos: [{ bytes: PNG, mime: 'image/png' }], unavailable: [] }) })

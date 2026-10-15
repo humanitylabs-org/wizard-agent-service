@@ -100,14 +100,17 @@ export function createPhotoProjection({ root, ownerId, authorityId, ownerLabel, 
       let record = manifest.files.find(f => f.sha256 === sha256)
       const rel = record?.path || `Photos/Chats/${sha256}.${EXT[mime]}`, target = join(base, rel)
       if (realpathSync(images) !== images || realpathSync(metadata) !== metadata) throw new Error('photo directory changed')
+      // An orphan target from a crash is not yet accounted in the manifest.
+      // Its admission must pass the same placement budget as a new copy.
+      if (!record) {
+        const used = manifest.files.reduce((n, f) => n + lstatSync(join(base, f.path)).size, 0)
+        if (!Number.isSafeInteger(maxBytes) || used + bytes.length > maxBytes) throw new Error('storage_placement_required')
+      }
       if (existsSync(target)) {
         const permissions = lstatSync(target)
         if (permissions.uid !== process.getuid() || (permissions.mode & 0o077)) throw new Error('unsafe photo file permissions')
         if (createHash('sha256').update(readPhotoBytes(target)).digest('hex') !== sha256) throw new Error('immutable photo hash mismatch')
       } else {
-        // Explicit deployment budget is a storage-placement gate, never silent truncation.
-        const used = manifest.files.reduce((n, f) => n + lstatSync(join(base, f.path)).size, 0)
-        if (!Number.isSafeInteger(maxBytes) || used + bytes.length > maxBytes) throw new Error('storage_placement_required')
         const tmp = join(images, `.${randomUUID()}.tmp`)
         const fd = openSync(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400)
         try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
@@ -151,8 +154,10 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
       }
       const processMessage = async (entry) => {
         const m = entry.message
+        let publishing = false
         try {
           const result = await resolveMessage(m)
+          publishing = true
           for (const photo of result.photos) {
             const published = await projection.publish(photo.bytes, photo.mime, { ...m, agent_id: 'main', owner_id: ownerId, authority_id: authorityId, sent_at: new Date(m.timestamp * 1000).toISOString() })
 
@@ -161,8 +166,12 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
           for (const reason of result.unavailable) unavailable(m, reason)
           return null
         } catch (e) {
-          // Storage/manifest corruption is a stop, not a historical-unavailable row.
-          if (/storage_placement|manifest|immutable photo|photo entry|checkpoint|permissions/.test(e.message)) throw e
+          // Never classify publication/integrity failures by error-message wording.
+          // Only an explicitly transient resolver failure may advance with a retry.
+          const retryCodes = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'])
+          const transient = retryCodes.has(e.code) || retryCodes.has(e.cause?.code) || [5, 6].includes(e.errcode)
+            || ['TimeoutError', 'AbortError'].includes(e.name) || e.message === 'helm_transient' || e.upstreamStatus >= 500
+          if (publishing || !transient) throw e
           const attempts = Math.min(entry.attempts + 1, 20)
           return { message: m, attempts, after: Date.now() + Math.min(3600000, 1000 * 2 ** attempts) }
         }

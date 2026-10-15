@@ -3220,7 +3220,7 @@ export function createWizardServer(options = {}) {
     const raw = Buffer.from(await result.arrayBuffer())
     if (raw.length > 2 * 1024 * 1024) throw Object.assign(new Error('Wizard Inbox response too large'), { status: 502 })
     if (inboxToken && raw.includes(Buffer.from(inboxToken))) throw Object.assign(new Error('unsafe Wizard Inbox response'), { status: 502 })
-    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus })
+    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus, upstreamStatus: result.status })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Wizard Inbox returned invalid JSON'), { status: 502 }) }
   }

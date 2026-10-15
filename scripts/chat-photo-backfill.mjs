@@ -20,7 +20,7 @@ const roots = (e.WIZARD_AGENT_ARTIFACT_ROOTS || '').split(':').filter(Boolean)
 const mediaFiles = !e.WIZARD_INBOX_INTERNAL_TOKEN && e.WIZARD_MEDIA_ROOT ? createMediaFiles({ mediaRoot: e.WIZARD_MEDIA_ROOT, agentRoot: e.WIZARD_MEDIA_AGENT_ROOT || e.WIZARD_MEDIA_ROOT, indexPath: e.WIZARD_MEDIA_INDEX_PATH || resolve(home, 'state/wizard-mobile/media-files.json') }) : null
 const inboxJson = async path => {
   const response = await fetch(`${e.WIZARD_INBOX_ORIGIN || 'http://127.0.0.1:8941'}${path}`, { headers: { Authorization: `Bearer ${e.WIZARD_INBOX_INTERNAL_TOKEN}` }, redirect: 'manual', signal: AbortSignal.timeout(8000) })
-  if (!response.ok) throw Object.assign(new Error('inbox_request_failed'), { status: response.status })
+  if (!response.ok) throw Object.assign(new Error('inbox_request_failed'), { status: response.status, upstreamStatus: response.status })
   const raw = await response.text(); if (raw.length > 2 * 1024 * 1024) throw new Error('inbox_response_limit'); return JSON.parse(raw)
 }
 const resolver = createCanonicalChatPhotoResolver({ database, ownerId, authorityId, registry, artifactRoots: roots,

@@ -103,6 +103,7 @@ export function createCanonicalChatPhotoResolver({ database, ownerId, authorityI
           fileIds.add(f.id)
           let resolved
           try { [resolved] = await resolveFiles([f.id]) } catch (error) {
+            if (error.upstreamStatus >= 500) throw error
             if ([400, 404].includes(error.status)) { unavailable.push('attachment_not_found'); continue }
             throw error
           }

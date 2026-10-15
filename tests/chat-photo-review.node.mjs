@@ -46,7 +46,7 @@ test('private permissions and accounting survive publication before checkpoint',
 test('transients remain durably pending beyond six attempts; authentication failure leaves no cursor',async t=>{
  const {root,options}=setup(t),statePath=join(root,'retry.json'), p=createPhotoProjection({root:join(root,'media'),...options})
  const message={thread_id:'wizard_123_abc',message_id:'1',role:'user',timestamp:10,refs:[{}]}
- const config={...options,statePath,projection:p,verifyAuthority:async()=>{},scanBatch:async s=>({evidence:s.cursor?[]:[message],counts:{},cursor:1,ceiling:1,done:true}),resolveMessage:async()=>{throw new Error('outage')}}
+ const config={...options,statePath,projection:p,verifyAuthority:async()=>{},scanBatch:async s=>({evidence:s.cursor?[]:[message],counts:{},cursor:1,ceiling:1,done:true}),resolveMessage:async()=>{throw Object.assign(new Error('outage'),{code:'ECONNRESET'})}}
  const r=createChatPhotoReconciler(config)
  for(let i=0;i<8;i++){await r.step();const state=JSON.parse(readFileSync(statePath));assert.equal(state.pending.length,1);state.pending[0].after=0;atomicPhotoJson(statePath,state)}
  const state=JSON.parse(readFileSync(statePath));assert.equal(state.pending[0].attempts,8);assert.equal(state.counts.unavailable,undefined)
