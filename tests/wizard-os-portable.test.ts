@@ -173,20 +173,24 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const hermes = await startHermes(STOCK)
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', appsJsonPath: appsJson })
     expect((await postRun(wizard)).status).toBe(202)
-    // Daily line: the app-provenance catalogue (every installed id/name) follows the kernel; assert on the kernel.
-    const first = String(hermes.bodies[0].instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, '')
+    const first = String(hermes.bodies[0].instructions)
     // The agent-bridge kernel replaced the URL- and path-heavy block (spec/AGENT_BRIDGE.md).
     expect(first).toContain("Wizard OS: you are the owner's agent on this box.")
     // No plugin (generic harness): the fixed kernel plus the job -> app map, one line per job.
     expect(first).toContain('- short-form video -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
     expect(first).toContain('- video editing -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
-    expect(first).not.toContain('Stopped')
+    // A stopped app does no job in the kernel/job map. It is still installed, so the separate app-provenance
+    // catalogue (live 41de73a) lists its id/name as data; check the kernel text before that catalogue.
+    expect(first.split('Installed Wizard app IDs and names (data):')[0]).not.toContain('Stopped')
+    expect(first).toContain('{"id":"stopped-app","name":"Stopped"}')
     expect(first).not.toContain('http://127.0.0.1:20002/mcp')
     expect(first).not.toContain(join(dir, 'skills'))
-    expect(first).toContain('Save only short pointer skills')
+    expect(first).toContain('Save routing-only app-job skills.')
+    expect(first).toContain('first load `wizard-builder` with skill_view')
+    expect(first).toContain('For ordinary app use:')
     writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))
     expect((await postRun(wizard)).status).toBe(202)
-    const second = String(hermes.bodies[1].instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, '')
+    const second = String(hermes.bodies[1].instructions)
     expect(second).toContain('- (no apps installed yet)')
     expect(second).not.toContain('DeFleur Video (')
   })

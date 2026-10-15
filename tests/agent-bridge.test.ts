@@ -92,6 +92,20 @@ describe('agent bridge: kernel', () => {
     expect(renderKernel(bridgeApps({ apps: [app('hello-wizard', 1)] }), { harness: 'generic' })).toContain('- diagnostics -> Hello Wizard (`hello_wizard__*`)')
   })
 
+  it('routes app development to the OS builder before ordinary job routing, including an empty box', () => {
+    for (const apps of [[], bridgeApps({ apps: [app('hello-wizard', 1)] })]) {
+      const text = renderKernel(apps)
+      expect(text).toContain('To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view')
+      expect(text.indexOf('wizard-builder')).toBeLessThan(text.indexOf('wizard-job-<job>'))
+      expect(text).toContain('follow its coding and wam workflow')
+      expect(text).toContain('For ordinary app use: Never search the disk')
+      expect(text).toContain('Use the installed app for its job.')
+      expect(text).not.toContain('An installed app beats')
+    }
+    // Non-Hermes harnesses retain their own discovery path, not a nonexistent skill_view tool.
+    expect(renderKernel([], { harness: 'generic' })).not.toContain('skill_view')
+  })
+
   it('writes one pointer skill per job, names real tools, and removes stale ones', () => {
     const dir = box([])
     const apps = bridgeApps({ apps: [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription'], skill: '' })] })
@@ -238,8 +252,7 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     const hermes = createServer(async (req, res) => {
       let body = ''
       for await (const c of req) body += c
-      // Daily line: drop the app-provenance catalogue (every installed id/name) that follows the bridge text.
-      if (req.url === '/v1/runs') seen.push(String(JSON.parse(body).instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, ''))
+      if (req.url === '/v1/runs') seen.push(JSON.parse(body).instructions)
       res.writeHead(req.url === '/v1/runs' ? 202 : 200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(req.url === '/v1/runs' ? { run_id: 'run_1', status: 'started' } : { features: {} }))
     })
@@ -263,6 +276,10 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     await post(base, 's-plugin')
     expect(seen.at(-1)).toContain('Wizard OS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
     expect(seen.at(-1)).toContain('Transcriber')
-    expect(seen.at(-1)).not.toContain('Hello Wizard')
+    // The delta names only the new app. The separate app-provenance catalogue (live 41de73a, every run) lists
+    // every installed app id/name as data, so the delta rule is checked on the text before that catalogue.
+    const delta = String(seen.at(-1)).split('Installed Wizard app IDs and names (data):')[0]
+    expect(delta).not.toContain('Hello Wizard')
+    expect(seen.at(-1)).toContain('Installed Wizard app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
   })
 })

@@ -8,7 +8,8 @@
 // The Agent Service is that client. This watcher finds Wizard threads whose newest message is such a
 // completion row, with no turn running, and starts one continuation run so the agent finishes the
 // original request without the person having to say anything. Each completion row is followed up
-// at most once (idempotency key = session + row id).
+// at most once (delegation identity when available, otherwise session + row id). Portable installs
+// inject the HTTP finder; an explicitly configured Hermes state path also enables receipt recovery.
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, ownerGate, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
@@ -56,11 +57,12 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
 }
 
 /**
- * Start the watcher. `admit(sessionId, input, idempotencyKey)` submits one run through the service's
- * normal admission path. `enabled()` is checked every tick so it turns itself off on agents that
- * join delegated work inside the run.
+ * Start the watcher. `find()` returns the pending threads ({ sessionId, messageId }).
+ * `admit(sessionId, input, idempotencyKey)` submits one run through the service's normal admission
+ * path. `enabled()` is checked every tick so it turns itself off on agents that join delegated work
+ * inside the run.
  */
-export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, allowSession = () => true, eligible = async () => true, intervalMs = 5000, log = () => {} }) {
+export function startDelegationFollowThrough({ sessionDbPath = '', find = () => findPendingFollowThroughs(sessionDbPath), admit, enabled, allowSession = () => true, eligible = async () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
   let busy = false
   const tick = async () => {
@@ -68,18 +70,21 @@ export function startDelegationFollowThrough({ sessionDbPath, admit, enabled, al
     busy = true
     try {
       if (!(await enabled())) return
-      const completions = findPendingFollowThroughs(sessionDbPath)
+      const completions = await find()
       const completionSessions = new Set(completions.map(row => row.sessionId))
       const receipts = findIdleUndeliveredHelperReceipts(sessionDbPath).filter(row => !completionSessions.has(row.sessionId))
       const touchedSessions = new Set()
       for (const pending of [...completions, ...receipts].filter(row => allowSession(row.sessionId))) {
         if (!await eligible(pending.sessionId)) continue
         if (touchedSessions.has(pending.sessionId)
-          || !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId)) continue
+          || (sessionDbPath && !continuationAllowed(sessionDbPath, pending.sessionId, pending.delegationId))) continue
         touchedSessions.add(pending.sessionId)
         const key = pending.key ?? `wizard-follow-through-${pending.sessionId}-${pending.messageId}`
-        const token = captureContinuation(sessionDbPath, pending)
-        if (!continuationCurrent(sessionDbPath, token)) continue
+        // Portable HTTP installations have no receipt DB. Preserve the exact observed
+        // completion identity; the service revalidates it over HTTP at admission/dispatch.
+        const token = sessionDbPath ? captureContinuation(sessionDbPath, pending)
+          : { kind: 'http-completion', sessionId: pending.sessionId, messageId: pending.messageId, at: pending.at }
+        if (sessionDbPath && !continuationCurrent(sessionDbPath, token)) continue
         if (done.has(key)) continue
         done.add(key)
         try {

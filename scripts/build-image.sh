@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# Build the Wizard shell image: this repo's Agent Service + wizard-ux's web/ folder.
-#   scripts/build-image.sh <path-to-wizard-ux-checkout> [image-tag]
+# Run on Thales under the shared build lock; this image contains no UX.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-ux=${1:?path to a wizard-ux checkout}
-tag=${2:-ghcr.io/humanitylabs-org/wizard-shell:dev}
-rm -rf "$here/ux" && cp -R "$ux/web" "$here/ux"
-git -C "$ux" rev-parse --short HEAD > "$here/ux/UX_COMMIT" 2>/dev/null || true
-trap 'rm -rf "$here/ux"' EXIT
-docker build -t "$tag" "$here"
-echo "built $tag"
+tag=${1:?explicit candidate image tag required}
+case "$tag" in *:latest|*:stable|*:0.2.0) printf 'Candidate tag required\n' >&2; exit 2;; esac
+docker build --label org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-agent-service -t "$tag" "$here"
