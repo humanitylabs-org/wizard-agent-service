@@ -20,6 +20,7 @@ from agent import secret_scope
 
 SOURCE = Path(__file__).resolve().parents[1] / 'hermes-plugin/wizard-heavy/__init__.py'
 spec = importlib.util.spec_from_file_location('wizard_heavy_fixture', SOURCE)
+assert spec is not None and spec.loader is not None
 plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)
 
@@ -61,7 +62,7 @@ class ScopedPluginTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *args):
+            def log_message(self, format, *args):
                 pass
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

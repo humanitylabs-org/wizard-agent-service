@@ -2,6 +2,7 @@
 """Execute on Thales only: real RPC, process, restart and shared-lock semantics."""
 import importlib.util
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import signal
@@ -98,7 +99,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((self.base / 'once').read_text(), 'x')
 
     def crash_dispatcher(self, job_id):
-        with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+        with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db, db:
             dispatcher, executor, deadline = db.execute(
                 'SELECT dispatcher_pid,pid,deadline FROM jobs WHERE id=?', (job_id,)).fetchone()
         self.assertIsNotNone(deadline)
@@ -142,7 +143,7 @@ class WorkerTests(unittest.TestCase):
         # live session leader. Recovery must never signal a database PID.
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
         try:
-            with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+            with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db, db:
                 db.execute('UPDATE jobs SET pid=? WHERE id=?', (unrelated.pid, a))
             began = time.monotonic()
             self.rpc('cancel', a)
@@ -171,7 +172,7 @@ class WorkerTests(unittest.TestCase):
         self.wait(b, ('completed',))
         self.rpc('submit', a, spec)
         self.assertEqual((self.base / 'once').read_text(), 'x')
-        with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+        with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db, db:
             self.assertEqual(db.execute('SELECT deadline FROM jobs WHERE id=?', (a,)).fetchone()[0], deadline)
 
     def test_ambiguous_claim_with_reused_pid_is_never_signalled_or_reexecuted(self):
@@ -182,7 +183,7 @@ class WorkerTests(unittest.TestCase):
         self.ids.append(a)
         unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
         try:
-            with sqlite3.connect(self.root / 'jobs.sqlite3') as db:
+            with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db, db:
                 db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,spec TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,pid INTEGER,cancel INTEGER NOT NULL DEFAULT 0,receipt TEXT,reason TEXT NOT NULL DEFAULT '')")
                 spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', "from pathlib import Path; Path('must-not-run').touch()"], 'timeout_seconds': 1}
                 db.execute('INSERT INTO jobs(id,spec,state,created,updated,pid,cancel) VALUES(?,?,?,?,?,?,?)',

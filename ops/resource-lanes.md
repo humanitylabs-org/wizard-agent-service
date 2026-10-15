@@ -6,9 +6,9 @@ This is an opt-in native Hermes plugin + Agent Service extension, not a core pat
 
 1. `wizard_heavy_submit` receives runtime-injected `session_id`. The service captures the current direct run, request watermark and effective model route. It durably writes a receipt **before** any SSH call. The agent acknowledges the receipt and finishes its ordinary turn. No active mutation owner is silently released or bypassed.
 2. A separate asynchronous outbox submits the stable job ID to a Thales SQLite spool. The dispatcher runs one process group under the **existing shared Android/VM worker lock**. Queued/remote-running jobs own no interactive admission slot.
-3. Completion admits one logical continuation using `wizard-heavy-<job_id>` through `DurableRunQueue`; both admission and dispatch revalidate ownership. Typed instructions, steering and stop invalidate old continuations. Sibling completions from the same original request can both resume, serially.
+3. Completion admits one logical continuation using `wizard-heavy-<job_id>` through `DurableRunQueue`; both admission and dispatch revalidate ownership. Typed instructions, steering and stop durably invalidate **every** old continuation, including completed siblings already admitted to the run queue. The invalidation bit is independent of the saved admission receipt ID. Sibling completions from the same original request can both resume, serially, only while that generation is still valid.
 4. Continuations pin the original provider/model with `require_model_lock:true`. Stock Hermes can expose runtime metadata only after a turn ends; the continuation then waits for that exact origin run's metadata. It never substitutes the current default route. Operator/private helper runtimes without a direct origin are refused rather than guessed.
-5. A remote restart never blindly reruns claimed commands. An orphan process keeps the worker lane occupied; after it exits, the receipt becomes `interrupted`. A service restart replays stable remote IDs and stable continuation IDs. Losing acknowledged remote state never recreates a build automatically.
+5. A remote restart never blindly reruns claimed commands. A per-command process-group owner retains the shared worker lock and execution lease across dispatcher loss, continues checking durable cancellation and the original persisted deadline, records its result, then terminates its **own** group. Recovery never signals a database PID: the caller itself pins the group identity, avoiding PID-reuse/check-then-kill races. The replacement dispatcher finalizes the receipt only after the execution lease releases, then advances the queue under the shared lock. A claim without a verified execution lease/result becomes `interrupted`, never re-executed. A service restart replays stable remote IDs and stable continuation IDs. Losing acknowledged remote state never recreates a build automatically.
 
 **Not an automatic migration:** existing synchronous terminal/build calls already running keep their leases. This feature does not stop them. New work must use the native tool. The plugin contributes a supported system-prompt section telling the model that a durable receipt is a legitimate turn boundary; it does not monkey-patch the model loop or forcibly terminate an uncooperative model. Final activation must include a model-driven tool canary.
 
@@ -42,6 +42,8 @@ WIZARD_HEAVY_TOKEN=<same-secret>
 ```
 
 `hermes plugins doctor <plugin-directory> --ci` must pass. Do not alter Hermes core. Only the selected profile/plugin runtime is in scope.
+
+The plugin resolves both variables with supported `agent.secret_scope.get_secret` inside each call and prompt callback. In a multiplexed gateway, a scoped miss stays closed even if another profile's values exist in `os.environ`. Use native plugin enable/hot-load for new sessions; a gateway restart is not required for that boundary. The service's scheduling activation remains a separate release-owner operation. Standalone plugin harnesses must run with the actual Hermes Python/import environment; do not mock `secret_scope` or add an environment fallback to make a fixture pass.
 
 ### Minimal container compatibility
 
@@ -77,9 +79,11 @@ On Thales, with external-volume `TMPDIR` and Homebrew binaries on `PATH`:
 npm ci --no-audit --no-fund
 npm test
 /opt/homebrew/bin/python3 tests/heavy-worker.remote.py
+# Actual Hermes source + its dependencies; no credentials required:
+PYTHONPATH=<hermes-source> <hermes-python> tests/heavy-plugin.remote.py
 ```
 
-Remote Python tests use temporary isolated locks and lightweight subprocesses: real duplicate RPCs, dispatcher crash, orphan handling, running/queued cancellation and inherited Android lock. They do not bypass the production lock to build anything.
+Remote Python tests use temporary isolated locks and lightweight subprocesses: real duplicate RPCs, dispatcher crash followed by cancellation, independent recovered deadline expiry, TERM-resistant descendants, unrelated/reused diagnostic PID safety, old-schema ambiguous claims, running/queued cancellation and inherited Android lock. They do not bypass the production lock to build anything. The plugin fixture uses the real Hermes `secret_scope` module with synthetic values and loopback HTTP, including fresh/concurrent profile scopes, missing scope/token/origin, and single-profile compatibility. It is not a model-selected live canary.
 
 `scripts/resource-lanes-canary.mjs` is a bounded disposable staging service using the real configured Hermes and real Thales RPC. It never restarts live. It requires an isolated `CANARY_STATE_DIR`, `HERMES_HOME`, `WIZARD_OS_HOME`, the real API key in environment, and `CANARY_REMOTE_DIR` pointing to the pushed/tested external-volume checkout.
 

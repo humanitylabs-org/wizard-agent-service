@@ -42,6 +42,8 @@ it.each(['stop', 'steer'].flatMap(action => [false, true].map(restart => ({ acti
     expect(ids).toHaveLength(2)
     expect(new Set(ids).size).toBe(2)
     for (const id of ids) expect(runs.get(id).status).toBe('queued')
+    // Positive control: both are dispatchable before the stop/steer fence.
+    for (const id of ids) await expect(integration.validate(runs.get(id))).resolves.toBeUndefined()
     const latest = runs.latestForSession('wizard_s')
     expect(ids).toContain(latest.publicRunId)
     if (action === 'stop') {
@@ -53,6 +55,9 @@ it.each(['stop', 'steer'].flatMap(action => [false, true].map(restart => ({ acti
     }
     if (restart) { await integration.close(); runs.close(); make() }
     // Human history deliberately stays unchanged: a watermark alone is not a stop fence.
+    canDispatch = true
+    await runs.tick(true); await runs.tick(true); await integration.queue.tick()
+    expect(launched).toEqual([])
     for (let n = 0; n < jobs.length; n++) {
       const saved = integration.queue.get(jobs[n].job_id)
       expect(saved.state).toBe('completed')
@@ -60,9 +65,6 @@ it.each(['stop', 'steer'].flatMap(action => [false, true].map(restart => ({ acti
       expect(saved.continuation_invalidated).toBe(true)
       await expect(integration.validate(runs.get(ids[n]))).rejects.toMatchObject({ status: 410 })
     }
-    canDispatch = true
-    await runs.tick(true); await runs.tick(true); await integration.queue.tick()
-    expect(launched).toEqual([])
     for (const id of ids) expect(['cancelled', 'failed']).toContain(runs.get(id).status)
   })
 
