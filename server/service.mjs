@@ -4475,6 +4475,10 @@ export function createWizardServer(options = {}) {
         sendJson(response, error.status, error.payload)
         return
       }
+      if (error?.code === 'dispatch_already_attempted' && !response.headersSent) {
+        sendJson(response, 409, { error: { code: error.code, message: error.message } })
+        return
+      }
       if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })

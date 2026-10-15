@@ -405,7 +405,7 @@ export class DurableRunQueue {
   async appendGuidance(publicRunId, guidance, trustedPaths = []) {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
-    if (record.dispatchAttempted) throw requestError('Delivery may already have started; this reply cannot be changed', 409)
+    if (record.dispatchAttempted) throw Object.assign(requestError('Delivery may already have started; this reply cannot be changed', 409), { code: 'dispatch_already_attempted' })
     if (record.status !== 'queued') throw requestError('queued run already started', 409)
     let guidanceContent = guidance
     if (Array.isArray(guidance) && guidance.length === 1 && guidance[0]?.role === 'user') guidanceContent = guidance[0].content

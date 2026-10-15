@@ -3,9 +3,14 @@ Run with HERMES_SOURCE pointing at an unmodified v0.22.1 checkout and its depend
 The exact upstream restart fixture claims a head then replaces authority AND adapter.
 Only model execution is an in-process deterministic answer; no real reboot is claimed.
 """
-import asyncio, json, os, sys, tempfile
+import asyncio, json, os, sys, tempfile, subprocess
 from pathlib import Path
 source = Path(os.environ['HERMES_SOURCE']).resolve()
+commit = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+if commit != '297552a9d646119871391d202509822cd86330df':
+    raise SystemExit('Acceptance requires exact Hermes v0.22.1 commit, got ' + commit)
+if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
+    raise SystemExit('Acceptance refuses a modified upstream checkout')
 sys.path.insert(0, str(source))
 import aiohttp
 from aiohttp import web
@@ -67,7 +72,7 @@ async def main():
             final = (await req('GET', run_path))[1]
             assert final['status'] in ('cancelled', 'interrupted'), final
             checks.append('canonical terminal state refreshes local queue')
-        print(json.dumps({'scope':'real upstream authority/adapter replacement through WAS; deterministic execution, not a full gateway reboot','checks':checks,'upstream_commit':os.popen('git -C '+str(source)+' rev-parse HEAD').read().strip(),'receipt':result,'artifact_dir':str(root)}, indent=2))
+        print(json.dumps({'scope':'real upstream authority/adapter replacement through WAS; deterministic execution, not a full gateway reboot','checks':checks,'upstream_commit':commit,'receipt':result,'artifact_dir':str(root)}, indent=2))
     finally:
         if proc and proc.returncode is None:
             proc.terminate()
