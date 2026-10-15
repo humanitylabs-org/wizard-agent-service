@@ -25,7 +25,7 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
-import { createBackgroundResults } from './background-results.mjs'
+import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
@@ -2637,17 +2637,25 @@ export function createWizardServer(options = {}) {
     }
     const queueHermesAdmission = async (record) => {
       let queuedBody = Buffer.from(record.body, 'utf8')
-      // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Only the
-      // service writes this marker (client runs carrying it are refused at admission); validateDispatch below
-      // re-checks the thread at dispatch (newer human turn, owner gate, lease, consumed result, boundary) and
-      // strips it. That fence stands in for the automatic helper-continuation currency check, which refuses
-      // anything past 2 h by design. Every other helper/follow-through admission keeps that check.
+      // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Its authority
+      // is the service-written queue continuation {kind:'background-recovery'} (no client path can set the
+      // continuation column; client bodies carrying the marker are refused at admission), matched against the
+      // body marker and session. For such a record the automatic helper-continuation check, which refuses
+      // anything past 2 h by design and needs a helper token this record does not have, is replaced by
+      // validateDispatch: it re-reads the thread at dispatch (newer human turn, status gate, boundary, consumed
+      // result, lease -> retry) and strips the marker. It is not the same fence: no receipt-database watermark.
+      // Every other helper/follow-through admission keeps requireHelperContinuation unchanged.
       let manualRecovery = false
-      if (backgroundResults) {
+      if (record.continuation?.kind === BACKGROUND_RECOVERY_KIND) {
         const parsed = parseJsonBody(queuedBody)
-        manualRecovery = record.runtime === 'direct' && Boolean(parsed?._wizard_background_recovery) && typeof parsed._wizard_background_recovery === 'object'
-        queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parsed)))
+        const marker = parsed?.[BACKGROUND_RECOVERY_MARKER]
+        if (!backgroundResults || record.runtime !== 'direct' || !marker || typeof marker !== 'object'
+          || marker.id !== record.continuation.id || parsed.session_id !== record.sessionId || record.continuation.session_id !== record.sessionId) {
+          throw Object.assign(new Error('recovery record does not match its admission'), { status: 400 })
+        }
+        manualRecovery = true
       }
+      if (backgroundResults) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
       let pendingWorker = null
       if (record.runtime === 'operator') {
         const value = parseJsonBody(queuedBody)
@@ -2749,7 +2757,6 @@ export function createWizardServer(options = {}) {
         try { appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
       },
     })
-    runQueueReady = runQueue.initialize()
   }
 
   if (runQueue) backgroundResults = createBackgroundResults({
@@ -2758,6 +2765,9 @@ export function createWizardServer(options = {}) {
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
     busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
   })
+  // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
+  // restart is relaunched by the first tick and must be validated, not cancelled.
+  if (runQueue) runQueueReady = runQueue.initialize()
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
@@ -4001,7 +4011,7 @@ export function createWizardServer(options = {}) {
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
-          if (Object.hasOwn(requested, '_wizard_background_recovery')) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
+          if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'
           const substantive = !operator || !isInlineOperatorRequest(requested.input)

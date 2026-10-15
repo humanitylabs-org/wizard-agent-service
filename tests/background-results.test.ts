@@ -75,7 +75,7 @@ async function fixture({ count = 205, access = false, history = false } = {}) {
   await open()
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
   owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); db?.close(); rmSync(dir, { recursive: true, force: true }) })
-  return { rows, calls, reads, sessions, finished, at, held, badHistory,
+  return { rows, calls, reads, sessions, finished, at, held, badHistory, queuePath: join(dir, 'queue.db'), close, open,
     receipt: (sessionId: string, id = 'deleg_saved_receipt') => db!.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run(id, sessionId, 'completed', 'dropped', JSON.stringify({ results: [{ task_index: 0, status: 'completed', summary: 'Saved receipt fixture findings.' }] }), finished),
     advance: (ms: number) => { skew += ms },
     failHistory: (v: boolean) => { failHistory = v },
@@ -217,7 +217,12 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     f.held.add('live_tip_202'); f.resume()
     await new Promise(r => setTimeout(r, 200))
     expect(f.calls).toHaveLength(0)
-    expect((await (await f.click(pending)).json()).status).toBe('failed')
+    // A held lease waits (retryable) instead of failing the owner's Continue for good; nothing dispatches meanwhile.
+    expect((await (await f.click(pending)).json()).status).toBe('queued')
+    f.held.clear()
+    await settled(f, 1)
+    expect(f.calls[0].session_id).toBe('wizard_compressed')
+    expect(f.calls[0]).not.toHaveProperty('_wizard_background_recovery')
   })
   it('a newer human request written to the logical compression root prevents Continue from its tip', async () => {
     const f = await fixture()
@@ -365,5 +370,82 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     f.failLease(false)
     expect((await f.click(pending)).status).toBe(202)
     await settled(f, 1)
+  })
+})
+
+// Review of 0a12f43 (manual Continue skips the automatic 2 h helper check): the skip's authority is the
+// service-written queue continuation, never the body marker a client could send.
+describe('manual Continue authority: only the service can mark a run as an owner Continue', () => {
+  const queueRow = (f: any) => {
+    const db = new DatabaseSync(f.queuePath)
+    try { return db.prepare('SELECT status, continuation_json, idempotency_key FROM wizard_run_queue').all() as any[] } finally { db.close() }
+  }
+  const clientRun = (f: any, raw: string, key: string) => fetch(`${f.base()}/wizard/hermes/v1/runs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: raw })
+  it('a client run carrying the reserved marker is refused at admission, including duplicate-key JSON', async () => {
+    const f = await fixture({ count: 1 }), r = (await f.list()).body.results[0]
+    const marker = { id: r.id, source_kind: 'transcript', read_id: r.session_id, boundary: '1', at: 9e12, delegation_id: '', message_id: '' }
+    expect((await clientRun(f, JSON.stringify({ session_id: r.session_id, input: 'x', _wizard_background_recovery: marker }), 'wizard-helper-receipt-deleg_manual_0')).status).toBe(400)
+    const dup = `{"session_id":"${r.session_id}","input":"x","_wizard_background_recovery":null,"_wizard_background_recovery":${JSON.stringify(marker)}}`
+    expect((await clientRun(f, dup, 'client-dup-key')).status).toBe(400)
+    await new Promise(r => setTimeout(r, 150))
+    expect(queueRow(f)).toHaveLength(0)
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a client run spoofing a helper idempotency key is cancelled at dispatch and never reaches Hermes', async () => {
+    const f = await fixture({ count: 1 })
+    expect((await clientRun(f, JSON.stringify({ session_id: 'wizard_manual_0', input: 'pretend helper' }), 'wizard-helper-receipt-deleg_manual_0')).status).toBe(202)
+    const deadline = Date.now() + 3000
+    while (queueRow(f)[0]?.status !== 'cancelled' && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
+    expect(queueRow(f)[0].status).toBe('cancelled')
+    expect(f.calls).toHaveLength(0)
+  })
+  it('the service records its own continuation for an owner Continue', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const r = (await f.list()).body.results[0]
+    expect((await f.click(r)).status).toBe(202)
+    expect(JSON.parse(queueRow(f)[0].continuation_json)).toEqual({ kind: 'background-recovery', id: r.id, session_id: r.session_id })
+  })
+  it('a queued record whose body carries the marker without the service continuation never dispatches', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const r = (await f.list()).body.results[0]
+    expect((await f.click(r)).status).toBe(202)
+    await f.close()
+    const db = new DatabaseSync(f.queuePath)
+    db.prepare("UPDATE wizard_run_queue SET continuation_json = 'null'").run()
+    db.close()
+    f.resume(); await f.open()
+    const deadline = Date.now() + 3000
+    while (!['cancelled', 'failed'].includes(queueRow(f)[0]?.status) && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
+    expect(['cancelled', 'failed']).toContain(queueRow(f)[0].status)
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a service continuation that does not match the body marker fails closed', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const r = (await f.list()).body.results[0]
+    expect((await f.click(r)).status).toBe(202)
+    await f.close()
+    const db = new DatabaseSync(f.queuePath)
+    db.prepare('UPDATE wizard_run_queue SET continuation_json = ?').run(JSON.stringify({ kind: 'background-recovery', id: 'bg_' + '0'.repeat(32), session_id: r.session_id }))
+    db.close()
+    f.resume(); await f.open()
+    const deadline = Date.now() + 3000
+    while (queueRow(f)[0]?.status !== 'failed' && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
+    expect(queueRow(f)[0].status).toBe('failed')
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a Continue left launching by a restart is validated and dispatched once, not cancelled', async () => {
+    const f = await fixture({ count: 1 }); f.pause()
+    const r = (await f.list()).body.results[0]
+    expect((await f.click(r)).status).toBe(202)
+    await f.close()
+    const db = new DatabaseSync(f.queuePath)
+    db.prepare("UPDATE wizard_run_queue SET status = 'launching'").run()
+    db.close()
+    f.resume(); await f.open()
+    await settled(f, 1)
+    expect(f.calls[0].session_id).toBe('wizard_manual_0')
+    expect(f.calls[0].input).toContain('owner pressed Continue')
+    expect(f.calls[0]).not.toHaveProperty('_wizard_background_recovery')
   })
 })

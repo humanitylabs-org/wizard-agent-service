@@ -15,6 +15,10 @@ const textOf = row => typeof row?.content === 'string' ? row.content : Array.isA
 const human = row => row?.role === 'user' && textOf(row).trim() && !INTERNAL.test(textOf(row)) && !['async_delegation_complete', 'internal_notification', 'system', 'hidden'].includes(row.display_kind)
 const identity = (root, source) => `bg_${createHash('sha256').update(`${root}\0${source}`).digest('hex').slice(0, 32)}`
 const error = (message, status = 409) => Object.assign(new Error(message), { status })
+// Service-written queue identity of an owner-approved manual Continue. The run queue stores it in its
+// continuation column, which no client path can set; the body marker alone carries no authority.
+export const BACKGROUND_RECOVERY_KIND = 'background-recovery'
+export const MARKER = '_wizard_background_recovery'
 
 function snapshot(rows, at) {
   const ordered = rows.map((row, n) => ({ ...row, n })).sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0) || Number(b.id || b.n) - Number(a.id || a.n))
@@ -214,19 +218,25 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (!current || current.boundary !== pending.boundary) throw error('the thread changed')
       const body = JSON.stringify({ session_id: pending.sessionId, input: pending.input,
         _wizard_background_recovery: { id, source_kind: pending.sourceKind, read_id: pending.readId, boundary: pending.boundary, at: pending.at, delegation_id: pending.delegationId || '', message_id: pending.messageId || '' } })
-      const result = await q.admit({ runtime: 'direct', sessionId, idempotencyKey: pending.key, requestHash: createHash('sha256').update(`direct\0${body}`).digest('hex'), body, trustedPaths: [] })
+      const result = await q.admit({ runtime: 'direct', sessionId, idempotencyKey: pending.key, requestHash: createHash('sha256').update(`direct\0${body}`).digest('hex'), body, trustedPaths: [],
+        continuation: { kind: BACKGROUND_RECOVERY_KIND, id, session_id: sessionId } })
       cache.at = 0
       return result
     },
     async validateDispatch(body) {
-      const marker = body?._wizard_background_recovery
-      if (!marker) return body
+      if (!body || typeof body !== 'object' || !Object.hasOwn(body, MARKER)) return body
+      const marker = body[MARKER]
+      // Never forward the reserved key, whatever its value; only the service writes a plain-object marker.
+      if (!marker || typeof marker !== 'object' || Array.isArray(marker)) throw error('invalid recovery marker', 400)
       let rows, leased
       try { rows = await threadRows(body.session_id, marker.read_id, true); leased = busy(body.session_id) || busy(marker.read_id) }
       catch (failure) { throw error(Number(failure?.status) === 404 ? 'the thread no longer exists' : 'history is temporarily unavailable', Number(failure?.status) === 404 ? 400 : 503) }
       const snap = snapshot(rows, marker.at)
-      if (snap.moved || snap.gated || leased || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
-      const { _wizard_background_recovery: _internal, ...forward } = body
+      if (snap.moved || snap.gated || snap.boundary !== marker.boundary || consumed(rows, marker.delegation_id, marker.at, marker.message_id, marker.source_kind)) throw error('recovery became stale before dispatch', 400)
+      // A turn holds the thread right now: wait (retryable) and re-check everything once it ends, rather than
+      // failing the owner's Continue for good. Nothing is dispatched while the lease is held.
+      if (leased) throw error('the thread is busy', 503)
+      const { [MARKER]: _internal, ...forward } = body
       return forward
     },
   }
