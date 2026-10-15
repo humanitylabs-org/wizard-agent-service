@@ -32,6 +32,20 @@ class ManagedMaintenance:
   p=subprocess.run(args,input=stdin,text=True,capture_output=True,timeout=timeout)
   if p.returncode:raise MaintenanceError('runtime_control_failed')
   return p.stdout
+ def host_legacy(self):
+  # No Hermes engine is shipped on the guest host. Nevertheless an existing
+  # manually installed host CLI must block maintenance for its entire lifetime.
+  for p in Path('/proc').iterdir():
+   if not p.name.isdigit() or int(p.name)==os.getpid():continue
+   try:
+    if 'docker' in (p/'cgroup').read_text():continue
+    args=(p/'cmdline').read_bytes().decode(errors='replace').split('\0')[:-1]
+    executable=Path(args[0]).name if args else ''
+    if executable=='hermes' or (executable.startswith('python') and any(Path(a).name in ['run_agent.py','cli.py'] or a in ['hermes_cli.main','gateway.run','-mhermes_cli.main','-mgateway.run'] for a in args[1:])):
+     return True
+   except (FileNotFoundError,ProcessLookupError):continue
+   except PermissionError:raise MaintenanceError('host_runtime_inventory_unknown')
+  return False
  def containers(self):
   ids=self.run(['docker','ps','-aq']).split()
   if not ids:raise MaintenanceError('runtime_inventory_unknown')
@@ -80,6 +94,7 @@ class ManagedMaintenance:
     lease={'token':token,'phase':'acquiring','created':time.time(),'runtimes':[],'containers':[]}
     self.save(lease)
    try:
+    if self.host_legacy():raise MaintenanceError('unmanaged_session_busy_close_Hermes_sessions_and_retry')
     cs=self.containers();lease['containers']=cs;self.save(lease)
     for c in cs:
      if not c['managed']:
@@ -129,6 +144,7 @@ class ManagedMaintenance:
      if not rows and not self.reservations():break
      time.sleep(.1)
     else:raise MaintenanceError('runtime_did_not_retire')
+    if self.host_legacy():raise MaintenanceError('unmanaged_session_busy_close_Hermes_sessions_and_retry')
     lease['phase']='held';self.save(lease);return self.receipt(lease)
    except Exception:
     # Compensation is token-owned; if any step fails the durable fence stays closed.
