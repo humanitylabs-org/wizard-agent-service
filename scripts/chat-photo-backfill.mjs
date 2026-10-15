@@ -54,7 +54,7 @@ if (process.argv[2] === '--survey') {
 } else if (process.argv[2] === '--backfill') {
   if (e.WIZARD_CHAT_PHOTOS_ENABLED !== '1') throw new Error('explicit activation required')
   const projection = createPhotoProjection({ root: e.WIZARD_USER_FILES_ROOT, ownerId, authorityId, ownerLabel: e.WIZARD_CHAT_PHOTOS_OWNER_LABEL, agentLabel: e.WIZARD_CHAT_PHOTOS_AGENT_LABEL, maxBytes: Number(e.WIZARD_CHAT_PHOTOS_MAX_BYTES) })
-  const reconciler = createChatPhotoReconciler({ database, ownerId, authorityId, verifyAuthority, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
+  const reconciler = createChatPhotoReconciler({ database, registryPath: registry.agentsDir, ownerId, authorityId, verifyAuthority, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
   for (let i = 0; i < 2000; i++) {
     const result = await reconciler.step(); console.log(JSON.stringify(result))
     if (result?.done) break

@@ -8,12 +8,15 @@ import json
 import re
 import sqlite3
 import sys
+import os
 
 TEST = re.compile(r'(?i)(?:\bqa\b|canary|smoke|fixture|probe|test[-_ ]session)')
 INTERNAL = ('[CONTEXT ', '[CONTEXT_', '[PRIOR CONTEXT', '[ASYNC ', '[IMPORTANT: Background', '[OUT-OF-BAND', '[Your active task', '[Your previous agent')
 
 
 def session_reason(s, owner_id):
+    if s.get('user_id') not in (None, '', owner_id):
+        return 'not_owner'
     if s['hidden'] or s['parent_session_id'] or s['profile_name'] not in (None, '', 'default'):
         return 'internal_or_private'
     try:
@@ -97,12 +100,25 @@ def photo_refs(content, role):
     return list({json.dumps(ref, sort_keys=True): ref for ref in out}.values())
 
 
-def scan(path, cursor, ceiling, owner_id, limit=250):
+def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
     c = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=2)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA query_only=ON')
     sessions = {s['id']: dict(s) for s in c.execute('SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,archived,parent_session_id,title,model_config,origin_json,created_source,transport_profile FROM sessions')}
-    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id)]
+    pins = {}
+    if registry_path:
+        try:
+            fd = os.open(os.path.join(registry_path, '.threads.json'), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            pass  # Same canonical registry contract: absent pin = main.
+        else:
+            with os.fdopen(fd) as stream:
+                if os.fstat(stream.fileno()).st_size > 8 * 1024 * 1024:
+                    raise ValueError('registry metadata too large')
+                pins = json.load(stream)['threads']
+                if not isinstance(pins, dict):
+                    raise ValueError('invalid registry metadata')
+    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id) and pins.get(sid, '') in ('', 'main')]
     ceiling = ceiling or c.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0]
     # Fetch metadata first; do not read tool content or excluded/private messages.
     # Use the canonical main inventory's session index, never scan tool content.
@@ -130,4 +146,4 @@ def scan(path, cursor, ceiling, owner_id, limit=250):
 
 
 if __name__ == '__main__':
-    print(json.dumps(scan(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 250), separators=(',', ':')))
+    print(json.dumps(scan(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 250, sys.argv[6] if len(sys.argv)>6 else ''), separators=(',', ':')))

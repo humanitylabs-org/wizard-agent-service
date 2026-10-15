@@ -124,13 +124,14 @@ export function createPhotoProjection({ root, ownerId, authorityId, ownerLabel, 
 
 // One bounded transaction: publication is idempotent, cursor+retry admission atomic.
 // A failed commit replays the page; transient failures cannot disappear behind cursor.
-export function createChatPhotoReconciler({ database, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, log = console.error }) {
+export function createChatPhotoReconciler({ database, registryPath, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, log = console.error }) {
   if (typeof resolveMessage !== 'function' || !ownerId || !SHA.test(authorityId || '')) throw new Error('canonical owner history adapter required')
   if (typeof verifyAuthority !== 'function') throw new Error('authenticated runtime verification required')
+  if (!scanBatch && !registryPath) throw new Error('canonical registry path required')
   let busy = false, stopped = false, timer
   const pendingEvents = {}
   const scan = scanBatch || (async state => {
-    const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250'], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
+    const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250', registryPath], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
     return JSON.parse(stdout)
   })
   async function step() {

@@ -3215,7 +3215,7 @@ export function createWizardServer(options = {}) {
   if (options.chatPhotos?.enabled === true) {
     if (!hermesStatePath || !options.userFilesRoot || !options.chatPhotos.statePath || !agents) throw new Error('chat photos require explicit owner media, registry and state paths')
     const authorityId = photoAuthorityId({ database: hermesStatePath, runtimeHome: bridgeOsHome, registryPath: agents.agentsDir, upstreamOrigin, hermesKey, ownerId: options.chatPhotos.ownerId, singleOwner: options.chatPhotos.singleOwner })
-    chatPhotos = createChatPhotoReconciler({ database: hermesStatePath,
+    chatPhotos = createChatPhotoReconciler({ database: hermesStatePath, registryPath: agents.agentsDir,
       verifyAuthority: createPhotoRuntimeVerifier({ database: hermesStatePath, registry: agents, ownerId: options.chatPhotos.ownerId, upstreamOrigin, hermesKey, fetchImpl }),
       statePath: options.chatPhotos.statePath, ownerId: options.chatPhotos.ownerId, authorityId,
       projection: createPhotoProjection({ root: options.userFilesRoot, ownerId: options.chatPhotos.ownerId, authorityId,
