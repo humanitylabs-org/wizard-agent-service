@@ -292,6 +292,7 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
+      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
@@ -314,6 +315,7 @@ export class DurableRunQueue {
       )
       SELECT current.public_run_id, current.session_id, current.status,
         current.waiting_reason, current.body, current.idempotency_key,
+        json_object('safe_error', json_extract(current.payload_json, '$.safe_error')) AS payload_json,
         current.created_at, current.updated_at
       FROM ranked JOIN wizard_run_queue current USING (public_run_id)
       WHERE ranked.position = 1
@@ -324,6 +326,7 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
+      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
@@ -394,6 +397,7 @@ export class DurableRunQueue {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
     if (TERMINAL.has(record.status)) return record
+    if (record.dispatchAttempted) throw requestError('Delivery outcome is not yet confirmed; refresh before stopping', 409)
     if (record.status !== 'queued') throw requestError('queued run already started', 409)
     return this._update(publicRunId, { status: 'cancelled', waitingReason: '', terminalAt: nowSeconds() })
   }

@@ -454,6 +454,7 @@ function newestRun(runs, sessionId) {
 }
 
 function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
+  if (run?.status === 'unknown') return false
   const startedAt = Number(run?.createdAt ?? 0)
   const terminalAt = Number(truth?.lastAssistantAt ?? 0)
   const latestRequestAt = Number(truth?.lastUserAt ?? 0)
@@ -528,6 +529,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               // The newest admitted run failed before any answer landed. Without this the
               // thread settles like a finished turn (Done/Defer, no reply, no Retry).
               projected.status = latestDirect.status
+              if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
             }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
@@ -2665,19 +2667,19 @@ export function createWizardServer(options = {}) {
         }
         manualRecovery = true
       }
-      if (backgroundResults) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
+      if (backgroundResults && !record.dispatchBody) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
       let pendingWorker = null
       if (record.runtime === 'operator') {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
+      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
-      if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
+      if (!record.dispatchBody && !manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
         await requireHelperContinuation(record.continuation)
       }
       // Persist the actual decorated wire payload, not just the UI input: capability and
@@ -4496,7 +4498,7 @@ export function createWizardServer(options = {}) {
       const address = server.address()
       if (address && typeof address === 'object') selfOrigin = `http://127.0.0.1:${address.port}`
     })
-    const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
+    const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
     const watcher = startDelegationFollowThrough({
       sessionDbPath: hermesStatePath,
       // Receipt delivery/gates are not exposed by stock HTTP. Retain the live recovery path

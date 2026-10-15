@@ -6,7 +6,7 @@ import { parseStatus } from './thread-status.mjs'
 
 const ID = /^[A-Za-z0-9._:-]{1,180}$/
 const WIZARD = /^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/
-const ACTIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
+const ACTIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 const INTERNAL = /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/
 const rowsOf = p => Array.isArray(p?.data) ? p.data : Array.isArray(p?.sessions) ? p.sessions : []
