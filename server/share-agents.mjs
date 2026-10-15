@@ -89,6 +89,7 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
 
   return {
     locateFile(key, expectedAgent = '') {
+      if (!expectedAgent || expectedAgent === MAIN_AGENT_ID) throw new UploadError(404, 'file_not_found')
       const candidates = registry.list().filter(a => a.id !== MAIN_AGENT_ID && (!expectedAgent || a.id === expectedAgent))
         .flatMap(a => Object.values(readLedger(a.id)).filter(f => f.id === key).map(file => ({ agent: a.id, file })))
       if (candidates.length !== 1) throw new UploadError(404, 'file_not_found')
@@ -121,7 +122,7 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
         // The agent's own Hermes knows nothing of wizard_file_ids: name the files by their path in its home.
         runFields: (text, files) => {
           const listed = files.map(({ file }) => ({
-            id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+            id: file.id, agent: agent.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
             trusted_path: posix.join(homeMount, file.path),
           }))
           return { input: `${text}\n\n[WIZARD_FILES_V1]\n${JSON.stringify(listed)}\n[/WIZARD_FILES_V1]` }

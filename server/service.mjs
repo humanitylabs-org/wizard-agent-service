@@ -3520,7 +3520,7 @@ export function createWizardServer(options = {}) {
             if (parts.length >= 2 && UPLOAD_ID.test(parts[1])) {
               const record = await uploads.getUpload(parts[1])
               const expected = record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes'
-              const agent = url.searchParams.get('agent') || (record.shareId ? expected : 'hermes')
+              const agent = url.searchParams.get('agent') || (record.share_id ? expected : 'hermes')
               if (agent !== expected) throw new UploadError(409, 'upload_agent_mismatch')
               await resolveShareAgent(agent)
             }
