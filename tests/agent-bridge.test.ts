@@ -238,8 +238,7 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     const hermes = createServer(async (req, res) => {
       let body = ''
       for await (const c of req) body += c
-      // Daily line: drop the app-provenance catalogue (every installed id/name) that follows the bridge text.
-      if (req.url === '/v1/runs') seen.push(String(JSON.parse(body).instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, ''))
+      if (req.url === '/v1/runs') seen.push(JSON.parse(body).instructions)
       res.writeHead(req.url === '/v1/runs' ? 202 : 200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(req.url === '/v1/runs' ? { run_id: 'run_1', status: 'started' } : { features: {} }))
     })
@@ -263,6 +262,10 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     await post(base, 's-plugin')
     expect(seen.at(-1)).toContain('Wizard OS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
     expect(seen.at(-1)).toContain('Transcriber')
-    expect(seen.at(-1)).not.toContain('Hello Wizard')
+    // The delta names only the new app. The separate app-provenance catalogue (live 41de73a, every run) lists
+    // every installed app id/name as data, so the delta rule is checked on the text before that catalogue.
+    const delta = String(seen.at(-1)).split('Installed Wizard app IDs and names (data):')[0]
+    expect(delta).not.toContain('Hello Wizard')
+    expect(seen.at(-1)).toContain('Installed Wizard app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
   })
 })

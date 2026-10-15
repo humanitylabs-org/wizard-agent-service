@@ -1,4 +1,5 @@
 import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
+import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { wizardOsHome } from './wizard-os-settings.mjs'
@@ -25,17 +26,32 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 }
 
 const port = Number(process.env.WIZARD_PORT || 8787)
-const requireAccess = process.env.WIZARD_REQUIRE_CF_ACCESS !== '0'
-// Daily line (live): the host Hermes state.db stays the default for the reads stock Hermes does not serve over
-// HTTP (helper follow-through, archived threads, other-surface turns). main makes it opt-in (spec/AGENT_BRIDGE.md).
-const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/state.db') : '')
+// Who may use the service: 'tailscale' (Tailscale Serve identity, the Wizard OS default), 'cloudflare'
+// (Cloudflare Access JWTs) or 'none' (box-only, e.g. behind a gateway that checks identity itself).
+// Unset keeps the earlier behaviour: tailscale when WIZARD_TAILNET_ORIGIN is set, else WIZARD_REQUIRE_CF_ACCESS.
+const authMode = process.env.WIZARD_AUTH_MODE
+  || (process.env.WIZARD_TAILNET_ORIGIN ? 'tailscale' : process.env.WIZARD_REQUIRE_CF_ACCESS === '0' ? 'none' : 'cloudflare')
+if (!['tailscale', 'cloudflare', 'none'].includes(authMode)) {
+  process.stderr.write('WIZARD_AUTH_MODE must be tailscale, cloudflare or none; the service was not started.\n')
+  process.exit(1)
+}
+const requireAccess = authMode !== 'none'
+// Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
+// spec/AGENT_BRIDGE.md "Agent adapter" lists them.
+const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
 const hermesHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
 const osHome = wizardOsHome()
 const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
 const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL ? {
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
-const accessVerifier = requireAccess ? createCloudflareAccessVerifier({
+// In a container, Tailscale Serve on the box reaches the published 127.0.0.1 port and the request arrives
+// from the container network's gateway; on a bare box it arrives from loopback.
+const accessVerifier = authMode === 'tailscale' ? createTailnetAccessVerifier({
+  origin: process.env.WIZARD_TAILNET_ORIGIN,
+  logins: process.env.WIZARD_TAILNET_LOGIN,
+  proxyPeers: [...['127.0.0.1', '::1'], ...(container ? [process.env.WIZARD_TAILNET_PROXY_PEER || containerGateway()] : [])].filter(Boolean),
+}) : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
@@ -76,6 +92,8 @@ const server = createWizardServer({
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
+  // Headless Agent Service behind a separate shell container: keep the shell's sidecar API paths.
+  uxApiCompat: process.env.WIZARD_UX_API_COMPAT === '1',
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,

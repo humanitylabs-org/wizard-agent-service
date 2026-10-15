@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer, listen } from '../server/service.mjs'
 import { FOLLOW_THROUGH_PREFIX } from '../server/delegation-follow-through.mjs'
 
@@ -12,21 +8,20 @@ import { FOLLOW_THROUGH_PREFIX } from '../server/delegation-follow-through.mjs'
 const servers: Server[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(() => r(undefined))))) })
 
-function stateDb() {
-  const path = join(mkdtempSync(join(tmpdir(), 'wizard-ft-svc-')), 'state.db')
-  const d = new DatabaseSync(path)
-  d.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, active INTEGER DEFAULT 1);
-          CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);
-          CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, started_at REAL, message_count INTEGER, model TEXT);`)
-  d.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)').run('wizard_shared', 'user', `${FOLLOW_THROUGH_PREFIX} — deleg_1] results`, Date.now() / 1000)
-  d.close()
-  return path
-}
-
 async function startHermes() {
   const posted: string[] = []
+  const completionAt = Date.now() / 1000 // a persisted message keeps its identity across reads
   const server = createServer((request, response) => {
     if (request.method === 'POST') posted.push(request.url ?? '')
+    // Stock Hermes HTTP only: no state.db anywhere in this test.
+    if (request.url?.startsWith('/api/sessions?')) {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      return response.end(JSON.stringify({ object: 'list', data: [{ id: 'wizard_shared', last_active: Date.now() / 1000, message_count: 1 }] }))
+    }
+    if (request.url?.startsWith('/api/sessions/wizard_shared/messages')) {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      return response.end(JSON.stringify({ object: 'list', data: [{ id: 7, role: 'user', content: `${FOLLOW_THROUGH_PREFIX} — deleg_1] results`, timestamp: completionAt, display_kind: 'async_delegation_complete' }] }))
+    }
     if (request.url === '/v1/capabilities') {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       return response.end(JSON.stringify({ features: { run_instructions: true, markdown_rendering: true } }))
@@ -42,9 +37,8 @@ async function startHermes() {
 describe('follow-through ownership with two services on one Hermes', () => {
   async function runFor(followThrough: boolean | undefined) {
     const hermes = await startHermes()
-    const statePath = stateDb()
     const options: Record<string, unknown> = { hermesKey: 'fixture-key', requireAccess: false, upstreamOrigin: hermes.origin,
-      hermesStatePath: statePath, sessionDbPath: statePath, joinedDelegation: 'off' }
+      joinedDelegation: 'off' }
     if (followThrough !== undefined) options.followThrough = followThrough
     const wizard = createWizardServer(options)
     servers.push(wizard)
@@ -53,9 +47,7 @@ describe('follow-through ownership with two services on one Hermes', () => {
     return hermes.posted.filter((u) => u.includes('/v1/runs'))
   }
 
-  // Daily line: follow-through admits only receipt-backed completions (helper receipts, owner gates); its positive
-  // cases live in delegation-follow-through / helper-* tests. This file keeps the staging-copy guarantee below.
-  it.skip('the default service starts the follow-through turn (control)', async () => {
+  it('the default service starts the follow-through turn (control)', async () => {
     expect((await runFor(undefined)).length).toBeGreaterThan(0)
   }, 15000)
 
