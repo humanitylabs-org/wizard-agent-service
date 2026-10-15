@@ -1,0 +1,7 @@
+name: wizard-heavy
+version: 0.1.0
+description: Submit remote heavy work durably without holding a conversation open.
+provides_tools:
+  - wizard_heavy_submit
+  - wizard_heavy_status
+  - wizard_heavy_cancel
