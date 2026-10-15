@@ -1,11 +1,11 @@
 ---
 wizard: 0.2
-id: wizard-shell
-name: Wizard
-type: view
-category: interface
-version: 0.2.0
-summary: "The Wizard shell: chats, launcher, voice and apps on top of Hermes Agent."
+id: wizard-agent-service
+name: Wizard Agent Service
+type: service
+category: system
+version: 0.3.0-candidate.20261012
+summary: "The Wizard API: chats, runs, approvals, voice and the one app gateway. Shells install separately."
 icon: icon.png
 license: MIT
 source: https://github.com/humanitylabs-org/wizard-agent-service
@@ -13,42 +13,31 @@ runtime:
   kind: runtipi
   config: runtipi/config.json
   compose: runtipi/docker-compose.yml
-view:
-  path: /wizard-ux/
-  port: 8787
 system: true
 provides:
-- shell
+- agent-service
 uses:
 - hermes-agent
 - transcriber
 - files
-needs:
-- mic
-- notifications
-- files
+skill: skill/SKILL.md
 health: /wizard/health
+mcp:
+  path: /wizard/mcp
+  port: 8787
 ---
 
-# Wizard (the shell)
+# Wizard Agent Service
 
-The system front end of a Wizard box ([wizard-os spec/SHELL.md](https://github.com/humanitylabs-org/wizard-os/blob/main/spec/SHELL.md)): chats with your agent, the launcher and dock, voice, notifications, and the other apps' screens.
+The headless half of the Wizard shell ([wizard-os DECISIONS #36](https://github.com/humanitylabs-org/wizard-os/blob/main/docs/DECISIONS.md)):
+it fills the `agent-service` spot and serves the `/wizard/...` API that every shell talks to.
+The Wizard shell itself ([wizard-ux](https://github.com/humanitylabs-org/wizard-ux)) is a separate view app
+in the `shell` spot; either can be updated or replaced without touching the other.
 
-One container holds two things:
-- **Wizard Agent Service** (this repo): sits in front of the `hermes-agent` app's API (`http://hermes-agent-engine:8642`), owns threads, runs, approvals, files and voice, and tells the agent which apps are installed.
-- **Wizard UX** ([wizard-ux](https://github.com/humanitylabs-org/wizard-ux)): static web files served at `/wizard-ux/`.
-
-## What it reads and writes
-
-- Hermes's session history (`hermes-agent` app data), **read-only**, so chats started anywhere show up here.
-- `media/` (the box's user-files folder, the same one the Files app shows): attachments you send land in `media/Inbox/<date>/`.
-- Its own state in its app-data folder: settings, launcher, thread state.
+- Sits in front of the agent's API (`hermes-agent`, or the box's own Hermes in alongside mode).
+- Owns threads, runs, approvals, files and voice; its state lives in its own app-data folder, so a shell
+  update never touches it.
+- Serves the one `wizard` MCP gateway (`/wizard/mcp`) that carries every installed app's tools.
 - Voice goes to the `transcriber` app. No cloud speech service.
 
-## Owner setup
-
-- Install `hermes-agent` first and set its model provider.
-- `HERMES_API_KEY`: the same API key as the `hermes-agent` app (in its settings).
-- Optional: `WIZARD_ROUTER_URL` / `WIZARD_ROUTER_MODEL` / `WIZARD_ROUTER_KEY` turn on the fast orb command router. Without them, every orb request goes to the agent.
-
-Reach it over Tailscale or a Cloudflare Tunnel. Its port is published on the box's loopback only.
+Reach it through the shell. Its port is published on the box's loopback only.

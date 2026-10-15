@@ -147,6 +147,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
     if (!id || seen.has(id)) continue
     // The shell is the thing drawing the launcher; it never gets a tile of its own.
     if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
+    // Agents are not apps (spec/AGENTS.md): an agent's container never gets a launcher tile; it lives in Agents.
+    if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url
       : app.view && typeof app.view.open === 'string' && SAFE_URL.test(app.view.open) ? app.view.open : ''
@@ -222,6 +224,9 @@ export function bootstrapPayload({ settings, settingsSource, capabilities }) {
       transcribe: capabilities.voice ? '/wizard/voice/transcribe' : '',
       route: capabilities.router ? '/wizard/v1/route' : '',
       upload: capabilities.files ? '/wizard/files/upload' : '',
+      uploads: capabilities.resumable_uploads ? '/wizard/v1/uploads' : '',
+      shares: capabilities.resumable_uploads ? '/wizard/v1/shares' : '',
+      user_files: capabilities.upload_destinations ? '/wizard/v1/user-files' : '',
     },
   }
 }

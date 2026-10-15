@@ -1,60 +1,17 @@
-name: Image
-# Publishes ghcr.io/humanitylabs-org/wizard-shell:<runtipi version> (amd64 + arm64): this repo's Agent Service
-# plus wizard-ux's web/ folder, the image runtipi/docker-compose.yml pulls. The smoke test runs before every push,
-# so a broken image is never published. Needs wizard-ux to be readable by this repo's token (public).
+name: Candidate image recipe
+# Candidate build/publish runs ONLY on Thales under the shared worker lock.
+# This workflow validates packaging lightly; no image publication or heavy build on hosted runners.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-    inputs:
-      ux_ref:
-        description: wizard-ux ref to bundle
-        default: daily
 permissions:
   contents: read
-  packages: write
-concurrency:
-  group: image-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
-  image:
+  recipe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: humanitylabs-org/wizard-ux
-          ref: ${{ inputs.ux_ref || 'daily' }}
-          path: .ux-src
-      - name: Recipe, config and wizard.md agree on the version
-        id: v
+      - name: Validate candidate metadata
         run: |
-          V=$(python3 -c 'import json; print(json.load(open("runtipi/config.json"))["version"])')
-          grep -q "ghcr.io/humanitylabs-org/wizard-shell:$V}" runtipi/docker-compose.yml
-          grep -q "^version: $V\$" wizard.md
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-      - name: Bundle the UX
-        run: |
-          cp -R .ux-src/web ux
-          git -C .ux-src rev-parse --short HEAD > ux/UX_COMMIT
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: "Smoke test (amd64): container boots and /wizard/health answers"
-        run: |
-          docker buildx build --load -t wizard-shell:ci .
-          docker run -d --name ws -p 127.0.0.1:8787:8787 -e WIZARD_HERMES_API_KEY=ci-placeholder-key wizard-shell:ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8787/wizard/health && exit 0; sleep 1; done
-          docker logs ws; exit 1
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish (amd64 + arm64)
-        run: |
-          V='${{ steps.v.outputs.version }}'
-          docker buildx build --push --platform linux/amd64,linux/arm64 \
-            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
-            -t "ghcr.io/humanitylabs-org/wizard-shell:$V" \
-            -t "ghcr.io/humanitylabs-org/wizard-shell:main-${GITHUB_SHA::7}" .
+          python3 -c 'import json; x=json.load(open("runtipi/config.json")); assert x["id"] == "wizard-agent-service"; assert "candidate" in x["version"]'
+          test -f wizard.md
+          test -f Dockerfile

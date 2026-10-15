@@ -110,6 +110,17 @@ export function createFollowThroughFinder({ request, busy = () => false, prefix,
   }
 }
 
+/** Revalidate a service-captured HTTP completion; no receipt/state.db authority is invented. */
+export async function requireHttpContinuation(request, token, prefix, now = Date.now()) {
+  const stale = () => Object.assign(new Error('Helper request is no longer current'), { status: 410 })
+  if (token?.kind !== 'http-completion' || !token.sessionId || !Number.isSafeInteger(token.messageId)
+    || token.messageId <= 0 || !Number.isFinite(token.at) || token.at > now / 1000
+    || now / 1000 - token.at > 2 * 3600) throw stale()
+  const [last] = await latestMessages(request, token.sessionId, 1)
+  if (!last || last.role !== 'user' || Number(last.id) !== token.messageId || Number(last.timestamp) !== token.at
+    || !(last.display_kind === FOLLOW_THROUGH_DISPLAY_KIND || String(last.content ?? '').startsWith(prefix))) throw stale()
+}
+
 function isHumanSession(session) {
   const id = String(session?._lineage_root_id ?? session?.id ?? '')
   return HUMAN_SESSION_SOURCES.has(String(session?.source ?? '').toLowerCase()) || HUMAN_ID_PREFIXES.some((p) => id.startsWith(p))

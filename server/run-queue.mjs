@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
@@ -109,10 +110,18 @@ export class DurableRunQueue {
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
     `)
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
+    }
   }
 
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
+    // Normalize older terminal receipts without replaying or changing saved requests.
+    for (const record of this._rows("status = 'completed' AND runtime = 'direct' AND payload_json LIKE '%Provider authentication failed:%'")) {
+      const payload = normalizeProviderPreflightFailure(record.payload)
+      if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
+    }
     await this.tick(true)
     if (this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
@@ -138,6 +147,7 @@ export class DurableRunQueue {
       idempotencyKey: row.idempotency_key,
       requestHash: row.request_hash,
       body: row.body,
+      continuation: parseJson(row.continuation_json, null),
       trustedPaths: parseJson(row.trusted_paths_json, []),
       status: row.status,
       upstreamRunId: row.upstream_run_id,
@@ -173,6 +183,16 @@ export class DurableRunQueue {
     if (!existing) return null
     if (existing.sessionId !== sessionId || existing.requestHash !== requestHash) throw requestError('idempotency key conflict', 409)
     return existing
+  }
+
+  /** Durable exact admission lookup: replay does not depend on which run is currently latest. */
+  byIdempotencyKey(runtime, key) { return this._existing(runtime, key) }
+
+  byBackgroundRecovery(id, sessionId) {
+    const row = this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime='direct' AND session_id=? AND json_extract(body,'$._wizard_background_recovery.id')=?
+      ORDER BY created_at LIMIT 1`).get(sessionId, id)
+    return row ? this._record(row) : null
   }
 
   admittedVoiceRun(runtime, sessionId, audioPaths) {
@@ -317,7 +337,9 @@ export class DurableRunQueue {
     }
   }
 
-  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [] }) {
+  // `continuation` is service authority (helper tokens; {kind:'background-recovery'} lets a manual Continue skip the
+  // automatic helper check). Never pass a caller-supplied value here.
+  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
@@ -340,9 +362,9 @@ export class DurableRunQueue {
       this.database.prepare(`
         INSERT INTO wizard_run_queue (
           public_run_id, runtime, session_id, idempotency_key, request_hash, body,
-          trusted_paths_json, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt)
+          trusted_paths_json, status, created_at, updated_at, continuation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt, JSON.stringify(continuation))
       this.database.exec('COMMIT')
     } catch (error) {
       try { this.database.exec('ROLLBACK') } catch { /* already rolled back */ }
@@ -428,6 +450,8 @@ export class DurableRunQueue {
     if (!force && nowSeconds() - record.updatedAt < 0.7) return record
     try {
       const result = await this.lookup(record)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
       return this._update(record.publicRunId, {
         status: capacityStatus,
@@ -447,6 +471,8 @@ export class DurableRunQueue {
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const status = safeStatus(result?.capacityStatus ?? result?.status ?? result?.payload?.status)
       current = this._update(record.publicRunId, {
         status,
@@ -461,6 +487,9 @@ export class DurableRunQueue {
       return current
     } catch (error) {
       const status = Number(error?.status)
+      if (status === 410 && (current.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(current.idempotencyKey))) {
+        return this._update(record.publicRunId, { status: 'cancelled', payload: { status: 'cancelled', safe_error: 'The helper request is no longer current.' }, waitingReason: '', terminalAt: nowSeconds() })
+      }
       const retry = error instanceof TypeError || RETRIABLE.has(status)
       return this._update(record.publicRunId, retry
         ? { status: 'queued', waitingReason: status === 429 ? 'provider_busy' : 'capacity', retryAfter: nowSeconds() + this.retryDelayMs / 1000 }

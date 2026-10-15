@@ -4,6 +4,12 @@ import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { wizardOsHome } from './wizard-os-settings.mjs'
+import { readFileSync } from 'node:fs'
+
+const secretFile = (path) => {
+  if (!path) return ''
+  try { return readFileSync(path, 'utf8').trim() } catch { return '' }
+}
 
 const key = process.env.WIZARD_HERMES_API_KEY
 if (!key) {
@@ -79,6 +85,7 @@ const server = createWizardServer({
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   requireAccess,
+  helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
@@ -97,6 +104,7 @@ const server = createWizardServer({
   appManagerHosts: list(process.env.WIZARD_APP_MANAGER_HOSTS),
   appReservedPorts: [port, Number(process.env.WIZARD_APPS_PORT || 0)].filter(Boolean),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
+  subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
   // Headless Agent Service behind a separate shell container: keep the shell's sidecar API paths.
   uxApiCompat: process.env.WIZARD_UX_API_COMPAT === '1',
@@ -107,8 +115,18 @@ const server = createWizardServer({
   mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
+  // Resumable uploads and shares (server/uploads.mjs). Size is bounded only by free disk minus the reserve.
+  uploadStatePath: process.env.WIZARD_UPLOAD_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'uploads.sqlite3'),
+  uploadStagingDir: process.env.WIZARD_UPLOAD_STAGING_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'upload-staging'),
+  ...(process.env.WIZARD_UPLOAD_RESERVE_BYTES ? { uploadReserveBytes: Number(process.env.WIZARD_UPLOAD_RESERVE_BYTES) } : {}),
+  ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
+  // The owner's user-files root on this host (Runtipi's media/ folder on a Wizard OS box). When set, an
+  // upload created with a destination is placed there, and the Files app can list it. Separate from
+  // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
+  userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
+  userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // Agent bridge: gateway token ($WIZARD_MCP_TOKEN or <WIZARD_OS_HOME>/mcp-token) and the per-thread app snapshots.
   wizardOsHome: osHome,
@@ -119,6 +137,18 @@ const server = createWizardServer({
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
+  // Agents (spec/AGENTS.md): folders under <WIZARD_OS_HOME>/agents; containers via the host agent-runtime helper.
+  ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
+  ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),
+  agentRuntimeUrl: process.env.WIZARD_AGENT_RUNTIME_URL || '',
+  agentRuntimeToken: process.env.WIZARD_AGENT_RUNTIME_TOKEN || secretFile(process.env.WIZARD_AGENT_RUNTIME_TOKEN_FILE),
+  agentDeliveryToken: process.env.WIZARD_AGENT_DELIVERY_TOKEN || secretFile(process.env.WIZARD_AGENT_DELIVERY_TOKEN_FILE),
+  agentUpstreamMode: process.env.WIZARD_AGENT_UPSTREAM === 'network' ? 'network' : 'host',
+  agentUpstreamHost: process.env.WIZARD_AGENT_UPSTREAM_HOST || '127.0.0.1',
+  ...(process.env.WIZARD_AGENT_BASE_PORT ? { agentBasePort: Number(process.env.WIZARD_AGENT_BASE_PORT) } : {}),
+  ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
+  // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
+  agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
 // The apps origin listener (serve it on its own HTTPS port, e.g. `tailscale serve --https=8444`): app documents only.
