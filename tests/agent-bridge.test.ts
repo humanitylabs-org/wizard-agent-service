@@ -238,8 +238,7 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     const hermes = createServer(async (req, res) => {
       let body = ''
       for await (const c of req) body += c
-      // Daily line: drop the app-provenance catalogue (every installed id/name) that follows the bridge text.
-      if (req.url === '/v1/runs') seen.push(String(JSON.parse(body).instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, ''))
+      if (req.url === '/v1/runs') seen.push(JSON.parse(body).instructions)
       res.writeHead(req.url === '/v1/runs' ? 202 : 200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(req.url === '/v1/runs' ? { run_id: 'run_1', status: 'started' } : { features: {} }))
     })

@@ -4371,12 +4371,13 @@ export function createWizardServer(options = {}) {
   })
   if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
-  if (options.followThrough !== false && hermesStatePath) {
+  if (options.followThrough !== false) {
     let selfOrigin = ''
     server.on('listening', () => {
       const address = server.address()
       if (address && typeof address === 'object') selfOrigin = `http://127.0.0.1:${address.port}`
     })
+    const LIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
     const watcher = startDelegationFollowThrough({
       sessionDbPath: hermesStatePath,
       // Receipt delivery/gates are not exposed by stock HTTP. Retain the live recovery path

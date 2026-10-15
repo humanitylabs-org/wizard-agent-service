@@ -173,8 +173,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const hermes = await startHermes(STOCK)
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', appsJsonPath: appsJson })
     expect((await postRun(wizard)).status).toBe(202)
-    // Daily line: the app-provenance catalogue (every installed id/name) follows the kernel; assert on the kernel.
-    const first = String(hermes.bodies[0].instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, '')
+    const first = String(hermes.bodies[0].instructions)
     // The agent-bridge kernel replaced the URL- and path-heavy block (spec/AGENT_BRIDGE.md).
     expect(first).toContain("Wizard OS: you are the owner's agent on this box.")
     // No plugin (generic harness): the fixed kernel plus the job -> app map, one line per job.
@@ -189,7 +188,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     expect(first).toContain('Save only short pointer skills')
     writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))
     expect((await postRun(wizard)).status).toBe(202)
-    const second = String(hermes.bodies[1].instructions).replace(/^Installed Wizard app IDs and names \(data\):.*$/gmu, '')
+    const second = String(hermes.bodies[1].instructions)
     expect(second).toContain('- (no apps installed yet)')
     expect(second).not.toContain('DeFleur Video (')
   })
