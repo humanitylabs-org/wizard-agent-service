@@ -214,10 +214,12 @@ export function createUploadStore(options) {
   async function createUpload(input, { targetKey = 'files' } = {}) {
     const spec = fileSpec(input)
     const existing = existingUpload(spec)
+    if (existing && existing.target !== targetKey) throw new UploadError(409, 'client_upload_id_conflict')
     if (existing) return { record: existing, replayed: true }
     ensureSpace(target(targetKey).stagingDir, [spec.bytes])
     const prepared = await prepareUpload(spec, targetKey)
     const raced = existingUpload(spec)
+    if (raced && raced.target !== targetKey) throw new UploadError(409, 'client_upload_id_conflict')
     if (raced) return { record: raced, replayed: true }
     return { record: insertUpload(prepared, { clientUploadId: spec.clientUploadId }), replayed: false }
   }

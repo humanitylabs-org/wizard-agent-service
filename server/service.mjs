@@ -40,6 +40,7 @@ import { requireCurrentContinuation, helperContinueRequestAllowed } from './help
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { controlBoundary, machineCapabilityPath } from './control-boundary.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -3402,9 +3403,14 @@ export function createWizardServer(options = {}) {
         if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
         url.pathname = '/' + route
       }
+      if (url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request)
+        && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: appRouteOptions.controlOrigins,
+          selfOrigin, appsOrigin: options.appsOrigin || '' })) {
+        sendJson(response, 403, { error: 'same_origin_required' }); return
+      }
       // Token routes (the agent gateway, its context) and health check their own callers; everything else is the
       // owner's. Containers on the box (installed apps, other services) get no sessions/runs/files authority here.
-      if (!requireAccess && !options.appLifecycleAccess && !['/wizard/health', '/wizard/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && !boxOwner(request)) {
+      if (!requireAccess && !options.appLifecycleAccess && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !boxOwner(request)) {
         sendJson(response, 403, { error: 'access_required' }); return
       }
       if (await appsViews(request, response, url)) return
@@ -3469,9 +3475,11 @@ export function createWizardServer(options = {}) {
               const input = parseJsonBody(await readBoundedBody(request, 16 * 1024))
               // A destination (the Files app) places the finished file in the user-files root: in the
               // given folder, or Inbox/<YYYY-MM-DD> in the owner's time zone when no folder is given.
-              let targetKey = 'files'
+              const routed = await resolveShareAgent(input.agent || '')
+              let targetKey = routed.target
               const destination = parseDestination(input?.destination)
               if (destination) {
+                if (routed.agent !== MAIN_SHARE_AGENT) throw new UploadError(409, 'private_destination_forbidden')
                 if (!userFiles) throw new UploadError(409, 'destination_unavailable')
                 if (destination.folder) userFiles.checkFolder(destination.folder)
                 targetKey = userFiles.targetKey({ folder: destination.folder, timeZone: ownerTimeZone() })
@@ -3479,6 +3487,13 @@ export function createWizardServer(options = {}) {
               const { record, replayed } = await uploads.createUpload(input, { targetKey })
               sendJson(response, 201, uploads.publicUpload(record), { 'Idempotency-Replayed': String(replayed) })
               return
+            }
+            if (parts.length >= 2 && UPLOAD_ID.test(parts[1])) {
+              const record = await uploads.getUpload(parts[1])
+              const agent = url.searchParams.get('agent') || 'hermes'
+              const expected = record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes'
+              if (agent !== expected) throw new UploadError(409, 'upload_agent_mismatch')
+              await resolveShareAgent(agent)
             }
             if (parts.length >= 2 && !UPLOAD_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
             if (parts.length === 2 && request.method === 'GET') {
@@ -3867,6 +3882,19 @@ export function createWizardServer(options = {}) {
       if (url.pathname === '/wizard/files/upload' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/octet-stream')) { sendJson(response, 415, { error: 'bytes_required' }); return }
+        const uploadAgent = url.searchParams.get('agent') || 'hermes'
+        const routed = await resolveShareAgent(uploadAgent)
+        if (routed.agent !== MAIN_SHARE_AGENT) {
+          if (!uploads) throw new UploadError(503, 'service_unavailable')
+          const bytes = Number(request.headers['content-length'])
+          const input = { client_upload_id: String(request.headers['x-wizard-upload-id'] || `web-${randomUUID()}`),
+            filename: request.headers['x-wizard-filename'], mime: request.headers['x-wizard-mime'], bytes }
+          const { record } = await uploads.createUpload(input, { targetKey: routed.target })
+          if (record.offset !== 0) throw new UploadError(409, 'use_resumable_upload')
+          await uploads.patchUpload(record.id, 0, request)
+          const complete = await uploads.completeUpload(record.id)
+          sendJson(response, 201, { file: uploads.publicUpload(complete).file }); return
+        }
         const filename = safeHeader(request.headers['x-wizard-filename'], 'uploaded-file', 240).replaceAll('/', '_').replaceAll('\\', '_')
         const mimeType = safeHeader(request.headers['x-wizard-mime'], 'application/octet-stream', 160)
         const data = await readBoundedBody(request, WIZARD_FILE_UPLOAD_LIMIT)
@@ -4075,6 +4103,16 @@ export function createWizardServer(options = {}) {
         if (agentCtx) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
+              const value = JSON.parse(agentResolution.body.toString('utf8'))
+              if (value.wizard_file_ids) {
+                const routed = await resolveShareAgent(agentResolution.agentId, { delivering: true })
+                const files = shareRouting.filesForAgent(agentResolution.agentId, value.wizard_file_ids)
+                Object.assign(value, routed.runFields(value.input || '', files))
+                delete value.wizard_file_ids
+                agentResolution.body = Buffer.from(JSON.stringify(value))
+              }
+            }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
               request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
@@ -4502,7 +4540,7 @@ export function createWizardServer(options = {}) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
-      if (error instanceof AgentError && !response.headersSent) {
+      if ((error instanceof AgentError || error instanceof UploadError) && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
       }

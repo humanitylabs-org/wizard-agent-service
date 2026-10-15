@@ -26,7 +26,7 @@ function cleanName(value) {
 export function createShareAgentRouting({ registry, homeMount = '/opt/data', now = () => new Date(), mainThreadExists }) {
   const agentDir = (id) => join(registry.agentsDir, id)
   const inboxRoot = (id) => join(agentDir(id), 'home', 'inbox')
-  const stagingDir = (id) => join(agentDir(id), 'upload-staging')
+  const stagingDir = (id) => join(agentDir(id), 'home', '.wizard-upload-staging')
   // Upload id → stored file, so a completion retried after a crash finds what was already stored.
   const ledgerPath = (id) => join(stagingDir(id), 'stored.json')
   const readLedger = (id) => { try { return JSON.parse(readFileSync(ledgerPath(id), 'utf8')) } catch { return {} } }
@@ -87,6 +87,15 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
   }
 
   return {
+    filesForAgent(id, ids) {
+      if (!Array.isArray(ids) || ids.length > 8 || ids.some(x => typeof x !== 'string')) throw new UploadError(400, 'invalid_files')
+      const ledger = Object.values(readLedger(id))
+      return ids.map(key => {
+        const file = ledger.find(f => f.id === key)
+        if (!file || !existsSync(join(agentDir(id), 'home', file.path))) throw new UploadError(409, 'file_agent_mismatch')
+        return { file }
+      })
+    },
     uploadTarget(key) {
       const match = AGENT_TARGET.exec(String(key))
       if (!match || match[1] === MAIN_AGENT_ID || !registry.read(match[1])) return null
