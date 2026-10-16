@@ -576,6 +576,20 @@ export function connectionRow(identity, payload, now) {
   if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT || payload.provider !== identity.id) {
     return unavailable(identity, PROVIDER_ERROR, `${identity.name} app answered with an unknown contract.`)
   }
+  // Explicit account inventory is authoritative, including an empty array. Never
+  // fall back to a singleton/host credential when Hermes reports zero accounts.
+  if (Array.isArray(payload.accounts)) {
+    const seen = new Set()
+    const accounts = payload.accounts.filter(a => a && /^[a-zA-Z0-9_-]{1,80}$/u.test(a.id) && !seen.has(a.id) && seen.add(a.id)).map(a => {
+      const usage = a.usage && typeof a.usage === 'object' ? a.usage : null
+      return { id: `${identity.id}:${a.id}`, providerId: identity.id, providerName: identity.name,
+        name: text(a.name, 80) || identity.name, email: text(a.email, 80) || null,
+        plan: text(a.plan, 40) || null, status: usage ? 'ok' : 'unavailable',
+        fetchedAt: isoTime(usage?.fetchedAt), limits: connectionLimits(usage), paid: connectionPaid(usage?.paid),
+        error: usage ? null : { code: PROVIDER_ERROR, message: 'Usage unavailable' } }
+    })
+    return { ...identity, accounts, accountCount: accounts.length, status: 'ok', fetchedAt: new Date(now()).toISOString(), limits: [], paid: null, plan: null, error: null }
+  }
   const plan = text(payload.plan, 40) || null
   const reported = payload.error && typeof payload.error === 'object' ? payload.error : null
   const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage : null

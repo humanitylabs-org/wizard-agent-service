@@ -10,7 +10,14 @@ import math
 import time
 from datetime import timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from importlib.util import spec_from_file_location, module_from_spec
+from pathlib import Path
+
+_spec = spec_from_file_location('wizard_provider_accounts', Path(__file__).with_name('provider_accounts.py'))
+assert _spec is not None and _spec.loader is not None
+_accounts = module_from_spec(_spec)
+_spec.loader.exec_module(_accounts)
 
 router = APIRouter()
 _CACHE: dict = {"at": 0.0, "value": None}
@@ -69,3 +76,13 @@ def get_chatgpt_usage():
         value = {"ok": False, "reason": f"ChatGPT usage read failed ({type(e).__name__})."}
     _CACHE.update(at=now, value=value)
     return value
+
+
+@router.get('/provider-accounts/{provider}')
+def get_provider_accounts(provider: str):
+    if provider not in _accounts.PROVIDERS:
+        raise HTTPException(404, 'Unknown provider')
+    try:
+        return _accounts.provider_accounts(provider)
+    except Exception:
+        raise HTTPException(503, 'Hermes account inventory unavailable') from None
