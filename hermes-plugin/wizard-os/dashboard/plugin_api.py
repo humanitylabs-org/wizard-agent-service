@@ -10,7 +10,9 @@ import math
 import time
 from datetime import timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
+import json
+
 from importlib.util import spec_from_file_location, module_from_spec
 from pathlib import Path
 
@@ -18,8 +20,53 @@ _spec = spec_from_file_location('wizard_provider_accounts', Path(__file__).with_
 assert _spec is not None and _spec.loader is not None
 _accounts = module_from_spec(_spec)
 _spec.loader.exec_module(_accounts)
+_lspec = spec_from_file_location('wizard_account_lifecycle', Path(__file__).with_name('account_lifecycle.py'))
+assert _lspec is not None and _lspec.loader is not None
+_lifecycle = module_from_spec(_lspec)
+_lspec.loader.exec_module(_lifecycle)
 
 router = APIRouter()
+
+
+@router.get('/provider-accounts/{provider}/operations/{operation}')
+def account_operation_status(provider: str, operation: str, response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    try:
+        return _lifecycle.broker.poll(provider, operation)
+    except _lifecycle.BrokerError:
+        raise HTTPException(404, 'Unknown operation') from None
+
+
+@router.post('/provider-accounts/{provider}/operations')
+async def account_operation(provider: str, request: Request, response: Response):
+    # Stock dashboard auth protects all plugin routes. Require a non-simple
+    # request too: cross-origin forms cannot initiate provider operations.
+    response.headers['Cache-Control'] = 'no-store'
+    if request.headers.get('X-Wizard-Account-Action') != '1' or request.headers.get('content-type', '').split(';')[0] != 'application/json':
+        raise HTTPException(403, 'Account action header required')
+    if request.headers.get('sec-fetch-site') == 'cross-site':
+        raise HTTPException(403, 'Cross-site action rejected')
+    raw = b''
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > 4096:
+            raise HTTPException(413, 'Request too large')
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) - {'action', 'target', 'label', 'confirmed', 'operation', 'code'}:
+            raise _lifecycle.BrokerError('Invalid request')
+        action = body.get('action')
+        if action == 'cancel':
+            return _lifecycle.broker.cancel(provider, body.get('operation'))
+        if action == 'submit':
+            return _lifecycle.broker.submit(provider, body.get('operation'), body.get('code'))
+        return _lifecycle.broker.start(provider, action, body.get('target'), body.get('label', ''), body.get('confirmed'))
+    except _lifecycle.BrokerError as error:
+        raise HTTPException(409, str(error)) from None
+    except (ValueError, TypeError):
+        raise HTTPException(409, 'Invalid account request') from None
+    except Exception:
+        raise HTTPException(503, 'Account broker unavailable; check inventory before retrying') from None
 _CACHE: dict = {"at": 0.0, "value": None}
 _TTL = 60.0
 

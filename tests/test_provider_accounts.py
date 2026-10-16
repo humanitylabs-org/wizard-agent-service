@@ -65,7 +65,7 @@ class AccountsTest(unittest.TestCase):
     def test_claude_is_not_invented_from_another_volume(self):
         out = m.provider_accounts('claude', lambda _: [], self.fetch)
         self.assertEqual(out['accountCount'], 0)
-        self.assertFalse(out['actions']['add'])
+        self.assertTrue(out['actions']['add'])
 
     def test_labels_mask_email_and_credential_like_values(self):
         out = m.provider_accounts('chatgpt', lambda _: [row(label='private@example.com')], self.fetch)
