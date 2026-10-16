@@ -170,7 +170,7 @@ class Broker:
                 if set(q) <= allowed and q.get('response_type') == ['code'] and q.get('code_challenge_method') == ['S256']:
                     job['url'] = url
         if job['provider'] == 'chatgpt':
-            m = re.search(r'Enter this code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})\b', clean)
+            m = re.search(r'Enter this code:\s*([A-Z0-9]{3,8}(?:-[A-Z0-9]{3,8})+)\b', clean)
             if m:
                 job['userCode'] = m.group(1)
         elif job['url'] and 'Authorization code:' in clean and not job['submitted']:
