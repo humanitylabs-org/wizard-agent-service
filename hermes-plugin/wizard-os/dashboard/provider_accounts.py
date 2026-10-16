@@ -116,7 +116,7 @@ def provider_accounts(provider, read=None, fetch=None):
     def project(item):
         key, aliases = item
         # Prefer an independent manual login over a singleton mirror.
-        row, claims = sorted(aliases, key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
+        row, claims = sorted(reversed(aliases), key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
         plan, usage = _quota(slug, row, fetch)
         auth = claims.get('https://api.openai.com/auth') or {}
         profile = claims.get('https://api.openai.com/profile') or {}
@@ -127,15 +127,18 @@ def provider_accounts(provider, read=None, fetch=None):
                 'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
                 'status': state, 'usage': usage, 'credentialCount': len(aliases),
                 'usageStatus': 'ok' if usage else 'unavailable',
-                'actions': {'reconnect': False, 'remove': False}}
+                'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
+                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit()}
+                                for r, _ in aliases if r.get('id')],
+                'actions': {'reconnect': True, 'remove': True}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
     # No full response cache: additions/removals are visible on every request.
     return {'provider': provider, 'name': _NAMES[provider], 'owner': 'hermes',
             'accounts': accounts, 'accountCount': len(accounts),
-            'actions': {'add': False},
-            'management': {'status': 'requires_hermes',
-                           'message': 'Manage subscriptions in Hermes. Browser account lifecycle is not yet safe on this Hermes version.',
+            'actions': {'add': True},
+            'management': {'status': 'available',
+                           'message': 'Reconnect signs in again and retains existing grants. Use a different OpenAI account to add quota; signing in to the same account can invalidate its older grants.',
                            'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
             'error': None}

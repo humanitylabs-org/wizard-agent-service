@@ -1,0 +1,38 @@
+# Multi-account lifecycle handoff (local candidate, not deployed)
+
+This supersedes the lifecycle-stub status in the original `agent_notes/wizard-os/multi-account-candidate.md`. All implementation changes remain in the two requested candidate worktrees. No user login, refresh, revoke, removal, token copy, public push, or live deployment was performed.
+
+## Implemented contract
+
+- Wizard plugin `dashboard/account_lifecycle.py` launches stock `hermes auth add <provider> --type oauth --label <nickname> --no-browser` or `hermes auth remove <provider> <exact-id>`. No Hermes core patches, singleton OAuth start, provider logout, index translation, or refresh endpoint.
+- ChatGPT uses the stock device-code flow. Claude uses the stock native PKCE flow: the owner opens the provider link and pastes `code#state` into the app's masked field. The code travels only through authenticated POST and stdin, never argv, returned JSON, logs, or a file.
+- Reconnect means **fresh sign-in**, retaining old grants. It does NOT replace an old ID or prove the newly selected provider identity equals the old one. The owner verifies the resulting row and separately confirms removal of any old grant. Same-account OpenAI login can invalidate old grants and adds no quota; UI warns before starting.
+- Inventory groups account+subject only for presentation; it never deletes grants. Each row exposes exact credential IDs and each removable grant has its own confirmation. Latest manual grant supplies the displayed quota after reconnect. External-source grants are labelled separately and are not removable here. All-numeric IDs are refused to eliminate the stock CLI's positional fallback; use stock Hermes directly for that rare case.
+- Dashboard authentication protects plugin routes; writes additionally require JSON plus `X-Wizard-Account-Action: 1`, reject browser cross-site requests, and cap body length. The app requires its own password for mutations and operation details. No CORS permissions are added.
+- One broker operation at a time, including an inherited filesystem flock across plugin instances, bounded 10-minute lifetime, process-group cancellation, masked status/errors, and exact readback. Cancellation is pending until the child is stopped/reconciled. Unknown completion is `needs_review`, never automatically retried. An unexpected loss of other grant IDs is `needs_review` (stock Hermes itself can heal forked grants).
+- CLI stdout is never returned or logged. Only exact allowlisted provider authorization URLs and bounded device-code display fields are projected. Poll responses are no-store.
+- UI survives reload by remembering only an opaque operation ID in sessionStorage. A lost/restarted broker operation becomes manual review; the owner must check inventory rather than assume cancellation. Do not run out-of-band auth CLI mutations concurrently with this broker; the CLI's own resolver accepts label/index fallbacks.
+
+## Deployment order for parent
+
+1. Integrate these candidate commits without resetting the live UX alpha branch. The Home-per-account candidate remains in `wizard-ux-multi-account` from the original handoff; integrate and verify it separately.
+2. Install the complete `hermes-plugin/wizard-os` tree into the intended running Hermes profile using the existing supported plugin delivery path. `dashboard/account_lifecycle.py`, `provider_accounts.py`, and `plugin_api.py` must be shipped together. Restart/reload that dashboard/plugin host so the new routes exist. Keep dashboard authentication enabled and confirm unauthenticated requests fail before the plugin.
+3. Verify stock Hermes command availability in that runtime, writable active HERMES_HOME, and only one active dashboard profile owner. Broker preflight requires `auth.adopt_external_logins=false` and ChatGPT `auth.codex_login_flow=device_code`. If changes are needed, use stock `hermes config set` after approval; do not hand-edit config or copy credentials. These checks prevent silently importing the existing Claude Code login.
+4. Build/run the app-store images from the companion candidate commit (Dockerfiles now actually start pool_server.py). Configure both provider-prefixed sets: `WIZARD_CHATGPT_HERMES_URL`, `_HERMES_USER`, `_HERMES_PASSWORD`, `_PASSWORD`; likewise `WIZARD_CLAUDE_*`. Dashboard URL must target this plugin-bearing Hermes, not an unrelated container. Supply passwords through the existing secret/config channel, never chat. Configure the authenticated Wizard proxy/browser and Home usage caller to send the app's Basic credentials. The apps intentionally fail closed for writes if `_PASSWORD` is empty.
+5. Preserve the existing Claude shared volume, UID/GID, and DirectSDK consumer configuration unchanged. The new app uses only the existing read-only ConnectionReader to expose `Legacy Claude Code source`, including when the Hermes pool is empty or dashboard unavailable. It never runs legacy auto-renew, login, logout, or migration. Do not recreate the volume or switch the current provider/model.
+6. Existing provider recipes live outside this repository (`claude-connection` and ChatGPT's own recipe); parent must update their private image references and new Claude dashboard settings during deployment. No external recipe was changed here. Candidate publication version is 0.2.0; nothing was pushed or published.
+7. Read back exact installed files and `/health`, assets, server card, authenticated `/api/accounts`, and box-only `/api/connection`. Verify legacy Max 20x remains visibly distinct and GPT identity dedupe still preserves every underlying grant. Confirm Home shows independent meters, not a sum/average. Do not exercise any mutating owner route as an automated canary.
+8. Owner-only final gate: supervised real login for a distinct ChatGPT account and/or a new Hermes-native Claude account. Provider authorization/MFA and actual subscription identity/quota need human completion. Until that gate, report fixture-tested lifecycle and packaged entrypoints, not successful real account enrollment.
+
+## Verified evidence
+
+- `venv/bin/python tests/test_account_lifecycle.py`: 15 passing tests, exclusively temporary pools and fake CLI subprocesses. Add/reconnect/remove, exact target, confirmation, external-source refusal, cancellation/timeout, cross-instance lock, device/PKCE handoff, code replay rejection, output redaction, CSRF/body rejection, readback.
+- `python3 tests/test_provider_accounts.py`: 5 passing synthetic inventory tests.
+- `node --test tests/provider-accounts.node.mjs`: 3 passing projection tests.
+- Agent-service `npm test`: 61 Vitest files / 710 tests; 15 Node tests; 5 Python tests passed.
+- App-store companion: 5 loopback HTTP fixture tests, Playwright 390px+1440px actual UI action tests, two packaged-image smoke tests with network disabled and no credential volumes. Root Bun suite: 64 passed / 740 assertions; TypeScript check passed.
+- Container smoke caught and fixed reverse-DNS startup delay and non-traversable newly copied static directory. Both default CMDs now listen and serve assets as UID1000. No live app was stopped or replaced.
+
+## Remaining non-owner integration checks
+
+Parent deployment and real authenticated gateway/Home integration are still required. Independent multi-account quota verification requires genuinely distinct account identity; earlier discovery found three GPT grants but only one principal. Provider quota availability, upstream rejection, and same-account revocation behavior are not simulated as proof of live success. Legacy source metadata is read-only, and keeping that login usable remains the existing consumer's responsibility. The candidate deliberately has no broad logout, automatic cleanup, or autonomous sign-in.

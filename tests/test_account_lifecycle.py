@@ -1,0 +1,141 @@
+"""Fake CLI only: this file never invokes Hermes or touches real credentials."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).parents[1]
+spec = importlib.util.spec_from_file_location('lifecycle', ROOT/'hermes-plugin/wizard-os/dashboard/account_lifecycle.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+FAKE = '''import json,sys,time
+from pathlib import Path
+path=Path(sys.argv[1]); args=sys.argv[2:]
+rows=json.loads(path.read_text())
+assert args[:1]==['auth']
+if args[1]=='remove':
+    assert args[3]=='aa11bb'
+    rows=[r for r in rows if r['id']!=args[3]]
+else:
+    assert args[1]=='add' and '--type' in args and '--no-browser' in args
+    label=args[args.index('--label')+1]
+    if args[2]=='anthropic':
+        print('https://claude.ai/oauth/authorize?response_type=code&code_challenge_method=S256&state=fixture',flush=True)
+        print('Authorization code: ',end='',flush=True)
+        code=input()
+        assert code=='fixture#state'
+    else:
+        print('https://auth.openai.com/codex/device\\nEnter this code:\\nABCD-EFGH',flush=True)
+    print('sk-SECRET_MUST_NOT_ESCAPE access_token refresh_token',flush=True)
+    if label=='wait': time.sleep(20)
+    if label=='fail': sys.exit(1)
+    rows.append({'id':'cc33dd','auth_type':'oauth','source':'manual:device_code','label':label})
+path.write_text(json.dumps(rows))
+'''
+
+class LifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
+        self.path=Path(self.tmp.name)/'pool.json'
+        self.original=[{'id':'aa11bb','auth_type':'oauth','source':'manual:device_code','label':'Old'},
+                       {'id':'ee55ff','auth_type':'oauth','source':'manual:device_code','label':'Other'}]
+        self.path.write_text(json.dumps(self.original))
+        self.cli=Path(self.tmp.name)/'fake.py'; self.cli.write_text(FAKE)
+        self.b=m.Broker(read=lambda _: json.loads(self.path.read_text()), command=[sys.executable,str(self.cli),str(self.path)],ttl=2,lock_path=Path(self.tmp.name)/'broker.lock')
+    def tearDown(self):
+        self.b.close()
+        for j in self.b.jobs.values():
+            deadline=time.time()+3
+            while j['status'] not in m.TERMINAL and time.time()<deadline: time.sleep(.01)
+        self.tmp.cleanup()
+    def wait(self,j,display=False):
+        deadline=time.time()+4
+        while time.time()<deadline:
+            out=self.b.poll(j['provider'],j['id'])
+            if out['status'] in m.TERMINAL or (display and (out['userCode'] or out['inputRequired'])): return out
+            time.sleep(.01)
+        self.fail('job did not settle')
+    def test_add_real_subprocess_and_readback(self):
+        out=self.wait(self.b.start('chatgpt','add',label='New',confirmed=True))
+        self.assertEqual(out['status'],'succeeded'); self.assertEqual(out['credentialIds'],['cc33dd'])
+        self.assertEqual(len(json.loads(self.path.read_text())),3)
+        self.assertNotIn('SECRET',json.dumps(out))
+    def test_reconnect_retains_exact_old_and_other_grants(self):
+        out=self.wait(self.b.start('chatgpt','reconnect','aa11bb',confirmed=True))
+        self.assertEqual(out['status'],'succeeded')
+        self.assertEqual(json.loads(self.path.read_text())[:2],self.original)
+    def test_remove_exact_id_not_position(self):
+        out=self.wait(self.b.start('chatgpt','remove','aa11bb',confirmed=True))
+        self.assertEqual(out['status'],'succeeded'); self.assertEqual(json.loads(self.path.read_text()),self.original[1:])
+    def test_confirmation_and_target_validation(self):
+        for target in ('1','missing','aa11bb;touch',None):
+            with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove',target,confirmed=True)
+        with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove','aa11bb')
+        self.assertEqual(self.b.jobs,{})
+    def test_external_source_refused(self):
+        self.original[0]['source']='claude_code'; self.path.write_text(json.dumps(self.original))
+        with self.assertRaises(m.BrokerError): self.b.start('claude','remove','aa11bb',confirmed=True)
+    def test_device_handoff_and_cancel(self):
+        j=self.b.start('chatgpt','add',label='wait',confirmed=True)
+        out=self.wait(j,True); self.assertEqual(out['userCode'],'ABCD-EFGH')
+        self.b.cancel('chatgpt',j['id']); out=self.wait(j)
+        self.assertEqual(out['status'],'cancelled'); self.assertIsNone(out['userCode'])
+        self.assertEqual(json.loads(self.path.read_text()),self.original)
+    def test_timeout(self):
+        self.b.ttl=.15
+        out=self.wait(self.b.start('chatgpt','add',label='wait',confirmed=True))
+        self.assertEqual(out['status'],'expired')
+    def test_single_flight_and_provider_binding(self):
+        j=self.b.start('chatgpt','add',label='wait',confirmed=True)
+        with self.assertRaises(m.BrokerError): self.b.start('claude','add',confirmed=True)
+        with self.assertRaises(m.BrokerError): self.b.cancel('claude',j['id'])
+        self.b.cancel('chatgpt',j['id'])
+    def test_claude_supported_pkce_stdin_handoff(self):
+        j=self.b.start('claude','add',confirmed=True); out=self.wait(j,True)
+        self.assertTrue(out['inputRequired']); self.assertIn('https://claude.ai/oauth/authorize?',out['url'])
+        self.b.submit('claude',j['id'],'fixture#state')
+        out=self.wait(j); self.assertEqual(out['status'],'succeeded'); self.assertNotIn('fixture#state',json.dumps(out))
+    def test_output_errors_never_returned(self):
+        out=self.wait(self.b.start('chatgpt','add',label='fail',confirmed=True))
+        self.assertEqual(out['status'],'failed'); self.assertNotIn('SECRET',json.dumps(out))
+    def test_url_allowlist(self):
+        j=dict(provider='claude',url=None,inputRequired=False,submitted=False)
+        self.b._display(j,'https://claude.ai.evil/oauth/authorize?response_type=code Authorization code:')
+        self.assertIsNone(j['url']); self.assertFalse(j['inputRequired'])
+    def test_second_broker_cannot_mutate_while_lease_held(self):
+        j=self.b.start('chatgpt','add',label='wait',confirmed=True)
+        other=m.Broker(read=self.b.read,command=self.b.command,lock_path=self.b.lock_path)
+        with self.assertRaises(m.BrokerError): other.start('chatgpt','add',confirmed=True)
+        self.b.cancel('chatgpt',j['id']); self.wait(j)
+        self.assertEqual(other.jobs,{})
+    def test_colliding_id_label_is_not_a_fallback_target(self):
+        self.original[1]['label']='aa11bb';self.path.write_text(json.dumps(self.original))
+        with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove','aa11bb',confirmed=True)
+        self.assertEqual(self.b.jobs,{})
+    def test_code_replay_and_invalid_input_rejected(self):
+        j=self.b.start('claude','add',confirmed=True);self.wait(j,True)
+        with self.assertRaises(m.BrokerError):self.b.submit('claude',j['id'],'bad\ncode')
+        self.b.submit('claude',j['id'],'fixture#state')
+        with self.assertRaises(m.BrokerError):self.b.submit('claude',j['id'],'fixture#state')
+        self.assertEqual(self.wait(j)['status'],'succeeded')
+    def test_routes_reject_csrf_and_hide_secret_errors(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        s=importlib.util.spec_from_file_location('api',ROOT/'hermes-plugin/wizard-os/dashboard/plugin_api.py')
+        api=importlib.util.module_from_spec(s); s.loader.exec_module(api)
+        api._lifecycle.broker=self.b
+        app=FastAPI(); app.include_router(api.router)
+        c=TestClient(app)
+        path='/provider-accounts/chatgpt/operations'
+        self.assertEqual(c.post(path,json={'action':'add','confirmed':True}).status_code,403)
+        headers={'X-Wizard-Account-Action':'1'}
+        self.assertEqual(c.post(path,json={'action':'add'},headers=headers).status_code,409)
+        self.assertEqual(c.post(path,json={'action':'add','confirmed':True},headers={**headers,'sec-fetch-site':'cross-site'}).status_code,403)
+        self.assertEqual(c.post(path,json={'code':'sk-SECRET','bad':True},headers=headers).status_code,409)
+        self.assertEqual(self.b.jobs,{})
+
+if __name__=='__main__': unittest.main()
