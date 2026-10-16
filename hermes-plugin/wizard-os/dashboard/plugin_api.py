@@ -130,6 +130,18 @@ def get_provider_accounts(provider: str):
     if provider not in _accounts.PROVIDERS:
         raise HTTPException(404, 'Unknown provider')
     try:
-        return _accounts.provider_accounts(provider)
+        result = _accounts.provider_accounts(provider)
+        from agent.credential_sources import adopt_external_logins_enabled
+        from hermes_cli.config import load_config_readonly
+        auth = (load_config_readonly() or {}).get('auth') or {}
+        reason = None
+        if adopt_external_logins_enabled():
+            reason = 'Account changes are gated: auth.adopt_external_logins is enabled (stock default). Owner approval is required before disabling automatic external CLI login adoption; existing credentials remain unchanged.'
+        elif provider == 'chatgpt' and auth.get('codex_login_flow', 'device_code') != 'device_code':
+            reason = 'Account changes require the stock device_code login flow.'
+        if reason:
+            result['management'] = {**result['management'], 'status': 'blocked', 'message': reason}
+            result['actions']['add'] = False
+        return result
     except Exception:
         raise HTTPException(503, 'Hermes account inventory unavailable') from None
