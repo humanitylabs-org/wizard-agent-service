@@ -62,10 +62,7 @@ class Broker:
         if confirmed is not True:
             raise BrokerError('Explicit confirmation required')
         if self.stock_cli:
-            from agent.credential_sources import adopt_external_logins_enabled
             from hermes_cli.config import load_config_readonly
-            if adopt_external_logins_enabled():
-                raise BrokerError('Disable external login adoption before using the account broker')
             cfg = load_config_readonly() or {}
             if provider == 'chatgpt' and action != 'remove' and (cfg.get('auth') or {}).get('codex_login_flow', 'device_code') != 'device_code':
                 raise BrokerError('The browser broker requires the stock device_code login flow')
