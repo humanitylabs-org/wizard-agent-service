@@ -9,7 +9,12 @@ export function projectPrivateFilePaths(result, trustedPaths) {
   const visit = (value) => {
     if (typeof value === 'string') return patterns.reduce((text, pattern) => text.replace(pattern, '[private attachment]'), value)
     if (Array.isArray(value)) return value.map(visit)
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, visit(item)]))
+    if (value && typeof value === 'object') {
+      const projected = Object.fromEntries(Object.entries(value).map(([key, item]) => [key, visit(item)]))
+      if (value.display_kind === 'run_context' && typeof value.run_context?.original === 'string'
+        && projected.run_context?.original !== value.run_context.original) projected.run_context.redacted = true
+      return projected
+    }
     return value
   }
   try { return Buffer.from(JSON.stringify(visit(JSON.parse(result.toString('utf8'))))) }

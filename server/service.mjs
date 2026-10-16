@@ -14,8 +14,11 @@ import { contentDisposition } from './content-disposition.mjs'
 import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
+import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
+import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
@@ -34,6 +37,8 @@ import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
+import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
+import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
@@ -122,6 +127,8 @@ const allowed = [
   { method: 'GET', pattern: new RegExp(`^/v1/runs/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/v1/runs/${ID}/events$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/approval$`), query: new Set() },
+  { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/clarify$`), query: new Set() },
+  { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/resolve-unknown$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/steer$`), query: new Set() },
   { method: 'POST', pattern: new RegExp(`^/v1/runs/${ID}/stop$`), query: new Set() },
 ]
@@ -279,7 +286,7 @@ export function supportsJoinedDelegation(payload) {
 }
 
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping'])
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const FAILED_RUN_STATUSES = new Set(['failed', 'interrupted'])
@@ -335,6 +342,18 @@ export function wizardDispatchHealthy({ cpuCount = cpus().length, oneMinuteLoad 
     cpuPressure = Number(source.match(/some\s+avg10=([0-9.]+)/)?.[1] ?? 0)
   } catch { cpuPressure = 0 }
   return oneMinuteLoad < Math.max(2, cpuCount * 1.5) && cpuPressure < 60
+}
+
+// Remote-model turns need memory, not an idle local CPU. Heavy CPU/disk work
+// belongs to the external worker lock; retain a bounded model-turn cap separately.
+export function wizardInteractiveHealthy({ memoryText, pressureText } = {}) {
+  try {
+    const memory = memoryText ?? readFileSync('/proc/meminfo', 'utf8')
+    const pressure = pressureText ?? readFileSync('/proc/pressure/memory', 'utf8')
+    const availableKiB = Number(memory.match(/^MemAvailable:\s+(\d+)/m)?.[1])
+    const full = Number(pressure.match(/full\s+avg10=([0-9.]+)/)?.[1] ?? 0)
+    return Number.isFinite(availableKiB) && availableKiB >= 512 * 1024 && full < 20
+  } catch { return process.platform !== 'linux' }
 }
 
 // A new turn in an archived thread must surface its result (James, 14 Oct 2026: replies
@@ -451,6 +470,7 @@ function newestRun(runs, sessionId) {
 }
 
 function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
+  if (run?.status === 'unknown') return false
   const startedAt = Number(run?.createdAt ?? 0)
   const terminalAt = Number(truth?.lastAssistantAt ?? 0)
   const latestRequestAt = Number(truth?.lastUserAt ?? 0)
@@ -525,6 +545,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               // The newest admitted run failed before any answer landed. Without this the
               // thread settles like a finished turn (Done/Defer, no reply, no Retry).
               projected.status = latestDirect.status
+              if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
             }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
@@ -696,7 +717,7 @@ function historyTimestamp(value) {
   return null
 }
 
-function durableInlineImage(part) {
+export function durableInlineImage(part) {
   if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
   const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
   if (!match || !match[2]) return null
@@ -813,7 +834,25 @@ function safeAttachment(value) {
   return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256 }
 }
 
-function projectWizardFileMarkers(result, userMessagesOnly = false) {
+export function createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots }) {
+  return async ids => Promise.all(ids.map(async id => {
+    if (!FILE_ID.test(id)) throw new Error('invalid attachment id')
+    if (mediaFiles) {
+      const record = mediaFiles.get(id, true)
+      if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
+      const file = safeFile(record, true)
+      if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
+      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
+    }
+    const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
+    const file = safeFile(payload.file, true)
+    if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
+    if (!inboxTrustedRoots.some(root => file.trusted_path.startsWith(root))) throw Object.assign(new Error('Wizard file escaped the trusted root'), { status: 502 })
+    return file
+  }))
+}
+
+export function projectWizardFileMarkers(result, userMessagesOnly = false) {
   const strings = []
   const collect = (value) => {
     if (typeof value === 'string') strings.push(value)
@@ -1102,8 +1141,7 @@ function legacyInternalHistoryMessage(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) return false
   const role = message.role ?? message.author
   if (typeof role !== 'string') return false
-  const content = message.content ?? message.text ?? message.output ?? ''
-  if (typeof content !== 'string') return false
+  const content = runContextText(message.content ?? message.text ?? message.output ?? '')
   if (historyProcessWakeup(message, content)) return false
   const trimmed = content.trimStart().replace(/^\[Workspace::v1: [^\]\r\n]+\]\s*/, '').trimStart()
   const normalized = trimmed.trim()
@@ -1263,7 +1301,7 @@ export function historyQuestion(args, content) {
   return text ? { text, choices: historyQuestionChoices(first.choices), state: 'waiting' } : null
 }
 
-export function projectWizardMessageHistory(result) {
+export function projectWizardMessageHistory(result, sourceResult = result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
     const fn = item.function && typeof item.function === 'object' && !Array.isArray(item.function) ? item.function : {}
@@ -1277,13 +1315,19 @@ export function projectWizardMessageHistory(result) {
       ...(question ? { question } : {}),
     }
   }
-  const slimMessage = (message) => {
+  const slimMessage = (message, sourceMessage = message) => {
     if (!message || typeof message !== 'object' || Array.isArray(message)) return message
     const role = message.role ?? message.author
     if (typeof role !== 'string') return message
     const projected = {}
     for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id']) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
+    }
+    const runContext = historyRunContext(sourceMessage)
+    if (runContext) {
+      // Never carry arbitrary source metadata or machine text into a human bubble.
+      delete projected.tool_call_id
+      return { ...projected, role: 'system', author: 'system', display_kind: 'run_context', content: '', display_content: '', shareable: false, run_context: runContext }
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
     if (role === 'tool') {
@@ -1310,16 +1354,38 @@ export function projectWizardMessageHistory(result) {
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
     return projected
   }
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.filter((item) => !legacyInternalHistoryMessage(item)).map(visit)
+  const visit = (value, source = value) => {
+    if (Array.isArray(value)) {
+      const seen = new Set()
+      return value.flatMap((item, index) => {
+        const sourceItem = source?.[index] ?? item
+        if (legacyInternalHistoryMessage(item) && !historyRunContext(sourceItem)) return []
+        const projected = visit(item, sourceItem)
+        if (projected?.display_kind === 'run_context') {
+          // Only repeated stable IDs in this page are duplicates. Identical notes
+          // with different IDs/times can be distinct run starts; retain them.
+          const id = projected.id ?? projected.message_id
+          if (id !== undefined && id !== null) {
+            const key = JSON.stringify([projected.session_id ?? '', id])
+            if (seen.has(key)) return []
+            seen.add(key)
+          }
+        }
+        return [projected]
+      })
+    }
     if (!value || typeof value !== 'object') return value
-    if (legacyInternalHistoryMessage(value)) return null
-    if (typeof (value.role ?? value.author) === 'string') return slimMessage(value)
+    if (legacyInternalHistoryMessage(value) && !historyRunContext(source)) return null
+    if (typeof (value.role ?? value.author) === 'string') return slimMessage(value, source)
     const projected = { ...value }
-    for (const key of Object.keys(projected)) projected[key] = visit(projected[key])
+    for (const key of Object.keys(projected)) projected[key] = visit(projected[key], source?.[key])
     return projected
   }
-  try { return Buffer.from(JSON.stringify(visit(JSON.parse(result.toString('utf8'))))) }
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    const source = sourceResult === result ? payload : JSON.parse(sourceResult.toString('utf8'))
+    return Buffer.from(JSON.stringify(visit(payload, source)))
+  }
   catch { throw Object.assign(new Error('invalid message history'), { status: 502 }) }
 }
 
@@ -1519,15 +1585,25 @@ function trustedAgentSource(sourcePath, artifactRoots, aliases = []) {
   return { source, details }
 }
 
-function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
-  if (!artifactDir || !artifactRoots.length) return null
+export function resolveAgentImage(sourcePath, artifactRoots, aliases = [], deniedRoots = []) {
+  const denied = path => /(?:^|[/\\])(?:profiles|sealed|private-agents|agent-vault|agents)(?:[/\\]|$)|[/\\]app-data[/\\]agent-/i.test(path)
+    || deniedRoots.some(root => path === root || path.startsWith(`${root}${sep}`))
+  if (denied(String(sourcePath))) return null
   const trusted = trustedAgentSource(sourcePath, artifactRoots, aliases)
-  if (!trusted || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  if (!trusted || denied(trusted.source) || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
   const { source } = trusted
   let bytes
-  try { bytes = readFileSync(source) } catch { return null }
+  try { bytes = readPhotoBytes(source) } catch { return null }
   const mime = imageMime(bytes)
   if (!mime) return null
+  return { bytes, mime, source }
+}
+
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
+  if (!artifactDir || !artifactRoots.length) return null
+  const resolved = resolveAgentImage(sourcePath, artifactRoots, aliases)
+  if (!resolved) return null
+  const { bytes, mime, source } = resolved
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const id = sha256.slice(0, 32)
   const cleanName = basename(source).replace(/[\\/\p{Cc}]/gu, '_').trim().slice(-120) || `wizard-image.${mime.split('/')[1]}`
@@ -1616,12 +1692,14 @@ function readAgentArtifact(id, artifactDir) {
   } catch { return null }
 }
 
-export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = []) {
+export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const projectText = (value, userImageReferences = false) => {
     const artifacts = []
+    const fences = []
+    value = value.replace(/```[^\n]*\n[\s\S]*?```/g, block => `\u0000photo-fence-${fences.push(block) - 1}\u0000`)
     const durableImageHashes = new Set()
     if (userImageReferences) value.replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/gi, (_marker, raw) => {
       try {
@@ -1632,7 +1710,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       return _marker
     })
     const register = (_line, sourcePath) => {
-      const artifact = registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
+      const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
         ?? registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases)
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
@@ -1640,9 +1718,13 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       return ''
     }
     let text = value.replace(AGENT_MEDIA_LINE, register)
+    // Historical visible image forms use the very same image resolver as MEDIA.
+    text = text.replace(/!\[[^\]\n]*\]\((\/[^)\s]+)\)/g, register)
     if (userImageReferences) {
+      text = text.replace(/^\s*\[Image(?: attached at)?:\s*(\/[^\]\n]+)\]\s*$/gm, register)
       text = text.replace(AGENT_IMAGE_REFERENCE_LINE, (_line, backtick, doubleQuote, singleQuote, bare) => {
-        const artifact = registerAgentArtifact(backtick || doubleQuote || singleQuote || bare, artifactDir, artifactRoots, aliases)
+        const sourcePath = backtick || doubleQuote || singleQuote || bare
+        const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
         if (artifact && !durableImageHashes.has(artifact.sha256)
             && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
         return ''
@@ -1651,6 +1733,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
     if ((artifacts.length || durableImageHashes.size) && userImageReferences) text = text.replace(/^\s*\[screenshot\]\s*$/gmi, '')
     if (userImageReferences) text = text.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     text = text.replace(/\n{3,}/g, '\n\n').trim()
+    text = text.replace(/\u0000photo-fence-(\d+)\u0000/g, (_, i) => fences[Number(i)])
     if (!artifacts.length) return text
     const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
     return text ? `${text}\n\n${envelope}` : envelope
@@ -1673,6 +1756,44 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
   }
   visit(payload)
   return Buffer.from(JSON.stringify(payload))
+}
+
+// Helm AttachmentStore.resolve's fixed ID+suffix inventory (png, jpg, webp).
+// Explicit read-only root; never an envelope-supplied path or a directory scan.
+export function readLegacyHelmImage(id, root) {
+  if (!root || !/^[0-9a-f]{32}$/.test(id)) return null
+  try { if (realpathSync(root) !== resolve(root)) return null } catch { return null }
+  for (const suffix of ['png', 'jpg', 'webp']) {
+    const path = join(root, `${id}.${suffix}`)
+    const photo = resolveAgentImage(path, [root])
+    if (!photo) continue
+    const sha256 = createHash('sha256').update(photo.bytes).digest('hex')
+    return { id, name: `screenshot.${suffix}`, mime: photo.mime, bytes: photo.bytes.length, sha256, kind: 'image', contentPath: path }
+  }
+  return null
+}
+
+// Same resolution routes as GET /wizard/attachments/:id; no arbitrary URLs.
+export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, legacyRoot = '', fetchImpl = fetch }) {
+  return async id => {
+    if (!/^[0-9a-f]{32}$/.test(id)) return null
+    const artifact = readAgentArtifact(id, artifactDir) || readLegacyHelmImage(id, legacyRoot)
+    let bytes
+    if (artifact) {
+      if (artifact.kind !== 'image') return null
+      bytes = readPhotoBytes(artifact.contentPath)
+      if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) return null
+    } else {
+      if (legacyRoot || !helmOrigin) return null
+      const response = await fetchImpl(`${helmOrigin}/helm/api/attachments/${id}`, { redirect: 'manual', signal: AbortSignal.timeout(8000) })
+      if (!response.ok) { await response.body?.cancel(); if (response.status >= 500) throw new Error('helm_transient'); return null }
+      const chunks = []; let size = 0
+      for await (const chunk of response.body) { size += chunk.length; if (size > WIZARD_AGENT_IMAGE_LIMIT) { await response.body.cancel().catch(() => {}); return null }; chunks.push(chunk) }
+      bytes = Buffer.concat(chunks)
+    }
+    const mime = imageMime(bytes)
+    return mime ? { bytes, mime } : null
+  }
 }
 
 function sendJson(response, status, value, headers = {}) {
@@ -2005,6 +2126,14 @@ export function createWizardServer(options = {}) {
     : null
   const agentCtx = agents ? {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    projectAgentHistory: (result, agent) => {
+      // Routed agents have a host-side home and the runtime mounts it at /opt/data.
+      // Shared inbox roots still apply when a note mentions a main-agent attachment.
+      const roots = [...inboxTrustedRoots, join(agents.agentsDir, agent.id, 'home'), '/opt/data']
+      const projected = projectPrivateFilePaths(result, roots)
+      if (roots.some(root => projected.includes(Buffer.from(root)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
+      return projected
+    },
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
@@ -2147,6 +2276,7 @@ export function createWizardServer(options = {}) {
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
   // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
   // Wizard Inbox service is configured.
+  let chatPhotos = null
   const mediaFiles = !inboxToken && options.mediaRoot
     ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
     : null
@@ -2215,7 +2345,7 @@ export function createWizardServer(options = {}) {
     if (init.body) headers.set('Content-Type', 'application/json')
     const result = await fetchImpl(`${upstreamOrigin}${path}`, { ...init, headers, redirect: 'manual' })
     const raw = Buffer.from(await result.arrayBuffer())
-    if (!result.ok) throw Object.assign(new Error('Hermes worker request failed'), { status: preserveStatus ? result.status : 502 })
+    if (!result.ok) throw upstreamError(preserveStatus ? result.status : 502, raw, result.headers.get('retry-after'))
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
   }
@@ -2234,6 +2364,7 @@ export function createWizardServer(options = {}) {
         const payload = await hermesJson('/v1/capabilities')
         hermesContract = {
           join: supportsJoinedDelegation(payload), markdown: supportsMarkdownRendering(payload),
+          unknownResolution: payload?.features?.run_unknown_resolution === true,
           checked: true, expiresAt: Date.now() + 30_000,
         }
         return hermesContract
@@ -2556,18 +2687,20 @@ export function createWizardServer(options = {}) {
       await hermesJson('/api/sessions', { method: 'POST', body: sessionBody })
     }
     await hermesJson(`/api/sessions/${encodeURIComponent(workerSessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+    let workerBody = (durableIdentity && runQueue?.get(durableIdentity)?.workerDispatchBody) || JSON.stringify({
+      session_id: workerSessionId,
+      input,
+      model: operatorWorkerModel,
+      provider: 'custom:tinfoil-operator',
+      require_model_lock: true,
+      model_options: { reasoning_effort: 'max' },
+      instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
+      ...runContractFields(await assertJoinedDelegationCapability()),
+    })
+    if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
     const admission = await hermesJson('/v1/runs', {
       method: 'POST',
-      body: JSON.stringify({
-        session_id: workerSessionId,
-        input,
-        model: operatorWorkerModel,
-        provider: 'custom:tinfoil-operator',
-        require_model_lock: true,
-        model_options: { reasoning_effort: 'max' },
-        instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
-        ...runContractFields(await assertJoinedDelegationCapability()),
-      }),
+      body: workerBody,
       headers: { 'Idempotency-Key': durableSuffix ? `operator-worker-${durableSuffix}` : `worker-${workerSessionId}` },
     })
     const workerRunId = typeof admission.run_id === 'string' ? admission.run_id : typeof admission.id === 'string' ? admission.id : ''
@@ -2608,6 +2741,7 @@ export function createWizardServer(options = {}) {
 
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
+  let heavyWork = null
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -2661,24 +2795,34 @@ export function createWizardServer(options = {}) {
         }
         manualRecovery = true
       }
-      if (backgroundResults) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
+      // Revalidate only a new dispatch. Frozen same-key replay reconciles an
+      // already attempted send; a newer turn/receipt must not cancel that lookup.
+      if (backgroundResults && !record.dispatchBody) queuedBody = Buffer.from(JSON.stringify(await backgroundResults.validateDispatch(parseJsonBody(queuedBody))))
       let pendingWorker = null
       if (record.runtime === 'operator') {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
+      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
       })
       headers.set('Authorization', ['Bearer', hermesKey].join(' '))
-      if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
-        await requireHelperContinuation(record.continuation)
+      if (!record.dispatchBody) {
+        if (record.continuation?.kind === HEAVY_KIND) {
+          if (!heavyWork) throw Object.assign(new Error('heavy continuation unavailable'), { status: 503 })
+          await heavyWork.validate(record)
+        } else if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
+          await requireHelperContinuation(record.continuation)
+        }
       }
+      // Persist the actual decorated wire payload, not just the UI input: capability and
+      // instruction changes across a restart must not change an attempted idempotency key.
+      queuedBody = Buffer.from(runQueue.freezeDispatchBody(record.publicRunId, queuedBody.toString('utf8')))
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
-      if (!result.ok) throw Object.assign(new Error('Hermes queued admission failed'), { status: result.status })
+      if (!result.ok) throw upstreamError(result.status, raw, result.headers.get('retry-after'))
       let payload
       try { payload = JSON.parse(raw.toString('utf8')) }
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
@@ -2694,6 +2838,7 @@ export function createWizardServer(options = {}) {
         persistOperatorWorkers()
       }
       await unarchiveForNewTurn(record.sessionId)
+      chatPhotos?.kick('accepted_user') // accepted user message; never upload completion
       return {
         upstreamRunId,
         workerRunId: pendingWorker?.workerRunId ?? '',
@@ -2704,6 +2849,7 @@ export function createWizardServer(options = {}) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+      if (payload.status === 'completed') chatPhotos?.kick('completed_assistant')
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -2726,7 +2872,7 @@ export function createWizardServer(options = {}) {
     // Turns started on other surfaces (Telegram, TUI) are visible only in state.db; without it the
     // queue counts its own runs, which Hermes serialises per session anyway.
     const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveHumanSessionIds(hermesStatePath) : []))
-    const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardDispatchHealthy())
+    const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardInteractiveHealthy())
     const turnHeldCache = new Map()
     const runTurnHeld = async (runId) => {
       const cached = turnHeldCache.get(runId)
@@ -2743,6 +2889,7 @@ export function createWizardServer(options = {}) {
     runQueue = new DurableRunQueue({
       statePath: runQueueStatePath,
       maxActive,
+      reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
       activeSessionIds: activeSessionReader,
@@ -2773,7 +2920,12 @@ export function createWizardServer(options = {}) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, request: async path => {
+    try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
+    catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
+  } })
   if (runQueue) runQueueReady = runQueue.initialize()
+  if (heavyWork) void runQueueReady.then(() => heavyWork.start())
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
@@ -3068,28 +3220,26 @@ export function createWizardServer(options = {}) {
     const raw = Buffer.from(await result.arrayBuffer())
     if (raw.length > 2 * 1024 * 1024) throw Object.assign(new Error('Wizard Inbox response too large'), { status: 502 })
     if (inboxToken && raw.includes(Buffer.from(inboxToken))) throw Object.assign(new Error('unsafe Wizard Inbox response'), { status: 502 })
-    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus })
+    if (!result.ok) throw Object.assign(new Error('Wizard Inbox request failed'), { status: result.status === 404 ? 404 : invalidStatus, upstreamStatus: result.status })
     try { return JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Wizard Inbox returned invalid JSON'), { status: 502 }) }
   }
 
-  const resolveFiles = async (ids) => Promise.all(ids.map(async (id) => {
-    if (mediaFiles) {
-      const record = mediaFiles.get(id, true)
-      if (!record) throw Object.assign(new Error('Wizard file not found'), { status: 400 })
-      const file = safeFile(record, true)
-      if (!file.trusted_path.startsWith(`${mediaFiles.agentRoot}${sep}`)) throw Object.assign(new Error('Wizard file escaped the files root'), { status: 502 })
-      // The service reads its own copy from the same record the agent path came from (never the agent path).
-      return { ...file, userVisible: true, localPath: resolve(mediaFiles.root, String(record.path ?? '')) }
-    }
-    const payload = await inboxJson(`/v1/internal/files/${encodeURIComponent(id)}`, {}, 400)
-    const file = safeFile(payload.file, true)
-    if (file.id !== id) throw Object.assign(new Error('Wizard file identity mismatch'), { status: 502 })
-    if (!inboxTrustedRoots.some((root) => file.trusted_path.startsWith(root))) {
-      throw Object.assign(new Error('Wizard file escaped the trusted root'), { status: 502 })
-    }
-    return file
-  }))
+  const resolveFiles = createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots })
+
+  if (options.chatPhotos?.enabled === true) {
+    if (!hermesStatePath || !options.userFilesRoot || !options.chatPhotos.statePath || !agents) throw new Error('chat photos require explicit owner media, registry and state paths')
+    const authorityId = photoAuthorityId({ database: hermesStatePath, runtimeHome: bridgeOsHome, registryPath: agents.agentsDir, upstreamOrigin, hermesKey, ownerId: options.chatPhotos.ownerId, singleOwner: options.chatPhotos.singleOwner })
+    chatPhotos = createChatPhotoReconciler({ database: hermesStatePath, registryPath: agents.agentsDir,
+      verifyAuthority: createPhotoRuntimeVerifier({ database: hermesStatePath, registry: agents, ownerId: options.chatPhotos.ownerId, upstreamOrigin, hermesKey, fetchImpl }),
+      statePath: options.chatPhotos.statePath, ownerId: options.chatPhotos.ownerId, authorityId,
+      projection: createPhotoProjection({ root: options.userFilesRoot, ownerId: options.chatPhotos.ownerId, authorityId,
+        ownerLabel: options.chatPhotos.ownerLabel, agentLabel: options.chatPhotos.agentLabel, maxBytes: options.chatPhotos.maxBytes }),
+      resolveMessage: createCanonicalChatPhotoResolver({ database: hermesStatePath, ownerId: options.chatPhotos.ownerId, authorityId,
+        registry: agents, resolveFiles, artifactRoots: agentArtifactRoots, aliases: agentPathAliases,
+        resolveHelm: createCanonicalHelmPhotoResolver({ artifactDir: agentArtifactDir, helmOrigin, legacyRoot: options.helmAttachmentsRoot, fetchImpl }) }),
+    })
+  }
 
   // Private closure used by authenticated Continue and the watcher. It is not addressable by
   // HTTP; headers/body fields never bypass Access or confer continuation authority.
@@ -3505,6 +3655,13 @@ export function createWizardServer(options = {}) {
         await bridge.handle(request, response)
         return
       }
+      if (url.pathname.startsWith('/wizard/internal/heavy/')) {
+        if (!heavyWork) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
+        sendJson(response, 200, await heavyWork.handle(request, url.pathname, value))
+        return
+      }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
@@ -3556,7 +3713,7 @@ export function createWizardServer(options = {}) {
           await upstream.body?.cancel().catch(() => undefined)
         } catch { reachable = false }
         finally { clearTimeout(timer) }
-        const queue = runQueue ? await runQueue.summary() : undefined
+        const queue = runQueue ? { ...await runQueue.summary(), ...(heavyWork ? { heavy: heavyWork.summary() } : {}) } : undefined
         sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
         return
       }
@@ -3680,7 +3837,7 @@ export function createWizardServer(options = {}) {
       const helmAttachmentMatch = url.pathname.match(/^\/wizard\/attachments\/([0-9a-f]{32})$/)
       if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir)
+        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir) || readLegacyHelmImage(helmAttachmentMatch[1], options.helmAttachmentsRoot)
         if (artifact) {
           // Images, audio and video play in place; everything else (APK, PDF, archives, documents)
           // downloads with its real type so the phone offers the right app, e.g. the APK installer.
@@ -4037,12 +4194,14 @@ export function createWizardServer(options = {}) {
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
-        const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval))?$/) : null
+        const queuedPath = runQueue ? upstreamPath.match(/^\/v1\/runs\/(wizardq_[0-9a-f]{32})(?:\/(events|steer|stop|approval|clarify|resolve-unknown))?$/) : null
         let queuedProxyRecord = queuedPath ? runQueue.get(queuedPath[1]) : null
         const operatorSteerRecord = operator && queuedProxyRecord?.upstreamRunId && queuedPath?.[2] === 'steer'
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
           : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
           return
@@ -4090,6 +4249,12 @@ export function createWizardServer(options = {}) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
+        if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
+          if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
+          const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
+          try { validateRecoveryIdentity(parseJsonBody(body), current) }
+          catch (error) { sendJson(response, error.status, { error: { code: error.code, message: error.message } }); return }
+        }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
@@ -4144,6 +4309,7 @@ export function createWizardServer(options = {}) {
             sendQueuedRun(response, 202, retainedVoice, { 'Idempotency-Replayed': 'true' })
             return
           }
+          heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
@@ -4203,6 +4369,8 @@ export function createWizardServer(options = {}) {
         }
         const replayed = upstream.headers.get('idempotency-replayed')
         if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
+        const retryAfter = upstream.headers.get('retry-after')
+        if (retryAfter) responseHeaders['Retry-After'] = retryAfter
         const runPathId = upstreamPath.match(/^\/v1\/runs\/([A-Za-z0-9._:-]+)/)?.[1]
         const responseTrustedPaths = runPathId ? runTrustedPaths.get(runPathId) ?? queuedProxyRecord?.trustedPaths ?? [] : []
         if (contentType.includes('text/event-stream') && upstream.body) {
@@ -4213,6 +4381,7 @@ export function createWizardServer(options = {}) {
           return
         }
         let result = Buffer.from(await upstream.arrayBuffer())
+        if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
         if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
           const ack = JSON.parse(result.toString('utf8'))
           const selected = lockedBridge.sessionRoute(decodeURIComponent(upstreamPath.split('/')[3]))
@@ -4382,10 +4551,14 @@ export function createWizardServer(options = {}) {
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
+          // These display transforms retain row order/identity. Keep the original
+          // only for startup excerpts, so omissions are flagged without changing
+          // the existing marker/media/shareability projection order.
+          const historySource = result
           result = projectWizardFileMarkers(result, messageHistory)
           if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
-          if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result)
+          if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file
@@ -4401,6 +4574,7 @@ export function createWizardServer(options = {}) {
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
+        if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick(request.method === 'GET' ? 'delivered_history' : 'accepted_main')
         return
       }
 
@@ -4457,6 +4631,10 @@ export function createWizardServer(options = {}) {
         sendJson(response, error.status, error.payload)
         return
       }
+      if (error?.code === 'dispatch_already_attempted' && !response.headersSent) {
+        sendJson(response, 409, { error: { code: error.code, message: error.message } })
+        return
+      }
       if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: names[error.status] })
@@ -4464,8 +4642,15 @@ export function createWizardServer(options = {}) {
       else response.destroy()
     }
   })
-  if (runQueue) server.once('close', () => runQueue.close())
+  if (runQueue) server.once('close', () => {
+    if (heavyWork) void heavyWork.close().finally(() => runQueue.close())
+    else runQueue.close()
+  })
   if (uploads) server.once('close', () => uploads.close())
+  if (chatPhotos) {
+    server.once('listening', () => chatPhotos.start())
+    server.once('close', () => chatPhotos.stop())
+  }
   server.on('listening', () => {
     const address = server.address()
     if (!address || typeof address !== 'object') return

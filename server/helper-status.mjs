@@ -1,6 +1,6 @@
 // Read-only helper visibility. Counts assigned tasks still awaited, not guessed live processes.
 import { DatabaseSync } from 'node:sqlite'
-import { currentOwnerResult, ownerGate, ownerMovedOn, receiptConsumed } from './delegation-receipts.mjs'
+import { ownerGate, ownerMovedOn, receiptConsumed } from './delegation-receipts.mjs'
 import { helperAnswerAfter } from './helper-continuation.mjs'
 import { helperDelegationQuery, assignedHelperCount, HELPER_SOURCE_LIMIT } from './helper-source.mjs'
 const RUNNING = new Set(['running','stalling','finalizing'])
@@ -30,8 +30,7 @@ export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds =
       const running = rows.filter(r=>RUNNING.has(r.state))
       const answers = new Map(completed.map(r=>[r.delegation_id,helperAnswerAfter(db,sid,r.completed_at,r.delegation_id)]))
       const uncertainAnswers = [...answers.values()].some(value=>value===null)
-      const unresolved = completed.filter(r=> answers.get(r.delegation_id)!==true
-        && !(['done','needs_you','check'].includes(currentOwnerResult(db,sid)) && receiptConsumed(db,sid,r.delegation_id,r.completed_at)))
+      const unresolved = completed.filter(r=> answers.get(r.delegation_id)!==true)
       if (!running.length && !unresolved.length) continue
       const since = running.length ? Math.min(...running.map(r=>Number(r.dispatched_at))) : Math.max(...unresolved.map(r=>Number(r.completed_at)))
       const stale = running.some(r=>sec-Number(r.dispatched_at)>6*3600)

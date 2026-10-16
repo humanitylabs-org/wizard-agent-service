@@ -76,7 +76,7 @@ test('a done final written while the reviewer still ran gets its findings back',
 })
 test('agent reading the saved result itself counts as consumed; prose naming it does not',()=>{
  const p1=fixture();let db=new DatabaseSync(p1)
- db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','tool','{"delegation_id":"deleg_a","status":"completed"}',now/1000-5);db.close()
+ db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','tool','{"delegation_id":"deleg_a","status":"completed","results":[{"summary":"Saved findings"}]}',now/1000-5);db.close()
  assert.equal(readUndeliveredHelperReceipts(p1,{now}).length,0)
  const p2=fixture();db=new DatabaseSync(p2)
  db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_a','assistant','Review deleg_a is running',now/1000-5);db.close()

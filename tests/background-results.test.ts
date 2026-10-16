@@ -9,10 +9,11 @@ import { createWizardServer, listen } from '../server/service.mjs'
 const owned: Array<() => Promise<void>> = []
 afterEach(async () => { while (owned.length) await owned.pop()!() })
 const status = (state: string) => `Outcome\n[WIZARD_STATUS_V1]{"state":"${state}","ask":"Approve the release"}[/WIZARD_STATUS_V1]`
-async function fixture({ count = 205, access = false, history = false } = {}) {
+async function fixture({ count = 205, access = false, history = false, loseAck = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-manual-background-'))
   const at = Date.now() / 1000, finished = at - 3 * 3600
   const rows = new Map<string, any[]>(), sessions: any[] = [], calls: any[] = [], reads: string[] = []
+  const wireAttempts: any[] = []
   let canDispatch = true, failHistory = false, slowHistory = false, skew = 0, historyStatus = 500, failLease = false
   const badHistory = new Set<string>()
   const held = new Set<string>()
@@ -53,8 +54,14 @@ async function fixture({ count = 205, access = false, history = false } = {}) {
     }
     if (u.pathname === '/v1/runs' && req.method === 'POST') {
       const chunks = []; for await (const c of req) chunks.push(c)
-      const body = JSON.parse(Buffer.concat(chunks).toString()); calls.push(body)
+      const text = Buffer.concat(chunks).toString()
+      wireAttempts.push({ text, key: req.headers['idempotency-key'] })
+      if (loseAck && wireAttempts.length > 1) {
+        res.end(JSON.stringify({ run_id: 'fixture_run_1', status: 'completed' })); return
+      }
+      const body = JSON.parse(text); calls.push(body)
       const list = rows.get(body.session_id)!; list.push({ id: 99999 + calls.length, role: 'user', content: body.input, timestamp: at + calls.length })
+      if (loseAck) { res.destroy(); return }
       res.end(JSON.stringify({ run_id: `fixture_run_${calls.length}`, status: 'completed', output: 'fixture: original-thread continuation complete' })); return
     }
     if (/^\/v1\/runs\/fixture_run_/.test(u.pathname)) { res.end(JSON.stringify({ run_id: u.pathname.split('/').pop(), status: 'completed', output: 'fixture: original-thread continuation complete' })); return }
@@ -65,17 +72,17 @@ async function fixture({ count = 205, access = false, history = false } = {}) {
   const open = async () => {
     server = createWizardServer({ upstreamOrigin: origin, hermesKey: 'fixture-only', joinedDelegation: 'prefer',
       followThrough: false, hermesStatePath: history ? historyPath : '', sessionDbPath: join(dir, 'absent-state.db'), archivedSessionReader: () => [],
-      runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: 25, dispatchHealthReader: () => canDispatch,
+      runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: loseAck ? 0 : 25, dispatchHealthReader: () => canDispatch,
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
       requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30,
-      backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: 25 })
+      backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: loseAck ? 60_000 : 25 })
     base = `http://127.0.0.1:${(await listen(server)).port}`
   }
   await open()
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
   owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); db?.close(); rmSync(dir, { recursive: true, force: true }) })
-  return { rows, calls, reads, sessions, finished, at, held, badHistory, queuePath: join(dir, 'queue.db'), close, open,
+  return { rows, calls, reads, wireAttempts, sessions, finished, at, held, badHistory, queuePath: join(dir, 'queue.db'), close, open,
     receipt: (sessionId: string, id = 'deleg_saved_receipt') => db!.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run(id, sessionId, 'completed', 'dropped', JSON.stringify({ results: [{ task_index: 0, status: 'completed', summary: 'Saved receipt fixture findings.' }] }), finished),
     advance: (ms: number) => { skew += ms },
     failHistory: (v: boolean) => { failHistory = v },
@@ -99,6 +106,28 @@ async function fixture({ count = 205, access = false, history = false } = {}) {
 const settled = async (f: any, n: number) => { const deadline = Date.now() + 5000; while (f.calls.length < n && Date.now() < deadline) await new Promise(r => setTimeout(r, 25)); expect(f.calls).toHaveLength(n) }
 
 describe('one-tap Continue for older finished results: actual HTTP + durable queue', () => {
+  it('reconciles a lost manual-Continue acknowledgement after restart even when a newer human turn invalidates new dispatch', async () => {
+    const f = await fixture({ count: 1, loseAck: true })
+    const item = (await f.list()).body.results[0]
+    const queued = await (await f.click(item)).json()
+    expect(queued.status).toBe('queued')
+    expect(f.calls).toHaveLength(1)
+    const before = new DatabaseSync(f.queuePath)
+    const frozen = before.prepare('SELECT dispatch_attempted,dispatch_body FROM wizard_run_queue').get()!
+    expect(frozen.dispatch_attempted).toBe(1)
+    expect(frozen.dispatch_body).toBe(f.wireAttempts[0].text)
+    before.close()
+    f.rows.get('wizard_manual_0')!.push({ id: 200001, role: 'user', content: 'A newer human request', timestamp: f.at + 100 })
+    await f.restart()
+    const retry = new DatabaseSync(f.queuePath)
+    retry.exec('UPDATE wizard_run_queue SET retry_after=0'); retry.close()
+    const result = await (await fetch(`${f.base()}/wizard/hermes/v1/runs/${queued.run_id}`)).json()
+    expect(result.status).toBe('completed')
+    expect(f.calls).toHaveLength(1)
+    expect(f.wireAttempts).toHaveLength(2)
+    expect(f.wireAttempts[1]).toEqual(f.wireAttempts[0])
+    expect(f.calls[0]).not.toHaveProperty('_wizard_background_recovery')
+  })
   it('walks past session 100, covers assistant and compressed roots, and never starts work from discovery', async () => {
     const f = await fixture()
     const { body } = await f.list()

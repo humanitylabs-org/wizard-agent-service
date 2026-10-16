@@ -19,7 +19,7 @@ async function readBody(req: IncomingMessage) {
 }
 
 // A stock-shaped Hermes API: sessions, runs, model options, health. Records every request.
-async function fakeHermes(name: string, sessions: string[] = []) {
+async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[]) {
   const seen: Seen[] = []
   const known = new Set(sessions)
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -37,7 +37,7 @@ async function fakeHermes(name: string, sessions: string[] = []) {
     if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
-    if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: [{ role: 'assistant', content: `${name} says hi` }] })
+    if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: messages ?? [{ role: 'assistant', content: `${name} says hi` }] })
     if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
     if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
     if (req.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(url.pathname)) return json(200, { run_id: url.pathname.split('/').at(-1), status: 'completed', output: `${name} done` })
@@ -98,6 +98,21 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('redacts shared and agent-local attachment roots in routed context', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const original = '[Wizard follow-through] Please inspect /private/attachments/PRIVATE_PATH_CANARY.wav and /opt/data/attachments/CONTAINER_PATH_CANARY.wav and ' + join(dir, 'agents/private/home/attachments/HOST_PATH_CANARY.wav')
+    const priv = await fakeHermes('private', ['wizard_private_paths'], [{ id: 4, role: 'user', timestamp: 42, content: original }])
+    const { base } = await start(dir, main, { inboxTrustedRoots: ['/private/attachments'] })
+    await withPrivate(dir, base, priv.port)
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_paths/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const payload = await response.json()
+    expect(payload.data[0].run_context.redacted).toBe(true)
+    expect(JSON.stringify(payload)).not.toMatch(/(?:PRIVATE|CONTAINER|HOST)_PATH_CANARY/)
+    expect(payload.data[0].run_context.original).toContain('[private attachment]')
+  })
+
   it('lists the main agent and only schema-1 agent folders', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -216,6 +231,21 @@ describe('agents registry and API', () => {
 })
 
 describe('per-agent threads and runs', () => {
+  it('projects private-agent startup context from received text without forwarding view', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const original = '[Wizard follow-through] Please finish the original request.'
+    const priv = await fakeHermes('private', ['wizard_private_context'], [{ id: 4, role: 'user', timestamp: 42, content: original + '\n[WIZARD_STATUS_V1] {"state":"done"}\nprivate-tail' }])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_context/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const payload = await response.json()
+    expect(payload.data[0]).toMatchObject({ id: 4, timestamp: 42, content: '', role: 'system', display_kind: 'run_context', run_context: { original, redacted: true, kind: 'continuation' } })
+    expect(JSON.stringify(payload)).not.toContain('private-tail')
+    expect(priv.seen.find(s => s.path.includes('/messages'))?.path).toBe('/api/sessions/wizard_private_context/messages')
+  })
+
   it('routes a private run to the private Hermes only, pins the thread, and never touches the main Hermes', async () => {
     const dir = box()
     const main = await fakeHermes('main', ['wizard_main_1'])

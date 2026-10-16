@@ -420,8 +420,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       result = decorateThreadAgent(result, info)
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
+    const historySource = result
     if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
-    if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result)
+    if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
+    if (messageHistory && ctx.projectAgentHistory) result = ctx.projectAgentHistory(result, agent)
   }
   response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
   response.end(result)

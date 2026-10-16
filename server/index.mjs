@@ -60,6 +60,7 @@ const server = createWizardServer({
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
+  helmAttachmentsRoot: process.env.WIZARD_HELM_ATTACHMENTS_ROOT || '',
   hermesStatePath,
   canonicalSessionListing: true,
   helmDbPath: process.env.WIZARD_HELM_DB_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/data/apps/helm/helm.db') : ''),
@@ -82,6 +83,18 @@ const server = createWizardServer({
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
+  runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
+  // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
+  heavyStatePath: process.env.WIZARD_HEAVY_STATE_PATH || '',
+  heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
+  heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
+  heavyWorker: {
+    host: process.env.WIZARD_HEAVY_SSH_HOST,
+    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
+    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
+    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
+    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
+  },
   requireAccess,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
@@ -112,6 +125,16 @@ const server = createWizardServer({
   // upload created with a destination is placed there, and the Files app can list it. Separate from
   // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
   userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',
+  chatPhotos: {
+    enabled: process.env.WIZARD_CHAT_PHOTOS_ENABLED === '1',
+    statePath: process.env.WIZARD_CHAT_PHOTOS_STATE_PATH || '',
+    ownerId: process.env.WIZARD_CHAT_PHOTOS_OWNER_ID || '',
+    singleOwner: process.env.WIZARD_CHAT_PHOTOS_SINGLE_OWNER === '1',
+    maxBytes: Number(process.env.WIZARD_CHAT_PHOTOS_MAX_BYTES || 0),
+    ownerLabel: process.env.WIZARD_CHAT_PHOTOS_OWNER_LABEL || '',
+    agentLabel: process.env.WIZARD_CHAT_PHOTOS_AGENT_LABEL || '',
+
+  },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
