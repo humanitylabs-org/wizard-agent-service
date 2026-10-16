@@ -1,6 +1,6 @@
 # Multi-account lifecycle handoff (local candidate, not deployed)
 
-This supersedes the lifecycle-stub status in the original `agent_notes/wizard-os/multi-account-candidate.md`. All implementation changes remain in the two requested candidate worktrees. No user login, refresh, revoke, removal, token copy, public push, or live deployment was performed.
+All implementation changes remain in the two requested candidate worktrees. No user login, refresh, revoke, removal, token copy, public push, or live deployment was performed.
 
 ## Implemented contract
 
