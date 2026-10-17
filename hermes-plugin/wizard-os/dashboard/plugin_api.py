@@ -7,6 +7,7 @@ usage reader with read_only=True (no refresh, rotation or store write). Never re
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import timezone
 
@@ -27,6 +28,13 @@ _lspec.loader.exec_module(_lifecycle)
 
 router = APIRouter()
 
+# Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
+# auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a
+# path that provably keeps that login; until then set WIZARD_ACCOUNT_CHANGES=1 only on a box that has been checked.
+def _changes_on() -> bool:
+    return os.environ.get('WIZARD_ACCOUNT_CHANGES', '0') == '1'
+_CHANGES_OFF = 'Adding and removing subscriptions here is switched off for now; manage them with stock Hermes.'
+
 
 @router.get('/provider-accounts/{provider}/operations/{operation}')
 def account_operation_status(provider: str, operation: str, response: Response):
@@ -42,6 +50,8 @@ async def account_operation(provider: str, request: Request, response: Response)
     # Stock dashboard auth protects all plugin routes. Require a non-simple
     # request too: cross-origin forms cannot initiate provider operations.
     response.headers['Cache-Control'] = 'no-store'
+    if not _changes_on():
+        raise HTTPException(403, _CHANGES_OFF)
     if request.headers.get('X-Wizard-Account-Action') != '1' or request.headers.get('content-type', '').split(';')[0] != 'application/json':
         raise HTTPException(403, 'Account action header required')
     if request.headers.get('sec-fetch-site') == 'cross-site':
@@ -131,6 +141,15 @@ def get_provider_accounts(provider: str):
         raise HTTPException(404, 'Unknown provider')
     try:
         result = _accounts.provider_accounts(provider)
+        # Changes off (the default): the listing needs no Hermes config at all.
+        if not _changes_on():
+            reason = _CHANGES_OFF
+            result['management'] = {**result['management'], 'status': 'off', 'message': reason}
+            result['actions'] = {k: False for k in result.get('actions', {})}
+            for row in result.get('accounts', []):
+                if isinstance(row.get('actions'), dict):
+                    row['actions'] = {k: False for k in row['actions']}
+            return result
         from hermes_cli.config import load_config_readonly
         auth = (load_config_readonly() or {}).get('auth') or {}
         reason = None

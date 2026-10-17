@@ -131,11 +131,29 @@ class LifecycleTests(unittest.TestCase):
         app=FastAPI(); app.include_router(api.router)
         c=TestClient(app)
         path='/provider-accounts/chatgpt/operations'
+        headers={'X-Wizard-Account-Action':'1'}
+        # Shipped default: account changes switched off, even with a valid request.
+        os.environ.pop('WIZARD_ACCOUNT_CHANGES',None)
+        self.assertEqual(c.post(path,json={'action':'add','confirmed':True},headers=headers).status_code,403)
+        self.assertEqual(self.b.jobs,{})
+        os.environ['WIZARD_ACCOUNT_CHANGES']='1'
+        self.addCleanup(os.environ.pop,'WIZARD_ACCOUNT_CHANGES',None)
         self.assertEqual(c.post(path,json={'action':'add','confirmed':True}).status_code,403)
         headers={'X-Wizard-Account-Action':'1'}
         self.assertEqual(c.post(path,json={'action':'add'},headers=headers).status_code,409)
         self.assertEqual(c.post(path,json={'action':'add','confirmed':True},headers={**headers,'sec-fetch-site':'cross-site'}).status_code,403)
         self.assertEqual(c.post(path,json={'code':'sk-SECRET','bad':True},headers=headers).status_code,409)
         self.assertEqual(self.b.jobs,{})
+
+    def test_listing_reports_changes_off_by_default(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        s=importlib.util.spec_from_file_location('api2',ROOT/'hermes-plugin/wizard-os/dashboard/plugin_api.py')
+        api=importlib.util.module_from_spec(s); s.loader.exec_module(api)
+        api._accounts.provider_accounts=lambda p:{'accounts':[{'id':'aa11bb','actions':{'reconnect':True,'remove':True}}],'actions':{'add':True},'management':{'status':'available'}}
+        os.environ.pop('WIZARD_ACCOUNT_CHANGES',None)
+        app=FastAPI(); app.include_router(api.router); j=TestClient(app).get('/provider-accounts/chatgpt').json()
+        self.assertEqual(j['management']['status'],'off'); self.assertEqual(j['actions'],{'add':False})
+        self.assertEqual(j['accounts'][0]['actions'],{'reconnect':False,'remove':False}); self.assertEqual(j['accounts'][0]['id'],'aa11bb')
 
 if __name__=='__main__': unittest.main()
