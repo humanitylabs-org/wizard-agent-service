@@ -3,6 +3,12 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
+// Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])
+export function neverSent(error) {
+  for (let e = error, depth = 0; e && depth < 4; e = e.cause, depth++) if (NOT_SENT_CODES.has(e.code)) return true
+  return false
+}
 const fail = (message, status = 422) => Object.assign(new Error(message), { status })
 
 export function runtimeMatches(runtime, route) {
@@ -22,9 +28,26 @@ export function sessionMessage(input) {
     : Array.isArray(item.content) ? item.content : [])
 }
 
+// A distinctive slice of the user's own words, used to find this exact send in the Hermes transcript.
+export function probeText(input) {
+  let text = ''
+  try {
+    const message = sessionMessage(input)
+    text = typeof message === 'string' ? message
+      : message.filter(part => part?.type === 'text' || part?.type === 'input_text').map(part => part.text || '').join('\n')
+  } catch { return '' }
+  text = text.replace(/\[WIZARD_FILES_V1\][\s\S]*?\[\/WIZARD_FILES_V1\]/g, '').trim()
+  return text.slice(0, 120)
+}
+
 export class LockedRunBridge {
-  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null }) {
+  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000 }) {
     this.rawFetch = fetchImpl
+    // deliveryProbe(sessionId, sinceMs) -> true (Hermes has a user turn since then), false (it does not), null (unknown).
+    // Lets an uncertain send (connection lost mid-request, e.g. a gateway restart) be replayed once Hermes
+    // provably never recorded it, instead of failing James's message permanently.
+    this.deliveryProbe = deliveryProbe
+    this.uncertainSettleMs = uncertainSettleMs
     this.origin = origin.replace(/\/$/, '')
     this.statePath = statePath
     this.sessionRoute = sessionRoute
@@ -82,13 +105,27 @@ export class LockedRunBridge {
     if (existing && existing.requestHash !== requestHash) throw fail('Idempotency key belongs to a different selected model or message')
     if (this.pending.has(key)) return this.response(await this.pending.get(key), true)
     if (existing?.runId) return this.response(existing, true)
-    if (existing) throw fail('Model-locked delivery is uncertain; automatic replay is blocked to avoid a duplicate')
+    if (existing && !(await this.provablyUndelivered(key, existing, value.session_id, probeText(value.input))))
+      throw fail('Model-locked delivery is uncertain; automatic replay is blocked to avoid a duplicate')
     const entry = { sessionId: value.session_id, ...route, requestHash, state: 'starting', createdAt: Date.now() }
     this.entries.set(key, entry); this.save()
     const task = this.launch(value, route, headers, entry)
     this.pending.set(key, task)
     try { return this.response(await task) }
     finally { this.pending.delete(key) }
+  }
+  async provablyUndelivered(key, existing, sessionId, text) {
+    if (existing.state !== 'uncertain' || typeof this.deliveryProbe !== 'function') return false
+    // Give a send that did reach Hermes time to land in its transcript before judging it missing.
+    if (Date.now() - existing.createdAt < this.uncertainSettleMs)
+      throw fail('Model-locked delivery is being confirmed; retrying shortly', 503)
+    let seen
+    try { seen = await this.deliveryProbe(sessionId, existing.createdAt - 1_000, text) }
+    catch { seen = null }
+    if (seen === null || seen === undefined) throw fail('Model-locked delivery could not be confirmed yet; retrying', 503)
+    if (seen) return false
+    this.entries.delete(key); this.save()
+    return true
   }
   response(entry, replay = false) {
     return new Response(JSON.stringify({ object: 'run', run_id: entry.runId, session_id: entry.sessionId,
@@ -122,7 +159,13 @@ export class LockedRunBridge {
       if (!upstream.body || !upstream.headers.get('content-type')?.includes('text/event-stream'))
         throw fail('Selected model could not start (' + upstream.status + ')', upstream.status >= 500 ? 503 : 409)
     } catch (error) {
-      if ([...this.entries.values()].includes(entry)) { entry.state = 'uncertain'; this.save() }
+      if ([...this.entries.values()].includes(entry)) {
+        if (neverSent(error)) {
+          const key = [...this.entries].find(([, e]) => e === entry)?.[0]
+          if (key) this.entries.delete(key)
+        } else entry.state = 'uncertain'
+        this.save()
+      }
       throw error
     }
     const reader = upstream.body.getReader()

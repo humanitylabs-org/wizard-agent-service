@@ -415,6 +415,26 @@ export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   }
 }
 
+// A brand-new thread whose first send failed (or still waits) has no Hermes messages yet, so every
+// list reader drops it and James's message vanishes. Keep it listed from the Wizard run queue,
+// which still holds the exact text, so it shows with its failure and Retry (17 Oct 2026 incident).
+export function readPendingFirstSendSessions(sessionDbPath, sessionIds) {
+  if (!sessionDbPath || !existsSync(sessionDbPath) || !sessionIds.length) return []
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    return database.prepare(`
+      SELECT id, source, model, title, started_at, ended_at, end_reason, message_count,
+             parent_session_id, last_activity_at AS last_active, pinned, archived, hidden
+        FROM sessions
+       WHERE id IN (${sessionIds.map(() => '?').join(',')})
+         AND COALESCE(message_count, 0) = 0 AND hidden = 0 AND archived = 0 AND parent_session_id IS NULL
+    `).all(...sessionIds).map((session) => ({
+      ...session, pinned: Boolean(session.pinned), archived: false, hidden: false,
+      wizard_pending_first_send: true,
+    }))
+  } catch { return [] } finally { database.close() }
+}
+
 function mergeArchivedSessions(result, archivedSessions) {
   if (!archivedSessions.length) return result
   try {
@@ -434,7 +454,8 @@ function isHumanSession(session, operator) {
   if (!session || typeof session.id !== 'string') return false
   const operatorSession = session.id.startsWith(OPERATOR_SESSION_PREFIX)
   if (operatorSession !== operator || session.hidden === true) return false
-  if (typeof session.message_count === 'number' && session.message_count <= 0) return false
+  if (typeof session.message_count === 'number' && session.message_count <= 0
+    && !(session.wizard_pending_first_send === true && !operator)) return false
   if (operator) return session.id.startsWith(OPERATOR_USER_SESSION_PREFIX)
   return isDirectHumanSessionIdentity(session.id, session.source)
 }
@@ -546,6 +567,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               // thread settles like a finished turn (Done/Defer, no reply, no Retry).
               projected.status = latestDirect.status
               if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
+              if (!projected.preview && latestDirect.preview) projected.preview = latestDirect.preview
             }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
@@ -2036,6 +2058,19 @@ export function createWizardServer(options = {}) {
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
+    // Read-only transcript check for sends whose connection dropped mid-request (gateway restart).
+    // false = Hermes never recorded this message, so the queue may replay it instead of failing it.
+    deliveryProbe: !hermesStatePath ? null : (sessionId, sinceMs, text) => {
+      if (!existsSync(hermesStatePath)) return null
+      const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+      try {
+        const since = Number(sinceMs) / 1000
+        const row = text
+          ? db.prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND role='user' AND timestamp>=? AND instr(content, ?) > 0").get(String(sessionId), since, String(text))
+          : db.prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND role='user' AND timestamp>=?").get(String(sessionId), since)
+        return Number(row?.n || 0) > 0
+      } catch { return null } finally { db.close() }
+    },
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
     sessionRoute: sessionId => {
       // Never infer a host state.db path on portable installs. Explicit client locks still work
@@ -2261,6 +2296,7 @@ export function createWizardServer(options = {}) {
   // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
   // "Agent adapter" keeps the list.
+  const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? readPendingFirstSendSessions(hermesStatePath, ids) : []))
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
   const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionReader = options.canonicalSessionReader
@@ -4500,6 +4536,12 @@ export function createWizardServer(options = {}) {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
+          if (!operator && runQueue && Number(url.searchParams.get('offset') ?? 0) === 0) {
+            try {
+              const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
+              result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
+            } catch { /* optional: never break ordinary Chats */ }
+          }
           const listedSessionIds = sessionIdsInList(result)
           const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
           const recentExternalReferences = canonicalPage
