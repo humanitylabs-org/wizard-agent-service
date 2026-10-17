@@ -341,7 +341,9 @@ function codexPoolRows(options) {
 function codexCandidate({ token, accountId = '', origin, priority, fallbackKey, label = '' }) {
   const claims = jwtClaims(token)
   const auth = claims[OPENAI_AUTH_CLAIM] && typeof claims[OPENAI_AUTH_CLAIM] === 'object' ? claims[OPENAI_AUTH_CLAIM] : {}
-  const account = trimmed(auth.chatgpt_account_id) || trimmed(accountId) || trimmed(claims.sub)
+  const account = trimmed(auth.chatgpt_account_id)
+  const subject = trimmed(claims.sub)
+  const principal = account && subject ? JSON.stringify([account, subject]) : ''
   return {
     token: trimmed(token),
     origin,
@@ -349,7 +351,7 @@ function codexCandidate({ token, accountId = '', origin, priority, fallbackKey, 
     label,
     // An unidentifiable credential keys on itself rather than merging with
     // another one whose account is equally unknown.
-    accountKey: digest(account ? `account:${account}` : `credential:${fallbackKey}`),
+    accountKey: digest(principal ? `principal:${principal}` : `credential:${fallbackKey}`),
     accountId: trimmed(auth.chatgpt_account_id) || trimmed(accountId),
     issuedAt: isFiniteNumber(claims.iat) ? claims.iat * 1000 : 0,
     expiresAt: isFiniteNumber(claims.exp) ? claims.exp * 1000 : null,
@@ -575,6 +577,22 @@ function connectionPaid(paid) {
 export function connectionRow(identity, payload, now) {
   if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT || payload.provider !== identity.id) {
     return unavailable(identity, PROVIDER_ERROR, `${identity.name} app answered with an unknown contract.`)
+  }
+  // Explicit account inventory is authoritative, including an empty array. Never
+  // fall back to a singleton/host credential when Hermes reports zero accounts.
+  if (Array.isArray(payload.accounts)) {
+    const seen = new Set()
+    const accounts = payload.accounts.filter(a => a && /^[a-zA-Z0-9_-]{1,80}$/u.test(a.id) && !seen.has(a.id) && seen.add(a.id)).map(a => {
+      const authCode = CONNECTION_STATUS_CODES.get(a.status) ?? a.error?.code
+      const revoked = authCode === SIGNED_OUT || authCode === EXPIRED
+      const usage = !revoked && a.usage && typeof a.usage === 'object' ? a.usage : null
+      return { id: `${identity.id}:${a.id}`, providerId: identity.id, providerName: identity.name,
+        name: text(a.name, 80) || identity.name, email: text(a.email, 80) || null,
+        plan: text(a.plan, 40) || null, status: usage ? 'ok' : 'unavailable',
+        fetchedAt: isoTime(usage?.fetchedAt), limits: connectionLimits(usage), paid: connectionPaid(usage?.paid),
+        error: usage ? null : { code: revoked ? authCode : PROVIDER_ERROR, message: revoked ? `${identity.name} sign-in needs reconnecting.` : 'Usage unavailable' } }
+    })
+    return { ...identity, accounts, accountCount: accounts.length, status: 'ok', fetchedAt: new Date(now()).toISOString(), limits: [], paid: null, plan: null, error: null }
   }
   const plan = text(payload.plan, 40) || null
   const reported = payload.error && typeof payload.error === 'object' ? payload.error : null

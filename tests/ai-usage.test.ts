@@ -182,6 +182,17 @@ describe('AI usage provider reads', () => {
 })
 
 describe('ChatGPT subscriptions in the credential pool', () => {
+  it('same account with different subjects remains separate; same principal grants dedupe', async () => {
+    const alter = (sub: string) => {
+      const claims = JSON.parse(Buffer.from(FIRST_TOKEN.split('.')[1], 'base64url').toString())
+      claims.sub = sub
+      return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`
+    }
+    const {usage} = reader({...credentialFixture({pool:[poolRow(alter('person-a'),{id:'a',label:'CODEX'}),poolRow(alter('person-b'),{id:'b',label:'CODEX-2'}),poolRow(alter('person-a'),{id:'c',label:'CODEX-3'})]})})
+    const out = await usage.read()
+    expect(out.providers.filter(p=>/^codex/.test(p.id))).toHaveLength(2)
+  })
+
   const codexPayloadFor = (remaining: number, resetAt: number, plan: string) => ({
     plan_type: plan,
     rate_limit: { primary_window: { used_percent: 100 - remaining, limit_window_seconds: 604_800, reset_at: resetAt } },
