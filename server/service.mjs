@@ -26,7 +26,8 @@ import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
-import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
+import { readUiPreferences, updateUiPreferences } from './ui-preferences.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -3631,6 +3632,21 @@ export function createWizardServer(options = {}) {
           }
           sendJson(response, parts.length <= 3 ? 405 : 404, { error: parts.length <= 3 ? 'method_not_allowed' : 'not_found' })
         } catch (error) { sendUploadError(response, error) }
+        return
+      }
+      if (url.pathname === '/wizard/v1/ui-preferences') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!['GET', 'PUT'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, PUT' }); return }
+        if (request.method === 'PUT' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
+        let patch
+        if (request.method === 'PUT') {
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+          try { patch = JSON.parse((await readBoundedBody(request, 32768)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
+        }
+        try {
+          sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
