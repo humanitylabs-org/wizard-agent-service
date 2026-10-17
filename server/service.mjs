@@ -581,7 +581,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
               const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
-              if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) delete projected.status
+              if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) {
+                delete projected.status
+                if (projected.wizard_pending_first_send) return null  // James dismissed a send that never went through
+              }
             }
             // Internal machine turns (helper results, follow-through nudges) never become the list preview.
             if (typeof projected.preview === 'string' && /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through)/u.test(projected.preview)) {
@@ -629,6 +632,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           }
           return projected
         })
+        .filter(Boolean)
       return Buffer.from(JSON.stringify(payload))
     }
   } catch { /* pass through the upstream error body */ }
@@ -4156,7 +4160,9 @@ export function createWizardServer(options = {}) {
         let sessionId
         try { sessionId = decodeURIComponent(failureDismissal[1]) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        if ((await readBoundedBody(request, 2)).length) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Wizard UX posts '{}'; accept an empty body or an empty JSON object.
+        const dismissBody = (await readBoundedBody(request, 64)).toString('utf8').trim()
+        if (dismissBody && dismissBody !== '{}') { sendJson(response, 400, { error: 'invalid_request' }); return }
         // Resolve the failure identity the way the session list projects it:
         // the newest bound external run, the newest Helm activity, else the
         // canonical session revision.
@@ -4167,6 +4173,10 @@ export function createWizardServer(options = {}) {
         } catch { /* read-only projection; the dismissal can still persist */ }
         if (!failureKey) {
           try { failureKey = String((await readHelmActivities()).find((activity) => activity.sessionId === sessionId)?.activityId ?? '') } catch { /* optional */ }
+        }
+        if (!failureKey) {
+          // Failed Wizard queue sends: the list keys these by the newest queue run (latestDirect.publicRunId).
+          try { failureKey = String(runQueue?.latestProjections([sessionId])?.[0]?.publicRunId ?? '') } catch { /* optional */ }
         }
         try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
         catch { sendJson(response, 400, { error: 'invalid_request' }); return }
