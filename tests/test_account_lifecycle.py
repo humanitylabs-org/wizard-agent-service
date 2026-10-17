@@ -152,7 +152,11 @@ class LifecycleTests(unittest.TestCase):
         api=importlib.util.module_from_spec(s); s.loader.exec_module(api)
         api._accounts.provider_accounts=lambda p:{'accounts':[{'id':'aa11bb','actions':{'reconnect':True,'remove':True}}],'actions':{'add':True},'management':{'status':'available'}}
         os.environ.pop('WIZARD_ACCOUNT_CHANGES',None)
-        app=FastAPI(); app.include_router(api.router); j=TestClient(app).get('/provider-accounts/chatgpt').json()
+        # Any attempt to read auth config would fail this listing: no adoption-setting precondition.
+        import sys
+        from types import SimpleNamespace
+        with patch.dict(sys.modules, {'hermes_cli.config': SimpleNamespace(load_config_readonly=lambda: (_ for _ in ()).throw(AssertionError('config read')))}):
+            app=FastAPI(); app.include_router(api.router); j=TestClient(app).get('/provider-accounts/chatgpt').json()
         self.assertEqual(j['management']['status'],'off'); self.assertEqual(j['actions'],{'add':False})
         self.assertEqual(j['accounts'][0]['actions'],{'reconnect':False,'remove':False}); self.assertEqual(j['accounts'][0]['id'],'aa11bb')
 

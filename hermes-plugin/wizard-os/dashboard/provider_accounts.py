@@ -138,7 +138,7 @@ def provider_accounts(provider, read=None, fetch=None):
     return {'provider': provider, 'name': _NAMES[provider], 'owner': 'hermes',
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
-            'management': {'status': 'available',
+            'management': {'contract': 'wizard.account-management/1', 'status': 'available',
                            'message': 'Reconnect signs in again and retains existing grants. Use a different OpenAI account to add quota; signing in to the same account can invalidate its older grants.',
                            'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
             'error': None}

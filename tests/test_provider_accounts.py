@@ -39,6 +39,14 @@ class AccountsTest(unittest.TestCase):
         for secret in ('SECRET', 'private@example.com', 'access_token', 'refresh_token'):
             self.assertNotIn(secret, text)
 
+    def test_legacy_labels_never_merge_unproven_accounts(self):
+        rows = [row('a', 'r1', 'CODEX'), row('b', 'r2', 'CODEX-2'), row('c', 'r3', 'CODEX-3')]
+        out = m.provider_accounts('chatgpt', lambda _: rows, self.fetch)
+        self.assertEqual(out['accountCount'], 3)
+        self.assertEqual(out['management']['contract'], 'wizard.account-management/1')
+        for item in rows: item['access_token'] = 'unproven'
+        self.assertEqual(m.provider_accounts('chatgpt', lambda _: rows, self.fetch)['accountCount'], 3)
+
     def test_dynamic_add_remove_and_empty_no_fallback(self):
         rows = [row()]
         read = lambda _: rows

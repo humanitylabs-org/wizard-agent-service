@@ -157,7 +157,9 @@ def get_provider_accounts(provider: str):
             reason = 'Account changes require the stock device_code login flow.'
         if reason:
             result['management'] = {**result['management'], 'status': 'blocked', 'message': reason}
-            result['actions']['add'] = False
+            result['actions'] = {k: False for k in result.get('actions', {})}
+            for row in result.get('accounts', []):
+                row['actions'] = {k: False for k in row.get('actions', {})}
         return result
     except Exception:
         raise HTTPException(503, 'Hermes account inventory unavailable') from None

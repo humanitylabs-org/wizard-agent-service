@@ -13,6 +13,13 @@ test('keeps independent account bars, no aggregate', () => {
   assert.deepEqual(row.accounts.map(a=>a.id),['chatgpt:a','chatgpt:b'])
   assert.equal(row.accounts[0].limits[0].remainingPercent,80)
 })
+test('expired account revokes even supplied old usage and reports reconnect', () => {
+  const row=connectionRow(identity,payload([{...account('legacy-claude-code'),status:'expired',error:{code:'expired'}}]),Date.now)
+  assert.equal(row.accounts[0].status,'unavailable')
+  assert.equal(row.accounts[0].error.code,'expired')
+  assert.match(row.accounts[0].error.message,/reconnecting/)
+  assert.deepEqual(row.accounts[0].limits,[])
+})
 test('empty authoritative pool does not expose singleton numbers', () => {
   const row=connectionRow(identity,{...payload([]),usage:{limits:[{usedPercent:90}]}},Date.now)
   assert.deepEqual(row.accounts,[])
