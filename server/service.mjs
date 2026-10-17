@@ -568,6 +568,14 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               projected.status = latestDirect.status
               if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
               if (!projected.preview && latestDirect.preview) projected.preview = latestDirect.preview
+              if (projected.wizard_pending_first_send) {
+                // A send Wizard never delivered: show it as an error thread with James's own words and Retry.
+                const words = String(latestDirect.preview || '').replace(/\[WIZARD_FILES_V1\][\s\S]*?(\[\/WIZARD_FILES_V1\]|$)/gu, '').trim()
+                if (words) projected.wizard_request_preview = words
+                projected.preview = words || 'Voice message'
+                if (!projected.title) projected.title = (words || 'Voice message').replace(/\s+/gu, ' ').slice(0, 60)
+                if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
+              }
             }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
