@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { searchHermesSessionText, readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -42,6 +42,8 @@ import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeV
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
+import { fullRetryInput } from './session-detail.mjs'
+import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -118,9 +120,9 @@ ${APP_PROVENANCE_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
-  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
+  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order', 'limit', 'offset', 'include_compacted', 'view']) },
   { method: 'POST', pattern: new RegExp(`^/api/sessions/${ID}/model$`), query: new Set() },
@@ -141,9 +143,14 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
   for (const name of searchParams.keys()) if (!route.query.has(name)) return false
   if (pathname === '/api/sessions' && method === 'GET') {
     if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
+    if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
+    if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
+    if (['window','q','overrides','cursor'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
+  if (/^\/api\/sessions\/[^/]+$/.test(pathname) && searchParams.has('view') && searchParams.get('view') !== 'detail') return false
   if (/\/messages$/.test(pathname)) {
     if (searchParams.has('order') && !['latest', 'oldest'].includes(searchParams.get('order'))) return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
@@ -3004,8 +3011,29 @@ export function createWizardServer(options = {}) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const canonicalSessionPage = async (operator, searchParams) => {
+  const listWindowPage = createListWindows()
+  const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
+    if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
+      const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+      if (!access) throw Object.assign(new Error('access required'), {status:403})
+      const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
+        const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
+        const rows = []
+        // Truth/helper readers cap at 200 IDs. Keep batches at the existing page size.
+        for (let i=0; i<all.length; i+=100) {
+          const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
+          const batch = JSON.parse(result.toString('utf8')).data
+          if (searchParams.get('q')) {
+            const hits = searchHermesSessionText(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
+            for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
+          }
+          rows.push(...batch)
+        }
+        return rows
+      } })
+    }
     const now = Date.now()
     const requestedOffset = Number(searchParams.get('offset'))
     const offset = Number.isSafeInteger(requestedOffset) ? Math.max(0, requestedOffset) : 0
@@ -4453,9 +4481,10 @@ export function createWizardServer(options = {}) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
+        for (const key of ['window','q','overrides','cursor']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
-          ? await canonicalSessionPage(operator, url.searchParams)
+          ? await canonicalSessionPage(operator, url.searchParams, request)
           : null
         const upstream = canonicalPage
           ? new Response(JSON.stringify(canonicalPage), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -4604,14 +4633,14 @@ export function createWizardServer(options = {}) {
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }
-        if (upstream.ok && !operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+        if (upstream.ok && !operator && request.method === 'GET' && url.searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
           const payload = JSON.parse(result.toString('utf8'))
           const row = payload.session || payload
           if (row?.id) {
             const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
-            detailed.wizard_retry_input = truth?.requestPreview || detailed.last_user_message?.content || detailed.wizard_request_preview || ''
+            detailed.wizard_retry_input = truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
         }
@@ -4651,7 +4680,7 @@ export function createWizardServer(options = {}) {
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
-          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')))))
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'))))
         }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)

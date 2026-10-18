@@ -87,14 +87,21 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     };
   }
 
-export function listRow(item) {
+export function listRow(item, q = '') {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  return { ...row, preview: s.preview.slice(0, 140), listVersion: 1 };
+  for (const key of ['safeError','critical','waitingOn','helperStatus','attention']) if (!row[key]) delete row[key];
+  const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
+  const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
+  const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;
+  return { ...row, preview: s.preview.slice(0, 140), listVersion: 1,
+    ...(body ? { searchSnippet: (at ? '…' : '') + body.slice(at, at+140) } : {}) };
+
 }
-export function listPayload(payload) {
-  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(listRow).filter(Boolean);
-  return { ...payload, view: 'list', list_version: 1 };
+export function listPayload(payload, q = '') {
+  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q)).filter(Boolean);
+  const { window_projected, ...visible } = payload;
+  return { ...visible, view: 'list', list_version: 1 };
 }
 export { normalizeFull, clean };
