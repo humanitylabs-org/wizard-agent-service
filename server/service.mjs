@@ -3645,7 +3645,13 @@ export function createWizardServer(options = {}) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
-  })
+  })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
+  try {
+    if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
+      process.stderr.write('Warning: a private agent exists but no owner proof is configured (WIZARD_OWNER_PROOF_FILE); every local caller counts as the owner.\n')
+    }
+  } catch { /* the registry reports its own errors */ }
+
   // Session ids (and `runtime:id` keys) that belong to a private agent the caller may not open.
   const hiddenSession = (request, key) => {
     if (!agents || typeof key !== 'string') return false
@@ -3779,13 +3785,15 @@ export function createWizardServer(options = {}) {
               if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
               const input = parseShareRequest(parseJsonBody(await readBoundedBody(request, 64 * 1024)))
               // Who may send to the named agent is checked first; a replay is answered only to a caller who may see it.
-              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) { sendJson(response, 404, { error: 'agent_not_found' }); return }
+              // A hidden agent gets exactly the answer of an agent that does not exist.
+              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) throw new UploadError(409, 'agent_unavailable', { agent: input.agent })
               const replay = uploads.replayShare(input)
               if (replay && hiddenShare(replay)) { sendJson(response, 404, { error: 'agent_not_found' }); return }
               if (replay) { sendJson(response, 201, uploads.publicShare(replay), { 'Idempotency-Replayed': 'true' }); return }
               const routed = await resolveShareAgent(input.agent)
               let threadId = input.thread
               if (threadId) {
+                if (hiddenSession(request, threadId)) throw new UploadError(404, 'thread_not_found')
                 if (!await shareThreadExists(threadId, routed)) throw new UploadError(404, 'thread_not_found')
               } else threadId = `wizard_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}`
               const { share, replayed } = await uploads.createShare(input, { ...routed, thread_id: threadId, thread_new: !input.thread })
@@ -4275,7 +4283,12 @@ export function createWizardServer(options = {}) {
         }
         const state = parseJsonBody(await readBoundedBody(request, 256 * 1024))
         // Seen marks for private threads the caller may not open are dropped before the merge, not after.
-        sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.merge(scope, withoutHiddenSeen(request, state))) })
+        // A non-owner merges only into what it can see: hidden records sit outside the size cap, and it cannot
+        // move the store's start time back, so it can neither push out nor reset the owner's private marks.
+        const owner = ownerLike(principalOf(request))
+        const merged = owner ? threadSeenStore.merge(scope, state)
+          : threadSeenStore.merge(scope, withoutHiddenSeen(request, state), { protect: (key) => hiddenSession(request, key), keepInitializedAt: true })
+        sendJson(response, 200, { state: withoutHiddenSeen(request, merged) })
         return
       }
 

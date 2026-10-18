@@ -391,6 +391,48 @@ describe('review regressions', () => {
     expect((await fetch(`${s.base}/wizard/thread-dispositions`, send('PUT', { runtime: 'direct', sessionId: 'wizard_private_direct', deferred: true }))).status).toBe(404)
   })
 
+  it('second review: a hidden agent answers exactly like a missing one on shares, grants and app membership', async () => {
+    const s = await scene(withUploads)
+    const same = async (make: (id: string) => Promise<Response>) => {
+      const hidden = await make(s.privateId)
+      const missing = await make('no-such-agent')
+      const hiddenText = (await hidden.text()).replaceAll(s.privateId, 'ID')
+      const missingText = (await missing.text()).replaceAll('no-such-agent', 'ID')
+      expect([hidden.status, hiddenText]).toEqual([missing.status, missingText])
+    }
+    await same((id) => fetch(`${s.base}/wizard/v1/shares`, send('POST', { client_share_id: `probe-${id}`, agent: id, files: [{ filename: 'a.txt', bytes: 1 }] })))
+    await same((id) => fetch(`${s.base}/wizard/v1/agent-grants`, send('POST', { reader: id, source: 'hermes', scope: 'titles' })))
+    await same((id) => fetch(`${s.base}/wizard/v1/agent-grants`, send('POST', { reader: s.helperId, source: id, scope: 'titles' })))
+    await same((id) => fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: ['hermes', id] })))
+    // A known private thread id answers a share like an unknown one.
+    const known = await fetch(`${s.base}/wizard/v1/shares`, send('POST', { client_share_id: 'probe-thread-1', thread: CANARY, files: [{ filename: 'a.txt', bytes: 1 }] }))
+    const unknown = await fetch(`${s.base}/wizard/v1/shares`, send('POST', { client_share_id: 'probe-thread-2', thread: 'wizard_never_existed', files: [{ filename: 'a.txt', bytes: 1 }] }))
+    expect([known.status, await known.text()]).toEqual([unknown.status, await unknown.text()])
+  })
+
+  it('second review: a thread another caller claimed does not break the owner\'s private list', async () => {
+    const s = await scene()
+    s.priv.known.add('wizard_private_unlisted')
+    const claimed = await fetch(`${s.base}/wizard/hermes/v1/runs`, send('POST', { input: 'x', session_id: 'wizard_private_unlisted', agent: s.helperId }))
+    expect(claimed.status).toBe(202)
+    const list = await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${s.privateId}`, { headers: OWNER })
+    expect(list.status).toBe(200)
+    expect(await list.text()).toContain(CANARY)
+  })
+
+  it('second review: a non-owner cannot push out or reset the owner\'s private seen marks', async () => {
+    const s = await scene()
+    const record = (seenAt: number) => ({ updatedAt: new Date(seenAt).toISOString(), previewFingerprint: 'abc', seenAt })
+    const ownerPut = await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 1000, threads: { [`direct:${CANARY}`]: record(2000) } }, OWNER))
+    expect(ownerPut.status).toBe(200)
+    const flood = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`direct:wizard_flood_${i}`, record(10_000 + i)]))
+    expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 0, threads: flood }))).status).toBe(200)
+    const state = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
+    expect(state.initializedAt).toBe(1000)
+    expect(Object.keys(state.threads)).toContain(`direct:${CANARY}`)
+    expect(Object.keys(state.threads).length).toBeLessThanOrEqual(500)
+  })
+
   it('the agent-only listener needs an agent credential on every request and never honours the owner proof', async () => {
     const s = await scene()
     const svc = servers.find((server) => `http://127.0.0.1:${(server.address() as any)?.port}` === s.base)!
