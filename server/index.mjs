@@ -1,4 +1,4 @@
-import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
+import { createAgentIngress, createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -36,6 +36,19 @@ if (!['tailscale', 'cloudflare', 'none'].includes(authMode)) {
   process.exit(1)
 }
 const requireAccess = authMode !== 'none'
+// Owner proof: a secret the trusted front proxy adds only after it authenticated the owner. Behind such a
+// gateway (auth mode none) it is what tells the owner's own client apart from every other local caller.
+let ownerProof = ''
+if (process.env.WIZARD_OWNER_PROOF_FILE) {
+  try { ownerProof = readFileSync(process.env.WIZARD_OWNER_PROOF_FILE, 'utf8').trim() } catch {
+    process.stderr.write('WIZARD_OWNER_PROOF_FILE is set but unreadable; the service was not started.\n')
+    process.exit(1)
+  }
+  if (ownerProof.length < 32) {
+    process.stderr.write('The owner proof secret must be at least 32 characters; the service was not started.\n')
+    process.exit(1)
+  }
+}
 // Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
 // spec/AGENT_BRIDGE.md "Agent adapter" lists them.
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
@@ -96,6 +109,7 @@ const server = createWizardServer({
     python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
   },
   requireAccess,
+  ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
@@ -164,3 +178,19 @@ const server = createWizardServer({
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+// Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
+if (process.env.WIZARD_AGENT_PORT) {
+  // Agents reach the main listener's loopback too: without an owner proof, a loopback caller is the owner there.
+  if (!ownerProof) {
+    process.stderr.write('WIZARD_AGENT_PORT needs WIZARD_OWNER_PROOF_FILE (owner proof); the service was not started.\n')
+    process.exit(1)
+  }
+  const agentHost = process.env.WIZARD_AGENT_HOST || host
+  const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
+  if (!privateAddress.test(agentHost) && !(container && agentHost === '0.0.0.0')) {
+    process.stderr.write('WIZARD_AGENT_HOST must be a loopback or private network address.\n')
+    process.exit(1)
+  }
+  const agentPort = Number(process.env.WIZARD_AGENT_PORT)
+  createAgentIngress(server).listen(agentPort, agentHost, () => process.stdout.write(`Wizard agent listener on ${agentHost}:${agentPort}\n`))
+}
