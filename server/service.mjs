@@ -42,7 +42,8 @@ import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeV
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
-import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { agentPathAllowed, createPrincipalResolver, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 
@@ -3557,9 +3558,34 @@ export function createWizardServer(options = {}) {
     stream.pipe(response)
   }
 
+  // Owner vs agent authentication: one principal per request, resolved before any route.
+  const principals = createPrincipalResolver({
+    ownerProof: options.ownerProof ?? '',
+    requireAccess,
+    accessVerified: (request) => accessVerified(request, accessVerifier),
+    internalCall,
+    agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
+    mainAgentId: MAIN_AGENT_ID,
+  })
+  // Session ids (and `runtime:id` keys) that belong to a private agent the caller may not open.
+  const hiddenSession = (request, key) => {
+    if (!agents || typeof key !== 'string') return false
+    const ids = [key, key.split(':').slice(1).join(':')].filter(Boolean)
+    return ids.some((id) => { const pinned = agents.pinnedAgent(id); return Boolean(pinned) && isPrivateAgent(agents, pinned) && !mayOpenAgent(request, pinned) })
+  }
+  const withoutHiddenSessions = (request, records) => {
+    if (!records || typeof records !== 'object' || Array.isArray(records) || ownerLike(principalOf(request))) return records
+    return Object.fromEntries(Object.entries(records).filter(([key]) => !hiddenSession(request, key)))
+  }
+  const withoutHiddenSeen = (request, state) => (state && typeof state === 'object' && state.threads && typeof state.threads === 'object'
+    ? { ...state, threads: withoutHiddenSessions(request, state.threads) } : state)
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      const principal = await principals.attach(request)
+      // An agent credential reaches only the agent surfaces; the rest is the owner's.
+      if (principal.kind === 'agent' && !agentPathAllowed(url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
         const authenticated = requireAccess && await accessVerified(request, accessVerifier)
         if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
@@ -3662,6 +3688,7 @@ export function createWizardServer(options = {}) {
               const input = parseShareRequest(parseJsonBody(await readBoundedBody(request, 64 * 1024)))
               const replay = uploads.replayShare(input)
               if (replay) { sendJson(response, 201, uploads.publicShare(replay), { 'Idempotency-Replayed': 'true' }); return }
+              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) { sendJson(response, 403, { error: 'owner_required', check: 'agent.private_owner' }); return }
               const routed = await resolveShareAgent(input.agent)
               let threadId = input.thread
               if (threadId) {
@@ -3673,7 +3700,9 @@ export function createWizardServer(options = {}) {
             }
             if (parts.length === 2 && request.method === 'GET') {
               if (!SHARE_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
-              sendJson(response, 200, uploads.publicShare(uploads.getShare(parts[1])))
+              const share = uploads.getShare(parts[1])
+              if (agents && share?.agent && isPrivateAgent(agents, share.agent) && !mayOpenAgent(request, share.agent)) { sendJson(response, 404, { error: 'not_found' }); return }
+              sendJson(response, 200, uploads.publicShare(share))
               return
             }
           }
@@ -4117,7 +4146,7 @@ export function createWizardServer(options = {}) {
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
         const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
-          sendJson(response, 200, { state: threadDispositionStore.get(scope) }); return
+          sendJson(response, 200, { state: withoutHiddenSessions(request, threadDispositionStore.get(scope)) }); return
         }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
           sendJson(response, 415, { error: 'json_required' }); return
@@ -4142,14 +4171,14 @@ export function createWizardServer(options = {}) {
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
         const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
-          sendJson(response, 200, { state: threadSeenStore.get(scope) })
+          sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
           return
         }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
           sendJson(response, 415, { error: 'json_required' }); return
         }
         const state = parseJsonBody(await readBoundedBody(request, 256 * 1024))
-        sendJson(response, 200, { state: threadSeenStore.merge(scope, state) })
+        sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.merge(scope, state)) })
         return
       }
 
@@ -4237,6 +4266,7 @@ export function createWizardServer(options = {}) {
         let agentResolution = null
         if (agentCtx) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
+          if (principalOf(request).kind === 'agent' && (operator || agentResolution.agentId !== principalOf(request).agentId)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,

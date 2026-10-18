@@ -8,6 +8,7 @@
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
+import { ownerLike, principalOf } from './principals.mjs'
 import { STATUS_INSTRUCTIONS } from './thread-status.mjs'
 
 export const AGENT_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party client for their own agents. This is a separate agent with its own private history, memory and files; nothing from other agents is available here. Answer with the same care you would anywhere else, scaled to the request. Wizard renders Markdown.
@@ -16,6 +17,29 @@ ${STATUS_INSTRUCTIONS}`
 
 const AGENT_ROUTE = /^\/wizard\/v1\/agents(?:\/([a-z][a-z0-9-]{0,30})(?:\/(start|stop|deliveries))?)?$/u
 const GRANT_ROUTE = /^\/wizard\/v1\/agent-grants(?:\/(grant_[a-f0-9]{12}))?$/u
+
+/** True when the agent exists and is private. */
+export function isPrivateAgent(registry, id) {
+  return Boolean(id) && registry.read(id)?.privacy === 'private'
+}
+
+/** Owner (or the Service itself) may open any agent; an agent credential only its own. */
+export function mayOpenAgent(request, agentId) {
+  const principal = principalOf(request)
+  return ownerLike(principal) || (principal.kind === 'agent' && principal.agentId === agentId)
+}
+
+/** A private agent's work is the owner's alone: refuse every other principal, whatever it claims. */
+export function assertAgentTargets(registry, request, ids) {
+  for (const id of ids) {
+    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw new AgentError(403, 'owner_required', 'agent.private_owner')
+  }
+}
+
+/** Agents a non-owner may see in admin listings: private agents are the owner's alone. */
+function visibleAgent(registry, request, id) {
+  return !isPrivateAgent(registry, id) || mayOpenAgent(request, id)
+}
 
 function agentErrorBody(error) {
   return error instanceof AgentError ? error.payload : null
@@ -65,15 +89,20 @@ export async function handleAgentsApi(ctx, url, request, response) {
     try {
       if (grantMatch[1]) {
         if (method !== 'DELETE') throw new AgentError(405, 'method_not_allowed', 'grant.route')
+        const existing = registry.grants().find((grant) => grant.id === grantMatch[1])
+        if (existing) assertAgentTargets(registry, request, [existing.reader, existing.source])
         registry.removeGrant(grantMatch[1])
         sendJson(response, 200, { ok: true })
       } else if (method === 'GET') {
         const reader = url.searchParams.get('reader') ?? ''
-        if (reader && !registry.read(reader)) throw new AgentError(404, 'agent_not_found', 'grant.reader')
-        const grants = registry.grants().filter((grant) => !reader || grant.reader === reader)
+        if (reader && (!registry.read(reader) || !visibleAgent(registry, request, reader))) throw new AgentError(404, 'agent_not_found', 'grant.reader')
+        const grants = registry.grants().filter((grant) => (!reader || grant.reader === reader)
+          && visibleAgent(registry, request, grant.reader) && visibleAgent(registry, request, grant.source))
         sendJson(response, 200, { grants, ...(reader ? { readable_sources: registry.readableSources(reader) } : {}) })
       } else if (method === 'POST') {
-        sendJson(response, 201, { grant: registry.addGrant(await readJson(ctx, request)) })
+        const body = await readJson(ctx, request)
+        assertAgentTargets(registry, request, [typeof body.reader === 'string' ? body.reader : '', typeof body.source === 'string' ? body.source : ''])
+        sendJson(response, 201, { grant: registry.addGrant(body) })
       } else throw new AgentError(405, 'method_not_allowed', 'grant.route')
     } catch (error) { sendAgentError(ctx, response, error) }
     return true
@@ -93,6 +122,8 @@ export async function handleAgentsApi(ctx, url, request, response) {
     try {
       const agent = registry.read(id)
       if (!agent || id === MAIN_AGENT_ID) throw new AgentError(404, 'agent_not_found', 'agent.id')
+      // The delivery token is a host writer's, not the owner's: it never opens a private agent.
+      assertAgentTargets(registry, request, [agent.id])
       const body = await readJson(ctx, request)
       const receipt = await ctx.deliver(agent, body)
       if (typeof receipt?.session_id === 'string') registry.pin(receipt.session_id, agent.id)
@@ -104,12 +135,12 @@ export async function handleAgentsApi(ctx, url, request, response) {
   try {
     if (isOptions) {
       if (method !== 'GET') throw new AgentError(405, 'method_not_allowed', 'agent.route')
-      sendJson(response, 200, { ...await registry.agentOptions(), binding_apps: ctx.bindings ? ctx.bindings.list() : [] })
+      sendJson(response, 200, { ...await registry.agentOptions(), binding_apps: ctx.bindings ? ctx.bindings.list().filter((binding) => visibleAgent(registry, request, bindingAgent(binding))) : [] })
       return true
     }
     if (!id) {
       if (method === 'GET') {
-        const agents = await Promise.all(registry.list().map((agent) => publicAgent(agent)))
+        const agents = await Promise.all(registry.list().filter((agent) => visibleAgent(registry, request, agent.id)).map((agent) => publicAgent(agent)))
         sendJson(response, 200, { agents })
         return true
       }
@@ -122,6 +153,8 @@ export async function handleAgentsApi(ctx, url, request, response) {
       }
       throw new AgentError(405, 'method_not_allowed', 'agent.route')
     }
+    // A private agent is invisible to everyone but the owner: same answer as an agent that does not exist.
+    if (!visibleAgent(registry, request, id)) throw new AgentError(404, 'agent_not_found', 'agent.id')
     if (action) {
       if (method !== 'POST') throw new AgentError(405, 'method_not_allowed', 'agent.route')
       requireJsonOrEmpty(request)
@@ -169,8 +202,16 @@ export async function handleAppBindingApi(ctx, url, request, response) {
   if (action === 'agents') {
     if (!await ctx.accessOk(request)) { sendJson(response, 403, { error: 'access_required' }); return true }
     try {
-      if (method === 'GET') sendJson(response, 200, registry.appAgents(appId))
-      else if (method === 'PUT') sendJson(response, 200, await registry.setAppAgents(appId, await readJson(ctx, request)))
+      if (method === 'GET') {
+        const value = registry.appAgents(appId)
+        sendJson(response, 200, Array.isArray(value?.agents) ? { ...value, agents: value.agents.filter((agent) => visibleAgent(registry, request, agent?.id)) } : value)
+      } else if (method === 'PUT') {
+        const body = await readJson(ctx, request)
+        const current = registry.appAgents(appId)
+        const before = Array.isArray(current?.agents) ? current.agents.map((agent) => agent?.id) : []
+        assertAgentTargets(registry, request, [...before, ...(Array.isArray(body.agents) ? body.agents.filter((item) => typeof item === 'string') : [])])
+        sendJson(response, 200, await registry.setAppAgents(appId, body))
+      }
       else throw new AgentError(405, 'method_not_allowed', 'app.route')
     } catch (error) { sendAgentError(ctx, response, error) }
     return true
@@ -211,18 +252,30 @@ export async function handleAppBindingApi(ctx, url, request, response) {
   try {
     if (isList) {
       if (method !== 'GET') throw new AgentError(405, 'method_not_allowed', 'app.route')
-      sendJson(response, 200, { bindings: bindings.list() })
+      sendJson(response, 200, { bindings: bindings.list().filter((binding) => visibleAgent(registry, request, bindingAgent(binding))) })
       return true
     }
-    if (method === 'GET') { sendJson(response, 200, { binding: bindings.get(appId) }); return true }
+    if (method === 'GET') {
+      const binding = bindings.get(appId)
+      assertAgentTargets(registry, request, [bindingAgent(binding)])
+      sendJson(response, 200, { binding })
+      return true
+    }
     if (method === 'PUT') {
       const body = await readJson(ctx, request)
+      // Moving an app onto or off a private agent re-routes what the app delivers: owner only.
+      assertAgentTargets(registry, request, [bindingAgent(bindings.get(appId)), typeof body.agent === 'string' ? body.agent : ''])
       sendJson(response, 200, { binding: bindings.set(appId, body) })
       return true
     }
     throw new AgentError(405, 'method_not_allowed', 'app.route')
   } catch (error) { sendAgentError(ctx, response, error) }
   return true
+}
+
+function bindingAgent(binding) {
+  const value = binding?.agent
+  return typeof value === 'string' ? value : typeof value?.id === 'string' ? value.id : typeof binding?.agent_id === 'string' ? binding.agent_id : ''
 }
 
 function requireJsonOrEmpty(request) {
@@ -285,6 +338,8 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     || (upstreamPath === '/api/sessions' && method === 'POST' && typeof (bodyValue?.id ?? bodyValue?.session_id) === 'string' ? (bodyValue.id ?? bodyValue.session_id) : '')
   const runId = runIdFromPath(upstreamPath)
   const pinned = (sessionId && registry.pinnedAgent(sessionId)) || (runId && registry.runAgent(runId)) || ''
+  // Authorize against the resolved target before anything else can answer (or hint) about it.
+  assertAgentTargets(registry, request, [explicit, pinned])
   if (explicit && pinned && explicit !== pinned) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
   // #59: a private agent's threads are read only through that agent's own Chats, which always names it. The operator
   // surface (other agents' work) never reaches a non-main agent, and a thread read that arrives by id alone (a link,
@@ -310,6 +365,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     const owner = registry.agentForModel({ model: bodyValue.model, provider: bodyValue.provider })
     if (owner && !(sessionId && await ctx.mainHasSession(sessionId))) routed = owner.id
   }
+  assertAgentTargets(registry, request, [routed])
   return { agentId: explicit || pinned || routed || MAIN_AGENT_ID, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
 }
 
