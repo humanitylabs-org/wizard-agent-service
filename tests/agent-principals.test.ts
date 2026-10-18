@@ -116,6 +116,8 @@ async function scene(extra: (dir: string) => Record<string, unknown> = () => ({}
   return { dir, main, priv, helper, ...svc, privateId, helperId, helperKey, privateKey }
 }
 
+const privateIdOf = (s: { privateId: string }) => s.privateId
+
 // Every way a non-owner might name, guess or reach the private agent's work.
 function privateProbes(privateId: string) {
   const runBody = (extra: Record<string, unknown>) => ({ input: 'hello', session_id: CANARY, ...extra })
@@ -155,7 +157,7 @@ async function call(base: string, [, method, path, body]: readonly [string, stri
   if (body !== undefined) { init.body = JSON.stringify(body); (init.headers as Record<string, string>)['Content-Type'] = 'application/json' }
   if (path.includes('/deliveries')) (init.headers as Record<string, string>).Authorization = 'Bearer delivery-token-0123456789abcdef'
   const response = await fetch(`${base}${path}`, init)
-  return { status: response.status, text: await response.text() }
+  return { status: response.status, text: await response.text(), agent: response.headers.get('x-wizard-agent') ?? '' }
 }
 
 describe('owner vs agent authentication', () => {
@@ -191,7 +193,10 @@ describe('owner vs agent authentication', () => {
     for (const headers of disguises) {
       for (const probe of privateProbes(s.privateId)) {
         const result = await call(s.base, probe, headers)
-        if (result.status < 400 || result.text.includes(CANARY_TEXT)) leaks.push(`${probe[0]} with ${Object.keys(headers).join('+') || 'no headers'}: ${result.status}`)
+        // A new chat that merely names the private agent's model may land on the main agent (where model routing
+        // is absent); what must never happen is that the private agent serves it.
+        const mainMayServe = probe[0].endsWith('on the private model')
+        if ((result.status < 400 && !mainMayServe) || result.agent === privateIdOf(s) || result.text.includes(CANARY_TEXT)) leaks.push(`${probe[0]} with ${Object.keys(headers).join('+') || 'no headers'}: ${result.status}`)
       }
     }
     expect(leaks).toEqual([])
