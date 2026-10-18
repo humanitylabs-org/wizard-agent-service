@@ -36,6 +36,19 @@ if (!['tailscale', 'cloudflare', 'none'].includes(authMode)) {
   process.exit(1)
 }
 const requireAccess = authMode !== 'none'
+// Owner proof: a secret the trusted front proxy adds only after it authenticated the owner. Behind such a
+// gateway (auth mode none) it is what tells the owner's own client apart from every other local caller.
+let ownerProof = ''
+if (process.env.WIZARD_OWNER_PROOF_FILE) {
+  try { ownerProof = readFileSync(process.env.WIZARD_OWNER_PROOF_FILE, 'utf8').trim() } catch {
+    process.stderr.write('WIZARD_OWNER_PROOF_FILE is set but unreadable; the service was not started.\n')
+    process.exit(1)
+  }
+  if (ownerProof.length < 32) {
+    process.stderr.write('The owner proof secret must be at least 32 characters; the service was not started.\n')
+    process.exit(1)
+  }
+}
 // Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
 // spec/AGENT_BRIDGE.md "Agent adapter" lists them.
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
@@ -96,6 +109,7 @@ const server = createWizardServer({
     python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
   },
   requireAccess,
+  ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   operatorWorkerModel: 'glm-5-3',
