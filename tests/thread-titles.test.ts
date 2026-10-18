@@ -39,6 +39,7 @@ describe('title format', () => {
     expect(STATUS_INSTRUCTIONS).toContain('"title":"Wizard OS · Desks"')
     expect(STATUS_INSTRUCTIONS).toContain('Return the thread\'s current title exactly')
     expect(WIZARD_RUN_INSTRUCTIONS).toContain('Project · Feature')
+    expect(WIZARD_RUN_INSTRUCTIONS).toContain("hand that tab over with the Browser app's handoff tool")
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur - Captions' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur · Captions' })
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped' }))).toEqual({ state: 'done', ask: 'Shipped' })
   })
