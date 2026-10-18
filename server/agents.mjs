@@ -35,10 +35,14 @@ export const OUTSIDE_TOOLS = [
 const OUTSIDE_IDS = new Set(OUTSIDE_TOOLS.map((tool) => tool.id))
 // Toolsets that touch files; `files: none` turns them off as well.
 const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
+// Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
 }
+// Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
+// rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
+export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
 export const LOCAL = { id: 'local', label: 'This box (local model)', confidential: true, models: [] }
 // Providers that the AI Accounts app signs in. Offered for standard agents only.
 const AI_ACCOUNTS = new Map([['anthropic', 'Claude (AI Accounts)'], ['openai-codex', 'ChatGPT (AI Accounts)']])
@@ -174,7 +178,24 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     status: status.status,
     status_detail: status.status_detail ?? '',
     is_default: agent.id === MAIN_AGENT_ID,
+    // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
+    created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
   }
+}
+
+/**
+ * Unified Chats routing: the agent that owns a model picked in the owner's Chats. Only a confidential provider's
+ * model routes away from the main agent, and only to a private agent that allows it. Several candidates: the oldest
+ * agent wins (created_at, then id), so the choice is the same on every request.
+ */
+export function agentForModel(agents, route) {
+  const model = typeof route?.model === 'string' ? route.model.trim() : ''
+  const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
+  if (!model || !isConfidentialProvider(provider)) return null
+  return agents
+    .filter((agent) => agent && agent.id !== MAIN_AGENT_ID && agent.privacy === 'private'
+      && agent.model?.provider === provider && Array.isArray(agent.model.allowed_models) && agent.model.allowed_models.includes(model))
+    .sort((a, b) => (Number(a.created_at) || 0) - (Number(b.created_at) || 0) || String(a.id).localeCompare(String(b.id)))[0] ?? null
 }
 
 export function threadAgent(agent) {
@@ -244,6 +265,12 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
+  // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
+  const overrides = agent.model.provider === TINFOIL.id
+    ? [...TINFOIL_NO_REASONING].filter((id) => (agent.model.allowed_models ?? [agent.model.model]).includes(id)) : []
+  if (overrides.length) {
+    lines.push('model_overrides:', '  custom:', ...overrides.flatMap((id) => [`    ${yamlString(id)}:`, '      supports_reasoning: false']))
+  }
   lines.push('agent:', `  disabled_toolsets: [${disabled.map(yamlString).join(', ')}]`)
   // agent.disabled_toolsets is applied last for every platform, the API server included (hermes_cli/tools_config).
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
@@ -759,6 +786,7 @@ export function createAgentRegistry(options = {}) {
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
+    agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken,
     grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent)),

@@ -332,6 +332,19 @@ export class DurableRunQueue {
     }))
   }
 
+  // Sessions whose newest queued send is recent and never produced a finished answer here.
+  // Lets the thread list keep a brand-new thread visible when its first send failed or waits.
+  recentUnfinishedSessionIds(sinceSeconds, limit = 50) {
+    return this.database.prepare(`
+      SELECT session_id FROM wizard_run_queue
+       WHERE created_at >= ?
+       GROUP BY session_id
+      HAVING SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) = 0
+       ORDER BY MAX(created_at) DESC
+       LIMIT ?
+    `).all(Number(sinceSeconds), Number(limit)).map((row) => String(row.session_id))
+  }
+
   latestProjections(sessionIds) {
     const ids = Array.isArray(sessionIds) ? [...new Set(sessionIds)] : null
     if (ids && !ids.length) return []
