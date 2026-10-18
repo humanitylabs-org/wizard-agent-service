@@ -15,14 +15,22 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 
 export const OWNER_PROOF_HEADER = 'x-wizard-owner-proof'
 const PRINCIPAL = Symbol.for('wizard.service.principal')
+const AGENT_INGRESS = Symbol.for('wizard.service.agent_ingress')
 const ANONYMOUS = Object.freeze({ kind: 'anonymous' })
 const BOX_OWNER = Object.freeze({ kind: 'owner', via: 'box_only' })
+const REFUSED = Object.freeze({ kind: 'refused' })
+
+/** Marks a request that arrived on the agent-only listener: there, only an agent credential counts. */
+export function markAgentIngress(request) {
+  Object.defineProperty(request, AGENT_INGRESS, { value: true, configurable: true })
+  return request
+}
 
 function digest(value) {
   return createHash('sha256').update(String(value)).digest()
 }
 
-/** Constant-time comparison of two strings of any length. */
+/** Compares two secrets through fixed-size digests, so the comparison itself leaks nothing about the expected value. */
 export function sameSecret(supplied, expected) {
   if (typeof supplied !== 'string' || typeof expected !== 'string' || !supplied || !expected) return false
   return timingSafeEqual(digest(supplied), digest(expected))
@@ -47,21 +55,29 @@ export function createPrincipalResolver(options = {}) {
   const ownerProof = typeof options.ownerProof === 'string' ? options.ownerProof.trim() : ''
   if (ownerProof && ownerProof.length < 32) throw new Error('The owner proof secret must be at least 32 characters')
   const mainAgentId = options.mainAgentId ?? 'hermes'
+  function agentPrincipal(request) {
+    const token = bearer(request)
+    if (!token || typeof options.agentForToken !== 'function') return null
+    let agentId = ''
+    try { agentId = options.agentForToken(token) || '' } catch { agentId = '' }
+    return agentId && agentId !== mainAgentId ? { kind: 'agent', agentId } : null
+  }
   async function resolve(request) {
+    // The agent-only listener (what agent containers are given): a valid agent credential or nothing.
+    // Owner proof, access headers and the Service's own token are never honoured there.
+    if (request?.[AGENT_INGRESS]) return agentPrincipal(request) ?? REFUSED
     if (ownerProof) {
       const supplied = request.headers?.[OWNER_PROOF_HEADER]
       if (typeof supplied === 'string' && sameSecret(supplied, ownerProof)) return { kind: 'owner', via: 'proxy_proof' }
     }
-    if (options.requireAccess && typeof options.accessVerified === 'function') {
+    // With an owner proof configured, the proof alone makes the owner: header-based verifiers can be
+    // imitated by a local caller, so they keep gating access but never grant the owner.
+    if (!ownerProof && options.requireAccess && typeof options.accessVerified === 'function') {
       try { if (await options.accessVerified(request)) return { kind: 'owner', via: 'access_verifier' } } catch { /* not the owner */ }
     }
     if (typeof options.internalCall === 'function' && options.internalCall(request)) return { kind: 'service' }
-    const token = bearer(request)
-    if (token && typeof options.agentForToken === 'function') {
-      let agentId = ''
-      try { agentId = options.agentForToken(token) || '' } catch { agentId = '' }
-      if (agentId && agentId !== mainAgentId) return { kind: 'agent', agentId }
-    }
+    const agent = agentPrincipal(request)
+    if (agent) return agent
     if (!ownerProof && !options.requireAccess) return BOX_OWNER
     return ANONYMOUS
   }

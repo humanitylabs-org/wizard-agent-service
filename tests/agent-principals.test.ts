@@ -5,8 +5,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
-import { createPrincipalResolver, sameSecret } from '../server/principals.mjs'
+import { createAgentIngress, createWizardServer, listen } from '../server/service.mjs'
+import { createPrincipalResolver, markAgentIngress, sameSecret } from '../server/principals.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((r) => s.close(() => r(undefined))) })
@@ -21,6 +21,7 @@ type Seen = { method: string, path: string }
 async function fakeHermes(name: string, sessions: string[] = []) {
   const seen: Seen[] = []
   const known = new Set(sessions)
+  const runs = new Set<string>()
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://x')
     let raw = ''
@@ -36,9 +37,12 @@ async function fakeHermes(name: string, sessions: string[] = []) {
     if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
-    if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: [{ role: 'assistant', content: name === 'private' ? CANARY_TEXT : `${name} says hi` }] })
+    const messagesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/)
+    if (req.method === 'GET' && messagesMatch) return known.has(decodeURIComponent(messagesMatch[1])) ? json(200, { data: [{ role: 'assistant', content: name === 'private' ? CANARY_TEXT : `${name} says hi` }] }) : json(404, { error: 'not found' })
     if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
-    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
+    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); runs.add(`${name}-run-1`); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
+    const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)/)
+    if (runMatch && !runs.has(runMatch[1])) return json(404, { error: 'no such run' })
     if (req.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(url.pathname)) return json(200, { run_id: url.pathname.split('/').at(-1), status: 'completed', output: `${name} done` })
     if (req.method === 'GET' && /^\/v1\/runs\/[^/]+\/events$/.test(url.pathname)) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end(`event: message.delta\ndata: {"delta":"${name}"}\n\n`); return }
     if (req.method === 'POST' && /^\/v1\/runs\/[^/]+\/(stop|steer|approval)$/.test(url.pathname)) return json(202, { ok: true })
@@ -90,12 +94,12 @@ async function agent(dir: string, base: string, body: Record<string, unknown>, p
 }
 
 // A box with the main agent, a private agent holding one canary thread, and a standard agent with its own credential.
-async function scene() {
+async function scene(extra: (dir: string) => Record<string, unknown> = () => ({})) {
   const dir = box()
   const main = await fakeHermes('main', ['wizard_main_1'])
   const priv = await fakeHermes('private', [CANARY])
   const helper = await fakeHermes('helper', ['wizard_helper_1'])
-  const svc = await start(dir, main)
+  const svc = await start(dir, main, extra(dir))
   const privateId = await agent(dir, svc.base, { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }, priv.port)
   const helperId = await agent(dir, svc.base, { label: 'Helper', harness: 'hermes', model: { provider: 'anthropic', model: 'claude-opus-5-5' }, permissions: { preset: 'standard' } }, helper.port)
   const helperKey = 'helper-gateway-key-0123456789abcdefghijklmnop'
@@ -198,11 +202,15 @@ describe('owner vs agent authentication', () => {
     expect(flagged.status).toBeGreaterThanOrEqual(400)
   })
 
-  it('test 2: denials name the owner check and never echo the thread', async () => {
+  it('test 2: denials look exactly like a missing agent or thread and never echo it', async () => {
     const s = await scene()
     const denied = await fetch(`${s.base}/wizard/hermes/api/sessions/${CANARY}/messages?agent=${s.privateId}`)
-    expect(denied.status).toBe(403)
-    expect(await denied.json()).toEqual({ error: 'owner_required', check: 'agent.private_owner' })
+    const missing = await fetch(`${s.base}/wizard/hermes/api/sessions/${CANARY}/messages?agent=nobody`)
+    expect([denied.status, await denied.json()]).toEqual([missing.status, await missing.json()])
+    // By id alone, the private thread answers like an id nobody has.
+    const idOnly = await fetch(`${s.base}/wizard/hermes/api/sessions/${CANARY}/messages`)
+    const unknown = await fetch(`${s.base}/wizard/hermes/api/sessions/wizard_never_existed/messages`)
+    expect([idOnly.status, await idOnly.text()]).toEqual([unknown.status, await unknown.text()])
     // Admin listings simply do not show the private agent to a non-owner.
     const agents = await (await fetch(`${s.base}/wizard/v1/agents`)).json()
     expect(agents.agents.map((a: any) => a.id)).not.toContain(s.privateId)
@@ -249,11 +257,13 @@ describe('owner vs agent authentication', () => {
     const run = await fetch(`${s.base}/wizard/hermes/v1/runs`, send('POST', { input: 'x', session_id: 'wizard_helper_1', agent: s.helperId }, bearer))
     expect(run.status).toBe(202)
     // Another agent's work: refused, by explicit name or by its pinned thread.
-    for (const path of [`/wizard/hermes/api/sessions?agent=${s.privateId}`, `/wizard/hermes/api/sessions/${CANARY}/messages?agent=${s.privateId}`]) {
-      expect((await fetch(`${s.base}${path}`, { headers: bearer })).status).toBe(403)
+    for (const path of [`/wizard/hermes/api/sessions?agent=${s.privateId}`, `/wizard/hermes/api/sessions/${CANARY}/messages?agent=${s.privateId}`, `/wizard/hermes/api/sessions/${CANARY}/messages`]) {
+      const refused = await fetch(`${s.base}${path}`, { headers: bearer })
+      expect(refused.status).toBeGreaterThanOrEqual(403)
+      expect(await refused.text()).not.toContain(CANARY_TEXT)
     }
     const pinned = await fetch(`${s.base}/wizard/hermes/v1/runs`, send('POST', { input: 'x', session_id: CANARY }, bearer))
-    expect(pinned.status).toBe(403)
+    expect(pinned.status).toBe(404)
     // The private agent's own credential reaches its own threads (its own runtime), and nothing else.
     const self = await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${s.privateId}`, { headers: { Authorization: `Bearer ${s.privateKey}` } })
     expect(self.status).toBe(200)
@@ -279,7 +289,7 @@ describe('owner vs agent authentication', () => {
     // A non-owner cannot see that binding, nor move the app off the private agent.
     const bindings = await (await fetch(`${s.base}/wizard/v1/app-bindings`)).json()
     expect(bindings.bindings.map((b: any) => b.agent)).not.toContain(s.privateId)
-    expect((await fetch(`${s.base}/wizard/v1/apps/meeting-recorder/binding`, send('PUT', { agent: 'hermes' }))).status).toBe(403)
+    expect((await fetch(`${s.base}/wizard/v1/apps/meeting-recorder/binding`, send('PUT', { agent: 'hermes' }))).status).toBe(404)
   })
 
   it('owner-only side lists omit private sessions for other callers', async () => {
@@ -291,6 +301,108 @@ describe('owner vs agent authentication', () => {
     expect(Object.keys(owner.state)).toEqual(expect.arrayContaining([`direct:${CANARY}`, 'direct:wizard_main_1']))
     const other = await (await fetch(`${s.base}/wizard/thread-dispositions`)).json()
     expect(Object.keys(other.state)).toEqual(['direct:wizard_main_1'])
+  })
+})
+
+// Attacks raised by the security review of this change, each pinned as a regression test.
+describe('review regressions', () => {
+  const withUploads = (dir: string) => ({
+    mediaRoot: join(dir, 'media'), mediaAgentRoot: '/files', mediaIndexPath: join(dir, 'state', 'media-files.json'),
+    uploadStatePath: join(dir, 'state', 'uploads.sqlite3'), uploadReserveBytes: 0,
+  })
+
+  it('a replayed private share and its upload ids give a non-owner nothing to read or write', async () => {
+    const s = await scene(withUploads)
+    const body = { client_share_id: 'owner-share-1', agent: s.privateId, files: [{ filename: 'a.txt', bytes: 5 }] }
+    const created = await fetch(`${s.base}/wizard/v1/shares`, send('POST', body, OWNER))
+    expect(created.status).toBe(201)
+    const share = await created.json()
+    const upload = share.uploads[0].upload_id as string
+    const attempts = [
+      ['replay', await fetch(`${s.base}/wizard/v1/shares`, send('POST', body))],
+      ['replay without the agent', await fetch(`${s.base}/wizard/v1/shares`, send('POST', { ...body, agent: undefined }))],
+      ['share status', await fetch(`${s.base}/wizard/v1/shares/${share.share_id}`)],
+      ['upload status', await fetch(`${s.base}/wizard/v1/uploads/${upload}`)],
+      ['upload bytes', await fetch(`${s.base}/wizard/v1/uploads/${upload}`, { method: 'PATCH', headers: { 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' }, body: 'evil!' })],
+      ['upload complete', await fetch(`${s.base}/wizard/v1/uploads/${upload}/complete`, send('POST', {}))],
+    ] as const
+    for (const [name, response] of attempts) {
+      const text = await response.text()
+      expect([name, response.status >= 400, text.includes(upload)]).toEqual([name, true, false])
+    }
+    // The owner's own upload is untouched and still accepts its bytes.
+    const status = await (await fetch(`${s.base}/wizard/v1/uploads/${upload}`, { headers: OWNER })).json()
+    expect(status.offset).toBe(0)
+    const bytes = await fetch(`${s.base}/wizard/v1/uploads/${upload}`, { method: 'PATCH', headers: { ...OWNER, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' }, body: 'hello' })
+    expect(bytes.status).toBe(204)
+  })
+
+  it('grant ids must be plain strings, so an array cannot slip a private reader past the check', async () => {
+    const s = await scene()
+    for (const reader of [[s.privateId], { id: s.privateId }]) {
+      const response = await fetch(`${s.base}/wizard/v1/agent-grants`, send('POST', { reader, source: 'hermes', scope: 'titles' }))
+      expect(response.status).toBe(400)
+    }
+    const grants = await (await fetch(`${s.base}/wizard/v1/agent-grants`, { headers: OWNER })).json()
+    expect(grants.grants.filter((g: any) => g.reader === s.privateId)).toEqual([])
+  })
+
+  it('replaying an agent-creation key does not reveal a private agent; only the owner creates one', async () => {
+    const s = await scene()
+    const body = { label: 'Second private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+    const key = { 'Idempotency-Key': 'create-second-private' }
+    expect((await fetch(`${s.base}/wizard/v1/agents`, send('POST', body, { ...OWNER, ...key }))).status).toBe(201)
+    const replay = await fetch(`${s.base}/wizard/v1/agents`, send('POST', body, key))
+    expect(replay.status).toBeGreaterThanOrEqual(400)
+    expect(await replay.text()).not.toContain('second-private')
+    expect((await fetch(`${s.base}/wizard/v1/agents`, send('POST', { ...body, label: 'Sneaky' }))).status).toBe(403)
+  })
+
+  it('app membership for standard agents still works for local callers while a private agent exists', async () => {
+    const s = await scene()
+    expect((await fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: [s.privateId] }, OWNER))).status).toBe(200)
+    const put = await fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: ['hermes', s.helperId] }))
+    expect(put.status).toBe(200)
+    expect(JSON.stringify(await put.json())).not.toContain(s.privateId)
+    // The hidden private membership stayed as the owner set it.
+    const owner = await (await fetch(`${s.base}/wizard/v1/apps/meditate/agents`, { headers: OWNER })).json()
+    expect(owner.agents.find((a: any) => a.id === s.privateId).enabled).toBe(true)
+    expect(owner.agents.find((a: any) => a.id === s.helperId).enabled).toBe(true)
+    // Changing the private membership itself is the owner's.
+    expect((await fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: [] }))).status).toBe(200)
+    const after = await (await fetch(`${s.base}/wizard/v1/apps/meditate/agents`, { headers: OWNER })).json()
+    expect(after.agents.find((a: any) => a.id === s.privateId).enabled).toBe(true)
+  })
+
+  it('side state for private threads cannot be written by others, and a thread read by the owner is hidden from then on', async () => {
+    const s = await scene()
+    const write = await fetch(`${s.base}/wizard/thread-dispositions`, send('PUT', { runtime: 'direct', sessionId: CANARY, deferred: true }))
+    expect(write.status).toBe(404)
+    const owner = await (await fetch(`${s.base}/wizard/thread-dispositions`, { headers: OWNER })).json()
+    expect(Object.keys(owner.state)).not.toContain(`direct:${CANARY}`)
+    // A private thread the owner opens directly (never listed) is pinned by that read and hidden afterwards.
+    s.priv.known.add('wizard_private_direct')
+    expect((await fetch(`${s.base}/wizard/hermes/api/sessions/wizard_private_direct?agent=${s.privateId}`, { headers: OWNER })).status).toBe(200)
+    expect((await fetch(`${s.base}/wizard/thread-dispositions`, send('PUT', { runtime: 'direct', sessionId: 'wizard_private_direct', deferred: true }))).status).toBe(404)
+  })
+
+  it('the agent-only listener needs an agent credential on every request and never honours the owner proof', async () => {
+    const s = await scene()
+    const svc = servers.find((server) => `http://127.0.0.1:${(server.address() as any)?.port}` === s.base)!
+    const ingress = createAgentIngress(svc)
+    servers.push(ingress)
+    const address = await listen(ingress) as import('node:net').AddressInfo
+    const agentBase = `http://127.0.0.1:${address.port}`
+    for (const headers of [{}, OWNER, { Authorization: 'Bearer fixture-key' }, { Authorization: 'Bearer not-a-key' }]) {
+      for (const path of ['/wizard/hermes/api/sessions', `/wizard/hermes/api/sessions?agent=${s.privateId}`, '/wizard/v1/agents', '/wizard/health']) {
+        const response = await fetch(`${agentBase}${path}`, { headers })
+        expect([path, Object.keys(headers).join(), response.status]).toEqual([path, Object.keys(headers).join(), 401])
+      }
+    }
+    const own = await fetch(`${agentBase}/wizard/hermes/api/sessions?agent=${s.helperId}`, { headers: { Authorization: `Bearer ${s.helperKey}` } })
+    expect(own.status).toBe(200)
+    const main = await fetch(`${agentBase}/wizard/hermes/api/sessions`, { headers: { Authorization: `Bearer ${s.helperKey}` } })
+    expect(main.status).toBe(403)
   })
 })
 
@@ -312,5 +424,13 @@ describe('principal resolver', () => {
     expect((await boxOnly.resolve(request({}))).kind).toBe('owner')
     expect(await boxOnly.resolve(request({ authorization: `Bearer ${'k'.repeat(40)}` }))).toEqual({ kind: 'agent', agentId: 'helper' })
     expect(() => createPrincipalResolver({ ownerProof: 'short' })).toThrow()
+  })
+
+  it('with a proof configured, header-based access verifiers never make the owner', async () => {
+    const request = (headers: Record<string, string>) => ({ headers }) as any
+    const resolver = createPrincipalResolver({ ownerProof: PROOF, requireAccess: true, accessVerified: async () => true })
+    expect((await resolver.resolve(request({ 'tailscale-user-login': 'owner@example.com' }))).kind).toBe('anonymous')
+    expect((await resolver.resolve(request({ 'x-wizard-owner-proof': PROOF }))).kind).toBe('owner')
+    expect((await resolver.resolve(markAgentIngress(request({ 'x-wizard-owner-proof': PROOF })))).kind).toBe('refused')
   })
 })

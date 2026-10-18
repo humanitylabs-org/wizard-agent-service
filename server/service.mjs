@@ -43,7 +43,7 @@ import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination }
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
-import { agentPathAllowed, createPrincipalResolver, ownerLike, principalOf } from './principals.mjs'
+import { agentPathAllowed, createPrincipalResolver, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 
@@ -3584,6 +3584,7 @@ export function createWizardServer(options = {}) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await principals.attach(request)
+      if (principal.kind === 'refused') { sendJson(response, 401, { error: 'agent_credential_required', check: 'principal.agent_ingress' }); return }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
@@ -3639,6 +3640,17 @@ export function createWizardServer(options = {}) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!uploads) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         const parts = url.pathname.split('/').slice(3)
+        // A share or upload on a private agent the caller may not open: same answer as one that does not exist.
+        const hiddenShare = (share) => Boolean(agents && share?.agent && isPrivateAgent(agents, share.agent) && !mayOpenAgent(request, share.agent))
+        const assertUploadVisible = async (id) => {
+          const record = await uploads.getUpload(id)
+          if (record?.share_id) {
+            let share = null
+            try { share = uploads.getShare(record.share_id) } catch { share = null }
+            if (!share || hiddenShare(share)) throw new UploadError(404, 'not_found')
+          }
+          return record
+        }
         try {
           if (parts[0] === 'uploads') {
             if (parts.length === 1 && request.method === 'POST') {
@@ -3658,6 +3670,7 @@ export function createWizardServer(options = {}) {
               return
             }
             if (parts.length >= 2 && !UPLOAD_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
+            if (parts.length >= 2) await assertUploadVisible(parts[1])
             if (parts.length === 2 && request.method === 'GET') {
               const { upload_id, offset, bytes, chunk_bytes, status, file, error } = uploads.publicUpload(await uploads.getUpload(parts[1]))
               sendJson(response, 200, { upload_id, offset, bytes, chunk_bytes, status, ...(file ? { file } : {}), ...(error ? { error } : {}) }, { 'Upload-Offset': String(offset) })
@@ -3686,9 +3699,11 @@ export function createWizardServer(options = {}) {
             if (parts.length === 1 && request.method === 'POST') {
               if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
               const input = parseShareRequest(parseJsonBody(await readBoundedBody(request, 64 * 1024)))
+              // Who may send to the named agent is checked first; a replay is answered only to a caller who may see it.
+              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) { sendJson(response, 404, { error: 'agent_not_found' }); return }
               const replay = uploads.replayShare(input)
+              if (replay && hiddenShare(replay)) { sendJson(response, 404, { error: 'agent_not_found' }); return }
               if (replay) { sendJson(response, 201, uploads.publicShare(replay), { 'Idempotency-Replayed': 'true' }); return }
-              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) { sendJson(response, 403, { error: 'owner_required', check: 'agent.private_owner' }); return }
               const routed = await resolveShareAgent(input.agent)
               let threadId = input.thread
               if (threadId) {
@@ -3701,7 +3716,7 @@ export function createWizardServer(options = {}) {
             if (parts.length === 2 && request.method === 'GET') {
               if (!SHARE_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
               const share = uploads.getShare(parts[1])
-              if (agents && share?.agent && isPrivateAgent(agents, share.agent) && !mayOpenAgent(request, share.agent)) { sendJson(response, 404, { error: 'not_found' }); return }
+              if (hiddenShare(share)) { sendJson(response, 404, { error: 'not_found' }); return }
               sendJson(response, 200, uploads.publicShare(share))
               return
             }
@@ -4161,6 +4176,8 @@ export function createWizardServer(options = {}) {
           if (originHost !== publicHost) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         }
         const body = parseJsonBody(await readBoundedBody(request, 1024))
+        // A private thread's side state is the owner's: refused before anything is stored.
+        if (hiddenSession(request, body?.sessionId) || hiddenSession(request, `${body?.runtime}:${body?.sessionId}`)) { sendJson(response, 404, { error: 'not_found' }); return }
         const record = threadDispositionStore.set(scope, body.runtime, body.sessionId, body.deferred)
         sendJson(response, 200, { record }); return
       }
@@ -4178,7 +4195,8 @@ export function createWizardServer(options = {}) {
           sendJson(response, 415, { error: 'json_required' }); return
         }
         const state = parseJsonBody(await readBoundedBody(request, 256 * 1024))
-        sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.merge(scope, state)) })
+        // Seen marks for private threads the caller may not open are dropped before the merge, not after.
+        sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.merge(scope, withoutHiddenSeen(request, state))) })
         return
       }
 
@@ -4784,6 +4802,15 @@ export function createWizardServer(options = {}) {
     server.on('close', () => watcher.stop())
   }
   return server
+}
+
+/**
+ * The agent-only listener: what agent containers are given instead of the main address. Same routes and state
+ * as `server`, but every request must carry that agent's own credential (no owner proof, no anonymous access),
+ * so an agent cannot fall back to the local-automation surface by leaving its credential off.
+ */
+export function createAgentIngress(server) {
+  return createServer((request, response) => server.emit('request', markAgentIngress(request), response))
 }
 
 export async function listen(server, host = '127.0.0.1', port = 0) {

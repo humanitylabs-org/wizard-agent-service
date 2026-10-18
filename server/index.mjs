@@ -1,4 +1,4 @@
-import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
+import { createAgentIngress, createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -178,3 +178,14 @@ const server = createWizardServer({
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+// Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
+if (process.env.WIZARD_AGENT_PORT) {
+  const agentHost = process.env.WIZARD_AGENT_HOST || host
+  const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
+  if (!privateAddress.test(agentHost) && !(container && agentHost === '0.0.0.0')) {
+    process.stderr.write('WIZARD_AGENT_HOST must be a loopback or private network address.\n')
+    process.exit(1)
+  }
+  const agentPort = Number(process.env.WIZARD_AGENT_PORT)
+  createAgentIngress(server).listen(agentPort, agentHost, () => process.stdout.write(`Wizard agent listener on ${agentHost}:${agentPort}\n`))
+}
