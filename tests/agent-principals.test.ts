@@ -475,8 +475,8 @@ describe('review regressions', () => {
     const ingress = createAgentIngress(svc)
     servers.push(ingress)
     const address = await listen(ingress, '0.0.0.0') as import('node:net').AddressInfo
-    const call = (path: string, headers: Record<string, string>, { method = 'GET', from = '127.0.0.1' } = {}) => new Promise<{ status: number, body: string }>((resolvePromise, reject) => {
-      const req = httpRequest({ host: '127.0.0.1', port: address.port, path, method, headers, localAddress: from }, (res) => {
+    const call = (path: string, headers: Record<string, string>, { method = 'GET' } = {}) => new Promise<{ status: number, body: string }>((resolvePromise, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port: address.port, path, method, headers }, (res) => {
         let body = ''
         res.on('data', (chunk) => { body += chunk })
         res.on('end', () => resolvePromise({ status: res.statusCode ?? 0, body }))
@@ -502,7 +502,9 @@ describe('review regressions', () => {
     }
     expect((await call('/wizard/v1/agent-context', helper, { method: 'POST' })).status).toBe(403)
     // The right key from outside the agent's uplink, and a key whose agent has no uplink, are refused.
-    const outside = await call('/wizard/v1/agent-context', helper, { from: '127.0.0.20' })
+    // Move the helper's uplink elsewhere: the same key from the old address is now outside it.
+    writeFileSync(recordPath, JSON.stringify({ ...record, runtime: { ...record.runtime, network: { uplink: '127.0.0.16/28', sandbox: '127.0.1.0/28' } } }))
+    const outside = await call('/wizard/v1/agent-context', helper)
     expect([outside.status, JSON.parse(outside.body).check]).toEqual([403, 'principal.agent_network'])
     const unbound = await call('/wizard/v1/agent-context', { Authorization: `Bearer ${s.privateKey}` })
     expect([unbound.status, JSON.parse(unbound.body).check]).toEqual([403, 'principal.agent_network'])
