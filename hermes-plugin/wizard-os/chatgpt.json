@@ -1,0 +1,16 @@
+{
+  "credential_id": null,
+  "models": [
+    {"id": "gpt-6-luna", "label": "GPT-6 Luna", "tier": "fast", "abilities": ["text", "streaming"]},
+    {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "tier": "standard", "abilities": ["text", "streaming"]},
+    {"id": "gpt-6-astra", "label": "GPT-6 Astra", "tier": "frontier", "abilities": ["text", "streaming"]}
+  ],
+  "limits": {
+    "request_bytes": 262144,
+    "messages": 128,
+    "max_tokens": 32768,
+    "timeout_seconds": 120,
+    "body_timeout_seconds": 10,
+    "concurrency": 2
+  }
+}
