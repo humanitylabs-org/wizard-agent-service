@@ -35,7 +35,8 @@ export function normalizeThreadSeenState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isFinite(value.initializedAt) || value.initializedAt < 0) return null
   if (!value.threads || typeof value.threads !== 'object' || Array.isArray(value.threads)) return null
   const entries = Object.entries(value.threads)
-  if (entries.length > MAX_THREAD_RECORDS) return null
+  // Hidden (owner-only) marks have their own capacity next to the visible ones.
+  if (entries.length > MAX_THREAD_RECORDS * 2) return null
   const threads = {}
   for (const [key, candidate] of entries) {
     if (!THREAD_KEY.test(key)) return null
@@ -103,9 +104,10 @@ export function mergeThreadSeenStates(left, right, { protect = null, keepInitial
   if (!changed) return left
   const order = (a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])
   const all = Object.entries(threads)
-  // Protected records are kept whatever the caller sends; the cap applies to the rest.
-  const kept = protect ? all.filter(([key]) => protect(key)) : []
-  const rest = (protect ? all.filter(([key]) => !protect(key)) : all).sort(order).slice(0, Math.max(0, MAX_THREAD_RECORDS - kept.length))
+  // Protected records are kept whatever the caller sends and have their own capacity, so the number of visible
+  // records a caller can store never depends on how many hidden ones exist.
+  const kept = protect ? all.filter(([key]) => protect(key)).sort(order).slice(0, MAX_THREAD_RECORDS) : []
+  const rest = (protect ? all.filter(([key]) => !protect(key)) : all).sort(order).slice(0, MAX_THREAD_RECORDS)
   const entries = [...kept, ...rest].sort(order)
   return { initializedAt: keepInitializedAt ? left.initializedAt : Math.min(left.initializedAt, right.initializedAt), threads: Object.fromEntries(entries) }
 }
@@ -132,7 +134,9 @@ export class ThreadSeenStore {
   }
 
   merge(scope, incoming, options = {}) {
-    const state = normalizeThreadSeenState(incoming)
+    let state = normalizeThreadSeenState(incoming)
+    // What a caller sends keeps the old limit; only stored state may hold hidden marks beyond it.
+    if (state && Object.keys(state.threads).length > MAX_THREAD_RECORDS) state = null
     if (!state) throw Object.assign(new Error('Invalid Wizard thread seen state'), { status: 400 })
     const previous = this.get(scope)
     const merged = mergeThreadSeenStates(previous, state, options)
