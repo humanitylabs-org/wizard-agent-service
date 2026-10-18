@@ -41,6 +41,7 @@ import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
+import { listPayload } from './session-list-view.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -117,7 +118,7 @@ ${APP_PROVENANCE_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
@@ -139,6 +140,7 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
   if (!route) return false
   for (const name of searchParams.keys()) if (!route.query.has(name)) return false
   if (pathname === '/api/sessions' && method === 'GET') {
+    if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
@@ -3183,6 +3185,55 @@ export function createWizardServer(options = {}) {
     } catch { return result }
   }
 
+  // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
+  const projectSessionList = async (result, operator, canonicalPage, firstPage) => {
+          result = canonicalPage
+            ? result
+            : mergeArchivedSessions(result, archivedSessionReader())
+          if (!operator && runQueue && firstPage) {
+            try {
+              const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
+              result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
+            } catch { /* optional: never break ordinary Chats */ }
+          }
+          const listedSessionIds = sessionIdsInList(result)
+          const recentExternalReferences = canonicalPage
+            // A Wizard run may legitimately remain active for hours. The run endpoint is
+            // authoritative and terminal results are cached, so never age an admitted run
+            // out of Working merely because its request is more than five minutes old.
+            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
+            : undefined
+          const [helmActivities, externalRuns] = operator
+            ? [[], []]
+            : await Promise.all([
+                readHelmActivities(),
+                readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
+              ])
+          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
+          result = filterSessionList(
+            result,
+            operator,
+            [...operatorWorkers.values()],
+            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
+            externalRuns,
+            sessionTruth,
+            helmActivities,
+            Boolean(canonicalPage),
+            dismissedFailureStore,
+          )
+          if (backgroundResults) {
+            try { result = await backgroundResults.project(result) }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          }
+          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
+          result = decorateSessionTitles(result, operator)
+          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+    return result
+  }
+
   const safeQueueValue = (value, record) => {
     let result = Buffer.from(JSON.stringify(value))
     result = projectStatusMarkers(result)
@@ -4551,51 +4602,18 @@ export function createWizardServer(options = {}) {
           void refreshCanonicalSessions().catch(() => undefined)
         }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
-          result = canonicalPage
-            ? result
-            : mergeArchivedSessions(result, archivedSessionReader())
-          if (!operator && runQueue && Number(url.searchParams.get('offset') ?? 0) === 0) {
-            try {
-              const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
-              result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
-            } catch { /* optional: never break ordinary Chats */ }
+          if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
+        }
+        if (upstream.ok && !operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          const payload = JSON.parse(result.toString('utf8'))
+          const row = payload.session || payload
+          if (row?.id) {
+            const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
+            const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
+            const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
+            detailed.wizard_retry_input = truth?.requestPreview || detailed.last_user_message?.content || detailed.wizard_request_preview || ''
+            result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
-          const listedSessionIds = sessionIdsInList(result)
-          const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
-          const recentExternalReferences = canonicalPage
-            // A Wizard run may legitimately remain active for hours. The run endpoint is
-            // authoritative and terminal results are cached, so never age an admitted run
-            // out of Working merely because its request is more than five minutes old.
-            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
-            : undefined
-          const [helmActivities, externalRuns] = operator
-            ? [[], []]
-            : await Promise.all([
-                readHelmActivities(),
-                readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
-              ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
-          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
-          result = filterSessionList(
-            result,
-            operator,
-            [...operatorWorkers.values()],
-            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
-            externalRuns,
-            sessionTruth,
-            helmActivities,
-            Boolean(canonicalPage),
-            dismissedFailureStore,
-          )
-          if (backgroundResults) {
-            try { result = await backgroundResults.project(result) }
-            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
-          }
-          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
-          result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
-          result = decorateSessionTitles(result, operator)
-          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
           result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
@@ -4632,6 +4650,9 @@ export function createWizardServer(options = {}) {
         }
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
+        if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')))))
+        }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
         if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick(request.method === 'GET' ? 'delivered_history' : 'accepted_main')
