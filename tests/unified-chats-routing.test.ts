@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { agentForModel, hermesConfigYaml, TINFOIL } from '../server/agents.mjs'
+import { agentForModel, hermesConfigYaml, TINFOIL, TINFOIL_NO_REASONING } from '../server/agents.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) } })
@@ -160,6 +160,7 @@ describe('unified Chats: the picker routes a new chat to the agent owning the mo
     expect(withDs).toContain('model_overrides:\n  custom:\n    "deepseek-v4-1-flash":\n      supports_reasoning: false\n')
     const glmOnly = hermesConfigYaml({ ...base, model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false } })
     expect(glmOnly).not.toContain('model_overrides')
-    expect(TINFOIL.models.find((m: any) => m.id === 'glm-5-3')).not.toHaveProperty('supports_reasoning')
+    expect([...TINFOIL_NO_REASONING]).toEqual(['deepseek-v4-1-flash'])
+    expect(TINFOIL.models.map((m) => m.id)).toEqual(['glm-5-3', 'deepseek-v4-1-flash'])
   })
 })
