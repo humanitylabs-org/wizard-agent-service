@@ -6,6 +6,10 @@
 //   /wizard/v1/agent-grants           (agent-data grants; a private source is refused, #59)
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
+import { listPayload } from './session-list-view.mjs'
+import { fullRetryInput, searchMessageText } from './session-detail.mjs'
+import { createListWindows, selectWindow } from './session-list-window.mjs'
+const listWindows = new WeakMap()
 import { pipeline } from 'node:stream/promises'
 import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
 import { STATUS_INSTRUCTIONS } from './thread-status.mjs'
@@ -381,6 +385,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (typeof request.headers.accept === 'string') headers.set('Accept', request.headers.accept)
   if (typeof request.headers['idempotency-key'] === 'string') headers.set('Idempotency-Key', request.headers['idempotency-key'])
   const query = new URLSearchParams(searchParams)
+  for (const key of ['window','q','overrides','snapshot','cursor']) query.delete(key)
   query.delete('view')
   query.delete('snapshot')
   const controller = new AbortController()
@@ -424,10 +429,61 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
+      if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
+        if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
+        const payload = await listWindows.get(ctx)({ params: searchParams, scope: agent.id, load: async () => {
+          const all=[]; let offset=0
+          // Read only this already-authorized agent runtime. Gateway controls never reach it.
+          while (true) {
+            const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
+            const page=await ctx.fetchImpl(`${registry.upstream(agent)}/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
+            if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+            const raw=Buffer.from(await page.arrayBuffer())
+            if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
+            const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
+            if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+            all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
+            if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
+            if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
+            offset+=rows.length
+          }
+          if (searchParams.get('q')) {
+            const q=searchParams.get('q'), pending=all.filter(row=>!selectWindow([row],{q}).search_total);
+            let index=0;
+            await Promise.all(Array.from({length:Math.min(4,pending.length)},async()=>{
+              while(index<pending.length) {
+                const row=pending[index++];
+                row.wizard_search_text=await searchMessageText(async offset=>{
+                  const page=await ctx.fetchImpl(`${registry.upstream(agent)}/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
+                  if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
+                  const raw=Buffer.from(await page.arrayBuffer());
+                  if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
+                  return JSON.parse(raw.toString('utf8'));
+                },q);
+              }
+            }));
+          }
+          return all
+        }})
+        result=Buffer.from(JSON.stringify(payload))
+      }
       result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
+      if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
+    if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
+      const payload=JSON.parse(result.toString('utf8')), row=payload.session||payload;
+      row.wizard_retry_input=await fullRetryInput(async offset=> {
+        const page=await ctx.fetchImpl(`${registry.upstream(agent)}${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
+        if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
+        const raw=Buffer.from(await page.arrayBuffer());
+        if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
+        return JSON.parse(raw.toString('utf8'));
+      });
+      result=Buffer.from(JSON.stringify(payload));
+      if (ctx.projectAgentHistory) result=ctx.projectAgentHistory(result,agent);
+    }
     const historySource = result
     if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
