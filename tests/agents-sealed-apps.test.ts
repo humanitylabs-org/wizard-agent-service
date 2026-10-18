@@ -278,9 +278,10 @@ describe('#59 private agents are sealed', () => {
     await fetch(`${base}/wizard/hermes/api/sessions?agent=private`)
     const token = gatewayKey(dir, reader.id)
     const viaToken = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_1/messages`, { headers: { Authorization: `Bearer ${token}` } })
-    // Refused at the principal check: an agent credential never opens another agent's (private) work.
+    // Refused at the principal check: an agent credential never opens another agent's (private) work. By id
+    // alone the thread is not routed to the private agent at all, so the reader's credential meets the scope check.
     expect(viaToken.status).toBe(403)
-    expect(await viaToken.json()).toMatchObject({ check: 'agent.private_owner' })
+    expect(await viaToken.json()).toMatchObject({ check: 'principal.agent_scope' })
     expect(JSON.stringify(priv.seen)).not.toContain('/messages')
   })
 

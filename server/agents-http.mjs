@@ -33,11 +33,20 @@ export function mayOpenAgent(request, agentId) {
   return ownerLike(principal) || (principal.kind === 'agent' && principal.agentId === agentId)
 }
 
-/** A private agent's work is the owner's alone: refuse every other principal, whatever it claims. */
+/**
+ * A private agent's work is the owner's alone: refuse every other principal, whatever it claims. The refusal is
+ * the same answer as an agent that does not exist, so it does not tell anyone that the private agent is there.
+ */
 export function assertAgentTargets(registry, request, ids) {
   for (const id of ids) {
-    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw new AgentError(403, 'owner_required', 'agent.private_owner')
+    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw new AgentError(404, 'agent_not_found', 'agent.id')
   }
+}
+
+/** Only the owner makes an agent private (or creates a private one). */
+function assertPrivacyChange(request, body) {
+  const wantsPrivate = body?.privacy === 'private' || body?.permissions?.preset === 'private'
+  if (wantsPrivate && !ownerLike(principalOf(request))) throw new AgentError(403, 'owner_required', 'agent.private_owner')
 }
 
 /** Agents a non-owner may see in admin listings: private agents are the owner's alone. */
@@ -105,7 +114,9 @@ export async function handleAgentsApi(ctx, url, request, response) {
         sendJson(response, 200, { grants, ...(reader ? { readable_sources: registry.readableSources(reader) } : {}) })
       } else if (method === 'POST') {
         const body = await readJson(ctx, request)
-        assertAgentTargets(registry, request, [typeof body.reader === 'string' ? body.reader : '', typeof body.source === 'string' ? body.source : ''])
+        // Check exactly the ids addGrant will store: anything but a plain string is refused before any check.
+        for (const field of ['reader', 'source']) if (typeof body[field] !== 'string') throw new AgentError(400, 'invalid_request', `grant.${field}`)
+        assertAgentTargets(registry, request, [body.reader, body.source])
         sendJson(response, 201, { grant: registry.addGrant(body) })
       } else throw new AgentError(405, 'method_not_allowed', 'grant.route')
     } catch (error) { sendAgentError(ctx, response, error) }
@@ -151,7 +162,10 @@ export async function handleAgentsApi(ctx, url, request, response) {
       if (method === 'POST') {
         const body = await readJson(ctx, request)
         const idempotencyKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
+        assertPrivacyChange(request, body)
         const created = await registry.create(body, { idempotencyKey })
+        // A replayed key never counts as permission: the caller must be able to see the agent it gets back.
+        if (!visibleAgent(registry, request, created.agent?.id)) throw new AgentError(404, 'agent_not_found', 'agent.id')
         sendJson(response, created.replayed ? 200 : 201, { agent: await publicAgent(created.agent) }, created.replayed ? { 'Idempotency-Replayed': 'true' } : {})
         return true
       }
@@ -174,6 +188,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
     }
     if (method === 'PATCH') {
       const body = await readJson(ctx, request)
+      assertPrivacyChange(request, body)
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
@@ -212,9 +227,18 @@ export async function handleAppBindingApi(ctx, url, request, response) {
       } else if (method === 'PUT') {
         const body = await readJson(ctx, request)
         const current = registry.appAgents(appId)
-        const before = Array.isArray(current?.agents) ? current.agents.map((agent) => agent?.id) : []
-        assertAgentTargets(registry, request, [...before, ...(Array.isArray(body.agents) ? body.agents.filter((item) => typeof item === 'string') : [])])
-        sendJson(response, 200, await registry.setAppAgents(appId, body))
+        let next = body
+        if (Array.isArray(body.agents) && Array.isArray(current?.agents)) {
+          // A caller who cannot see a private agent cannot change it either: its membership stays as it is,
+          // and only the memberships this request actually changes are checked.
+          const hiddenEnabled = current.agents.filter((agent) => agent?.enabled && !visibleAgent(registry, request, agent.id)).map((agent) => agent.id)
+          const wanted = new Set([...body.agents, ...hiddenEnabled])
+          next = { ...body, agents: [...wanted] }
+          const changed = current.agents.filter((agent) => Boolean(agent?.enabled) !== wanted.has(agent?.id)).map((agent) => agent.id)
+          assertAgentTargets(registry, request, [...changed, ...body.agents.filter((item) => typeof item === 'string')])
+        }
+        const result = await registry.setAppAgents(appId, next)
+        sendJson(response, 200, Array.isArray(result?.agents) ? { ...result, agents: result.agents.filter((agent) => visibleAgent(registry, request, agent?.id)) } : result)
       }
       else throw new AgentError(405, 'method_not_allowed', 'app.route')
     } catch (error) { sendAgentError(ctx, response, error) }
@@ -341,9 +365,13 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     || (upstreamPath === '/v1/runs' && typeof bodyValue?.session_id === 'string' ? bodyValue.session_id : '')
     || (upstreamPath === '/api/sessions' && method === 'POST' && typeof (bodyValue?.id ?? bodyValue?.session_id) === 'string' ? (bodyValue.id ?? bodyValue.session_id) : '')
   const runId = runIdFromPath(upstreamPath)
-  const pinned = (sessionId && registry.pinnedAgent(sessionId)) || (runId && registry.runAgent(runId)) || ''
+  let pinned = (sessionId && registry.pinnedAgent(sessionId)) || (runId && registry.runAgent(runId)) || ''
   // Authorize against the resolved target before anything else can answer (or hint) about it.
-  assertAgentTargets(registry, request, [explicit, pinned])
+  assertAgentTargets(registry, request, [explicit])
+  // A read by id alone of a thread or run the caller may not open goes where an unknown id goes (the main
+  // agent, which does not have it): the answer is the same as for an id that does not exist.
+  if (!explicit && pinned && method === 'GET' && isPrivateAgent(registry, pinned) && !mayOpenAgent(request, pinned)) pinned = ''
+  assertAgentTargets(registry, request, [pinned])
   if (explicit && pinned && explicit !== pinned) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
   // #59: a private agent's threads are read only through that agent's own Chats, which always names it. The operator
   // surface (other agents' work) never reaches a non-main agent, and a thread read that arrives by id alone (a link,
@@ -474,6 +502,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         if (typeof sessionId === 'string') registry.pin(sessionId, agent.id)
       } catch { /* nothing to pin */ }
     }
+    // A thread read through its agent is that agent's from now on, even if it never appeared in a list.
+    const readSession = method === 'GET' ? sessionIdFromPath(upstreamPath) : ''
+    if (readSession) { try { registry.pin(readSession, agent.id) } catch { /* already another agent's */ } }
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
