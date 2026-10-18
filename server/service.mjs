@@ -46,7 +46,7 @@ import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
-import { agentPathAllowed, createPrincipalResolver, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
+import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 
@@ -2162,6 +2162,7 @@ export function createWizardServer(options = {}) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
@@ -3645,6 +3646,7 @@ export function createWizardServer(options = {}) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
+    agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
   })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
   try {
     if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
@@ -3669,7 +3671,8 @@ export function createWizardServer(options = {}) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await principals.attach(request)
-      if (principal.kind === 'refused') { sendJson(response, 401, { error: 'agent_credential_required', check: 'principal.agent_ingress' }); return }
+      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {

@@ -1,7 +1,7 @@
 // Owner vs agent authentication: who may open a private agent, and what an agent credential reaches.
 // Fixtures only: synthetic agents, a synthetic canary thread, fake Hermes APIs, temporary homes.
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -436,21 +436,47 @@ describe('review regressions', () => {
   it('the agent-only listener needs an agent credential on every request and never honours the owner proof', async () => {
     const s = await scene()
     const svc = servers.find((server) => `http://127.0.0.1:${(server.address() as any)?.port}` === s.base)!
+    // The helper runs in the restricted runtime: its edge connects from its own uplink /28.
+    const recordPath = join(s.dir, 'agents', s.helperId, 'agent.json')
+    const record = JSON.parse(readFileSync(recordPath, 'utf8'))
+    record.runtime = { ...record.runtime, isolation: 'restricted', network: { uplink: '127.0.0.0/28', sandbox: '127.0.1.0/28' } }
+    writeFileSync(recordPath, JSON.stringify(record))
     const ingress = createAgentIngress(svc)
     servers.push(ingress)
-    const address = await listen(ingress) as import('node:net').AddressInfo
-    const agentBase = `http://127.0.0.1:${address.port}`
+    const address = await listen(ingress, '0.0.0.0') as import('node:net').AddressInfo
+    const call = (path: string, headers: Record<string, string>, { method = 'GET', from = '127.0.0.1' } = {}) => new Promise<{ status: number, body: string }>((resolvePromise, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port: address.port, path, method, headers, localAddress: from }, (res) => {
+        let body = ''
+        res.on('data', (chunk) => { body += chunk })
+        res.on('end', () => resolvePromise({ status: res.statusCode ?? 0, body }))
+      })
+      req.on('error', reject)
+      req.end()
+    })
     for (const headers of [{}, OWNER, { Authorization: 'Bearer fixture-key' }, { Authorization: 'Bearer not-a-key' }]) {
-      for (const path of ['/wizard/hermes/api/sessions', `/wizard/hermes/api/sessions?agent=${s.privateId}`, '/wizard/v1/agents', '/wizard/health']) {
-        const response = await fetch(`${agentBase}${path}`, { headers })
+      for (const path of ['/wizard/hermes/api/sessions', `/wizard/hermes/api/sessions?agent=${s.privateId}`, '/wizard/v1/agents', '/wizard/health', '/wizard/v1/agent-context', '/wizard/mcp']) {
+        const response = await call(path, headers)
         expect([path, Object.keys(headers).join(), response.status]).toEqual([path, Object.keys(headers).join(), 401])
       }
     }
-    const own = await fetch(`${agentBase}/wizard/hermes/api/sessions?agent=${s.helperId}`, { headers: { Authorization: `Bearer ${s.helperKey}` } })
-    expect(own.status).toBe(200)
-    const main = await fetch(`${agentBase}/wizard/hermes/api/sessions`, { headers: { Authorization: `Bearer ${s.helperKey}` } })
-    expect(main.status).toBe(403)
+    const helper = { Authorization: `Bearer ${s.helperKey}` }
+    // Passes the listener (this scene runs without the app bridge, so the route itself answers 404).
+    const allowed = await call('/wizard/v1/agent-context', helper)
+    expect([401, 403]).not.toContain(allowed.status)
+    expect(allowed.body).not.toContain('principal.')
+    // Only the app gateway and the agent's own context are served here.
+    for (const path of [`/wizard/hermes/api/sessions?agent=${s.helperId}`, '/wizard/hermes/api/sessions', '/wizard/v1/agents', '/wizard/health']) {
+      const response = await call(path, helper)
+      expect([path, response.status, JSON.parse(response.body).check]).toEqual([path, 403, 'principal.agent_scope'])
+    }
+    expect((await call('/wizard/v1/agent-context', helper, { method: 'POST' })).status).toBe(403)
+    // The right key from outside the agent's uplink, and a key whose agent has no uplink, are refused.
+    const outside = await call('/wizard/v1/agent-context', helper, { from: '127.0.0.20' })
+    expect([outside.status, JSON.parse(outside.body).check]).toEqual([403, 'principal.agent_network'])
+    const unbound = await call('/wizard/v1/agent-context', { Authorization: `Bearer ${s.privateKey}` })
+    expect([unbound.status, JSON.parse(unbound.body).check]).toEqual([403, 'principal.agent_network'])
   })
+
 })
 
 describe('principal resolver', () => {

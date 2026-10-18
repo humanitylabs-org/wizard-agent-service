@@ -98,6 +98,32 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('restricted isolation gives each new agent its own uplink/sandbox /28 and the edge as its gateway', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base } = await start(dir, main, { agentIsolation: 'restricted', agentGatewayUrl: 'http://wizard-agent-service:8923/wizard/mcp' })
+    const make = async (label: string, key: string) => (await (await fetch(`${base}/wizard/v1/agents`, json({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard' } }, { 'Idempotency-Key': key }))).json()).agent
+    const first = await make('Daily', 'restricted-1')
+    const second = await make('Other', 'restricted-2')
+    const stored = (id: string) => JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
+    expect(stored(first.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' } })
+    expect(stored(second.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.32/28', sandbox: '10.251.0.32/28' } })
+    const config = readFileSync(join(dir, 'agents', first.id, 'home', 'config.yaml'), 'utf8')
+    expect(config).toContain('http://edge:8923/wizard/mcp')
+    expect(config).not.toContain('wizard-agent-service:8923')
+    // The network allocation is not part of the public agent shape.
+    expect(JSON.stringify(first)).not.toContain('10.250.')
+  })
+
+  it('without isolation, new agents keep the existing runtime shape', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base } = await start(dir, main)
+    const { agent } = await withPrivate(dir, base)
+    const runtime = JSON.parse(readFileSync(join(dir, 'agents', agent.id, 'agent.json'), 'utf8')).runtime
+    expect(runtime.isolation).toBeUndefined()
+    expect(runtime.network).toBeUndefined()
+  })
   it('redacts shared and agent-local attachment roots in routed context', async () => {
     const dir = box()
     const main = await fakeHermes('main')

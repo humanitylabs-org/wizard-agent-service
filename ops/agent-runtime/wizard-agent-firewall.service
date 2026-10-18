@@ -1,0 +1,15 @@
+# Install (root): copy agent-firewall.sh to /usr/local/sbin/wizard-agent-firewall, this file to
+# /etc/systemd/system/, then `systemctl enable --now wizard-agent-firewall`.
+[Unit]
+Description=Wizard OS restricted-agent host firewall
+After=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/wizard-agent-firewall apply 8924
+ExecStop=/usr/local/sbin/wizard-agent-firewall remove
+
+[Install]
+WantedBy=multi-user.target

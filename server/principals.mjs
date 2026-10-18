@@ -18,7 +18,36 @@ const PRINCIPAL = Symbol.for('wizard.service.principal')
 const AGENT_INGRESS = Symbol.for('wizard.service.agent_ingress')
 const ANONYMOUS = Object.freeze({ kind: 'anonymous' })
 const BOX_OWNER = Object.freeze({ kind: 'owner', via: 'box_only' })
-const REFUSED = Object.freeze({ kind: 'refused' })
+const REFUSED = Object.freeze({ kind: 'refused', status: 401, error: 'agent_credential_required', check: 'principal.agent_ingress' })
+const WRONG_NETWORK = Object.freeze({ kind: 'refused', status: 403, error: 'agent_network', check: 'principal.agent_network' })
+
+/** Whether this request arrived on the agent-only listener. */
+export function isAgentIngress(request) {
+  return Boolean(request?.[AGENT_INGRESS])
+}
+
+/** Paths the agent-only listener serves at all: the app gateway and the agent's own context. */
+export function agentIngressPathAllowed(method, pathname) {
+  return pathname === '/wizard/mcp' || (pathname === '/wizard/v1/agent-context' && method === 'GET')
+}
+
+function ipv4(address) {
+  const text = String(address || '').replace(/^::ffff:/iu, '')
+  const parts = text.split('.')
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/u.test(part) || Number(part) > 255)) return null
+  return parts.reduce((sum, part) => sum * 256 + Number(part), 0)
+}
+
+/** True when `address` lies inside the IPv4 `cidr` (e.g. 10.250.0.16/28). */
+export function inSubnet(address, cidr) {
+  const [base, bitsText] = String(cidr || '').split('/')
+  const bits = Number(bitsText)
+  const ip = ipv4(address)
+  const net = ipv4(base)
+  if (ip === null || net === null || !Number.isInteger(bits) || bits < 8 || bits > 32) return false
+  const size = 2 ** (32 - bits)
+  return Math.floor(ip / size) === Math.floor(net / size)
+}
 
 /** Marks a request that arrived on the agent-only listener: there, only an agent credential counts. */
 export function markAgentIngress(request) {
@@ -49,6 +78,7 @@ function bearer(request) {
  *   internalCall(request)     the Service's own in-process token,
  *   agentForToken(token)      id of the non-main agent whose gateway credential this is ('' = none),
  *   mainAgentId               id of the main agent (its credential is not an agent principal here),
+ *   agentSubnet(agentId)      uplink subnet the agent's requests must come from on the agent-only listener,
  * }
  */
 export function createPrincipalResolver(options = {}) {
@@ -65,7 +95,13 @@ export function createPrincipalResolver(options = {}) {
   async function resolve(request) {
     // The agent-only listener (what agent containers are given): a valid agent credential or nothing.
     // Owner proof, access headers and the Service's own token are never honoured there.
-    if (request?.[AGENT_INGRESS]) return agentPrincipal(request) ?? REFUSED
+    if (request?.[AGENT_INGRESS]) {
+      const agent = agentPrincipal(request)
+      if (!agent) return REFUSED
+      // Each agent key works only from that agent's own uplink network (its edge sidecar).
+      const subnet = typeof options.agentSubnet === 'function' ? options.agentSubnet(agent.agentId) : ''
+      return subnet && inSubnet(request.socket?.remoteAddress, subnet) ? agent : WRONG_NETWORK
+    }
     if (ownerProof) {
       const supplied = request.headers?.[OWNER_PROOF_HEADER]
       if (typeof supplied === 'string' && sameSecret(supplied, ownerProof)) return { kind: 'owner', via: 'proxy_proof' }

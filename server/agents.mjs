@@ -238,6 +238,10 @@ export function agentAppIds(agent) {
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
  * later appear without a restart); a private agent only once the owner ticks an app for it.
  */
+/** What a restricted agent's harness calls: its edge sidecar, which forwards to the Service's agent-only listener. */
+export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
+const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
+
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
   return agent.privacy === 'standard' || agentAppIds(agent).size > 0
@@ -328,6 +332,11 @@ export function createAgentRegistry(options = {}) {
   // #59: agent-data grants (reader -> source); a private source is refused.
   const grantsPath = join(agentsDir, '.agent-grants.json')
   const gatewayUrl = typeof options.gatewayUrl === 'string' ? options.gatewayUrl : ''
+  // Restricted runtime (wizard-app-store runtimes/restricted-agent): new container agents get their own uplink and
+  // sandbox networks and reach the Service only through their edge sidecar, which forwards to the agent-only listener.
+  const isolation = options.isolation === 'restricted' ? 'restricted' : ''
+  const restricted = (agent) => agent?.runtime?.isolation === 'restricted'
+  const gatewayUrlFor = (agent) => (restricted(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
 
@@ -522,6 +531,8 @@ export function createAgentRegistry(options = {}) {
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
+    // A restricted agent is reached only through its edge relay, published on host loopback at its port.
+    if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
     if (upstreamMode === 'network') {
       const url = new URL(String(agent.runtime.api || ''))
       if (url.protocol !== 'http:' || url.hostname !== agent.runtime.app_id || url.username || url.password || url.pathname !== '/') {
@@ -610,6 +621,23 @@ export function createAgentRegistry(options = {}) {
     return id
   }
 
+  /** The lowest free /28 pair (uplink 10.250.x.y, sandbox 10.251.x.y); index 0 is left to conformance runs. */
+  function nextNetwork() {
+    const used = new Set(list().map((agent) => agent.runtime?.network?.uplink).filter((value) => typeof value === 'string'))
+    for (let index = 1; index < 4096; index += 1) {
+      const suffix = `${index >> 4}.${(index & 15) << 4}/28`
+      if (!used.has(`10.250.${suffix}`)) return { uplink: `10.250.${suffix}`, sandbox: `10.251.${suffix}` }
+    }
+    fail(503, 'network_exhausted', 'agent.runtime.network')
+  }
+
+  /** The uplink subnet an agent's edge connects from ('' = this agent has no agent-only network). */
+  function agentUplink(id) {
+    const agent = read(id)
+    const uplink = restricted(agent) ? agent.runtime?.network?.uplink : ''
+    return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
+  }
+
   function nextPort() {
     const used = new Set(list().map((agent) => agent.runtime?.port).filter(Number.isInteger))
     let port = basePort
@@ -633,8 +661,9 @@ export function createAgentRegistry(options = {}) {
       writeTextAtomic(join(dir, 'gateway.key'), `${gateway}\n`)
     }
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
-    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, gatewayUrl) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl }))
+    const agentGateway = gatewayUrlFor(agent)
+    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) ? gateway : '' }))
+    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway }))
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
@@ -668,7 +697,10 @@ export function createAgentRegistry(options = {}) {
       schema: AGENT_SCHEMA, id, label, harness: 'hermes', privacy: preset.privacy,
       appearance: normalizeAppearance(body.appearance, preset.privacy),
       model, permissions,
-      runtime: { kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '' },
+      runtime: {
+        kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
+        ...(isolation ? { isolation, network: nextNetwork() } : {}),
+      },
       created_at: Math.floor(now() / 1000),
     }
     assertPrivateWalls(agent)
@@ -787,7 +819,7 @@ export function createAgentRegistry(options = {}) {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink,
     grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent)),
     threadAgent: (agentOrId) => {
