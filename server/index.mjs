@@ -180,6 +180,11 @@ const server = createWizardServer({
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
 // Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
 if (process.env.WIZARD_AGENT_PORT) {
+  // Agents reach the main listener's loopback too: without an owner proof, a loopback caller is the owner there.
+  if (!ownerProof) {
+    process.stderr.write('WIZARD_AGENT_PORT needs WIZARD_OWNER_PROOF_FILE (owner proof); the service was not started.\n')
+    process.exit(1)
+  }
   const agentHost = process.env.WIZARD_AGENT_HOST || host
   const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
   if (!privateAddress.test(agentHost) && !(container && agentHost === '0.0.0.0')) {

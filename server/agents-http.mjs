@@ -33,9 +33,9 @@ export function mayOpenAgent(request, agentId) {
  * A private agent's work is the owner's alone: refuse every other principal, whatever it claims. The refusal is
  * the same answer as an agent that does not exist, so it does not tell anyone that the private agent is there.
  */
-export function assertAgentTargets(registry, request, ids) {
+export function assertAgentTargets(registry, request, ids, missing = () => new AgentError(404, 'agent_not_found', 'agent.id')) {
   for (const id of ids) {
-    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw new AgentError(404, 'agent_not_found', 'agent.id')
+    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw missing(id)
   }
 }
 
@@ -112,7 +112,9 @@ export async function handleAgentsApi(ctx, url, request, response) {
         const body = await readJson(ctx, request)
         // Check exactly the ids addGrant will store: anything but a plain string is refused before any check.
         for (const field of ['reader', 'source']) if (typeof body[field] !== 'string') throw new AgentError(400, 'invalid_request', `grant.${field}`)
-        assertAgentTargets(registry, request, [body.reader, body.source])
+        // Hidden ids get byte-for-byte the answer addGrant gives an id that does not exist.
+        assertAgentTargets(registry, request, [body.reader], () => new AgentError(404, 'agent_not_found', 'grant.reader'))
+        assertAgentTargets(registry, request, [body.source], () => new AgentError(404, 'agent_not_found', 'grant.source'))
         sendJson(response, 201, { grant: registry.addGrant(body) })
       } else throw new AgentError(405, 'method_not_allowed', 'grant.route')
     } catch (error) { sendAgentError(ctx, response, error) }
@@ -231,7 +233,7 @@ export async function handleAppBindingApi(ctx, url, request, response) {
           const wanted = new Set([...body.agents, ...hiddenEnabled])
           next = { ...body, agents: [...wanted] }
           const changed = current.agents.filter((agent) => Boolean(agent?.enabled) !== wanted.has(agent?.id)).map((agent) => agent.id)
-          assertAgentTargets(registry, request, [...changed, ...body.agents.filter((item) => typeof item === 'string')])
+          assertAgentTargets(registry, request, [...changed, ...body.agents.filter((item) => typeof item === 'string')], (id) => new AgentError(404, 'agent_not_found', 'agent.id', id))
         }
         const result = await registry.setAppAgents(appId, next)
         sendJson(response, 200, Array.isArray(result?.agents) ? { ...result, agents: result.agents.filter((agent) => visibleAgent(registry, request, agent?.id)) } : result)
@@ -445,17 +447,24 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
   }
   let pinAfter = ''
+  // A thread is pinned only once its agent has accepted it, so a refused request never claims an id.
+  let pinOnSuccess = ''
+  const claim = (sessionId) => {
+    const existing = registry.pinnedAgent(sessionId)
+    if (existing && existing !== agent.id) registry.pin(sessionId, agent.id) // raises the usual pin conflict
+    pinOnSuccess = sessionId
+  }
   if (method === 'POST' && upstreamPath === '/v1/runs') {
     const sessionId = typeof value.session_id === 'string' ? value.session_id : ''
     if (!sessionId) throw new AgentError(400, 'session_required', 'thread.session_id')
-    registry.pin(sessionId, agent.id)
+    claim(sessionId)
     value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS }
     delete value.delegation_delivery
     delete value.response_rendering
   }
   if (method === 'POST' && upstreamPath === '/api/sessions') {
     const sessionId = typeof (value.id ?? value.session_id) === 'string' ? (value.id ?? value.session_id) : ''
-    if (sessionId) registry.pin(sessionId, agent.id)
+    if (sessionId) claim(sessionId)
     else pinAfter = 'session'
   }
   const key = registry.apiKey(agent.id)
@@ -479,6 +488,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (error instanceof AgentError) throw error
     throw new AgentError(503, 'agent_unavailable', 'agent.running')
   }
+  if (upstream.ok && pinOnSuccess) registry.pin(pinOnSuccess, agent.id)
   const secrets = [key, ...ctx.mainSecrets].filter(Boolean)
   const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
   const responseHeaders = { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Wizard-Agent': agent.id }
@@ -513,7 +523,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
-      for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
+      // One thread already claimed by another agent must not break this agent's whole list.
+      for (const id of sessionIdsIn(result)) { try { registry.pin(id, agent.id) } catch { /* pinned elsewhere */ } }
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     const historySource = result
     if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
