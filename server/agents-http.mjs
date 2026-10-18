@@ -43,6 +43,13 @@ export function assertAgentTargets(registry, request, ids, missing = () => new A
   }
 }
 
+/** Referenced ids in order: an id this caller cannot see gets exactly the answer a missing id gets. */
+function assertKnownTargets(registry, request, ids, missing) {
+  for (const id of ids) {
+    if (!registry.read(id) || (isPrivateAgent(registry, id) && !mayOpenAgent(request, id))) throw missing(id)
+  }
+}
+
 /** Only the owner makes an agent private (or creates a private one). */
 function assertPrivacyChange(request, body) {
   const wantsPrivate = body?.privacy === 'private' || body?.permissions?.preset === 'private'
@@ -116,9 +123,10 @@ export async function handleAgentsApi(ctx, url, request, response) {
         const body = await readJson(ctx, request)
         // Check exactly the ids addGrant will store: anything but a plain string is refused before any check.
         for (const field of ['reader', 'source']) if (typeof body[field] !== 'string') throw new AgentError(400, 'invalid_request', `grant.${field}`)
-        // Hidden ids get byte-for-byte the answer addGrant gives an id that does not exist.
-        assertAgentTargets(registry, request, [body.reader], () => new AgentError(404, 'agent_not_found', 'grant.reader'))
-        assertAgentTargets(registry, request, [body.source], () => new AgentError(404, 'agent_not_found', 'grant.source'))
+        // Same order as addGrant (shape, kind, reader, source); hidden ids answer exactly like missing ones.
+        if ((body.kind ?? 'agent-data') !== 'agent-data') throw new AgentError(400, 'unknown_grant_kind', 'grant.kind')
+        assertKnownTargets(registry, request, [body.reader], () => new AgentError(404, 'agent_not_found', 'grant.reader'))
+        assertKnownTargets(registry, request, [body.source], () => new AgentError(404, 'agent_not_found', 'grant.source'))
         sendJson(response, 201, { grant: registry.addGrant(body) })
       } else throw new AgentError(405, 'method_not_allowed', 'grant.route')
     } catch (error) { sendAgentError(ctx, response, error) }
@@ -230,14 +238,17 @@ export async function handleAppBindingApi(ctx, url, request, response) {
         const body = await readJson(ctx, request)
         const current = registry.appAgents(appId)
         let next = body
-        if (Array.isArray(body.agents) && Array.isArray(current?.agents)) {
+        if (Array.isArray(current?.agents)) {
+          // Same order as setAppAgents: shape first, then each requested id in order, hidden answering like missing.
+          if (!Array.isArray(body.agents) || body.agents.length > 64 || !body.agents.every((id) => typeof id === 'string')) throw new AgentError(400, 'invalid_request', 'app.agents')
+          assertKnownTargets(registry, request, body.agents, (id) => new AgentError(404, 'agent_not_found', 'agent.id', id))
           // A caller who cannot see a private agent cannot change it either: its membership stays as it is,
           // and only the memberships this request actually changes are checked.
           const hiddenEnabled = current.agents.filter((agent) => agent?.enabled && !visibleAgent(registry, request, agent.id)).map((agent) => agent.id)
           const wanted = new Set([...body.agents, ...hiddenEnabled])
           next = { ...body, agents: [...wanted] }
           const changed = current.agents.filter((agent) => Boolean(agent?.enabled) !== wanted.has(agent?.id)).map((agent) => agent.id)
-          assertAgentTargets(registry, request, [...changed, ...body.agents.filter((item) => typeof item === 'string')], (id) => new AgentError(404, 'agent_not_found', 'agent.id', id))
+          assertAgentTargets(registry, request, changed, (id) => new AgentError(404, 'agent_not_found', 'agent.id', id))
         }
         const result = await registry.setAppAgents(appId, next)
         sendJson(response, 200, Array.isArray(result?.agents) ? { ...result, agents: result.agents.filter((agent) => visibleAgent(registry, request, agent?.id)) } : result)

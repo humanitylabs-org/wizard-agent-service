@@ -410,6 +410,36 @@ describe('review regressions', () => {
     expect([known.status, await known.text()]).toEqual([unknown.status, await unknown.text()])
   })
 
+  it('third review: malformed and multi-id requests answer the same for a hidden agent and a missing one', async () => {
+    const s = await scene()
+    const same = async (make: (id: string) => Promise<Response>) => {
+      const hidden = await make(s.privateId)
+      const missing = await make('no-such-agent')
+      const hiddenText = (await hidden.text()).replaceAll(s.privateId, 'ID')
+      const missingText = (await missing.text()).replaceAll('no-such-agent', 'ID')
+      expect([hidden.status, hiddenText]).toEqual([missing.status, missingText])
+    }
+    await same((id) => fetch(`${s.base}/wizard/v1/agent-grants`, send('POST', { kind: 'bogus', reader: id, source: 'hermes' })))
+    await same((id) => fetch(`${s.base}/wizard/v1/agent-grants`, send('POST', { reader: 'nobody', source: id })))
+    await same((id) => fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: [id, 0] })))
+    await same((id) => fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: ['nobody', id] })))
+  })
+
+  it('third review: the number of visible seen marks a caller can store does not depend on hidden ones', async () => {
+    const s = await scene()
+    const record = (seenAt: number) => ({ updatedAt: new Date(seenAt).toISOString(), previewFingerprint: 'abc', seenAt })
+    const flood = { initializedAt: 0, threads: Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`direct:wizard_flood_${i}`, record(10_000 + i)])) }
+    const count = async () => Object.keys((await (await fetch(`${s.base}/wizard/thread-seen`, send('PUT', flood))).json()).state.threads).length
+    const before = await count()
+    expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 1000, threads: { [`direct:${CANARY}`]: record(1_000_000) } }, OWNER))).status).toBe(200)
+    expect(await count()).toBe(before)
+    const own = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
+    expect(Object.keys(own.threads)).toContain(`direct:${CANARY}`)
+    // A caller still cannot send more than 500 marks at once.
+    const tooMany = { initializedAt: 0, threads: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`direct:wizard_many_${i}`, record(i + 1)])) }
+    expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', tooMany))).status).toBe(400)
+  })
+
   it('second review: a thread another caller claimed does not break the owner\'s private list', async () => {
     const s = await scene()
     s.priv.known.add('wizard_private_unlisted')
@@ -430,7 +460,8 @@ describe('review regressions', () => {
     const state = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
     expect(state.initializedAt).toBe(1000)
     expect(Object.keys(state.threads)).toContain(`direct:${CANARY}`)
-    expect(Object.keys(state.threads).length).toBeLessThanOrEqual(500)
+    // Visible marks keep their cap of 500; the owner's hidden marks sit beside them.
+    expect(Object.keys(state.threads).filter((key) => key !== `direct:${CANARY}`).length).toBeLessThanOrEqual(500)
   })
 
   it('the agent-only listener needs an agent credential on every request and never honours the owner proof', async () => {
