@@ -763,8 +763,12 @@ function historyTimestamp(value) {
 
 export function durableInlineImage(part) {
   if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
-  const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
-  if (!match || !match[2]) return null
+  // Linear check: a repeated-group regex over multi-megabyte base64 overflows V8's regex stack
+  // (RangeError), which turned a whole thread's history read into 502 "Couldn't load this thread".
+  const head = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,/i)
+  const body = head ? part.image_url.url.slice(head[0].length) : ''
+  if (!head || !body || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body) || body.slice(0, -2).includes('=')) return null
+  const match = [head[0] + body, head[1], body]
   const declaredMime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
   if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(declaredMime)) return null
   const bytes = Buffer.from(match[2], 'base64')
