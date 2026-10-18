@@ -618,6 +618,7 @@ function connectionSource(app) {
   return {
     id: identity.id,
     name: identity.name,
+    provider: app.provider,
     // Its own cache cell: switching between a host reader and an app never
     // carries one source's last good numbers into the other.
     cacheKey: `app:${app.appId}:${app.provider}`,
@@ -651,7 +652,7 @@ export function createAiUsageReader(options = {}) {
   // a subscription added to the pool appears on the next refresh, and one
   // removed stops being read, without restarting Wizard or re-reading the
   // store on every request.
-  let enumerated = { sources: [], at: 0 }
+  let enumerated = { sources: [], codexUsage: [], at: 0 }
 
   const sourcesNow = () => {
     if (enumerated.sources.length && now() - enumerated.at < cacheMs) return enumerated.sources
@@ -660,9 +661,16 @@ export function createAiUsageReader(options = {}) {
     const apps = readConnectionApps(options)
     const covered = new Set(apps.map((app) => app.provider))
     const hostClaude = [...CLAUDE_PROVIDERS].some((id) => covered.has(id)) ? [] : [claude]
-    const hostCodex = [...CODEX_PROVIDERS].some((id) => covered.has(id)) ? [] : codexSources(options, now())
-    enumerated = { sources: [...hostClaude, ...hostCodex, ...apps.map(connectionSource)], at: now() }
-    const live = new Set(enumerated.sources.map(cellKey))
+    const codexApp = [...CODEX_PROVIDERS].some((id) => covered.has(id))
+    const hostCodex = codexSources(options, now())
+    // A ChatGPT app that reports `usage: null` (it holds no token, so it can't read usage) keeps
+    // the host Codex readers as the usage source behind its own status and plan.
+    enumerated = {
+      sources: [...hostClaude, ...(codexApp ? [] : hostCodex), ...apps.map(connectionSource)],
+      codexUsage: codexApp ? hostCodex : [],
+      at: now(),
+    }
+    const live = new Set([...enumerated.sources, ...enumerated.codexUsage].map(cellKey))
     for (const id of [...cells.keys()]) if (!live.has(id)) cells.delete(id)
     return enumerated.sources
   }
@@ -714,7 +722,23 @@ export function createAiUsageReader(options = {}) {
 
   return {
     async read() {
-      const providers = await Promise.all(sourcesNow().map(readSource))
+      const sources = sourcesNow()
+      const rows = await Promise.all(sources.map(readSource))
+      const providers = []
+      for (const [index, row] of rows.entries()) {
+        const source = sources[index]
+        // Connected with nothing to chart: show the host's ChatGPT usage under the app's status and
+        // plan. Only readings that worked replace the row; without one the app's own row stays.
+        if (CODEX_PROVIDERS.has(source.provider) && row.status === 'ok' && row.fetchedAt === null && !row.limits.length) {
+          const host = (await Promise.all(enumerated.codexUsage.map(readSource)))
+            .filter((entry) => entry.status === 'ok' || entry.status === 'stale')
+          if (host.length) {
+            providers.push(...host.map((entry, n) => ({ ...entry, id: n === 0 ? row.id : entry.id, name: row.name, plan: row.plan ?? entry.plan })))
+            continue
+          }
+        }
+        providers.push(row)
+      }
       return { fetchedAt: new Date(now()).toISOString(), providers }
     },
   }

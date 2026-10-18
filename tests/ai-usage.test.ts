@@ -494,6 +494,37 @@ describe('AI connection apps', () => {
     expect(fetcher.mock.calls.some((call) => String(call[0]).includes('wham'))).toBe(false)
   })
 
+  it('keeps the host ChatGPT usage behind a connected ChatGPT app that reports usage: null', async () => {
+    const chatgptApp = connectionApp('chatgpt', 8812, ['ai-connection', 'chatgpt-subscription'])
+    const fetcher = vi.fn(async (url: string) => String(url).includes('anthropic') ? jsonResponse(claudePayload)
+      : String(url).includes('wham') ? jsonResponse(codexPayload)
+      : jsonResponse({ contract: 'wizard.ai-connection/1', provider: 'chatgpt', name: 'ChatGPT', status: 'connected', plan: null, account: null, usage: null, error: null }))
+    const { usage } = reader({ appsJsonPath: appsJson([chatgptApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, any>> }
+    const hostOnly = provider(await reader().usage.read() as never, 'codex')
+
+    // One ChatGPT row, under the app's id and name, carrying the host reader's usage exactly.
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['claude', 'chatgpt'])
+    const chatgpt = provider(snapshot, 'chatgpt')
+    expect(chatgpt).toMatchObject({ status: 'ok', name: 'ChatGPT', error: null })
+    expect(chatgpt.limits).toEqual(hostOnly.limits)
+    expect(chatgpt.paid).toEqual(hostOnly.paid)
+    expect(chatgpt.plan).toBe(hostOnly.plan)
+    expect(chatgpt.limits.length).toBeGreaterThan(0)
+  })
+
+  it('keeps the ChatGPT app\'s own row when it reports usage: null and the host has no ChatGPT sign-in', async () => {
+    const chatgptApp = connectionApp('chatgpt', 8812, ['ai-connection', 'chatgpt-subscription'])
+    const fetcher = vi.fn(async (url: string) => String(url).includes('anthropic') ? jsonResponse(claudePayload)
+      : String(url).includes('wham') ? jsonResponse({}, 401)
+      : jsonResponse({ contract: 'wizard.ai-connection/1', provider: 'chatgpt', name: 'ChatGPT', status: 'connected', plan: 'Plus', account: null, usage: null, error: null }))
+    const { usage } = reader({ ...credentialFixture({ pool: [] }), codexAuthPath: '/nonexistent/auth.json', appsJsonPath: appsJson([chatgptApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, any>> }
+
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['claude', 'chatgpt'])
+    expect(provider(snapshot, 'chatgpt')).toMatchObject({ status: 'ok', plan: 'Plus', limits: [], paid: null, error: null })
+  })
+
   it('keeps the host readers unchanged when there is no apps.json', async () => {
     const withoutApps = reader({ appsJsonPath: join(mkdtempSync(join(tmpdir(), 'wizard-no-apps-')), 'apps.json') })
     const baseline = reader()
