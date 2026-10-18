@@ -306,7 +306,15 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   if (explicit && explicit !== MAIN_AGENT_ID && !pinned && sessionId && await ctx.mainHasSession(sessionId)) {
     throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
   }
-  return { agentId: explicit || pinned || MAIN_AGENT_ID, body, bodyRead: body !== undefined, sessionId }
+  // Unified Chats (spec/AGENTS.md): a new chat started on a private agent's confidential model belongs to that agent,
+  // even when the client did not name it. Existing threads keep their agent; the operator surface never routes here.
+  let routed = ''
+  if (!explicit && !pinned && !operator && method === 'POST' && (upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions')
+    && bodyValue && typeof bodyValue === 'object' && typeof registry.agentForModel === 'function') {
+    const owner = registry.agentForModel({ model: bodyValue.model, provider: bodyValue.provider })
+    if (owner && !(sessionId && await ctx.mainHasSession(sessionId))) routed = owner.id
+  }
+  return { agentId: explicit || pinned || routed || MAIN_AGENT_ID, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
 }
 
 function modelAllowed(agent, value) {
