@@ -123,6 +123,29 @@ class ScopedPluginTests(unittest.TestCase):
         self.assertEqual(self.received[0][1], 'Bearer fixture-single')
 
 
+    def submit_spec(self, args):
+        secret_scope.set_multiplex_active(False)
+        with patch.dict(os.environ, {'WIZARD_HEAVY_ORIGIN': self.origin, 'WIZARD_HEAVY_TOKEN': 'fixture-single'}), scope(None):
+            return json.loads(plugin.submit(args, session_id='lanes'))
+
+    def test_heavy_spec_is_unchanged_without_lane(self):
+        self.submit_spec(self.args)
+        self.assertEqual(self.received[-1][2]['spec'],
+                         {'cwd': '/Volumes/ThalesMedia/fixture', 'argv': ['true'], 'timeout_seconds': 3600})
+        self.submit_spec({**self.args, 'lane': 'heavy'})
+        self.assertNotIn('lane', self.received[-1][2]['spec'])
+
+    def test_light_lane_is_forwarded_with_short_default_deadline(self):
+        self.submit_spec({**self.args, 'lane': 'light'})
+        self.assertEqual(self.received[-1][2]['spec'],
+                         {'cwd': '/Volumes/ThalesMedia/fixture', 'argv': ['true'], 'timeout_seconds': 900, 'lane': 'light'})
+
+    def test_light_lane_rejects_long_deadline_and_unknown_lane_before_http(self):
+        before = len(self.received)
+        self.assertIn('error', self.submit_spec({**self.args, 'lane': 'light', 'timeout_seconds': 901}))
+        self.assertIn('error', self.submit_spec({**self.args, 'lane': 'gpu'}))
+        self.assertEqual(len(self.received), before)
+
 if __name__ == '__main__':
     source = Path(secret_scope.__file__)
     print('actual secret_scope source:', source, 'sha256:', hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)

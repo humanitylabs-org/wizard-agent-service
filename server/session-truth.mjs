@@ -37,14 +37,14 @@ function openReadOnly(path) {
   catch { return null }
 }
 
-function visibleUserRequest(content, displayKind) {
+export function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
   if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
-function visibleAssistantReply(content, displayKind, finishReason) {
+export function visibleAssistantReply(content, displayKind, finishReason) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
   const completion = String(finishReason || '')
@@ -80,6 +80,26 @@ function lockedRoute(modelConfig) {
     const provider = typeof lock?.provider === 'string' ? lock.provider : ''
     return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider, updatedAt: Number(lock.updated_at) || 0 } : null
   } catch { return null }
+}
+
+// Search only caller-approved session IDs in this runtime, with the same visibility rules
+// as the list truth reader. Never discover agents or open their stores here.
+export function searchHermesSessionText(path, sessionIds, query) {
+  const ids = boundedIds(sessionIds), hits = new Map();
+  const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!ids.length || !words.length) return hits;
+  const db = openReadOnly(path); if (!db) return hits;
+  try {
+    const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x=>x.name));
+    const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
+    const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL ORDER BY timestamp DESC`;
+    for (const row of db.prepare(sql).iterate(...ids)) {
+      if (hits.has(row.session_id)) continue;
+      const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
+      if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
+    }
+  } catch { /* old stores retain title/request search */ } finally { db.close(); }
+  return hits;
 }
 
 export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
