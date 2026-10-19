@@ -29,7 +29,7 @@ def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str
 
 class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
         self.agents = ar.Agents(self.tmp / "agents", None)
         self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "", 8924)
         self.calls = []
