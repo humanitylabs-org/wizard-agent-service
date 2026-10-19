@@ -8,7 +8,7 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/wizard-agent-firewall apply 8924
+ExecStart=/usr/local/sbin/wizard-agent-firewall apply 8929
 ExecStop=/usr/local/sbin/wizard-agent-firewall remove
 
 [Install]

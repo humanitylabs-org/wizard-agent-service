@@ -46,6 +46,9 @@ DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
 # The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
 RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
+AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
+MANAGED_FILES = (".env", "config.yaml")
+SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()
@@ -123,9 +126,13 @@ class Agents:
                 return line
         return ""
 
+    def managed(self, agent_id: str) -> Path:
+        """Where the Service writes a restricted agent's managed files (.env, config.yaml); synced into its home."""
+        return self.root / agent_id / "managed"
+
     def add_provider_keys(self, agent: dict) -> None:
-        """The Service writes home/.env without provider keys; add the ones this agent's provider needs."""
-        env_path = self.home(agent["id"]) / ".env"
+        """The Service writes .env without provider keys; add the ones this agent's provider needs."""
+        env_path = (self.managed(agent["id"]) if restricted(agent) else self.home(agent["id"])) / ".env"
         try:
             lines = env_path.read_text().splitlines()
         except PermissionError:
@@ -323,6 +330,7 @@ class RestrictedDriver:
             "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
             "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
             "EDGE_UPSTREAM_PORT": str(self.listener_port),
+            "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         if self.image:
             env["AGENT_IMAGE"] = self.image
@@ -332,18 +340,39 @@ class RestrictedDriver:
         return docker(["compose", "-p", self.project(agent["id"]), "-f", str(self.compose_file), *args],
                       timeout=timeout, env=self.env(agent))
 
-    def apply(self, agent: dict) -> dict:
+    def sync_home(self, agent: dict) -> None:
+        """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
+        only the file capabilities, like the runtime's own home-init. The host never writes into the home itself."""
+        managed = self.agents.managed(agent["id"])
+        missing = [name for name in MANAGED_FILES if not (managed / name).is_file()]
+        if missing:
+            raise RuntimeFailure("agent_not_prepared", 409)
+        home = self.agents.home(agent["id"])
+        home.mkdir(mode=0o700, exist_ok=True)
+        copy = " && ".join(f"cp /managed/{name} /opt/data/{name}.new && chown {AGENT_UID}:{AGENT_UID} /opt/data/{name}.new"
+                           f" && chmod 600 /opt/data/{name}.new && mv -f /opt/data/{name}.new /opt/data/{name}" for name in MANAGED_FILES)
+        docker(["run", "--rm", "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
+                "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
+                "-v", f"{home}:/opt/data", "-v", f"{managed}:/managed:ro", "--entrypoint", "/bin/sh", SIDECAR_IMAGE,
+                "-c", f"set -eu; {copy}; chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data"], timeout=300)
+
+    def _prepare(self, agent: dict) -> None:
         self.agents.add_provider_keys(agent)
+        self._compose(agent, "build", timeout=1800)
+        self.sync_home(agent)
+
+    def apply(self, agent: dict) -> dict:
+        self._prepare(agent)
         project = self.project(agent["id"])
         running = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}"], timeout=60).stdout.split()
-        self._compose(agent, "up", "-d", "--build", "--remove-orphans", timeout=1800)
+        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
         if running:
             self._compose(agent, "restart", RESTRICTED_SERVICE, timeout=300)
         return {"ok": True, "driver": "restricted", "project": project}
 
     def start(self, agent: dict) -> dict:
-        self.agents.add_provider_keys(agent)
-        self._compose(agent, "up", "-d", "--build", timeout=1800)
+        self._prepare(agent)
+        self._compose(agent, "up", "-d", timeout=1800)
         return {"ok": True}
 
     def stop(self, agent: dict) -> dict:
@@ -556,7 +585,8 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
     cid = container or container_for(driver.project(agent["id"]), service)
-    run = docker(["exec", "-i", "-u", "hermes", cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
         code = (run.stderr.strip().splitlines() or ["delivery_failed"])[-1]
@@ -653,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
-    ap.add_argument("--agent-listener-port", type=int, default=8924, help="the Agent Service's agent-only listener port")
+    ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:

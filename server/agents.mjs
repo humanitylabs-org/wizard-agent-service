@@ -647,8 +647,11 @@ export function createAgentRegistry(options = {}) {
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     const dir = folder(agent.id)
-    const home = join(dir, 'home')
+    // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
+    // files it manages to managed/, and the runtime driver copies them in before every start.
+    const home = join(dir, restricted(agent) ? 'managed' : 'home')
     mkdirSync(home, { recursive: true, mode: 0o700 })
+    if (restricted(agent)) mkdirSync(join(dir, 'home'), { recursive: true, mode: 0o700 })
     let key = rotateKey ? '' : apiKey(agent.id)
     if (!key) {
       key = randomBytes(32).toString('base64url')

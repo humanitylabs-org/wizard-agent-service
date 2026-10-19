@@ -174,6 +174,20 @@ describe('shares with an agents registry', () => {
     expect(await switched.json()).toEqual({ error: 'client_share_id_conflict' })
   })
 
+  it('refuses shares to a restricted agent (its home belongs to its container user)', async () => {
+    const { dir, main, base } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const file = join(dir, 'agents', agent.id, 'agent.json')
+    const value = JSON.parse(readFileSync(file, 'utf8'))
+    value.runtime = { ...value.runtime, isolation: 'restricted', network: { uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' } }
+    writeFileSync(file, JSON.stringify(value))
+    const result = await post(base, '/wizard/v1/shares', { client_share_id: 'restricted-share', agent: agent.id, files: [{ filename: 'x', bytes: 5 }] })
+    expect(result.status).toBe(409)
+    expect(await result.json()).toMatchObject({ error: 'agent_unavailable' })
+    expect(agentHermes.runs()).toEqual([])
+    expect(main.runs()).toEqual([])
+  })
+
   it('refuses shares when agent file permission is none', async () => {
     const { dir, main, base } = await start()
     const { agent, agentHermes } = await addPrivate(dir, base)

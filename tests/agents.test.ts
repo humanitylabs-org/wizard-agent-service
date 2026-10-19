@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -108,9 +108,12 @@ describe('agents registry and API', () => {
     const stored = (id: string) => JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
     expect(stored(first.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' } })
     expect(stored(second.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.32/28', sandbox: '10.251.0.32/28' } })
-    const config = readFileSync(join(dir, 'agents', first.id, 'home', 'config.yaml'), 'utf8')
+    // Managed files go to managed/: the home belongs to the agent's container user and stays empty here.
+    const config = readFileSync(join(dir, 'agents', first.id, 'managed', 'config.yaml'), 'utf8')
     expect(config).toContain('http://edge:8923/wizard/mcp')
     expect(config).not.toContain('wizard-agent-service:8923')
+    expect(readFileSync(join(dir, 'agents', first.id, 'managed', '.env'), 'utf8')).toContain('WIZARD_MCP_TOKEN=')
+    expect(readdirSync(join(dir, 'agents', first.id, 'home'))).toEqual([])
     // The network allocation is not part of the public agent shape.
     expect(JSON.stringify(first)).not.toContain('10.250.')
   })

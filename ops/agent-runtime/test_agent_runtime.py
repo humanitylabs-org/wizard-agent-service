@@ -14,7 +14,10 @@ import agent_runtime as ar  # noqa: E402
 def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str = "restricted") -> dict:
     folder = root / agent_id
     (folder / "home").mkdir(parents=True)
-    (folder / "home" / ".env").write_text("API_SERVER_KEY=x\n")
+    managed = folder / ("managed" if isolation else "home")
+    managed.mkdir(exist_ok=True)
+    (managed / ".env").write_text("API_SERVER_KEY=x\n")
+    (managed / "config.yaml").write_text("model: {}\n")
     (folder / "runtime.key").write_text("api-key-0123456789\n")
     (folder / "gateway.key").write_text("gateway-key-abcdef\n")
     runtime = {"kind": "container", "app_id": f"agent-{agent_id}", "port": 18650}
@@ -31,7 +34,7 @@ class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
         self.agents = ar.Agents(self.tmp / "agents", None)
-        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "", 8924)
+        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "", 8929)
         self.calls = []
         self.real_docker = ar.docker
         ar.docker = lambda args, **kw: (self.calls.append((args, kw.get("env"))), type("R", (), {"stdout": "", "returncode": 0})())[1]
@@ -49,7 +52,7 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertEqual(env["EDGE_TOKEN_SHA256"], hashlib.sha256(b"gateway-key-abcdef").hexdigest())
         self.assertEqual((env["AGENT_UPLINK_SUBNET"], env["AGENT_SANDBOX_SUBNET"]), ("10.250.0.16/28", "10.251.0.16/28"))
         self.assertEqual(env["AGENT_INGRESS_BIND"], "127.0.0.1:18650")
-        self.assertEqual((env["EDGE_UPSTREAM_HOST"], env["EDGE_UPSTREAM_PORT"]), ("10.250.0.17", "8924"))
+        self.assertEqual((env["EDGE_UPSTREAM_HOST"], env["EDGE_UPSTREAM_PORT"]), ("10.250.0.17", "8929"))
         self.assertNotIn("gateway-key-abcdef", json.dumps(env))
 
     def test_lifecycle_uses_the_vendored_compose_and_the_agent_service(self):
@@ -58,7 +61,26 @@ class RestrictedDriverTest(unittest.TestCase):
         compose = [args for args, _ in self.calls if args[0] == "compose"]
         self.assertEqual(compose[0][:4], ["compose", "-p", "agent-daily", "-f"])
         self.assertEqual(compose[0][4], str(ar.RESTRICTED_DIR / "compose.yml"))
-        self.assertIn("--build", compose[0])
+        self.assertEqual([c[5] for c in compose[:2]], ["build", "up"])
+        # build, then the home sync, then up: the host never writes into the agent-owned home itself.
+        order = [args[0] if args[0] != "compose" else args[5] for args, _ in self.calls if args[0] in ("compose", "run")]
+        self.assertEqual(order[:3], ["build", "run", "up"])
+        sync = next(args for args, _ in self.calls if args[0] == "run")
+        for flag in (["--network", "none"], ["--read-only"], ["--cap-drop", "ALL"], ["--user", "0:0"]):
+            self.assertTrue(any(sync[i:i + len(flag)] == flag for i in range(len(sync))), flag)
+        self.assertIn(f"{self.tmp / 'agents' / 'daily' / 'managed'}:/managed:ro", sync)
+        self.assertIn(f"{self.tmp / 'agents' / 'daily' / 'home'}:/opt/data", sync)
+        self.assertIn("chown 10000:10000", sync[-1])
+        # Provider keys land in managed/.env, not in the home.
+        self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
+
+    def test_sync_refuses_without_managed_files(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        (self.tmp / "agents" / "daily" / "managed" / "config.yaml").unlink()
+        with self.assertRaises(ar.RuntimeFailure) as raised:
+            self.driver.apply(agent)
+        self.assertEqual(raised.exception.code, "agent_not_prepared")
+        self.assertFalse(any(args[0] == "run" or args[-2:] == ["-d", "--remove-orphans"] for args, _ in self.calls))
         self.driver.stop(agent)
         self.assertEqual(self.calls[-1][0][-1], "stop")
 
