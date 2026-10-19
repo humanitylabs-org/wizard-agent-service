@@ -3651,6 +3651,7 @@ export function createWizardServer(options = {}) {
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
     agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
+    agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
   })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
   try {
     if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {

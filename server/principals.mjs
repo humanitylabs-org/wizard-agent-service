@@ -79,6 +79,8 @@ function bearer(request) {
  *   agentForToken(token)      id of the non-main agent whose gateway credential this is ('' = none),
  *   mainAgentId               id of the main agent (its credential is not an agent principal here),
  *   agentSubnet(agentId)      uplink subnet the agent's requests must come from on the agent-only listener,
+ *   agentRestricted(agentId)  true for an agent in the restricted runtime: its key works only on the agent-only
+ *                             listener, even when its stored network is missing or malformed (fail closed),
  * }
  */
 export function createPrincipalResolver(options = {}) {
@@ -91,6 +93,14 @@ export function createPrincipalResolver(options = {}) {
     let agentId = ''
     try { agentId = options.agentForToken(token) || '' } catch { agentId = '' }
     return agentId && agentId !== mainAgentId ? { kind: 'agent', agentId } : null
+  }
+  function networkBound(agentId) {
+    try {
+      if (typeof options.agentRestricted === 'function' && options.agentRestricted(agentId)) return true
+      return typeof options.agentSubnet === 'function' && Boolean(options.agentSubnet(agentId))
+    } catch {
+      return true
+    }
   }
   async function resolve(request) {
     // The agent-only listener (what agent containers are given): a valid agent credential or nothing.
@@ -114,7 +124,7 @@ export function createPrincipalResolver(options = {}) {
     if (typeof options.internalCall === 'function' && options.internalCall(request)) return { kind: 'service' }
     const agent = agentPrincipal(request)
     // A restricted agent's key is bound to its own network and works only on the agent-only listener.
-    if (agent && typeof options.agentSubnet === 'function' && options.agentSubnet(agent.agentId)) return WRONG_NETWORK
+    if (agent && networkBound(agent.agentId)) return WRONG_NETWORK
     if (agent) return agent
     if (!ownerProof && !options.requireAccess) return BOX_OWNER
     return ANONYMOUS

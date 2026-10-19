@@ -648,6 +648,11 @@ export function createAgentRegistry(options = {}) {
     return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
   }
 
+  /** Whether an agent runs in the restricted runtime (its key is then bound to the agent-only listener). */
+  function agentRestricted(id) {
+    try { return restricted(read(id)) } catch { return false }
+  }
+
   function nextPort() {
     const used = new Set(list().map((agent) => agent.runtime?.port).filter(Number.isInteger))
     let port = basePort
@@ -834,7 +839,7 @@ export function createAgentRegistry(options = {}) {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent)),
     threadAgent: (agentOrId) => {

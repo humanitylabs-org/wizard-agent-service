@@ -2,6 +2,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -61,10 +62,12 @@ class RestrictedDriverTest(unittest.TestCase):
         compose = [args for args, _ in self.calls if args[0] == "compose"]
         self.assertEqual(compose[0][:4], ["compose", "-p", "agent-daily", "-f"])
         self.assertEqual(compose[0][4], str(ar.RESTRICTED_DIR / "compose.yml"))
-        self.assertEqual([c[5] for c in compose[:2]], ["build", "up"])
-        # build, then the home sync, then up: the host never writes into the agent-owned home itself.
+        self.assertEqual([c[5] for c in compose[:3]], ["build", "stop", "up"])
+        # The agent is stopped before its home is touched, and the home sync runs between stop and up.
+        self.assertEqual(compose[1][6:], [ar.RESTRICTED_SERVICE])
+        # build, stop, then the home sync, then up: the host never writes into the agent-owned home itself.
         order = [args[0] if args[0] != "compose" else args[5] for args, _ in self.calls if args[0] in ("compose", "run")]
-        self.assertEqual(order[:3], ["build", "run", "up"])
+        self.assertEqual(order[:4], ["build", "stop", "run", "up"])
         sync = next(args for args, _ in self.calls if args[0] == "run")
         for flag in (["--network", "none"], ["--read-only"], ["--cap-drop", "ALL"], ["--user", "0:0"]):
             self.assertTrue(any(sync[i:i + len(flag)] == flag for i in range(len(sync))), flag)
@@ -89,6 +92,38 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertIn("mktemp -d /opt/data/.wizard-sync.", script)
         self.assertIn('mv -T -f "$tmp/.env" /opt/data/.env', script)
         self.assertNotIn(".new", script)   # no predictable names an agent could plant
+
+    def test_sync_timeout_removes_the_named_helper(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        removed = []
+        real = ar.docker
+
+        def fake(args, **kw):
+            if args[0] == "run":
+                raise subprocess.TimeoutExpired(args, 120)
+            if args[0] == "rm":
+                removed.append(args)
+            return real(args, **kw)
+        ar.docker = fake
+        try:
+            with self.assertRaises(ar.RuntimeFailure) as raised:
+                self.driver.sync_home(agent)
+        finally:
+            ar.docker = real
+        self.assertEqual(raised.exception.code, "agent_sync_timeout")
+        self.assertEqual(len(removed), 1)
+        self.assertTrue(removed[0][2].startswith("agent-daily-sync-"))
+
+    def test_only_restricted_agents_lock_per_agent(self):
+        restricted, runtipi = object(), object()
+        self.assertIs(ar.lifecycle_lock(runtipi, restricted, "a"), ar.LOCK)
+        self.assertIs(ar.lifecycle_lock(runtipi, None, "a"), ar.LOCK)
+        self.assertIs(ar.lifecycle_lock(restricted, restricted, "a"), ar.agent_lock("a"))
+        # A restricted action never waits for a Runtipi one.
+        with ar.LOCK:
+            lock = ar.lifecycle_lock(restricted, restricted, "b")
+            self.assertTrue(lock.acquire(timeout=1))
+            lock.release()
 
     def test_lifecycle_locks_are_per_agent(self):
         self.assertIs(ar.agent_lock("a"), ar.agent_lock("a"))

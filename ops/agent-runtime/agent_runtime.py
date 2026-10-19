@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -51,14 +52,21 @@ MANAGED_FILES = (".env", "config.yaml")
 SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
-LOCK = threading.Lock()
+LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
 _AGENT_LOCKS: dict = {}
+_AGENT_LOCKS_GUARD = threading.Lock()
 
 
 def agent_lock(agent_id: str) -> threading.Lock:
-    """One lifecycle lock per agent: a slow or stuck agent never holds up the others."""
-    with LOCK:
+    """One lifecycle lock per restricted agent: a slow or stuck agent never holds up the others."""
+    with _AGENT_LOCKS_GUARD:
         return _AGENT_LOCKS.setdefault(agent_id, threading.Lock())
+
+
+def lifecycle_lock(chosen, restricted_driver, agent_id: str) -> threading.Lock:
+    """Restricted agents share no state between lifecycle actions, so they lock per agent; every other driver
+    keeps the global lock (RuntipiDriver._install patches process-wide wam.private functions)."""
+    return agent_lock(agent_id) if restricted_driver is not None and chosen is restricted_driver else LOCK
 
 
 class RuntimeFailure(Exception):
@@ -356,18 +364,25 @@ class RestrictedDriver:
             raise RuntimeFailure("agent_not_prepared", 409)
         home = self.agents.home(agent["id"])
         home.mkdir(mode=0o700, exist_ok=True)
-        # The agent controls its home between starts, so nothing there is trusted: each file is written into a fresh
-        # directory made by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target.
-        # rename(2) replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes
-        # the sync fail, which only stops that agent.
+        # Only ever called with the agent stopped (see _prepare), so nothing in the home changes underneath us. The
+        # agent controlled it before, so nothing there is trusted: each file is written into a fresh directory made
+        # by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target. rename(2)
+        # replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes the sync
+        # fail, which only stops that agent.
         copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
         script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
                   f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
-        docker(["run", "--rm", "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
-                "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
-                "-v", f"{home}:/opt/data", "-v", f"{managed}:/managed:ro", "--entrypoint", "/bin/sh", SIDECAR_IMAGE,
-                "-c", script], timeout=120)
+        name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
+        try:
+            docker(["run", "--rm", "--name", name, "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
+                    "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
+                    "-v", f"{home}:/opt/data", "-v", f"{managed}:/managed:ro", "--entrypoint", "/bin/sh", SIDECAR_IMAGE,
+                    "-c", script], timeout=120)
+        except subprocess.TimeoutExpired:
+            # Killing the docker client leaves the container running: remove it, then fail this agent only.
+            docker(["rm", "-f", name], timeout=60, check=False)
+            raise RuntimeFailure("agent_sync_timeout", 504)
 
     def _prepare(self, agent: dict) -> None:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
@@ -375,15 +390,15 @@ class RestrictedDriver:
             raise RuntimeFailure("restricted_provider_unsupported", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
+        # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
+        # starts it again with the new files.
+        self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
         self.sync_home(agent)
 
     def apply(self, agent: dict) -> dict:
         self._prepare(agent)
         project = self.project(agent["id"])
-        running = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}"], timeout=60).stdout.split()
         self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
-        if running:
-            self._compose(agent, "restart", RESTRICTED_SERVICE, timeout=300)
         return {"ok": True, "driver": "restricted", "project": project}
 
     def start(self, agent: dict) -> dict:
@@ -673,7 +688,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with agent_lock(agent_id):
+                with lifecycle_lock(chosen, restricted_driver, agent_id):
                     result = getattr(chosen, action)(agent)
                 self._json(200, result)
             except RuntimeFailure as error:

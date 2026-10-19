@@ -58,6 +58,33 @@ for i in $(seq 15); do sh "$FW" apply 8929 >/dev/null; done
 touch /tmp/stop; wait "$hammer1" "$hammer2" "$hammer3" "$hammer4"
 echo $(( $(paste -sd+ /tmp/leaks) )) > /tmp/leaks
 [ "$(cat /tmp/leaks)" = 0 ] && ok "no connection slips through during 15 refreshes" || bad "refresh gap: $(cat /tmp/leaks) connections"
+# Deterministic gap check: a shim runs every iptables call the script makes and, after each change, records any
+# moment where the uplink, sandbox or listener-port guard has no INPUT hook at all.
+REAL=$(command -v iptables); mkdir -p /tmp/shim; rm -f /tmp/gaps; touch /tmp/gaps
+cat > /tmp/shim/iptables <<EOF
+#!/bin/sh
+"$REAL" "\$@"; rc=\$?
+case " \$* " in *" -S "*|*" -C "*) exit \$rc ;; esac
+now=\$("$REAL" -S INPUT)
+echo "\$now" | grep -q -- "-s 10.250.0.0/16 -j WIZARD-AGENTS" || echo "uplink unguarded after: \$*" >> /tmp/gaps
+echo "\$now" | grep -q -- "-s 10.251.0.0/16 -j WIZARD-AGENTS" || echo "sandbox unguarded after: \$*" >> /tmp/gaps
+echo "\$now" | grep -q -- "--dport 8929 -j WIZARD-AGENT-PORT" || echo "port unguarded after: \$*" >> /tmp/gaps
+exit \$rc
+EOF
+chmod +x /tmp/shim/iptables
+PATH=/tmp/shim:$PATH sh "$FW" apply 8929 >/dev/null
+[ ! -s /tmp/gaps ] && ok "a normal refresh never leaves a guard unhooked" || bad "refresh gap: $(head -1 /tmp/gaps)"
+# A refresh interrupted after the old chains went but before the rename: the -NEXT chains are the only guard.
+# The next apply must finish that refresh without a gap.
+iptables -E WIZARD-AGENTS WIZARD-AGENTS-NEXT; iptables -E WIZARD-AGENT-PORT WIZARD-AGENT-PORT-NEXT
+: > /tmp/gaps
+PATH=/tmp/shim:$PATH sh "$FW" apply 8929 >/dev/null
+[ ! -s /tmp/gaps ] && ok "no gap when recovering an interrupted refresh" || bad "recovery gap: $(head -1 /tmp/gaps)"
+sh "$FW" check 8929 >/dev/null && [ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] && ok "recovered refresh leaves one hooked set" || bad "recovery left a bad state"
+# Leftovers of a refresh interrupted while building (unhooked -NEXT chains) are cleaned; the live set stays.
+iptables -N WIZARD-AGENTS-NEXT; iptables -A WIZARD-AGENTS-NEXT -j ACCEPT
+sh "$FW" apply 8929 >/dev/null
+[ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] && sh "$FW" check 8929 >/dev/null && ok "unhooked leftovers are dropped" || bad "unhooked leftovers kept"
 sh "$FW" apply 9000 >/dev/null
 [ "$(iptables -S INPUT | grep -c -- '--dport 8929')" = 0 ] && ok "re-apply on a new port drops the old port hook" || bad "old port hook left"
 sh "$FW" remove >/dev/null
