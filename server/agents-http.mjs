@@ -15,7 +15,7 @@ import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
 import { ownerLike, principalOf } from './principals.mjs'
 import { STATUS_INSTRUCTIONS } from './thread-status.mjs'
 
-export const AGENT_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party client for their own agents. This is a separate agent with its own private history, memory and files; nothing from other agents is available here. Answer with the same care you would anywhere else, scaled to the request. Wizard renders Markdown.
+export const AGENT_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party client for their own agents. This is a separate agent with its own private history, memory and files; nothing from other agents is available here. Answer with the same care you would anywhere else, scaled to the request. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help.
 
 ${STATUS_INSTRUCTIONS}`
 
