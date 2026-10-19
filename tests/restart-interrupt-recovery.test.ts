@@ -191,6 +191,7 @@ describe('Agent Service restart during a live run (HTTP)', () => {
   async function harness() {
     const sessions = ['wizard_cut', 'wizard_stopped'].map((id) => ({ id, source: 'api_server', title: id, message_count: 1, hidden: false, archived: false, updated_at: new Date().toISOString() }))
     const runs = new Map<string, { sessionId: string, status: string, input: string, output?: string }>()
+    const transcript = new Map<string, object[]>()
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')
       const json = (status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)) }
@@ -210,6 +211,8 @@ describe('Agent Service restart during a live run (HTTP)', () => {
         if (!run) { json(404, {}); return }
         json(200, { object: 'run', run_id: detail[1], session_id: run.sessionId, status: run.status, ...(run.output ? { output: run.output } : {}) }); return
       }
+      const messages = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/)
+      if (req.method === 'GET' && messages) { json(200, { object: 'list', data: transcript.get(messages[1]) ?? [] }); return }
       if (req.method === 'GET' && url.pathname === '/api/sessions') { json(200, { object: 'list', data: sessions }); return }
       if (req.method === 'GET' && url.pathname === '/v1/capabilities') { json(200, {}); return }
       res.writeHead(404); res.end()
@@ -263,7 +266,7 @@ describe('Agent Service restart during a live run (HTTP)', () => {
       }
       return status
     }
-    return { runs, statePath, boot, admit, list, call, settle }
+    return { runs, transcript, statePath, boot, admit, list, call, settle }
   }
 
   it('ends with the resumed answer, and a James Stop stays stopped', async () => {
@@ -328,5 +331,33 @@ describe('Agent Service restart during a live run (HTTP)', () => {
     }
     expect(row).toMatchObject({ status: 'interrupted', wizard_safe_error: INTERRUPTED_SAFE_ERROR })
     expect(h.runs.size).toBe(2)
+  })
+
+  it('uses the real Hermes transcript: resumes a cut turn, leaves an answered one alone', async () => {
+    const h = await harness()
+    const first = await h.boot()
+    const now = Date.now() / 1000
+    const cut = await h.admit(first.origin, 'wizard_cut', 'k-cut', 'Make the drop cap selectable')
+    const answered = await h.admit(first.origin, 'wizard_stopped', 'k-answered', 'Quick question')
+    // Oldest-first page, as Hermes returns order=latest: tool call, cancelled tool, empty assistant.
+    h.transcript.set('wizard_cut', [
+      { role: 'user', content: 'Make the drop cap selectable', timestamp: now + 1 },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1' }], timestamp: now + 2 },
+      { role: 'tool', content: '[Tool execution cancelled — terminal was skipped.', timestamp: now + 3 },
+      { role: 'assistant', content: '', timestamp: now + 4 },
+    ])
+    h.transcript.set('wizard_stopped', [
+      { role: 'user', content: 'Quick question', timestamp: now + 1 },
+      { role: 'assistant', content: 'Here is the answer.', timestamp: now + 2 },
+    ])
+    await new Promise<void>((resolve) => { first.wizard.closeAllConnections?.(); first.wizard.close(() => resolve()) })
+    h.runs.get('actual_1')!.status = 'cancelled'
+    h.runs.get('actual_2')!.status = 'cancelled'
+    const second = await h.boot()   // default reader, no injection
+    await h.settle(second.origin, cut.run_id, (s) => s === 'interrupted')
+    expect(await h.settle(second.origin, answered.run_id, (s) => s === 'completed')).toBe('completed')
+    for (let attempt = 0; attempt < 20 && h.runs.size < 3; attempt += 1) { await h.list(second.origin); await new Promise((resolve) => setTimeout(resolve, 25)) }
+    expect(h.runs.size).toBe(3)
+    expect(h.runs.get('actual_3')).toMatchObject({ sessionId: 'wizard_cut' })
   })
 })
