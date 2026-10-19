@@ -46,9 +46,25 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
 
 ### Pull requests
 
+- **Say what kind of change it is.** Every PR gets exactly one tier, shown both as a label and as the start of its title. This lets anyone triage a list of PRs at a glance.
+
+  | Tier | Label | Title starts with | Means |
+  |---|---|---|---|
+  | Bug fix | `tier: recommended fix` | `Recommended fix:` | Something is broken and this makes it work. It must land. |
+  | Improvement | `tier: strong suggestion` | `Strong suggestion:` | A clearly better behaviour or a new capability. Feel free to drop it. |
+  | Personal preference | `tier: opinionated` | `Opinionated — feel free to drop:` | Taste: look, layout, wording, or how you like to work. |
+  | Maintenance | `tier: maintenance` | `Maintenance:` | Docs, releases, CI, tests or refactors with no change in behaviour. |
+
+  Optional labels:
+  - `priority: 1` (review first), `priority: 2` (review next) and `priority: 3` (when there is time).
+  - `needs: james review`: the PR waits for James to accept it or drop it.
+  - `preview only`: an experiment that must not be merged.
+  - `from: <where it already runs>`, for example `from: miguel test port`: the change is already in daily use there.
+
+  Use the same tiers for issues.
 - **Open the PR once your first commit is pushed.** Use a draft until it is ready: `gh pr create --base main --draft`.
 - **Keep each PR to one change** that a reader can follow in a few minutes. Split unrelated fixes into separate PRs.
-- **Title:** state the outcome in plain words ("Threads open instantly from the on-device cache"), rather than the mechanism.
+- **Title:** after the tier prefix, state the outcome in plain words ("Recommended fix: threads open instantly from the on-device cache"), rather than the mechanism.
 - **Body:** fill in the PR template. Write it for someone opening it cold:
   1. **What and why:** what changes for the user or the system, and the problem it solves.
   2. **Verified:** the exact commands you ran and their results. Add runtime evidence (a live box, screenshots or a short recording) wherever behaviour changed. For a bug fix, show the new test failing before the fix and passing after it.
@@ -64,6 +80,11 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
   - nothing in the PR needs a decision (see the next section).
 
   There is no wait for a human approval.
+- **What each tier means for merging:**
+  - **Recommended fixes and maintenance** merge on those conditions.
+  - **Strong suggestions** merge on them too, unless they change something James sees or uses every day. In that case add `needs: james review` and wait.
+  - **Opinionated changes** always carry `needs: james review` and wait for James.
+  - **`preview only`** PRs never merge.
 - **Use "Create a merge commit"**, then delete the branch.
 - **After merging anything that publishes or deploys,** confirm that the workflow run on `main` succeeded.
 
@@ -76,7 +97,12 @@ Decide and merge yourself, except when the change:
 - changes James's skins (Nebula, Grove, Tide, Ember, Signal) or the base shell look;
 - deletes user data, rewrites history, or is otherwise hard to undo.
 
-For those, open the PR or an issue, explain the choice in one paragraph, and assign it to the agent account of the person who needs to decide. GitHub's Assignee field is used only for this. Carry on with other work while you wait.
+For those, open the PR or an issue and explain the choice in one paragraph. Then:
+
+- **If James decides:** add `needs: james review`.
+- **If another agent's side has to act:** assign that agent's account. GitHub's Assignee field is used only for this.
+
+Carry on with other work while you wait.
 
 ### Changes that span repos
 
