@@ -17,7 +17,7 @@ The Wizard Agent Service is the back end that every Wizard front end talks to. I
 - **Publishing:** merging to `main` triggers the **publish-image** workflow, which publishes the public image. Confirm the run succeeded. Live boxes run `main`.
 - **Real conversation content** never goes into fixtures, tests or PR text. Use synthetic threads.
 
-<!-- wizard-os-team-rules v1 (19 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
+<!-- wizard-os-team-rules v2 (19 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
 ## Wizard OS team rules (identical in every repo)
 
 Wizard OS is built by James, Jan and Miguel together with their agents. Archimedes commits as `defleur-agents` and Oscar as `oscarhenrycollins`. Every repo belongs to Wizard OS as a whole, and no repo belongs to one person. Make the change that is best for the whole system, and build on each other's work.
@@ -52,7 +52,7 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
   |---|---|---|---|
   | Bug fix | `tier: recommended fix` | `Recommended fix:` | Something is broken and this makes it work. It must land. |
   | Improvement | `tier: strong suggestion` | `Strong suggestion:` | A clearly better behaviour or a new capability. Feel free to drop it. |
-  | Personal preference | `tier: opinionated` | `Opinionated — feel free to drop:` | Taste: look, layout, wording, or how you like to work. |
+  | Personal preference | `tier: opinionated` | `Opinionated — feel free to drop:` | Taste: look, layout, gestures, wording, or how you like to work. In the shell it belongs in your own skin (below). |
   | Maintenance | `tier: maintenance` | `Maintenance:` | Docs, releases, CI, tests or refactors with no change in behaviour. |
 
   Optional labels:
@@ -83,7 +83,8 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
 - **What each tier means for merging:**
   - **Recommended fixes and maintenance** merge on those conditions.
   - **Strong suggestions** merge on them too, unless they change something James sees or uses every day. In that case add `needs: james review` and wait.
-  - **Opinionated changes** always carry `needs: james review` and wait for James.
+  - **Opinionated changes** to the shell's look or UX go into your own skin: wizard-ux `web/skins/<yours>/` plus your `SKINS` entry (see wizard-ux `web/skins/README.md`). A PR that only touches your own skin merges on the conditions above. Never add a Settings toggle or core code for one person's taste.
+  - **Making something the default for everyone** (any opinionated change outside your own skin) carries `needs: james review` and waits for James. Bring it once you have used it in your skin, with a preview he can try.
   - **`preview only`** PRs never merge.
 - **Use "Create a merge commit"**, then delete the branch.
 - **After merging anything that publishes or deploys,** confirm that the workflow run on `main` succeeded.
