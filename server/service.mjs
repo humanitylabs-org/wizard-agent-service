@@ -109,7 +109,7 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser.
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG.
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
@@ -763,8 +763,12 @@ function historyTimestamp(value) {
 
 export function durableInlineImage(part) {
   if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
-  const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
-  if (!match || !match[2]) return null
+  // Linear check: a repeated-group regex over multi-megabyte base64 overflows V8's regex stack
+  // (RangeError), which turned a whole thread's history read into 502 "Couldn't load this thread".
+  const head = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,/i)
+  const body = head ? part.image_url.url.slice(head[0].length) : ''
+  if (!head || !body || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body) || body.slice(0, -2).includes('=')) return null
+  const match = [head[0] + body, head[1], body]
   const declaredMime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
   if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(declaredMime)) return null
   const bytes = Buffer.from(match[2], 'base64')
