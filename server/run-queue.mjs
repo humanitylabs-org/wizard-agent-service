@@ -14,6 +14,13 @@ const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
 // Continue is an interactive request; model text never determines scheduling.
 export const isBackgroundContinuation = record => Boolean(record.continuation)
   && record.continuation.kind !== 'background-recovery'
+// A run the owner did not stop but that ended `cancelled` lost its transport: an Agent Service
+// or gateway restart dropped the SSE stream and Hermes interrupted the turn (19 Oct 2026: four
+// threads ended as a blank "Worked for Ns" receipt). Such runs become `interrupted` (Needs retry)
+// and are resumed once, through normal admission, under this stable key prefix.
+export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
+export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
+const RECOVERY_INPUT_CHARS = 4000
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
@@ -54,6 +61,17 @@ const queuedInputPreview = (body) => {
   }).join('\n').trim().slice(0, 300)
 }
 
+const queuedInputText = (value) => {
+  const input = value?.input
+  if (typeof input === 'string') return input.trim()
+  if (!Array.isArray(input)) return ''
+  return input.flatMap((item) => {
+    if (typeof item?.content === 'string') return [item.content]
+    if (!Array.isArray(item?.content)) return []
+    return item.content.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text)
+  }).join('\n').trim()
+}
+
 const requestError = (message, status) => Object.assign(new Error(message), { status })
 
 export function queueRequestHash(runtime, body) {
@@ -78,6 +96,11 @@ export class DurableRunQueue {
     confirmAbandoned = null,
     onReconciled = () => {},
     staleAfterSeconds = 300,
+    // Interrupt recovery: interruptOutcome(record) -> 'completed' when the answer landed before the
+    // cut (no resume needed), anything else resumes. onInterruptRecovery logs each decision.
+    interruptOutcome = null,
+    onInterruptRecovery = () => {},
+    interruptRecoveryMaxAgeSeconds = 6 * 3600,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -96,6 +119,9 @@ export class DurableRunQueue {
     this.confirmAbandoned = confirmAbandoned
     this.onReconciled = onReconciled
     this.staleAfterSeconds = Math.max(1, Number(staleAfterSeconds) || 300)
+    this.interruptOutcome = interruptOutcome
+    this.onInterruptRecovery = onInterruptRecovery
+    this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
     this.leaselessSince = new Map()
     this.timer = null
     this.tickPromise = null
@@ -131,6 +157,13 @@ export class DurableRunQueue {
       );
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
+      CREATE TABLE IF NOT EXISTS wizard_owner_stops (
+        run_id TEXT PRIMARY KEY, at REAL NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS wizard_interrupt_recovery (
+        public_run_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+        recovery_run_id TEXT NOT NULL DEFAULT '', at REAL NOT NULL
+      );
     `)
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
@@ -412,7 +445,13 @@ export class DurableRunQueue {
 
   // `continuation` is service authority (helper tokens; {kind:'background-recovery'} lets a manual Continue skip the
   // automatic helper check). Never pass a caller-supplied value here.
-  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
+  async admit(request) {
+    const result = this._admitRow(request)
+    if (!result.replayed) await this.tick(true)
+    return result.replayed ? result : { record: this.get(result.record.publicRunId), replayed: false }
+  }
+
+  _admitRow({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
@@ -443,8 +482,75 @@ export class DurableRunQueue {
       try { this.database.exec('ROLLBACK') } catch { /* already rolled back */ }
       throw error
     }
-    await this.tick(true)
     return { record: this.get(publicRunId), replayed: false }
+  }
+
+  /** The owner pressed Stop: a later `cancelled` for this run is deliberate, never resumed. */
+  markOwnerStop(runId) {
+    const id = String(runId ?? '')
+    if (!id || id.length > 256) return
+    const record = this.get(id) ?? this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE upstream_run_id = ? OR worker_run_id = ?').get(id, id))
+    const insert = this.database.prepare('INSERT OR IGNORE INTO wizard_owner_stops(run_id, at) VALUES(?, ?)')
+    for (const value of new Set([id, record?.publicRunId, record?.upstreamRunId].filter(Boolean))) insert.run(value, nowSeconds())
+    this.database.prepare('DELETE FROM wizard_owner_stops WHERE at < ?').run(nowSeconds() - 7 * 24 * 3600)
+  }
+
+  _ownerStopped(record) {
+    return Boolean(this.database.prepare('SELECT 1 FROM wizard_owner_stops WHERE run_id IN (?, ?) LIMIT 1')
+      .get(record.publicRunId, record.upstreamRunId || record.publicRunId))
+  }
+
+  interruptRecovery(publicRunId) {
+    return this.database.prepare('SELECT * FROM wizard_interrupt_recovery WHERE public_run_id = ?').get(publicRunId) ?? null
+  }
+
+  _recoveryBody(record) {
+    const original = parseJson(record.body, {})
+    const value = { ...original }
+    delete value._wizard_background_recovery
+    const text = queuedInputText(original)
+    const quoted = text.length > RECOVERY_INPUT_CHARS ? `${text.slice(0, RECOVERY_INPUT_CHARS)}…` : text
+    value.input = '[Wizard follow-through] Wizard restarted while your previous turn in this thread was running, so it was '
+      + 'cut off before you replied. Resume that request from where it stopped and give your final answer in this thread. '
+      + 'Check what already happened before repeating any step with side effects.'
+      + (quoted ? `\n\nThe interrupted request was:\n${quoted}` : '')
+    return JSON.stringify(value)
+  }
+
+  async _recoverInterrupted() {
+    const pending = this.database.prepare("SELECT public_run_id FROM wizard_interrupt_recovery WHERE state = 'pending' ORDER BY at").all()
+    for (const { public_run_id: id } of pending) {
+      const record = this.get(id)
+      const finish = (state, reason, recoveryRunId = '') => {
+        this.database.prepare('UPDATE wizard_interrupt_recovery SET state = ?, reason = ?, recovery_run_id = ?, at = ? WHERE public_run_id = ?')
+          .run(state, reason, recoveryRunId, nowSeconds(), id)
+        try { this.onInterruptRecovery(record, { state, reason, recoveryRunId }) } catch { /* logging only */ }
+      }
+      if (!record || record.status !== 'interrupted') { finish('skipped', 'not_interrupted'); continue }
+      if (record.idempotencyKey.startsWith(INTERRUPT_RECOVERY_PREFIX)) { finish('skipped', 'recovery_already_interrupted'); continue }
+      if (nowSeconds() - record.createdAt > this.interruptRecoveryMaxAgeSeconds) { finish('skipped', 'too_old'); continue }
+      const key = INTERRUPT_RECOVERY_PREFIX + record.publicRunId
+      const newer = this.database.prepare(`SELECT 1 FROM wizard_run_queue WHERE runtime = ? AND session_id = ?
+        AND created_at > ? AND idempotency_key <> ? LIMIT 1`).get(record.runtime, record.sessionId, record.createdAt, key)
+      if (newer) { finish('skipped', 'newer_request'); continue }
+      if (this.interruptOutcome) {
+        let outcome = null
+        try { outcome = await this.interruptOutcome(record) } catch { outcome = null }
+        if (outcome === 'completed') {
+          this._update(id, { status: 'completed', payload: { ...record.payload, status: 'completed', last_event: 'run.reconciled', reconciled_reason: 'answered_before_interrupt' } })
+          finish('skipped', 'answered_before_interrupt')
+          continue
+        }
+      }
+      try {
+        const body = this._recoveryBody(record)
+        const { record: admitted } = this._admitRow({ runtime: record.runtime, sessionId: record.sessionId, idempotencyKey: key,
+          requestHash: queueRequestHash(record.runtime, body), body, trustedPaths: record.trustedPaths ?? [] })
+        finish('admitted', '', admitted.publicRunId)
+      } catch (error) {
+        finish('failed', String(error?.message ?? error).slice(0, 200))
+      }
+    }
   }
 
   async cancel(publicRunId) {
@@ -527,10 +633,18 @@ export class DurableRunQueue {
       const result = await this.lookup(record)
       const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
       if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
-      const capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
+      let capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
+      let nextPayload = result?.payload ?? record.payload
+      if (record.runtime === 'direct' && ['cancelled', 'interrupted'].includes(capacityStatus)
+          && record.status !== 'stopping' && !this._ownerStopped(record)) {
+        capacityStatus = 'interrupted'
+        nextPayload = { ...(nextPayload ?? {}), status: 'interrupted', interrupted_reason: 'transport_lost', safe_error: INTERRUPTED_SAFE_ERROR }
+        this.database.prepare("INSERT OR IGNORE INTO wizard_interrupt_recovery(public_run_id, state, at) VALUES(?, 'pending', ?)")
+          .run(record.publicRunId, nowSeconds())
+      }
       return this._update(record.publicRunId, {
         status: capacityStatus,
-        payload: result?.payload ?? record.payload,
+        payload: nextPayload,
         workerRunId: result?.workerRunId ?? record.workerRunId,
         waitingReason: '',
         terminalAt: TERMINAL.has(capacityStatus) ? nowSeconds() : null,
@@ -618,6 +732,7 @@ export class DurableRunQueue {
       else await this._refresh(record, force)
     }
     await this._reconcileStale()
+    await this._recoverInterrupted()
 
     let external
     try { external = await this.activeSessionIds() }
