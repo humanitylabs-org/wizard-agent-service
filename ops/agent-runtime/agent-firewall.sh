@@ -10,12 +10,16 @@
 #   WIZARD-AGENT-PORT  the listener binds 0.0.0.0, so connections to its port from anywhere except loopback
 #                      or the uplink range are dropped (public interface included).
 #
+# A refresh never opens a gap: the new chains are built and hooked in before the old hooks and chains go, then
+# renamed into place (rules follow a renamed chain).
+#
 #   agent-firewall.sh apply [port]   install or refresh the rules
 #   agent-firewall.sh check [port]   print the rules (exit 1 when any hook is missing)
 #   agent-firewall.sh remove         take them out again
 set -eu
 RANGE=WIZARD-AGENTS
 LISTEN=WIZARD-AGENT-PORT
+NEXT=-NEXT
 UPLINK=10.250.0.0/16
 SANDBOX=10.251.0.0/16
 PORT=${2:-8929}
@@ -24,13 +28,12 @@ case "$PORT" in *[!0-9]*|'') echo "port must be a number" >&2; exit 2 ;; esac
 range_hook() { iptables -C INPUT -s "$1" -j "$RANGE" 2>/dev/null; }
 port_hook() { iptables -C INPUT -p tcp --dport "$PORT" -j "$LISTEN" 2>/dev/null; }
 
-remove_all() {
-  # Every INPUT jump into either chain, whatever port it was installed with.
-  iptables -S INPUT | grep -E -- "-j ($RANGE|$LISTEN)\$" | sed 's/^-A /-D /' | while read -r rule; do
-    # shellcheck disable=SC2086
-    iptables $rule
-  done
-  for chain in "$RANGE" "$LISTEN"; do
+drop_chains() { # chain names: every INPUT jump into them (whatever port), then the chains themselves
+  for chain in "$@"; do
+    iptables -S INPUT | grep -E -- "-j $chain\$" | sed 's/^-A /-D /' | while read -r rule; do
+      # shellcheck disable=SC2086
+      iptables $rule
+    done
     iptables -F "$chain" 2>/dev/null || true
     iptables -X "$chain" 2>/dev/null || true
   done
@@ -38,19 +41,22 @@ remove_all() {
 
 case "${1:-}" in
   apply)
-    remove_all
-    iptables -N "$RANGE"
-    iptables -A "$RANGE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A "$RANGE" -s "$UPLINK" -p tcp --dport "$PORT" -m conntrack --ctstate NEW -j ACCEPT
-    iptables -A "$RANGE" -j DROP
-    iptables -N "$LISTEN"
-    iptables -A "$LISTEN" -i lo -j RETURN
-    iptables -A "$LISTEN" -s "$UPLINK" -j RETURN
-    iptables -A "$LISTEN" -j DROP
+    drop_chains "$RANGE$NEXT" "$LISTEN$NEXT"          # leftovers of an interrupted refresh
+    iptables -N "$RANGE$NEXT"
+    iptables -A "$RANGE$NEXT" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A "$RANGE$NEXT" -s "$UPLINK" -p tcp --dport "$PORT" -m conntrack --ctstate NEW -j ACCEPT
+    iptables -A "$RANGE$NEXT" -j DROP
+    iptables -N "$LISTEN$NEXT"
+    iptables -A "$LISTEN$NEXT" -i lo -j RETURN
+    iptables -A "$LISTEN$NEXT" -s "$UPLINK" -j RETURN
+    iptables -A "$LISTEN$NEXT" -j DROP
     # Inserted at the top in reverse, so the order is: uplink range, sandbox range, listener port guard.
-    iptables -I INPUT 1 -p tcp --dport "$PORT" -j "$LISTEN"
-    iptables -I INPUT 1 -s "$SANDBOX" -j "$RANGE"
-    iptables -I INPUT 1 -s "$UPLINK" -j "$RANGE"
+    iptables -I INPUT 1 -p tcp --dport "$PORT" -j "$LISTEN$NEXT"
+    iptables -I INPUT 1 -s "$SANDBOX" -j "$RANGE$NEXT"
+    iptables -I INPUT 1 -s "$UPLINK" -j "$RANGE$NEXT"
+    drop_chains "$RANGE" "$LISTEN"                    # the old set; the new one is already in force
+    iptables -E "$RANGE$NEXT" "$RANGE"
+    iptables -E "$LISTEN$NEXT" "$LISTEN"
     echo "agent firewall: applied (listener port $PORT)"
     ;;
   check)
@@ -59,7 +65,7 @@ case "${1:-}" in
     range_hook "$UPLINK" && range_hook "$SANDBOX" && port_hook && echo "agent firewall: hooked (listener port $PORT)"
     ;;
   remove)
-    remove_all
+    drop_chains "$RANGE" "$LISTEN" "$RANGE$NEXT" "$LISTEN$NEXT"
     echo "agent firewall: removed"
     ;;
   *)

@@ -102,7 +102,13 @@ describe('agents registry and API', () => {
     const dir = box()
     const main = await fakeHermes('main')
     const { base } = await start(dir, main, { agentIsolation: 'restricted', agentGatewayUrl: 'http://wizard-agent-service:8923/wizard/mcp' })
-    const make = async (label: string, key: string) => (await (await fetch(`${base}/wizard/v1/agents`, json({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard' } }, { 'Idempotency-Key': key }))).json()).agent
+    const create = (label: string, key: string, model = { provider: 'anthropic', model: 'claude-opus-5-5' }) => fetch(`${base}/wizard/v1/agents`, json({ label, harness: 'hermes', model, permissions: { preset: 'standard' } }, { 'Idempotency-Key': key }))
+    const make = async (label: string, key: string) => (await (await create(label, key)).json()).agent
+    // No Tinfoil attestation sidecar in the restricted runtime yet: refused up front, and nothing is created.
+    const tinfoil = await create('Confidential', 'restricted-0', { provider: 'tinfoil', model: 'glm-5-3' })
+    expect(tinfoil.status).toBe(409)
+    expect(await tinfoil.json()).toMatchObject({ error: 'restricted_provider_unsupported' })
+    expect(existsSync(join(dir, 'agents', 'confidential'))).toBe(false)
     const first = await make('Daily', 'restricted-1')
     const second = await make('Other', 'restricted-2')
     const stored = (id: string) => JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
@@ -116,6 +122,10 @@ describe('agents registry and API', () => {
     expect(readdirSync(join(dir, 'agents', first.id, 'home'))).toEqual([])
     // The network allocation is not part of the public agent shape.
     expect(JSON.stringify(first)).not.toContain('10.250.')
+    // ...and an existing restricted agent cannot move onto Tinfoil either.
+    const moved = await fetch(`${base}/wizard/v1/agents/${first.id}`, { ...json({ model: { provider: 'tinfoil', model: 'glm-5-3' } }), method: 'PATCH' })
+    expect(moved.status).toBe(409)
+    expect(stored(first.id).model.provider).toBe('anthropic')
   })
 
   it('without isolation, new agents keep the existing runtime shape', async () => {

@@ -16,13 +16,23 @@ wizard-app-store, digests in `SOURCE.txt`). Agents created before keep their run
 The home belongs to the agent's container user. The host never writes into it directly:
 
 - The runtime driver (`RestrictedDriver.sync_home`) copies the managed files in using a one-shot container. That
-  container has no network, a read-only root, and only the CHOWN, FOWNER and DAC_OVERRIDE capabilities. The
-  runtime's own `home-init` then re-owns anything that is not `10000:10000`.
+  container has no network, a read-only root, and only the CHOWN, FOWNER and DAC_OVERRIDE capabilities. Nothing
+  in the home is trusted: each file is written into a fresh `mktemp -d` directory and renamed over its target, so
+  a planted symlink or FIFO is replaced rather than followed or opened. The runtime's own `home-init` then
+  re-owns anything that is not `10000:10000`. Lifecycle actions lock per agent, so one stuck agent never
+  holds up the others.
 - Anything else that must land in the home runs inside the agent container as its own user, for example an import:
   `docker exec -u 10000:10000 <agent container> hermes import <archive>`. Files written this way stay owned correctly.
   The runtime's `home-init` repairs ownership on the next start if something lands as another uid.
 - Shares (files sent to an agent from the phone) answer `409 agent_unavailable` for restricted agents until
   in-container placement exists.
+
+## Model providers
+
+The restricted runtime has no Tinfoil attestation sidecar yet. Creating a restricted agent on Tinfoil, or moving
+one onto it, answers `409 restricted_provider_unsupported`; the runtime driver refuses it as well. Private agents
+need a confidential provider, so until that sidecar exists they stay on the existing runtime or use the local
+model.
 
 ## Networks and ports
 
@@ -33,6 +43,10 @@ The home belongs to the agent's container user. The host never writes into it di
 - The agent reaches the Service only through its edge sidecar, which connects to the agent-only listener
   `WIZARD_AGENT_PORT` (default 8929; 8924 is often taken by wizard-link) at the uplink gateway address.
 - On that listener, an agent key is accepted only from that agent's own uplink /28. Only `/wizard/mcp` and
-  `GET /wizard/v1/agent-context` are served.
+  `GET /wizard/v1/agent-context` are served. A restricted agent's key is refused (`403 principal.agent_network`) on
+  every other listener.
 - Host firewall: `ops/agent-runtime/agent-firewall.sh` and `wizard-agent-firewall.service`. Install them as root.
-  The functional test is `test_agent_firewall.sh`, which runs in a privileged throwaway container.
+  A refresh builds the new chains and hooks them in before the old ones go, so the guard never drops. Stopping
+  the unit leaves the rules in place; removal is `wizard-agent-firewall remove`. The functional test is
+  `test_agent_firewall.sh`, which runs in a privileged throwaway container and includes a check that nothing
+  slips through during refreshes.

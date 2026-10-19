@@ -1,5 +1,7 @@
 # Install (root): copy agent-firewall.sh to /usr/local/sbin/wizard-agent-firewall, this file to
 # /etc/systemd/system/, then `systemctl enable --now wizard-agent-firewall`.
+# Stopping or restarting the unit never takes the rules down (no ExecStop); `restart`/`reload` refresh them in
+# place without a gap. Removing them is deliberate: `wizard-agent-firewall remove`.
 [Unit]
 Description=Wizard OS restricted-agent host firewall
 After=network-pre.target docker.service
@@ -9,7 +11,7 @@ Wants=network-pre.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/wizard-agent-firewall apply 8929
-ExecStop=/usr/local/sbin/wizard-agent-firewall remove
+ExecReload=/usr/local/sbin/wizard-agent-firewall apply 8929
 
 [Install]
 WantedBy=multi-user.target

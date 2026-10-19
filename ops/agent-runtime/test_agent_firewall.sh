@@ -48,6 +48,16 @@ if echo x | nc -w 2 10.250.0.17 7000 >/dev/null 2>&1; then ok "host -> uplink re
 sh "$FW" check 8929 >/dev/null && ok "check passes when applied" || bad "check when applied"
 before=$(iptables -S | wc -l); sh "$FW" apply 8929 >/dev/null; after=$(iptables -S | wc -l)
 [ "$before" = "$after" ] && ok "apply is idempotent ($after rules)" || bad "apply idempotent ($before -> $after)"
+[ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] && ok "no -NEXT chains left after refresh" || bad "-NEXT chains left"
+# No gap while refreshing: a sandbox client hammers a host port through 15 refreshes; nothing may get through.
+for k in 1 2 3 4; do
+  ( n=0; while [ ! -f /tmp/stop ]; do ip netns exec sb sh -c 'echo x | nc -w 1 10.251.0.30 8923' >/dev/null 2>&1 && n=$((n+1)); done; echo "$n" >> /tmp/leaks ) &
+  eval "hammer$k=\$!"
+done
+for i in $(seq 15); do sh "$FW" apply 8929 >/dev/null; done
+touch /tmp/stop; wait "$hammer1" "$hammer2" "$hammer3" "$hammer4"
+echo $(( $(paste -sd+ /tmp/leaks) )) > /tmp/leaks
+[ "$(cat /tmp/leaks)" = 0 ] && ok "no connection slips through during 15 refreshes" || bad "refresh gap: $(cat /tmp/leaks) connections"
 sh "$FW" apply 9000 >/dev/null
 [ "$(iptables -S INPUT | grep -c -- '--dport 8929')" = 0 ] && ok "re-apply on a new port drops the old port hook" || bad "old port hook left"
 sh "$FW" remove >/dev/null

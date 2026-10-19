@@ -113,6 +113,8 @@ export function createPrincipalResolver(options = {}) {
     }
     if (typeof options.internalCall === 'function' && options.internalCall(request)) return { kind: 'service' }
     const agent = agentPrincipal(request)
+    // A restricted agent's key is bound to its own network and works only on the agent-only listener.
+    if (agent && typeof options.agentSubnet === 'function' && options.agentSubnet(agent.agentId)) return WRONG_NETWORK
     if (agent) return agent
     if (!ownerProof && !options.requireAccess) return BOX_OWNER
     return ANONYMOUS

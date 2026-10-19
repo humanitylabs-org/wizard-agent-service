@@ -506,6 +506,10 @@ describe('review regressions', () => {
     writeFileSync(recordPath, JSON.stringify({ ...record, runtime: { ...record.runtime, network: { uplink: '127.0.0.16/28', sandbox: '127.0.1.0/28' } } }))
     const outside = await call('/wizard/v1/agent-context', helper)
     expect([outside.status, JSON.parse(outside.body).check]).toEqual([403, 'principal.agent_network'])
+    // A restricted agent's key does nothing on the main listener, even from the right address.
+    writeFileSync(recordPath, JSON.stringify(record))
+    const main = await fetch(`${s.base}/wizard/v1/agent-context`, { headers: helper })
+    expect([main.status, (await main.json()).check]).toEqual([403, 'principal.agent_network'])
     const unbound = await call('/wizard/v1/agent-context', { Authorization: `Bearer ${s.privateKey}` })
     expect([unbound.status, JSON.parse(unbound.body).check]).toEqual([403, 'principal.agent_network'])
   })

@@ -74,6 +74,29 @@ class RestrictedDriverTest(unittest.TestCase):
         # Provider keys land in managed/.env, not in the home.
         self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
 
+    def test_tinfoil_agents_are_refused_before_anything_runs(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        agent["model"] = {"provider": "tinfoil"}
+        with self.assertRaises(ar.RuntimeFailure) as raised:
+            self.driver.apply(agent)
+        self.assertEqual((raised.exception.code, raised.exception.status), ("restricted_provider_unsupported", 409))
+        self.assertEqual(self.calls, [])
+
+    def test_sync_writes_through_a_fresh_temp_dir_and_renames(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        self.driver.apply(agent)
+        script = next(args for args, _ in self.calls if args[0] == "run")[-1]
+        self.assertIn("mktemp -d /opt/data/.wizard-sync.", script)
+        self.assertIn('mv -T -f "$tmp/.env" /opt/data/.env', script)
+        self.assertNotIn(".new", script)   # no predictable names an agent could plant
+
+    def test_lifecycle_locks_are_per_agent(self):
+        self.assertIs(ar.agent_lock("a"), ar.agent_lock("a"))
+        self.assertIsNot(ar.agent_lock("a"), ar.agent_lock("b"))
+        with ar.agent_lock("a"):
+            self.assertTrue(ar.agent_lock("b").acquire(timeout=1))
+            ar.agent_lock("b").release()
+
     def test_sync_refuses_without_managed_files(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         (self.tmp / "agents" / "daily" / "managed" / "config.yaml").unlink()

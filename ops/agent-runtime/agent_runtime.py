@@ -52,6 +52,13 @@ SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()
+_AGENT_LOCKS: dict = {}
+
+
+def agent_lock(agent_id: str) -> threading.Lock:
+    """One lifecycle lock per agent: a slow or stuck agent never holds up the others."""
+    with LOCK:
+        return _AGENT_LOCKS.setdefault(agent_id, threading.Lock())
 
 
 class RuntimeFailure(Exception):
@@ -349,14 +356,23 @@ class RestrictedDriver:
             raise RuntimeFailure("agent_not_prepared", 409)
         home = self.agents.home(agent["id"])
         home.mkdir(mode=0o700, exist_ok=True)
-        copy = " && ".join(f"cp /managed/{name} /opt/data/{name}.new && chown {AGENT_UID}:{AGENT_UID} /opt/data/{name}.new"
-                           f" && chmod 600 /opt/data/{name}.new && mv -f /opt/data/{name}.new /opt/data/{name}" for name in MANAGED_FILES)
+        # The agent controls its home between starts, so nothing there is trusted: each file is written into a fresh
+        # directory made by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target.
+        # rename(2) replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes
+        # the sync fail, which only stops that agent.
+        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
+                         f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
+        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
+                  f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
         docker(["run", "--rm", "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
                 "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
                 "-v", f"{home}:/opt/data", "-v", f"{managed}:/managed:ro", "--entrypoint", "/bin/sh", SIDECAR_IMAGE,
-                "-c", f"set -eu; {copy}; chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data"], timeout=300)
+                "-c", script], timeout=120)
 
     def _prepare(self, agent: dict) -> None:
+        if (agent.get("model") or {}).get("provider") == "tinfoil":
+            # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
+            raise RuntimeFailure("restricted_provider_unsupported", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
         self.sync_home(agent)
@@ -657,7 +673,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with LOCK:
+                with agent_lock(agent_id):
                     result = getattr(chosen, action)(agent)
                 self._json(200, result)
             except RuntimeFailure as error:

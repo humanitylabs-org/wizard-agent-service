@@ -242,6 +242,16 @@ export function agentAppIds(agent) {
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
 const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
 
+/**
+ * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
+ * combination up front instead of starting an agent whose model route does not exist.
+ */
+export function assertIsolationSupports(agent) {
+  if (agent.runtime?.isolation === 'restricted' && agent.model?.provider === TINFOIL.id) {
+    fail(409, 'restricted_provider_unsupported', 'agent.runtime.isolation', 'the restricted runtime has no Tinfoil attestation sidecar yet')
+  }
+}
+
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
   return agent.privacy === 'standard' || agentAppIds(agent).size > 0
@@ -707,6 +717,7 @@ export function createAgentRegistry(options = {}) {
       created_at: Math.floor(now() / 1000),
     }
     assertPrivateWalls(agent)
+    assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
     try {
       writeHarnessFiles(agent)
@@ -771,6 +782,7 @@ export function createAgentRegistry(options = {}) {
       }
     }
     assertPrivateWalls(next)
+    assertIsolationSupports(next)
     const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
