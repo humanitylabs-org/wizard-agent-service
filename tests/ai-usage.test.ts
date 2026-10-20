@@ -454,6 +454,22 @@ describe('AI connection apps', () => {
     expect(JSON.stringify(call[1])).not.toContain('Authorization')
   })
 
+  it('reads a wizard.ai-connection/2 app (adds a models catalogue) exactly like /1', async () => {
+    const v2 = { ...connectedClaude, contract: 'wizard.ai-connection/2', models: [{ id: 'claude-opus', label: 'Opus' }] }
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? v2 : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const claude = provider(await usage.read() as never, 'claude')
+    expect(claude).toMatchObject({ status: 'ok', plan: 'Max 20x', error: null })
+    expect((claude as { limits: unknown[] }).limits).toEqual([{ id: 'weekly_all:weekly', label: 'All models · weekly', usedPercent: 12, remainingPercent: 88, resetsAt: '2026-09-26T01:00:00.000Z' }])
+  })
+
+  it('still refuses a contract it does not know', async () => {
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? { ...connectedClaude, contract: 'wizard.ai-connection/9' } : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const claude = provider(await usage.read() as never, 'claude')
+    expect(claude).toMatchObject({ status: 'unavailable', error: { code: 'provider_error' } })
+  })
+
   it('reports a not-connected app as unavailable with the app\'s own message', async () => {
     const notConnected = { contract: 'wizard.ai-connection/1', provider: 'claude', name: 'Claude', status: 'not_connected', plan: null, account: null, usage: null, error: { code: 'signed_out', message: 'Claude is not connected. Open the Claude app to connect.' } }
     const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? notConnected : codexPayload))
