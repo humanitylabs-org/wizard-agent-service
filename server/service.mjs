@@ -297,7 +297,8 @@ export function supportsJoinedDelegation(payload) {
     && capability.modes.includes('join')
 }
 
-const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
+// Stock Hermes import retains CLI/TUI source and ids; these are interactive human chats too.
+const HUMAN_SESSION_SOURCES = new Set(['cli', 'tui', 'webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
