@@ -381,3 +381,89 @@ export function readPendingWizardAssistantAdmissions(path, sessionIds, nowSecond
     try { db.close() } catch { /* read-only cleanup */ }
   }
 }
+
+// ---- Chats list cache signals (session-list-cache.mjs). Both readers fail open: null/undefined
+// tells the caller to rebuild everything, never to trust a cached row.
+
+/** Cheap revision of the Hermes state that can change a projected thread row. */
+export function readHermesListRevision(path) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const parts = []
+    const sessions = db.prepare('SELECT COUNT(*) AS n, MAX(COALESCE(last_activity_at, started_at)) AS at, MAX(message_count) AS m FROM sessions').get()
+    parts.push(sessions.n, sessions.at, sessions.m)
+    parts.push(db.prepare('SELECT MAX(rowid) AS id FROM messages').get().id)
+    for (const sql of [
+      'SELECT COUNT(*) AS n, MAX(expires_at) AS at FROM session_turn_leases',
+      'SELECT COUNT(*) AS n, MAX(rowid) AS id, SUM(state IN (\'running\', \'stalling\', \'finalizing\')) AS live FROM async_delegations',
+    ]) {
+      try { parts.push(...Object.values(db.prepare(sql).get())) } catch { parts.push('-') }
+    }
+    return parts.map((value) => String(value ?? '')).join(':')
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+function lineageRoots(db, ids) {
+  const parentOf = db.prepare('SELECT parent_session_id FROM sessions WHERE id = ?')
+  const parents = new Map()
+  const roots = new Set()
+  for (const start of ids) {
+    let id = String(start)
+    const seen = new Set()
+    for (let depth = 0; depth < 1000 && !seen.has(id); depth++) {
+      seen.add(id)
+      roots.add(id)
+      let parent = parents.get(id)
+      if (parent === undefined) {
+        parent = parentOf.get(id)?.parent_session_id
+        parent = parent ? String(parent) : ''
+        parents.set(id, parent)
+      }
+      if (!parent) break
+      id = parent
+    }
+  }
+  return roots
+}
+
+/**
+ * Thread ids (every lineage ancestor) with Hermes activity since `sinceSeconds`. A compression tip
+ * or a helper child counts for the thread it descends from, so its root is re-projected.
+ */
+export function readRecentHermesRootIds(path, sinceSeconds) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const recent = db.prepare('SELECT id FROM sessions WHERE COALESCE(last_activity_at, started_at) >= ?').all(Number(sinceSeconds))
+    return lineageRoots(db, recent.map((row) => row.id))
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+/**
+ * Threads (with lineage ancestors) that received Hermes messages after message `afterId`.
+ * `roots` is null when the delta is unknown or too large to trust: the caller rebuilds everything.
+ */
+export function readHermesMessageDelta(path, afterId, maxRows = 20_000) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const maxId = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get().id ?? 0)
+    if (!Number.isFinite(afterId) || afterId > maxId || maxId - afterId > maxRows) return { maxId, roots: null }
+    // Walk the primary key range; DISTINCT/GROUP BY here makes SQLite scan the session index.
+    const sessions = new Set(db.prepare('SELECT session_id FROM messages WHERE id > ? AND id <= ? ORDER BY id').all(afterId, maxId).map((row) => String(row.session_id)))
+    return { maxId, roots: lineageRoots(db, sessions) }
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}

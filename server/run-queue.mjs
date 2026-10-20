@@ -365,6 +365,16 @@ export class DurableRunQueue {
     }))
   }
 
+  /** Cheap revision of the queue's unfinished rows (covering index only): changes on every admission or status move. */
+  listRevision() {
+    const rows = this.database.prepare(`
+      SELECT status, public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+       WHERE status NOT IN ('completed','failed','cancelled','interrupted')
+    `).all()
+    const newest = this.database.prepare('SELECT MAX(rowid) AS id FROM wizard_run_queue').get()
+    return `${newest?.id ?? 0}:${rows.map((row) => `${row.public_run_id}=${row.status}`).sort().join(',')}`
+  }
+
   // Sessions whose newest queued send is recent and never produced a finished answer here.
   // Lets the thread list keep a brand-new thread visible when its first send failed or waits.
   recentUnfinishedSessionIds(sinceSeconds, limit = 50) {
@@ -726,7 +736,9 @@ export class DurableRunQueue {
   }
 
   async _tick(force) {
-    let activeRows = this._rows("status NOT IN ('queued','completed','failed','cancelled','interrupted')")
+    // The status is stored after the request body, so a plain scan follows every saved body's
+    // overflow pages each 1.5 s. Select the identities through the (status, …) index instead.
+    let activeRows = this._rows("public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo WHERE status NOT IN ('queued','completed','failed','cancelled','interrupted'))")
     for (const record of activeRows) {
       if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
       else await this._refresh(record, force)
