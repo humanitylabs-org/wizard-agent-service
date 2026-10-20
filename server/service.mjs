@@ -26,6 +26,7 @@ import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
+import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -577,6 +578,8 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               // thread settles like a finished turn (Done/Defer, no reply, no Retry).
               projected.status = latestDirect.status
               if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
+              // Provider sign-in expired: name the connection app that fixes it (provider-reconnect.mjs).
+              if (latestDirect.reconnect) projected.wizard_reconnect = latestDirect.reconnect
               if (!projected.preview && latestDirect.preview) projected.preview = latestDirect.preview
               if (projected.wizard_pending_first_send) {
                 // A send Wizard never delivered: show it as an error thread with James's own words and Retry.
@@ -593,6 +596,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
               if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) {
                 delete projected.status
+                delete projected.wizard_reconnect
                 if (projected.wizard_pending_first_send) return null  // James dismissed a send that never went through
               }
             }
@@ -3227,6 +3231,25 @@ export function createWizardServer(options = {}) {
     } catch { return result }
   }
 
+  // A thread whose last run failed on an expired provider sign-in gets the connection app to open
+  // (installed or not) and that app's current reading. The usage read is cached and bounded here,
+  // so a slow connection app never holds up Chats.
+  const decorateReconnectRows = async (result) => {
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      const rows = ['data', 'sessions'].flatMap((key) => Array.isArray(payload?.[key]) ? payload[key] : [])
+        .filter((row) => row && row.wizard_reconnect)
+      if (!rows.length) return result
+      const installedApps = readApps({ appsJsonPath, launcherPath }).apps
+      const usage = await Promise.race([
+        aiUsageReader.read().catch(() => null),
+        new Promise((done) => setTimeout(() => done(null), 400).unref?.()),
+      ])
+      decorateReconnect(rows, { installedApps, usage })
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
+
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   const projectSessionList = async (result, operator, canonicalPage, firstPage) => {
           result = canonicalPage
@@ -3265,6 +3288,7 @@ export function createWizardServer(options = {}) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
+          if (!operator) result = await decorateReconnectRows(result)
           if (backgroundResults) {
             try { result = await backgroundResults.project(result) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
