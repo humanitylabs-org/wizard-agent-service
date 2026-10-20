@@ -6,7 +6,8 @@ const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { i
   wizard_request_preview: 'FULL REQUEST '.repeat(300), latest_message: { role: 'assistant', content: '<memory-context>not visible</memory-context> **Visible** '+ 'answer '.repeat(50), timestamp: 1700000100 },
   wizard_run_id: 'run-exact', wizard_last_run_idempotency_key: 'key-exact', model: 'model-exact', provider: 'provider-exact', wizard_model_lock_updated_at: 123456789,
   wizard_helper_status: { phase: 'returned', canContinue: true }, wizard_safe_error: 'Safe failure', wizard_attention_level: 'critical', wizard_waiting_on: 'helper',
-  wizard_title_renames: [{ from: 'Old', to: 'New', at: 123 }], wizard_attention: { state: 'needs_you', ask: 'Check me', subject: 'Subject' } };
+  wizard_title_renames: [{ from: 'Old', to: 'New', at: 123 }], wizard_attention: { state: 'needs_you', ask: 'Check me', subject: 'Subject' },
+  wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude', installed: true, app_status: 'expired' } };
 test('list keeps exact grouping/unread/ack/model/helper inputs and full title', () => {
   const full = normalizeFull(fixture), list = listRow(fixture);
   for (const key of Object.keys(full).filter(k => !['request','renames','source','runtime','preview'].includes(k))) assert.deepEqual(list[key],full[key],key);
