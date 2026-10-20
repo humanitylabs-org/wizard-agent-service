@@ -223,6 +223,27 @@ class PrivateProviderTest(unittest.TestCase):
             self.provider.network(self.entry)
         self.assertEqual(error.exception.code, 'relay_network_unsafe')
 
+    def test_addresses_uses_full_docker_id_and_fails_closed_on_missing_peer(self):
+        self.address_patch.stop()
+        cid = 'a' * 64
+        network = 'wizard-relay-wizard-tinfoil'
+        doc = {'IPAM': {'Config': [{'Subnet': '10.252.0.0/24'}]},
+               'Containers': {cid: {'IPv4Address': '10.252.0.2/24'}}}
+        (self.agents.root / 'probe/runtime').mkdir(parents=True)
+        def engine(args, **kwargs):
+            if args[0] == 'ps':
+                self.assertIn('--no-trunc', args)
+                result = cid
+            else:
+                result = json.dumps([doc])
+            return subprocess.CompletedProcess(args, 0, result, '')
+        self.provider.docker = engine
+        self.assertEqual(self.provider.addresses(self.agent, self.entry, network)['provider_ip'], '10.252.0.2')
+        doc['Containers'] = {}
+        with self.assertRaises(ar.RuntimeFailure) as error:
+            self.provider.addresses(self.agent, self.entry, network)
+        self.assertEqual(error.exception.code, 'relay_network_attach_failed')
+
     def test_firewall_helper_has_no_token_and_only_host_netadmin(self):
         calls = []
         self.provider.docker = lambda args, **kwargs: calls.append(args)

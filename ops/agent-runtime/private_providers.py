@@ -162,8 +162,13 @@ class PrivateProviders:
         with NETWORK_LOCK:
             info = json.loads(self.docker(['network', 'inspect', network], timeout=60).stdout)[0]
             subnet = ipaddress.ip_network(info['IPAM']['Config'][0]['Subnet'])
-            cid = self.docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.strip()
-            provider_ip = str(ipaddress.ip_interface(info['Containers'][cid]['IPv4Address']).ip)
+            ids = self.docker(['ps', '-aq', '--no-trunc', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
+            if len(ids) != 1:
+                raise self.failure('private_provider_container_ambiguous', 503)
+            peer = info.get('Containers', {}).get(ids[0])
+            if not peer:
+                raise self.failure('relay_network_attach_failed', 503)
+            provider_ip = str(ipaddress.ip_interface(peer['IPv4Address']).ip)
             used = {str(ipaddress.ip_interface(c['IPv4Address']).ip) for c in info.get('Containers', {}).values()}
             own = None
             for path in self.agents.root.glob('*/runtime/private-provider.json'):
