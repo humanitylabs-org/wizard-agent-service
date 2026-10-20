@@ -51,13 +51,15 @@ class PrivateProviderTest(unittest.TestCase):
         self.origin = f'http://127.0.0.1:{self.server.server_port}'
         self.apps = self.root / 'apps.json'
         self.entry = {'id': self.app_id, 'status': 'running', 'view': {'local': self.origin},
-                      'private_inference': {'kind': 'attested-relay', 'relay_port': 8090}}
+                      'private_inference': {'kind': 'attested-relay', 'relay_port': 8090, 'egress': ['inference.tinfoil.sh', 'atc.tinfoil.sh']}}
         self.apps.write_text(json.dumps({'apps': [self.entry]}))
         self.agents = ar.Agents(self.root / 'agents', apps_path=self.apps)
         self.provider = self.agents.providers
         self.provider.docker = lambda *a, **kw: subprocess.CompletedProcess(a, 0, '', '')
         self.network = patch.object(self.provider, 'network', return_value='wizard-relay-wizard-tinfoil')
         self.network.start()
+        self.egress_patch = patch('private_providers.ProviderEgress.reconcile')
+        self.egress_patch.start()
         self.address_patch = patch.object(self.provider, 'addresses', return_value={'sandbox_ip': '10.251.0.19', 'relay_ip': '10.252.0.3', 'provider_ip': '10.252.0.2', 'relay_port': 8090})
         self.address_patch.start()
         self.agent = {'id': 'probe', 'privacy': 'private', 'model': {'provider': 'wizard-tinfoil', 'allowed_models': ['probe-model'], 'model': 'probe-model'},
@@ -66,6 +68,7 @@ class PrivateProviderTest(unittest.TestCase):
 
     def tearDown(self):
         self.network.stop()
+        self.egress_patch.stop()
         self.address_patch.stop()
         self.server.shutdown()
         self.server.server_close()
@@ -110,6 +113,7 @@ class PrivateProviderTest(unittest.TestCase):
         self.app_id = 'other-local-app'
         self.entry['id'] = self.app_id
         self.entry['private_inference']['kind'] = 'local'
+        self.entry['private_inference']['egress'] = []
         self.apps.write_text(json.dumps({'apps': [self.entry]}))
         self.agent['model']['provider'] = self.app_id
         link = self.provider.prepare(self.agent)
@@ -155,6 +159,7 @@ class PrivateProviderTest(unittest.TestCase):
 
     def test_local_passthrough_profile(self):
         self.entry['private_inference']['kind'] = 'local'
+        self.entry['private_inference']['egress'] = []
         self.apps.write_text(json.dumps({'apps': [self.entry]}))
         from private_providers import client_service
         self.assertEqual(client_service(self.provider.prepare(self.agent), ar.CLIENT_IMAGE)['environment']['PROFILE'], 'passthrough')

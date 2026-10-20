@@ -779,6 +779,8 @@ def main(argv: list[str] | None = None) -> int:
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
                                              args.agent_listener_port)
+    for failure in agents.providers.reconcile_installed():
+        sys.stderr.write('[agent-runtime] provider reconciliation failed: ' + json.dumps(failure) + '\n')
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

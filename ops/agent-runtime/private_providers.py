@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from provider_egress import ProviderEgress, declared_hosts
 
 RELAY_POOL = ipaddress.ip_network('10.252.0.0/16')
 NETWORK_LOCK = threading.Lock()
@@ -46,6 +47,10 @@ class PrivateProviders:
             raise self.failure('private_provider_invalid', 409)
         if app.get('status') != 'running':
             raise self.failure('private_provider_unavailable', 503)
+        try:
+            declared_hosts(spec)
+        except (ValueError, TypeError):
+            raise self.failure('private_provider_egress_invalid', 409) from None
         return app
 
     def is_private(self, agent):
@@ -106,7 +111,7 @@ class PrivateProviders:
                     value.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true'):
                 raise self.failure('relay_network_unsafe', 409)
             # Service labels work for both Runtipi and plain Compose; ambiguous installations fail closed.
-            ids = self.docker(['ps', '-q', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
+            ids = self.docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
             if len(ids) != 1:
                 raise self.failure('private_provider_container_ambiguous', 503)
             cid = ids[0]
@@ -120,7 +125,25 @@ class PrivateProviders:
                 info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
                 if alias not in (info['NetworkSettings']['Networks'][name].get('Aliases') or []):
                     raise self.failure('relay_network_attach_failed', 503)
+            ProviderEgress(self.docker, self.failure).reconcile(app, cid, name)
         return name
+
+    def reconcile_installed(self):
+        """Boot reconciliation before accepting links; failures remain visibly stopped."""
+        try:
+            apps = json.loads(self.apps_path.read_text()).get('apps', [])
+        except (OSError, ValueError):
+            return []
+        failures = []
+        for entry in apps:
+            if not isinstance(entry.get('private_inference'), dict):
+                continue
+            try:
+                # Running registry status denotes desired state, not container liveness.
+                self.network(self.app(entry['id']))
+            except self.failure as error:
+                failures.append({'app': entry.get('id'), 'error': error.code})
+        return failures
 
     def revoke(self, agent):
         runtime = self.agents.root / agent['id'] / 'runtime'
@@ -138,7 +161,7 @@ class PrivateProviders:
         with NETWORK_LOCK:
             info = json.loads(self.docker(['network', 'inspect', network], timeout=60).stdout)[0]
             subnet = ipaddress.ip_network(info['IPAM']['Config'][0]['Subnet'])
-            cid = self.docker(['ps', '-q', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.strip()
+            cid = self.docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.strip()
             provider_ip = str(ipaddress.ip_interface(info['Containers'][cid]['IPv4Address']).ip)
             used = {str(ipaddress.ip_interface(c['IPv4Address']).ip) for c in info.get('Containers', {}).values()}
             own = None
