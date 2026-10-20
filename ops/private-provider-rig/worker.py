@@ -112,6 +112,7 @@ def main():
         assert hashlib.file_digest(f, 'sha256').hexdigest() == IMAGE_SHA, 'Ubuntu base checksum mismatch'
     config = {
         'vmType': 'vz', 'arch': 'aarch64', 'cpus': 4, 'memory': '6GiB', 'disk': '40GiB',
+        'vmOpts': {'vz': {'rosetta': {'enabled': True, 'binfmt': True}}},
         'images': [{'location': str(image), 'arch': 'aarch64', 'digest': 'sha256:' + IMAGE_SHA}],
         'user': {'name': 'rig', 'home': '/home/rig', 'uid': 1000, 'shell': '/bin/bash'},
         'mounts': [{'location': str(stage), 'mountPoint': '/mnt/pp-stage', 'writable': False}],
