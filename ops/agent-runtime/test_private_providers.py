@@ -202,6 +202,13 @@ class PrivateProviderTest(unittest.TestCase):
         self.assertEqual(create[create.index('--subnet') + 1], '10.252.0.0/24')
         self.assertIn(['network', 'connect', '--alias', self.app_id + '-relay', name, 'provider-container'], calls)
 
+    def test_boot_reconciles_registry_desired_state_and_reports_failure(self):
+        with patch.object(self.agents.providers, 'network') as network:
+            self.assertEqual(self.agents.providers.reconcile_installed(), [])
+            network.assert_called_once()
+        with patch.object(self.agents.providers, 'network', side_effect=ar.RuntimeFailure('egress_blocked',409)):
+            self.assertEqual(self.agents.providers.reconcile_installed(), [{'app':'wizard-tinfoil','error':'egress_blocked'}])
+
     def test_unsafe_existing_relay_network_is_refused(self):
         self.network.stop()
         self.provider.docker = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, json.dumps([{'Internal': False}]), '')

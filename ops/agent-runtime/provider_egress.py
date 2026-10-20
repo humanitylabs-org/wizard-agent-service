@@ -4,7 +4,6 @@ Linking is an explicit migration: stop the provider, remove ALL old interfaces,
 attach internal-only networks, then start. Apps must ship proxy-aware images and
 DNS/proxy settings; incompatible installations are left stopped, never bypassed.
 """
-import hashlib
 import ipaddress
 import json
 from pathlib import Path
@@ -58,6 +57,14 @@ class ProviderEgress:
             value.get('Labels', {}).get('wizard.private-egress') != app['id'] or
             value.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true'):
             raise self.failure('provider_egress_network_unsafe', 409)
+        blocks = value.get('IPAM', {}).get('Config') or []
+        try:
+            block = ipaddress.ip_network(blocks[0]['Subnet'])
+            valid = len(blocks) == 1 and block.version == 4 and block.prefixlen == 24 and block.subnet_of(POOL)
+        except (ValueError, KeyError, IndexError):
+            valid = False
+        if not valid:
+            raise self.failure('provider_egress_network_unsafe', 409)
         return name
 
     def validate(self, info, hosts):
@@ -100,6 +107,9 @@ class ProviderEgress:
             net = self.network(app)
             proxy = self.namespace + '-egress-proxy-' + app['id']
             edge = self.namespace + '-provider-edge-' + app['id']
+            allowed_peers = {info['Name'].lstrip('/'), proxy, edge}
+            if any(peer.get('Name') not in allowed_peers for peer in (self.inspect('network', net).get('Containers') or {}).values()):
+                raise self.failure('provider_egress_network_unexpected_peer', 409)
             # Helpers are replaced on every reconcile, so policy/listen IP updates are atomic
             # with respect to the stopped app, including after runtime/Docker restart.
             for name in (proxy, edge):
@@ -111,29 +121,23 @@ class ProviderEgress:
                 if old not in (net, relay):
                     self.docker(['network', 'disconnect', '-f', old, cid], timeout=60)
             subnet = ipaddress.ip_network(self.inspect('network', net)['IPAM']['Config'][0]['Subnet'])
-            address, proxy_ip, edge_ip = (str(subnet.network_address + n) for n in (2, 3, 4))
+            address, proxy_ip = (str(subnet.network_address + n) for n in (2, 3))
             current = self.inspect('container', cid)
             if net in current['NetworkSettings']['Networks']:
                 self.docker(['network', 'disconnect', '-f', net, cid], timeout=60)
             self.docker(['network', 'connect', '--ip', address, net, cid], timeout=60)
             label = ['--label', 'wizard.private-egress=' + app['id']]
-            if hosts:
-                self.helper(proxy, [*label, '--ip', proxy_ip, '--network-alias', 'wizard-egress-proxy',
-                                   '-e', 'ALLOWED_HOSTS=' + json.dumps(hosts),
-                                   '-e', 'LISTEN_IP=' + proxy_ip, self.image], net)
-                self.docker(['network', 'connect', 'bridge', proxy], timeout=60)
-                self.docker(['start', proxy], timeout=60)
             # Original provider PortBindings are inert on internal-only Docker networks.
             # A narrow ingress-only TCP edge preserves owner/Agent Service reachability.
             ports = info['HostConfig'].get('PortBindings') or {}
+            mappings, routes = [], []
             if ports:
                 local = urlsplit(app.get('view', {}).get('local') or app.get('health') or '')
                 if local.hostname not in ('localhost', '127.0.0.1'):
                     raise self.failure('provider_management_origin_invalid', 409)
-                mappings, routes = [], []
                 for key, bindings in ports.items():
                     port, protocol = key.split('/')
-                    if protocol != 'tcp' or int(port) == app['private_inference']['relay_port']:
+                    if protocol != 'tcp' or int(port) in (3128, app['private_inference']['relay_port']):
                         raise self.failure('provider_management_port_unsafe', 409)
                     for binding in bindings or []:
                         # Never preserve a public/wildcard exposure during migration.
@@ -141,10 +145,16 @@ class ProviderEgress:
                             raise self.failure('provider_management_binding_unsafe', 409)
                         mappings += ['-p', '127.0.0.1:' + binding['HostPort'] + ':' + port]
                     routes.append([int(port), address, int(port)])
-                self.helper(edge, [*label, *mappings, '-e', 'INGRESS_ROUTES=' + json.dumps(routes),
-                                   '--entrypoint', 'python', self.image, '/app/provider-ingress.py'], 'bridge')
-                self.docker(['network', 'connect', '--ip', edge_ip, net, edge], timeout=60)
-                self.docker(['start', edge], timeout=60)
+            if hosts or routes:
+                # One system edge per app: CONNECT + fixed ingress, not two uplinks.
+                helper = proxy if hosts else edge
+                self.helper(helper, [*label, *mappings, '--ip', proxy_ip,
+                                     '--network-alias', 'wizard-egress-proxy' if hosts else 'wizard-provider-ingress',
+                                     '-e', 'ALLOWED_HOSTS=' + json.dumps(hosts),
+                                     '-e', 'LISTEN_IP=' + proxy_ip,
+                                     '-e', 'INGRESS_ROUTES=' + json.dumps(routes), self.image], net)
+                self.docker(['network', 'connect', 'bridge', helper], timeout=60)
+                self.docker(['start', helper], timeout=60)
             self.docker(['start', cid], timeout=60)
             final = self.inspect('container', cid)
             if set(final['NetworkSettings']['Networks']) != {net, relay}:

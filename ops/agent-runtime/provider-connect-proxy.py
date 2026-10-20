@@ -154,7 +154,17 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == '__main__':
+    import threading
+    from importlib.util import module_from_spec, spec_from_file_location
+    routes = json.loads(os.environ.get('INGRESS_ROUTES', '[]'))
+    if routes:
+        spec = spec_from_file_location('provider_ingress', '/app/provider-ingress.py')
+        ingress = module_from_spec(spec); spec.loader.exec_module(ingress)
+        ingress.start(routes)
     allowed = frozenset(hostname(h) for h in json.loads(os.environ['ALLOWED_HOSTS']))
+    if not allowed:
+        # Local providers get fixed incoming TCP routes, never a CONNECT listener.
+        threading.Event().wait()
     with Server((os.environ.get('LISTEN_IP', '0.0.0.0'), 3128), Handler) as server:
         server.allowed = allowed
         server.serve_forever()

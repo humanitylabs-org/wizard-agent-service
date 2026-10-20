@@ -87,6 +87,20 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(Failure): manager.validate(self.fixture(), [])
         value = self.fixture(); value['Config']['Env'] = []; manager.validate(value, [])
 
+    def test_existing_network_requires_owned_ipv4_internal_inhibited_subnet(self):
+        value = {'Internal':True, 'EnableIPv6':False, 'Driver':'bridge',
+                 'Labels':{'wizard.private-egress':'example'},
+                 'Options':{'com.docker.network.bridge.inhibit_ipv4':'true'},
+                 'IPAM':{'Config':[{'Subnet':'10.253.12.0/24'}]}}
+        manager = ProviderEgress(None, Failure)
+        with patch.object(manager, 'inspect', return_value=value):
+            self.assertEqual(manager.network({'id':'example'}), 'wizard-egress-example')
+        for key,bad in [('Internal',False), ('EnableIPv6',True), ('Labels',{}), ('Options',{}),
+                        ('IPAM',{'Config':[{'Subnet':'172.20.0.0/24'}]}), ('IPAM',{'Config':[{'Subnet':'10.253.0.0/16'}]})]:
+            changed=copy.deepcopy(value); changed[key]=bad
+            with self.subTest(key=key), patch.object(manager, 'inspect', return_value=changed), self.assertRaises(Failure):
+                manager.network({'id':'example'})
+
     def test_failure_stops_before_validation_and_never_starts(self):
         calls=[]
         manager = ProviderEgress(lambda args, **kw: calls.append(args), Failure)

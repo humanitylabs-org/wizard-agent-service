@@ -48,7 +48,7 @@ def exec_python(name,code):
     print(result.stdout.strip(),flush=True)
 
 def make_provider(app_id,local=False,real=False):
-    relay=network(PREFIX+'-relay-'+app_id,'10.252.247.0/24' if real else ('10.252.245.0/24' if not local else '10.252.246.0/24'))
+    relay=network(PREFIX+'-relay-'+app_id,'10.252.246.0/24' if local else ('10.252.247.0/24' if real else '10.252.245.0/24'))
     boot=network(PREFIX+'-boot-'+app_id)
     name=PREFIX+'-app-'+app_id; containers.append(name)
     app={'id':app_id,'private_inference':{'kind':'local' if local else 'attested-relay','relay_port':8090,
@@ -112,7 +112,9 @@ def main():
         exec_python(name,DIRECT); exec_python(name,PROXY)
         print('RECONCILE_RESTART',json.dumps(mgr.reconcile(app,name,relay)),flush=True)
         exec_python(name,DIRECT); exec_python(name,PROXY)
-        app,local,_,_,_=make_provider('local',local=True)
+        app,local,_,_,local_origin=make_provider('local',local=True,real=True)
+        ready(local_origin+'/healthz')
+        exec_python(local,"import socket; sock=socket.socket(); sock.settimeout(2); assert sock.connect_ex(('wizard-provider-ingress',3128)) != 0; sock.close(); print('LOCAL_INGRESS_NO_CONNECT_LISTENER')")
         assert docker(['inspect','pp-test-egress-proxy-local'],check=False).returncode!=0
         exec_python(local,DIRECT); print('LOCAL_NO_PROXY_PASS',flush=True)
         if args.key_env:
@@ -139,8 +141,9 @@ def main():
             print('KEY_SAVE',json.dumps({k:v for k,v in result.items() if k in ('status','credentialStored','credentialVerified')}),flush=True)
             status=request(origin+'/api/connection'); assert status['credentialStored'] and status['models']
             token=request(origin+'/api/private-clients',{'agent':'pp-test-client'},headers=headers)['token']
-            model='llama3-3-70b'; models=status['models']
-            if model not in models: model=next(m for m in models if 'llama' in m)
+            models=[m['id'] if isinstance(m,dict) else m for m in status['models']]
+            print('AVAILABLE_CHAT_MODELS',json.dumps(models),flush=True)
+            model=next((m for m in ('llama3-3-70b','gpt-oss-120b','deepseek-v4-1-flash','kimi-k3') if m in models),models[0])
             client=PREFIX+'-client'; containers.append(client)
             # Secret relay token goes over stdin into tmpfs, never docker args/config or host file.
             docker(['create','--name',client,'--network',relay,'--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true',
@@ -159,9 +162,20 @@ def main():
             payload={'model':model,'messages':[{'role':'user','content':'Reply exactly '+codeword}], 'max_tokens':60}
             response=docker(['exec',client,'node','--input-type=module','-e',
                             "const r=await fetch('http://127.0.0.1:3301/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify("+json.dumps(payload)+")}); console.log(JSON.stringify({status:r.status,body:await r.json()}));"],timeout=180)
-            parsed=json.loads(response.stdout); assert parsed['status']==200,parsed
+            parsed=json.loads(response.stdout)
+            if parsed['status']!=200:
+                debug=docker(['exec',client,'node','--input-type=module','-e',
+                              "import {AttestedRelay,configFromEnv} from '/app/server.mjs';try{const r=await new AttestedRelay(configFromEnv()).ready();console.log('ATTESTED_ENCLAVE',r.enclave)}catch(e){console.log('ATTESTATION_DIAGNOSTIC',e.name,e.message)}"],check=False)
+                print(debug.stdout,debug.stderr,flush=True)
+                diagnostic=docker(['exec',client,'node','--input-type=module','-e',
+                    "import {AttestedRelay,configFromEnv} from '/app/server.mjs';try{const r=await new AttestedRelay(configFromEnv()).request(JSON.stringify({model:'llama3-3-70b',messages:[{role:'user',content:'Say OK'}],max_tokens:10}));console.log('UPSTREAM_DIAGNOSTIC',r.status,!!r.headers.get('Ehbp-Response-Nonce'))}catch(e){console.log('TRANSPORT_DIAGNOSTIC',e.name,e.message)}"],check=False)
+                print(diagnostic.stdout,diagnostic.stderr,flush=True)
+                print('PROXY_HOST_AUDIT',docker(['logs','pp-test-egress-proxy-real']).stdout.strip(),flush=True)
+            assert parsed['status']==200,parsed
             assert codeword in parsed['body']['choices'][0]['message']['content']
             print('REAL_RELAY_COMPLETION_PASS',model,flush=True)
+            exec_python(name,"from app.server import worker,stored; result=worker('infer',stored()['key'],{'model':'llama3-3-70b','messages':[{'role':'user','content':'Reply exactly OK'}],'max_tokens':10}); assert 'OK' in result['choices'][0]['message']['content']; print('OFFICIAL_PYTHON_SDK_EHBP_PROXY_PASS')")
+            exec_python(name,"from pathlib import Path; probe="+repr(codeword.encode())+"; assert all(probe not in p.read_bytes() for p in Path('/data').rglob('*') if p.is_file()); print('NO_CODEWORD_IN_PROVIDER_DATA')")
             for target in [name,'pp-test-egress-proxy-real']:
                 logs=docker(['logs',target]).stdout+docker(['logs',target]).stderr
                 assert codeword not in logs

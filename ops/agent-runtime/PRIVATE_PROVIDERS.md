@@ -80,4 +80,4 @@ an isolated VM, not by weakening the preflight guard. No test should modify prod
 containers, systemd units or owner state.
 
 Whole-system attestation/ciphertext capture, actual provider image integration, and provider-app egress
-acceptance are separate gates. See PRIVATE_PROVIDER_EGRESS.md for the last gate.
+acceptance are separate gates. Provider-app egress now has its own runtime-owned CONNECT/system-edge implementation and disposable Docker + real Tinfoil/client proof; see PRIVATE_PROVIDER_EGRESS.md for topology, installer prerequisites and remaining final-box integration gates.

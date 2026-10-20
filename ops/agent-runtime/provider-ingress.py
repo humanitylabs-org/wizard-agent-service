@@ -19,10 +19,15 @@ class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
     def handle_error(self, *args): pass
-servers = []
-for listen, host, port in json.loads(os.environ['INGRESS_ROUTES']):
-    server = Server(('0.0.0.0', listen), Handler)
-    server.destination = (host, port)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    servers.append(server)
-threading.Event().wait()
+def start(routes):
+    servers = []
+    for listen, host, port in routes:
+        server = Server(('0.0.0.0', listen), Handler)
+        server.destination = (host, port)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+    return servers
+
+if __name__ == '__main__':
+    start(json.loads(os.environ['INGRESS_ROUTES']))
+    threading.Event().wait()
