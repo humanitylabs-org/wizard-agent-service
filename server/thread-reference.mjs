@@ -26,6 +26,16 @@ export function qualifySideRecords(records) {
     return [sideKey(pair.agent_id, pair.legacyKey), { ...record, agent_id: pair.agent_id, session_id: pair.session_id }]
   }))
 }
+// Raw session-id journals must not strip a literal "direct:" or "operator:" from an imported id.
+export function qualifyRawThreadRecords(records) {
+  return Object.fromEntries(Object.entries(records).map(([key, record]) => {
+    const match = /^agent\/([a-z][a-z0-9-]{0,30})\/(.+)$/u.exec(key)
+    const session_id = match?.[2] ?? key
+    const agent_id = record.agent_id ?? match?.[1] ?? LEGACY_AGENT_ID
+    if (!validAgentId(agent_id) || (match && match[1] !== agent_id) || (record.session_id !== undefined && record.session_id !== session_id)) throw new Error('Invalid thread journal pair')
+    return [sideKey(agent_id, session_id), { ...record, agent_id, session_id }]
+  }))
+}
 export function backupJson(path) {
   const backup = `${path}.pre-agent-pairs-v1.bak`
   if (!existsSync(backup)) {

@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { DismissedFailureStore } from '../server/thread-seen.mjs'
 import { ThreadTitleStore } from '../server/thread-titles.mjs'
+import { StatusBackfill } from '../server/thread-status.mjs'
+import { SubjectCatalog } from '../server/thread-subjects.mjs'
 import { LockedRunBridge } from '../server/locked-run-bridge.mjs'
 import { DurableHeavyQueue } from '../server/heavy-queue.mjs'
 import { createUploadStore } from '../server/uploads.mjs'
@@ -40,6 +42,30 @@ describe('agent-pair store migrations', () => {
     }
     load()
     for (const path of Object.keys(original)) expect(readFileSync(path, 'utf8')).toBe(first[path])
+  })
+
+  it('status backfills and subject corrections preserve colon ids and independently qualify imported pairs', () => {
+    const dir = directory(), statusPath = join(dir, 'status.json'), subjectPath = join(dir, 'subjects.json'), id = 'direct:same'
+    const originals = {
+      [statusPath]: JSON.stringify({ threads: { [id]: { state: 'done', ask: 'Complete', assistant_at: 10 }, [`agent/imported/${id}`]: { state: 'needs_you', ask: 'Review import', assistant_at: 10 } } }),
+      [subjectPath]: JSON.stringify({ subjects: ['Main', 'Imported'], threads: { [id]: { subject: 'Main' }, [`agent/imported/${id}`]: { subject: 'Imported' } } }),
+    }
+    for (const [path, text] of Object.entries(originals)) writeFileSync(path, text)
+    const load = () => {
+      const status = new StatusBackfill(statusPath), subjects = new SubjectCatalog(subjectPath)
+      expect(status.lookup(id, 10)?.state).toBe('done'); expect(status.lookup(id, 10, 'imported')?.state).toBe('needs_you')
+      expect(subjects.resolve(id, 'Old')).toBe('Main'); expect(subjects.resolve(id, 'Old', 'imported')).toBe('Imported')
+      expect(JSON.parse(readFileSync(statusPath, 'utf8')).threads[id]).toMatchObject({ agent_id: 'hermes', session_id: id })
+    }
+    load()
+    const migrated = Object.fromEntries(Object.keys(originals).map(path => [path, readFileSync(path, 'utf8')]))
+    load()
+    for (const [path, original] of Object.entries(originals)) {
+      expect(readFileSync(path, 'utf8')).toBe(migrated[path]); expect(readFileSync(path + suffix, 'utf8')).toBe(original)
+      writeFileSync(path, original)
+    }
+    load()
+    for (const path of Object.keys(originals)) expect(readFileSync(path, 'utf8')).toBe(migrated[path])
   })
 
   it('legacy share receipts migrate to their stored recipient, not a new default; backup is restorable SQLite', async () => {

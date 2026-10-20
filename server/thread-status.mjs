@@ -8,6 +8,7 @@
 // one-off backfill record that applies only while that exact reply is still the latest one.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { migrateJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'
 import { normalizeAppId, metadataAppId } from './thread-app-provenance.mjs'
@@ -93,6 +94,7 @@ export function projectStatusMarkers(result) {
 export class StatusBackfill {
   constructor(path) {
     this.path = path || ''
+    migrateJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
     this.mtime = -1
     this.threads = {}
   }
@@ -110,8 +112,8 @@ export class StatusBackfill {
   }
 
   // Applies only while the reply it classified is still the thread's latest assistant reply.
-  lookup(sessionId, latestAssistantAt) {
-    const record = this.load()[sessionId]
+  lookup(sessionId, latestAssistantAt, agentId = 'hermes') {
+    const record = this.load()[sideKey(agentId, sessionId)]
     if (!record) return null
     const at = Number(record.assistant_at)
     if (!Number.isFinite(at) || !Number.isFinite(Number(latestAssistantAt)) || Math.abs(at - Number(latestAssistantAt)) > 2) return null

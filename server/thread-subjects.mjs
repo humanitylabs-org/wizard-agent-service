@@ -19,6 +19,7 @@
 // subjects pass through exactly as the agent wrote them.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { migrateJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 
 const SUBJECT_MAX = 40
 const ABOUT_MAX = 120
@@ -57,9 +58,12 @@ export function normalizeSubjects(raw) {
   const threads = new Map()
   const rawThreads = value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? value.threads : {}
   for (const [id, entry] of Object.entries(rawThreads).slice(0, MAP_MAX)) {
-    if (!ID.test(id) || !entry || typeof entry !== 'object') continue
+    if (!entry || typeof entry !== 'object') continue
+    let pair
+    try { pair = Object.values(qualifyRawThreadRecords({ [id]: entry }))[0] } catch { continue }
+    if (!ID.test(pair.session_id)) continue
     const subject = resolveName(entry.subject)
-    if (subject) threads.set(id, { from: subjectKey(entry.from), subject })
+    if (subject) threads.set(sideKey(pair.agent_id, pair.session_id), { from: subjectKey(entry.from), subject, agent_id: pair.agent_id, session_id: pair.session_id })
   }
   return { subjects, canonical, aliases, threads }
 }
@@ -67,6 +71,7 @@ export function normalizeSubjects(raw) {
 export class SubjectCatalog {
   constructor(path = '') {
     this.path = path || ''
+    migrateJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
     this.mtime = -1
     this.data = normalizeSubjects({})
   }
@@ -84,10 +89,10 @@ export class SubjectCatalog {
   }
 
   /** The subject to show for this thread: a thread correction, then an alias, then the canonical spelling. */
-  resolve(sessionId, subject) {
+  resolve(sessionId, subject, agentId = 'hermes') {
     const raw = clean(subject, SUBJECT_MAX)
     const { canonical, aliases, threads } = this.load()
-    const fix = typeof sessionId === 'string' ? threads.get(sessionId) : null
+    const fix = typeof sessionId === 'string' ? threads.get(sideKey(agentId, sessionId)) : null
     if (fix && (!fix.from || fix.from === subjectKey(raw))) return fix.subject
     if (!raw) return ''
     const key = subjectKey(raw)
@@ -95,9 +100,9 @@ export class SubjectCatalog {
   }
 
   /** wizard_attention with its subject folded into the owner's list. */
-  apply(sessionId, attention) {
+  apply(sessionId, attention, agentId = 'hermes') {
     if (!attention || typeof attention !== 'object') return attention
-    const subject = this.resolve(sessionId, attention.subject)
+    const subject = this.resolve(sessionId, attention.subject, agentId)
     if (subject === (attention.subject ?? '')) return attention
     const { subject: _old, ...rest } = attention
     return subject ? { ...rest, subject } : rest
