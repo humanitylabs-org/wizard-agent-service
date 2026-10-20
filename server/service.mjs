@@ -41,6 +41,7 @@ import { requireCurrentContinuation, helperContinueRequestAllowed } from './help
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
+import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
@@ -110,7 +111,7 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG.
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG. Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the plain-CSS file Skins/My skin.css in their Files (Files app tools), which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS only, no @import or outside URLs; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
@@ -3606,6 +3607,9 @@ export function createWizardServer(options = {}) {
       userFiles = null
     }
   }
+  // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
+  const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
+  if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -3850,6 +3854,42 @@ export function createWizardServer(options = {}) {
           }
           sendJson(response, parts.length <= 3 ? 405 : 404, { error: parts.length <= 3 ? 'method_not_allowed' : 'not_found' })
         } catch (error) { sendUploadError(response, error) }
+        return
+      }
+      if (url.pathname === '/wizard/v1/my-skin') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.method === 'GET' || request.method === 'HEAD') {
+          if (url.searchParams.get('format') === 'json') { sendJson(response, 200, mySkin ? mySkin.info() : { path: '', exists: false, bytes: 0, max_bytes: MY_SKIN_MAX_BYTES, empty: true, too_large: false, unavailable: true }); return }
+          const body = Buffer.from(mySkin ? mySkin.css() : '', 'utf8')
+          const tag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"`
+          const headers = { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-cache', ETag: tag, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; font-src 'self' data:" }
+          if (String(request.headers['if-none-match'] ?? '') === tag) { response.writeHead(304, headers); response.end(); return }
+          response.writeHead(200, { ...headers, 'Content-Length': String(body.length) })
+          response.end(request.method === 'HEAD' ? undefined : body)
+          return
+        }
+        if (request.method !== 'PUT' && request.method !== 'DELETE') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
+        // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let host
+          try { host = new URL(request.headers.origin).host } catch { host = '' }
+          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
+        try {
+          if (request.method === 'DELETE') mySkin.reset()
+          else {
+            if (!/^text\/css(?:;|$)/iu.test(String(request.headers['content-type'] ?? '').trim())) { sendJson(response, 415, { error: 'css_required' }); return }
+            mySkin.write((await readBoundedBody(request, MY_SKIN_MAX_BYTES)).toString('utf8'))
+          }
+          sendJson(response, 200, mySkin.info())
+        } catch (error) {
+          const status = error instanceof MySkinError ? error.status : error?.status === 413 ? 413 : 500
+          sendJson(response, status, { error: error instanceof MySkinError ? error.code : status === 413 ? 'my_skin_too_large' : 'my_skin_failed' })
+        }
         return
       }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
