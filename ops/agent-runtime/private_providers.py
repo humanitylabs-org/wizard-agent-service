@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,6 +90,34 @@ class PrivateProviders:
         except (OSError, ValueError, urllib.error.URLError):
             raise self.failure('private_provider_unavailable', 503) from None
 
+    def require_weights(self, app, cid):
+        spec = app['private_inference']
+        marker = spec.get('weights_ready') if spec.get('kind') == 'local' else None
+        if not marker:
+            return
+        if not isinstance(marker, str) or not marker.startswith('/models/') or '..' in marker.split('/'):
+            raise self.failure('private_provider_unavailable', 503)
+        result = self.docker(['exec', cid, 'test', '-r', marker], check=False, timeout=10)
+        if result.returncode:
+            raise self.failure('private_provider_unavailable', 503)
+
+    def wait_ready(self, app):
+        spec = app['private_inference']
+        if spec.get('kind') != 'local' or not spec.get('weights_ready'):
+            return
+        # Reconciliation restarts the model. Only poll bodyless readiness, never a prompt or token write.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                value = self.request(app, 'GET', '/api/connection')
+                if value.get('weights_ready') is True and value.get('status') == 'connected':
+                    return
+            except self.failure:
+                pass
+            if time.monotonic() >= deadline:
+                raise self.failure('private_provider_unavailable', 503)
+            time.sleep(0.25)
+
     def network(self, app):
         name = 'wizard-relay-' + app['id']
         with NETWORK_LOCK:
@@ -117,6 +146,8 @@ class PrivateProviders:
                 raise self.failure('private_provider_container_ambiguous', 503)
             cid = ids[0]
             info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
+            # Provisioning must complete before a local provider is attached to the relay.
+            self.require_weights(app, cid)
             attachment = info.get('NetworkSettings', {}).get('Networks', {}).get(name)
             alias = app['id'] + '-relay'
             if attachment and alias not in (attachment.get('Aliases') or []):
@@ -212,6 +243,7 @@ class PrivateProviders:
         if state.exists() and json.loads(state.read_text())['app']['id'] != app['id']:
             self.revoke(agent)
         network = self.network(app)
+        self.wait_ready(app)
         addresses = self.addresses(agent, app, network)
         value = self.request(app, 'POST', '/api/private-clients', {'agent': agent['id']})
         token, relay = value.get('token'), value.get('relay_url')
