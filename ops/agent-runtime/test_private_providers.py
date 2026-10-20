@@ -217,6 +217,21 @@ class PrivateProviderTest(unittest.TestCase):
         self.assertIn('-d "$PROVIDER" -p tcp --dport "$PORT" -j ACCEPT', script)
         self.assertIn('-A "$CHAIN" -j DROP', script)
 
+    def test_firewall_refusal_never_starts_the_client(self):
+        folder = self.agents.root / self.agent['id']
+        (folder / 'home').mkdir(parents=True)
+        (folder / 'home/.env').write_text('API_SERVER_KEY=agent-fixture\n')
+        (folder / 'runtime.key').write_text('fixture-api-key')
+        (folder / 'gateway.key').write_text('fixture-gateway-key')
+        driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, '', 8929)
+        calls = []
+        engine = lambda args, **kwargs: (calls.append(args), subprocess.CompletedProcess(args, 0, '', ''))[1]
+        with patch.object(ar, 'docker', engine), patch.object(self.provider, 'prepare', return_value={}), patch.object(self.provider, 'firewall', side_effect=ar.RuntimeFailure('docker_failed')):
+            with self.assertRaises(ar.RuntimeFailure):
+                driver.apply(self.agent)
+        self.assertTrue(any('down' in args for args in calls))
+        self.assertFalse(any('up' in args for args in calls))
+
     def test_both_runtime_drivers_dispatch_private_without_fallback(self):
         for driver in [object(), object()]:
             sealed = object()
