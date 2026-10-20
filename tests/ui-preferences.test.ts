@@ -36,10 +36,31 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect((await fetch(open, { method: 'DELETE' })).status).toBe(405)
     expect((await fetch(open, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{' })).status).toBe(400)
   })
-  it('fails closed on corrupted stored state rather than overwriting it', async () => {
-    const d = home(); writeFileSync(join(d, 'ui-preferences.json'), '{broken'); const u = await start(d)
-    expect((await fetch(u)).status).toBe(503); expect((await put(u, { compact: true })).status).toBe(503)
-    expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe('{broken')
+  it('reads leniently: an unknown stored key is dropped, valid keys kept, defaults filled', async () => {
+    const d = home(), file = join(d, 'ui-preferences.json'), stored = '{"compact":true,"futureShellKey":{"x":1}}\n'
+    writeFileSync(file, stored); const u = await start(d)
+    const r = await fetch(u); expect(r.status).toBe(200)
+    expect(await r.json()).toEqual({ ...DEFAULT_UI_PREFERENCES, compact: true })
+    expect(readFileSync(file, 'utf8')).toBe(stored)
+    // A write from this (older) version keeps the newer key on disk for a later roll-forward.
+    expect((await put(u, { readyOrder: 'priority' })).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ compact: true, futureShellKey: { x: 1 }, readyOrder: 'priority' })
+    expect(await (await fetch(u)).json()).toEqual({ ...DEFAULT_UI_PREFERENCES, compact: true, readyOrder: 'priority' })
+  })
+  it('reads leniently: an invalid stored value defaults only that key', async () => {
+    const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ archiveAfterDays: 9999, compact: true, readyOrder: 'chaos', subjectOrder: ['a', 'b'] }))
+    const u = await start(d); const r = await fetch(u); expect(r.status).toBe(200)
+    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, readyOrder: 'newest', subjectOrder: ['a', 'b'] })
+    expect((await put(u, { archiveAfterDays: 9999 })).status).toBe(400)
+  })
+  it('unparseable stored state serves defaults without overwriting it until the next valid PUT', async () => {
+    const d = home(), file = join(d, 'ui-preferences.json'); writeFileSync(file, '{broken'); const u = await start(d)
+    const r = await fetch(u); expect(r.status).toBe(200); expect(await r.json()).toEqual(DEFAULT_UI_PREFERENCES)
+    expect(readFileSync(file, 'utf8')).toBe('{broken')
+    expect((await put(u, { extra: true })).status).toBe(400); expect(readFileSync(file, 'utf8')).toBe('{broken')
+    expect((await put(u, { compact: true })).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ compact: true })
+    for (const bad of ['[1,2]', 'null', '"x"']) { writeFileSync(file, bad); const g = await fetch(u); expect(g.status).toBe(200); expect(await g.json()).toEqual(DEFAULT_UI_PREFERENCES) }
   })
   it('concurrent partial writes preserve all unrelated preferences', async () => {
     const u = await start(home()); await Promise.all([put(u, { compact: true }), put(u, { readyOrder: 'subject' }), put(u, { archiveAfterDays: 14 })])

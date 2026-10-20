@@ -23,8 +23,20 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 The service saves `ui-preferences.json` under its Wizard OS home, using a restricted
 mode and atomic rename. It never rewrites operator-owned `settings.json`, app config,
 Hermes configuration or user data. Writes within one service process merge
-synchronously so simultaneous partial updates do not lose other fields. Corrupt
-stored preferences fail closed with 503 instead of resetting the owner's choices.
+synchronously so simultaneous partial updates do not lose other fields.
+
+PUT is strict; reads are lenient. The stored file may come from a newer or older
+service or shell (rollback, two shells on one box), so GET never fails on its content:
+
+- Unknown stored keys are left out of the response. A PUT from this version keeps them
+  on disk, so rolling forward again does not lose them.
+- A known key with an invalid stored value falls back to its default; other keys are
+  unaffected.
+- A file that is unparseable, not a JSON object, or over 32 KiB is served as defaults
+  and left untouched on disk until the next valid PUT replaces it.
+
+GET and PUT responses only ever contain the four known keys. 503 means the file could
+not be written (for example, a read-only volume), not that the stored content is bad.
 
 Front ends may use browser storage as an offline cache, but this endpoint is the
 cross-device source of truth. Poll or refresh on focus; do not overwrite a user's
