@@ -2326,7 +2326,7 @@ function buildWizardServer(options, lifetime) {
     },
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
-    accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
+    accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
@@ -3191,9 +3191,11 @@ function buildWizardServer(options, lifetime) {
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
+      const requireAccess = request[TAILNET_INGRESS] || baseRequireAccess
+      const accessVerifier = request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
       if (!access) throw Object.assign(new Error('access required'), {status:403})
-      const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
@@ -3283,7 +3285,7 @@ function buildWizardServer(options, lifetime) {
     const current = readSessionTitle(titleDbPath(), sessionId)
     if (!current) return ''
     const record = threadTitleStore.get(sessionId)
-    return titleContextLine(current.title, { locked: titleLocked(current, record) }, readSettings(settingsPath).settings.owner.name)
+    return titleContextLine(current.title, { locked: titleLocked(current, record) })
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
@@ -3849,14 +3851,17 @@ function buildWizardServer(options, lifetime) {
   // Owner vs agent authentication: one principal per request, resolved before any route.
   const principals = createPrincipalResolver({
     ownerProof: options.ownerProof ?? '',
-    requireAccess,
-    accessVerified: (request) => accessVerified(request, accessVerifier),
+    requireAccess: baseRequireAccess,
+    accessVerified: (request) => accessVerified(request, baseAccessVerifier),
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
     agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
     agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
-  })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
+  })
+  // Only the dedicated Serve listener may use the enrolled owner identity without proxy proof.
+  const tailnetPrincipals = createPrincipalResolver({ requireAccess: true, accessVerified: (request) => accessVerified(request, tailnetVerifier) })
+  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
   try {
     if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
       process.stderr.write('Warning: a private agent exists but no owner proof is configured (WIZARD_OWNER_PROOF_FILE); every local caller counts as the owner.\n')
@@ -3935,7 +3940,7 @@ function buildWizardServer(options, lifetime) {
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
-      const principal = await principals.attach(request)
+      const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
@@ -3957,6 +3962,7 @@ function buildWizardServer(options, lifetime) {
         }
       }
       if (url.pathname === '/wizard/v1/setup' || url.pathname.startsWith('/wizard/v1/setup/')) {
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!phoneSetup) { sendJson(response, 404, { error: 'not_found' }); return }
         // Enrollment decides who owns this box on the tailnet: a DNS-rebound page must not reach it through an
