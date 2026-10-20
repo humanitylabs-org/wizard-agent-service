@@ -580,9 +580,10 @@ export function createAgentRegistry(options = {}) {
 
   async function providers() {
     const out = await Promise.all(privateApps().map(async (app) => {
-      const row = { id: app.id, label: cleanLabel(app.name, app.id), confidential: true, models: [], available: false, error: 'private_provider_unavailable' }
+      const kind = ['attested-relay', 'local'].includes(app.private_inference.kind) ? app.private_inference.kind : ''
+      const row = { id: app.id, label: cleanLabel(app.name, app.id), confidential: true, kind, models: [], available: false, error: 'private_provider_unavailable' }
       const url = aiConnectionUrl(app, options.aiConnectionAddress === 'internal' ? 'internal' : 'local')
-      if (app.status !== 'running' || !url || !['attested-relay', 'local'].includes(app.private_inference.kind)) return row
+      if (app.status !== 'running' || !url || !kind) return row
       try {
         const response = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(4000) })
         if (!response.ok) return row

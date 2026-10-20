@@ -43,7 +43,7 @@ it('migrates legacy ids, preserving arbitrary app ids', () => {
 })
 it('fetches models over real provider HTTP and emits no credential in Hermes config', async () => {
   const f = await fixture()
-  expect(await f.registry.providers()).toContainEqual(expect.objectContaining({ id: 'new-private-app', confidential: true, available: true, models: [{ id: 'private-chat', label: 'Private Chat' }] }))
+  expect(await f.registry.providers()).toContainEqual(expect.objectContaining({ id: 'new-private-app', confidential: true, kind: expect.stringMatching(/^(attested-relay|local)$/), available: true, models: [{ id: 'private-chat', label: 'Private Chat' }] }))
   const result = await f.create()
   const config = readFileSync(join(f.dir, 'agents', result.agent.id, 'home/config.yaml'), 'utf8')
   expect(config).toContain(`http://agent-${result.agent.id}-client:3301/v1`)
