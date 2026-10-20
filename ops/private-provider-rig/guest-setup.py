@@ -81,8 +81,45 @@ def main():
     (ROOT / 'tmp').mkdir(exist_ok=True)
     (ROOT / 'src').mkdir(exist_ok=True)
     run('sudo', 'apt-get', 'update', timeout=300)
-    run('sudo', '-E', 'apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'python3-yaml',
+    run('sudo', '-E', 'apt-get', 'install', '-y', 'python3-yaml',
         'git', 'curl', 'tcpdump', 'tshark', 'jq', 'xz-utils', 'sqlite3', 'ca-certificates', timeout=900)
+    # Docker's official packages emit a semver Compose version accepted by Runtipi.
+    # Ubuntu's docker-compose-v2 includes a Debian suffix that Runtipi rejects.
+    conflicts = []
+    for package in ['docker.io', 'docker-compose', 'docker-compose-v2', 'docker-doc',
+                    'docker-buildx', 'podman-docker', 'containerd', 'runc']:
+        result = subprocess.run(['dpkg-query', '-W', '-f=${Status}', package],
+                                env=ENV, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout == 'install ok installed':
+            conflicts.append(package)
+    if conflicts:
+        run('sudo', '-E', 'apt-get', 'remove', '-y', *conflicts, timeout=600)
+    run('sudo', 'install', '-m', '0755', '-d', '/etc/apt/keyrings')
+    run('sudo', 'curl', '-fsSL', 'https://download.docker.com/linux/ubuntu/gpg',
+        '-o', '/etc/apt/keyrings/docker.asc')
+    run('sudo', 'chmod', '0644', '/etc/apt/keyrings/docker.asc')
+    release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    codename = release.get('UBUNTU_CODENAME', release['VERSION_CODENAME']).strip('"')
+    assert codename == 'noble', 'this rig supports only Ubuntu 24.04'
+    arch = run('dpkg', '--print-architecture', capture=True).stdout.decode().strip()
+    assert arch == 'arm64', 'this rig supports only arm64'
+    sources = ROOT / 'docker.sources'
+    write(sources, f'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: {codename}\n'
+          f'Components: stable\nArchitectures: {arch}\nSigned-By: /etc/apt/keyrings/docker.asc\n')
+    run('sudo', 'install', '-m', '0644', str(sources), '/etc/apt/sources.list.d/docker.sources')
+    run('sudo', 'apt-get', 'update', timeout=300)
+    run('sudo', '-E', 'apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io',
+        'docker-buildx-plugin', 'docker-compose-plugin', timeout=900)
+    compose = run('sudo', 'docker', 'compose', 'version', '--short', capture=True).stdout.decode().strip().removeprefix('v')
+    assert len(compose.split('.')) == 3 and all(p.isdigit() for p in compose.split('.')), 'non-semver Compose: ' + compose
+    print('COMPOSE_SEMVER', compose, flush=True)
+    # Stateful bridge-peer policy requires this module, including after baseline reboot.
+    write(ROOT / 'br_netfilter.conf', 'br_netfilter\n')
+    run('sudo', 'install', '-m', '0644', str(ROOT / 'br_netfilter.conf'), '/etc/modules-load.d/pp-rig.conf')
+    run('sudo', 'modprobe', 'br_netfilter')
+    run('sudo', 'sysctl', '-w', 'net.bridge.bridge-nf-call-iptables=1')
+    write(ROOT / 'bridge-netfilter.conf', 'net.bridge.bridge-nf-call-iptables = 1\n')
+    run('sudo', 'install', '-m', '0644', str(ROOT / 'bridge-netfilter.conf'), '/etc/sysctl.d/90-pp-rig.conf')
     run('sudo', 'usermod', '-aG', 'docker', USER)
     run('sudo', 'systemctl', 'enable', '--now', 'docker')
     run('sudo', 'loginctl', 'enable-linger', USER)
