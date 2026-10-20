@@ -153,7 +153,7 @@ describe('user-files read API', () => {
     expect(list.entries.map((e: any) => [e.name, e.is_dir, e.size])).toEqual([['Clips', true, 0], ['alias.txt', false, 11], ['b.txt', false, 11]])
     expect(typeof list.entries[0].mtime).toBe('string')
     const root = await (await fetch(`${base}/wizard/v1/user-files`)).json()
-    expect(root.entries.map((e: any) => e.name)).toEqual(['Projects'])
+    expect(root.entries.map((e: any) => e.name)).toEqual(['Projects', 'Skins']) // Skins/My skin.css: the owner's own skin layer (my-skin.mjs)
     expect((await fetch(`${base}/wizard/v1/user-files?folder=..`)).status).toBe(400)
     expect((await fetch(`${base}/wizard/v1/user-files?folder=Nope`)).status).toBe(404)
     const whole = await fetch(`${base}/wizard/v1/user-files/content?path=Projects/b.txt`)

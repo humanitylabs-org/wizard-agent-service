@@ -150,6 +150,10 @@ const server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  // My skin (server/my-skin.mjs): <Files root>/Skins/My skin.css by default (the user-files root, else the
+  // media root). WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
+  ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).
