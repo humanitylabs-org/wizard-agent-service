@@ -96,7 +96,7 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
       if(!Array.isArray(results)) continue
       const text=results.filter(r=>typeof r?.summary==='string'&&r.summary.trim()).map(r=>`Helper ${Number(r.task_index)+1} (${String(r.status||'unknown')}):\n${r.summary.trim()}`).join('\n\n')
       if(!text||text.length>60000) continue
-      receipts.push({sessionId,delegationId:id,at:Number(row.completed_at),key:receiptKey(id),
+      receipts.push({agent_id:'hermes',session_id:sessionId,sessionId,delegationId:id,at:Number(row.completed_at),key:receiptKey(id),
         input:RECEIPT_PREFIX+id+'\nThese are saved helper findings, not verified completion. Continue the original request through its remaining acceptance checks. Preserve the latest user instructions and original release authority. Keep internal progress in Working; return a final answer only when there is a verified result or one specific owner-only gate.\n\n'+text})
     }
     return receipts

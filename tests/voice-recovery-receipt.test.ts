@@ -69,7 +69,7 @@ function fixture() {
     )
   })
   const args = { request, manifestPath, queueDbPath, inboxDbPath, blobRoot }
-  const receipt = { version: 1, ...request, runId: entry.recoveredRunId, status: 'completed' }
+  const receipt = { version: 1, ...request, agent_id: 'hermes', session_id: request.sessionId, runId: entry.recoveredRunId, status: 'completed' }
   return { directory, blobPath, entry, manifest, saveManifest, args, receipt }
 }
 
@@ -93,7 +93,7 @@ describe('read-only voice recovery receipt', () => {
     expect(resolveVoiceRecoveryReceipt({ ...f.args, request: { ...f.args.request, intentId: 'another-local-intent' } }))
       .toEqual({ ...f.receipt, intentId: 'another-local-intent' })
     expect(Object.keys(resolveVoiceRecoveryReceipt(f.args)!)).toEqual([
-      'version', 'sessionId', 'intentId', 'sourceFileId', 'audioSha256', 'inputSha256', 'runId', 'status',
+      'version', 'sessionId', 'agent_id', 'session_id', 'intentId', 'sourceFileId', 'audioSha256', 'inputSha256', 'runId', 'status',
     ])
   })
 

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { migrateJson } from './thread-reference.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
 // Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
@@ -55,6 +56,7 @@ export class LockedRunBridge {
     this.pending = new Map()
     this.streams = new Set()
     if (statePath) {
+      migrateJson(statePath, rows => rows.map(([key, row]) => [key, { ...row, agent_id: row.agent_id ?? 'hermes', session_id: row.session_id ?? row.sessionId }]))
       try { this.entries = new Map(JSON.parse(readFileSync(statePath, 'utf8'))) }
       catch (error) { if (error.code !== 'ENOENT') throw fail('Model-route journal is unreadable', 503) }
     }
@@ -107,7 +109,7 @@ export class LockedRunBridge {
     if (existing?.runId) return this.response(existing, true)
     if (existing && !(await this.provablyUndelivered(key, existing, value.session_id, probeText(value.input))))
       throw fail('Model-locked delivery is uncertain; automatic replay is blocked to avoid a duplicate')
-    const entry = { sessionId: value.session_id, ...route, requestHash, state: 'starting', createdAt: Date.now() }
+    const entry = { sessionId: value.session_id, session_id: value.session_id, agent_id: 'hermes', ...route, requestHash, state: 'starting', createdAt: Date.now() }
     this.entries.set(key, entry); this.save()
     const task = this.launch(value, route, headers, entry)
     this.pending.set(key, task)

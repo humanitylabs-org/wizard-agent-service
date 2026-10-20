@@ -117,7 +117,8 @@ describe('shares with an agents registry', () => {
     expect(runs[0].body.input).not.toContain(dir)
     // the thread is pinned to the private agent
     const pins = JSON.parse(readFileSync(join(dir, 'agents', '.threads.json'), 'utf8'))
-    expect(pins.threads[share.thread_id]).toBe(agent.id)
+    expect(pins.schema).toBe(2)
+    expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id })
     // staging is outside the agent's home and empty
     expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path
@@ -156,7 +157,7 @@ describe('shares with an agents registry', () => {
     const path = `/wizard/hermes/api/sessions/${share.thread_id}`
     expect((await fetch(`${base}${path}?agent=${agent.id}`)).status).toBe(200)
     expect((await fetch(`${base}${path}`)).status).toBe(409)
-    expect((await fetch(`${base}${path}?agent=hermes`)).status).toBe(409)
+    expect((await fetch(`${base}${path}?agent=hermes`)).status).toBe(404) // a qualified pair is independent; Hermes has no such session
     expect((await fetch(`${base}${path}?agent=${agent.id}&view=operator`)).status).toBeGreaterThanOrEqual(400)
     const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
     expect((await fetch(`${base}/wizard/files/${upload.file.id}/content`)).status).toBe(404)

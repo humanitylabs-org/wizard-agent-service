@@ -47,7 +47,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
         if (delegationId && receiptConsumed(database, sessionId, delegationId)) return null
         const receipt = delegationId ? readUndeliveredHelperReceipts(sessionDbPath, { now, delegationId, includeDelivered: true })
           .find(r => r.sessionId === sessionId) : null
-        return { sessionId, messageId: Number(row.message_id), at: Number(row.at),
+        return { agent_id: 'hermes', session_id: sessionId, sessionId, messageId: Number(row.message_id), at: Number(row.at),
           ...(delegationId ? { delegationId, key: receiptKey(delegationId), input: receipt?.input
             ?? RECEIPT_PREFIX + delegationId + '\nThe saved helper findings below arrived. Finish the original request under its latest instructions and release authority.\n\n' + row.content } : {}) }
       }).filter(Boolean)

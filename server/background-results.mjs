@@ -150,7 +150,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     if (!inflight) inflight = scan().catch(error => { console.warn('[background-results] discovery temporarily unavailable:', String(error?.message || 'read failed').slice(0, 120)); cache = { ...cache, at: now(), error: true }; return cache }).finally(() => { inflight = null })
     return inflight
   }
-  const publicRecord = row => ({ id: row.id, session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
+  const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
   return {
     async list() {
       void refresh()
@@ -219,7 +219,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const body = JSON.stringify({ session_id: pending.sessionId, input: pending.input,
         _wizard_background_recovery: { id, source_kind: pending.sourceKind, read_id: pending.readId, boundary: pending.boundary, at: pending.at, delegation_id: pending.delegationId || '', message_id: pending.messageId || '' } })
       const result = await q.admit({ runtime: 'direct', sessionId, idempotencyKey: pending.key, requestHash: createHash('sha256').update(`direct\0${body}`).digest('hex'), body, trustedPaths: [],
-        continuation: { kind: BACKGROUND_RECOVERY_KIND, id, session_id: sessionId } })
+        continuation: { kind: BACKGROUND_RECOVERY_KIND, id, agent_id: 'hermes', session_id: sessionId } })
       cache.at = 0
       return result
     },

@@ -8,6 +8,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { readSettings } from './wizard-os-settings.mjs'
+import { migrateJson, threadKey, threadReference } from './thread-reference.mjs'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -166,7 +168,7 @@ function validateModel(model, providers, { privacy, confirmDowngrade = false } =
   return { provider: provider.id, model: model.model, allowed_models: allowed, fallback }
 }
 
-export function publicAgent(agent, status = { status: 'stopped', status_detail: '' }) {
+export function publicAgent(agent, status = { status: 'stopped', status_detail: '' }, defaultAgentId = MAIN_AGENT_ID) {
   return {
     id: agent.id,
     label: agent.label,
@@ -177,7 +179,8 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     permissions: { ...agent.permissions, outside_tools: [...agent.permissions.outside_tools], wizard_apps: [...agent.permissions.wizard_apps], agent_apps: [...agent.permissions.agent_apps] },
     status: status.status,
     status_detail: status.status_detail ?? '',
-    is_default: agent.id === MAIN_AGENT_ID,
+    is_default: agent.id === defaultAgentId,
+    ...(agent.role === 'recovery' ? { role: 'recovery' } : {}),
     // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
     created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
   }
@@ -193,19 +196,20 @@ export function agentForModel(agents, route) {
   const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
   if (!model || !isConfidentialProvider(provider)) return null
   return agents
-    .filter((agent) => agent && agent.id !== MAIN_AGENT_ID && agent.privacy === 'private'
+    .filter((agent) => agent && agent.role !== 'recovery' && agent.id !== MAIN_AGENT_ID && agent.privacy === 'private'
       && agent.model?.provider === provider && Array.isArray(agent.model.allowed_models) && agent.model.allowed_models.includes(model))
     .sort((a, b) => (Number(a.created_at) || 0) - (Number(b.created_at) || 0) || String(a.id).localeCompare(String(b.id)))[0] ?? null
 }
 
 export function threadAgent(agent) {
-  return { id: agent.id, label: agent.label, privacy: agent.privacy, appearance: agent.appearance }
+  return { id: agent.id, label: agent.label, privacy: agent.privacy, appearance: agent.appearance, ...(agent.role === 'recovery' ? { role: 'recovery' } : {}) }
 }
 
 /** Validate a stored agent.json. Returns null for anything that is not a schema-1 agent (e.g. other experiments). */
 export function parseAgentFile(value, id) {
   if (!value || typeof value !== 'object' || value.schema !== AGENT_SCHEMA || value.id !== id || !ID_RE.test(id) || id === MAIN_AGENT_ID) return null
   if (value.harness !== 'hermes' || !['private', 'standard'].includes(value.privacy)) return null
+  if (value.role !== undefined && value.role !== 'standard') return null
   const model = value.model
   if (!model || typeof model.provider !== 'string' || typeof model.model !== 'string' || !Array.isArray(model.allowed_models)) return null
   const permissions = value.permissions
@@ -359,7 +363,8 @@ export function createAgentRegistry(options = {}) {
     return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
   }
   const mainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
     permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', ...mainApps(), other_agents: 'none' },
@@ -376,6 +381,11 @@ export function createAgentRegistry(options = {}) {
     try { return readdirSync(agentsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort() } catch { return [] }
   }
   const read = (id) => { syncApps(); return readRaw(id) }
+  const canStartAgent = (id) => {
+    const agent = readRaw(id)
+    return Boolean(agent && agent.role !== 'recovery' && ['external', 'container'].includes(agent.runtime?.kind))
+  }
+  const defaultAgentId = () => readSettings(options.settingsPath, { canStartAgent }).settings.agents.default_agent_id
   const list = () => {
     syncApps()
     return [mainAgent(), ...folderIds().map(readRaw).filter(Boolean)]
@@ -418,7 +428,7 @@ export function createAgentRegistry(options = {}) {
         if (stored?.schema === 1) {
           const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
           for (const app of fresh) if (!apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
-          writeJsonAtomic(mainPath, { schema: 1, ...apps })
+          writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
         }
       }
       if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))) {
@@ -433,6 +443,7 @@ export function createAgentRegistry(options = {}) {
    * choice → null (every app, exactly the gateway's behaviour before #58).
    */
   function allowedApps(agentId) {
+    if (readRaw(agentId)?.role === 'recovery') return new Set()
     if (agentId === MAIN_AGENT_ID && readJson(mainPath)?.schema !== 1) { syncApps(); return null }
     const agent = read(agentId)
     return agent ? agentAppIds(agent) : new Set()
@@ -444,7 +455,7 @@ export function createAgentRegistry(options = {}) {
     if (!kind) fail(404, 'app_not_found', 'app.id')
     return {
       app_id: appId, kind,
-      agents: list().map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === MAIN_AGENT_ID })),
+      agents: list().filter(agent => agent.role !== 'recovery').map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === defaultAgentId() })),
     }
   }
 
@@ -455,7 +466,7 @@ export function createAgentRegistry(options = {}) {
     const ids = body?.agents
     if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
     const wanted = new Set(ids)
-    const all = list()
+    const all = list().filter(agent => agent.role !== 'recovery')
     for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)
@@ -480,6 +491,7 @@ export function createAgentRegistry(options = {}) {
     if (!reader) fail(404, 'agent_not_found', 'grant.reader')
     const source = read(String(body.source ?? ''))
     if (!source) fail(404, 'agent_not_found', 'grant.source')
+    if (reader.role === 'recovery' || source.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
     if (source.privacy === 'private') sealed(`${source.id} is private; nothing can read it`)
     if (reader.id === source.id) fail(400, 'invalid_grant', 'grant.source')
     const scope = body.scope ?? 'titles'
@@ -502,8 +514,8 @@ export function createAgentRegistry(options = {}) {
    */
   function readableSources(readerId) {
     const reader = read(readerId)
-    if (!reader) return []
-    const agents = list()
+    if (!reader || reader.role === 'recovery') return []
+    const agents = list().filter(agent => agent.role !== 'recovery')
     const out = new Map()
     if (reader.permissions.other_agents !== 'none') {
       for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard') out.set(agent.id, reader.permissions.other_agents)
@@ -688,6 +700,7 @@ export function createAgentRegistry(options = {}) {
 
   async function create(body, { idempotencyKey = '' } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
     if (idempotencyKey) {
       if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(idempotencyKey)) fail(400, 'invalid_idempotency_key', 'agent.idempotency_key')
@@ -746,6 +759,18 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (id === MAIN_AGENT_ID) {
+      if (body.role !== undefined) {
+        if (!['standard', 'recovery'].includes(body.role)) fail(400, 'invalid_agent_role', 'agent.role')
+        if (Object.keys(body).some(key => key !== 'role')) fail(400, 'invalid_request', 'agent.body')
+        if (body.role === 'recovery' && defaultAgentId() === MAIN_AGENT_ID) fail(409, 'recovery_cannot_be_default', 'agent.role')
+        if (body.role === 'recovery' && options.isBindingTarget?.(MAIN_AGENT_ID)) fail(409, 'recovery_agent_bound', 'agent.recovery_sealed')
+        if (body.role === 'recovery' && grants().some(grant => grant.reader === MAIN_AGENT_ID || grant.source === MAIN_AGENT_ID)) fail(409, 'recovery_agent_granted', 'agent.recovery_sealed')
+        mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+        writeJsonAtomic(mainPath, { schema: 1, ...mainApps(), role: body.role })
+        appsChanged()
+        return read(id)
+      }
+      if (agent.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
       // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
       const keys = Object.keys(body)
       const permKeys = Object.keys(body.permissions ?? {})
@@ -754,10 +779,11 @@ export function createAgentRegistry(options = {}) {
       }
       const apps = normalizePermissions(agent.permissions, body.permissions)
       mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-      writeJsonAtomic(mainPath, { schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
+      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
       appsChanged()
       return read(id)
     }
+    if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     if (agent.privacy === 'private') {
       // #59: nothing turns a private agent into something another agent can read.
       if (body.privacy !== undefined && body.privacy !== 'private') sealed('a private agent stays private')
@@ -809,39 +835,61 @@ export function createAgentRegistry(options = {}) {
     return agent
   }
 
-  // Thread pins: session id -> agent id, set when the thread is created. Absent = the main agent.
+  // Qualified pins. A legacy id->agent entry already contains an explicit agent: preserve it, not today's default.
+  migrateJson(threadsPath, value => {
+    if (value.schema === 2) return value
+    if (value.schema !== 1 || !value.threads || typeof value.threads !== 'object') throw new Error('Invalid thread pins')
+    return { schema: 2, threads: Object.fromEntries(Object.entries(value.threads).map(([id, agent]) => {
+      const pair = threadReference(id, typeof agent === 'string' && agent ? agent : MAIN_AGENT_ID)
+      return [threadKey(pair.agent_id, id), pair]
+    })) }
+  })
   let pinsCache = null
   const pins = () => {
     if (!pinsCache) pinsCache = readJson(threadsPath)?.threads ?? {}
     return pinsCache
   }
+  function pinnedAgents(sessionId) {
+    return Object.values(pins()).filter(row => row.session_id === sessionId).map(row => row.agent_id)
+  }
   function pinnedAgent(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return ''
-    return pins()[sessionId] ?? ''
+    const ids = pinnedAgents(sessionId)
+    if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread')
+    return ids[0] ?? ''
   }
   function pin(sessionId, agentId) {
-    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || agentId === MAIN_AGENT_ID) return
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || !readRaw(agentId)) return
     const current = pins()
-    if (current[sessionId] === agentId) return
-    if (current[sessionId] && current[sessionId] !== agentId) fail(409, 'thread_agent_pinned', 'thread.agent_pinned')
+    const key = threadKey(agentId, sessionId)
+    if (current[key]) return
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-    pinsCache = { ...current, [sessionId]: agentId }
-    writeJsonAtomic(threadsPath, { schema: 1, threads: pinsCache })
+    const next = { ...current, [key]: threadReference(sessionId, agentId) }
+    writeJsonAtomic(threadsPath, { schema: 2, threads: next })
+    pinsCache = next
   }
-  const runs = new Map()
-  function noteRun(runId, agentId) {
-    if (!runId) return
-    runs.set(runId, agentId)
-    if (runs.size > 512) runs.delete(runs.keys().next().value)
+  const runsPath = join(agentsDir, '.run-threads.json')
+  const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
+  function noteRun(runId, agentId, sessionId = '') {
+    if (typeof runId !== 'string' || !runId) return
+    const rows = runs.get(runId) ?? []
+    if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
+    if (!sessionId || !readRaw(agentId)) return
+    const next = new Map(runs)
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId) }])
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next) })
+    runs.set(runId, next.get(runId))
   }
+  const runAgents = runId => (runs.get(runId) ?? []).map(row => row.agent_id)
 
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
-    pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
+    pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
-    publicAgent: async (agent) => publicAgent(agent, await status(agent)),
+    publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId
       return agent ? threadAgent(agent) : null

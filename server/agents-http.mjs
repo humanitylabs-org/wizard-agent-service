@@ -24,7 +24,7 @@ const GRANT_ROUTE = /^\/wizard\/v1\/agent-grants(?:\/(grant_[a-f0-9]{12}))?$/u
 
 /** True when the agent exists and is private. */
 export function isPrivateAgent(registry, id) {
-  return Boolean(id) && registry.read(id)?.privacy === 'private'
+  return Boolean(id) && (registry.read(id)?.privacy === 'private' || registry.read(id)?.role === 'recovery')
 }
 
 /** Owner (or the Service itself) may open any agent; an agent credential only its own. */
@@ -39,25 +39,27 @@ export function mayOpenAgent(request, agentId) {
  */
 export function assertAgentTargets(registry, request, ids, missing = () => new AgentError(404, 'agent_not_found', 'agent.id')) {
   for (const id of ids) {
-    if (id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw missing(id)
+    if (registry.read(id)?.role === 'recovery' ? principalOf(request).kind !== 'owner' : id && isPrivateAgent(registry, id) && !mayOpenAgent(request, id)) throw missing(id)
   }
 }
 
 /** Referenced ids in order: an id this caller cannot see gets exactly the answer a missing id gets. */
 function assertKnownTargets(registry, request, ids, missing) {
   for (const id of ids) {
-    if (!registry.read(id) || (isPrivateAgent(registry, id) && !mayOpenAgent(request, id))) throw missing(id)
+    if (!registry.read(id) || !visibleAgent(registry, request, id)) throw missing(id)
   }
 }
 
 /** Only the owner makes an agent private (or creates a private one). */
 function assertPrivacyChange(request, body) {
+  if (body?.role !== undefined && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'agent.recovery_owner')
   const wantsPrivate = body?.privacy === 'private' || body?.permissions?.preset === 'private'
   if (wantsPrivate && !ownerLike(principalOf(request))) throw new AgentError(403, 'owner_required', 'agent.private_owner')
 }
 
 /** Agents a non-owner may see in admin listings: private agents are the owner's alone. */
 function visibleAgent(registry, request, id) {
+  if (registry.read(id)?.role === 'recovery') return principalOf(request).kind === 'owner'
   return !isPrivateAgent(registry, id) || mayOpenAgent(request, id)
 }
 
@@ -80,15 +82,21 @@ export function decorateThreadAgent(result, agentInfo) {
   try {
     const payload = JSON.parse(result.toString('utf8'))
     let changed = false
+    const decorate = item => {
+      if (!item || typeof item !== 'object') return item
+      const agent = typeof agentInfo === 'function' ? agentInfo(item) : agentInfo
+      return { ...item, agent, agent_id: agent.id, session_id: item.session_id ?? item.id }
+    }
     for (const key of ['data', 'sessions']) {
       if (!Array.isArray(payload?.[key])) continue
-      payload[key] = payload[key].map((item) => (item && typeof item === 'object' ? { ...item, agent: typeof agentInfo === 'function' ? agentInfo(item) : agentInfo } : item))
+      payload[key] = payload[key].map(decorate)
       changed = true
     }
     if (payload?.session && typeof payload.session === 'object') {
-      payload.session = { ...payload.session, agent: typeof agentInfo === 'function' ? agentInfo(payload.session) : agentInfo }
+      payload.session = decorate(payload.session)
       changed = true
     }
+    if (!changed && typeof payload?.id === 'string') return Buffer.from(JSON.stringify(decorate(payload)))
     return changed ? Buffer.from(JSON.stringify(payload)) : result
   } catch { return result }
 }
@@ -269,6 +277,7 @@ export async function handleAppBindingApi(ctx, url, request, response) {
       const agentId = bindings.agentFor(appId)
       const agent = registry.read(agentId)
       if (!agent) throw new AgentError(409, 'bound_agent_missing', 'app.binding.agent', `bound to ${agentId}`)
+      if (agent.role === 'recovery') throw new AgentError(404, 'agent_not_found', 'agent.id')
       if (agentId !== MAIN_AGENT_ID) {
         const state = await registry.status(agent, { fresh: true })   // never deliver on a stale 'running'
         if (state.status !== 'running') throw new AgentError(503, 'bound_agent_unavailable', 'app.binding.agent_running', `${agentId} is ${state.status}`)
@@ -352,8 +361,10 @@ function sendAgentError(ctx, response, error) {
  */
 export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParams, request, operator }) {
   const { registry } = ctx
-  const explicitQuery = searchParams.get('agent') ?? ''
+  const explicitQuery = searchParams.get('agent_id') || searchParams.get('agent') || ''
+  if (searchParams.get('agent_id') && searchParams.get('agent') && searchParams.get('agent_id') !== searchParams.get('agent')) throw new AgentError(400, 'agent_mismatch', 'request.agent')
   searchParams.delete('agent')
+  searchParams.delete('agent_id')
   let body
   const hasBody = method === 'PATCH' || (method === 'POST' && !upstreamPath.endsWith('/stop'))
   let explicitBody = ''
@@ -362,13 +373,14 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     body = await ctx.readBoundedBody(request)
     try {
       bodyValue = JSON.parse(body.toString('utf8'))
-      if (bodyValue && typeof bodyValue === 'object' && !Array.isArray(bodyValue) && 'agent' in bodyValue) {
-        explicitBody = typeof bodyValue.agent === 'string' ? bodyValue.agent : ''
-        const { agent: _agent, ...rest } = bodyValue
+      if (bodyValue && typeof bodyValue === 'object' && !Array.isArray(bodyValue) && ('agent' in bodyValue || 'agent_id' in bodyValue)) {
+        if (bodyValue.agent && bodyValue.agent_id && bodyValue.agent !== bodyValue.agent_id) throw new AgentError(400, 'agent_mismatch', 'request.agent')
+        explicitBody = typeof (bodyValue.agent_id ?? bodyValue.agent) === 'string' ? (bodyValue.agent_id ?? bodyValue.agent) : ''
+        const { agent: _agent, agent_id: _agentId, ...rest } = bodyValue
         bodyValue = rest
         body = Buffer.from(JSON.stringify(rest))
       }
-    } catch { bodyValue = null }
+    } catch (error) { if (error instanceof AgentError) throw error; bodyValue = null }
   }
   if (explicitQuery && explicitBody && explicitQuery !== explicitBody) throw new AgentError(400, 'agent_mismatch', 'request.agent')
   const explicit = explicitQuery || explicitBody
@@ -378,14 +390,31 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     || (upstreamPath === '/v1/runs' && typeof bodyValue?.session_id === 'string' ? bodyValue.session_id : '')
     || (upstreamPath === '/api/sessions' && method === 'POST' && typeof (bodyValue?.id ?? bodyValue?.session_id) === 'string' ? (bodyValue.id ?? bodyValue.session_id) : '')
   const runId = runIdFromPath(upstreamPath)
-  let pinned = (sessionId && registry.pinnedAgent(sessionId)) || (runId && registry.runAgent(runId)) || ''
+  const knownPins = sessionId ? (registry.pinnedAgents?.(sessionId) ?? [registry.pinnedAgent(sessionId)].filter(Boolean)) : []
+  if (principalOf(request).kind === 'agent' && !explicit && !knownPins.includes(principalOf(request).agentId) && !runId) {
+    if (method !== 'GET') assertAgentTargets(registry, request, knownPins)
+    throw new AgentError(403, 'agent_scope', 'principal.agent_scope')
+  }
+  const knownRuns = runId && !explicit ? (registry.runAgents?.(runId) ?? [registry.runAgent(runId)].filter(Boolean)).filter(id => visibleAgent(registry, request, id)) : []
+  if (knownRuns.length > 1) throw new AgentError(409, 'ambiguous_thread', 'agent.ambiguous_thread')
+  let pinned = knownRuns[0] || ''
   // Authorize against the resolved target before anything else can answer (or hint) about it.
   assertAgentTargets(registry, request, [explicit])
   // A read by id alone of a thread or run the caller may not open goes where an unknown id goes (the main
   // agent, which does not have it): the answer is the same as for an id that does not exist.
-  if (!explicit && pinned && method === 'GET' && isPrivateAgent(registry, pinned) && !mayOpenAgent(request, pinned)) pinned = ''
+  if (!explicit && sessionId) {
+    let matches = knownPins.filter(id => visibleAgent(registry, request, id))
+    // A stored single pin decides old-client routing. Otherwise discover visible histories, never private content.
+    if (!knownPins.length && ctx.sessionExists) {
+      matches = (await Promise.all(registry.list().filter(agent => agent.role !== 'recovery' && visibleAgent(registry, request, agent.id) && (principalOf(request).kind !== 'agent' || principalOf(request).agentId === agent.id)).map(async agent =>
+        await ctx.sessionExists(agent.id, sessionId) ? agent.id : ''))).filter(Boolean)
+    }
+    if (matches.length > 1) throw new AgentError(409, 'ambiguous_thread', 'agent.ambiguous_thread')
+    pinned = matches[0] || pinned
+    if (!pinned && knownPins.length && method !== 'GET') assertAgentTargets(registry, request, knownPins)
+  }
   assertAgentTargets(registry, request, [pinned])
-  if (explicit && pinned && explicit !== pinned) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
+  // A pair is authoritative: duplicate ids in different histories are independent, not a pin conflict.
   // #59: a private agent's threads are read only through that agent's own Chats, which always names it. The operator
   // surface (other agents' work) never reaches a non-main agent, and a thread read that arrives by id alone (a link,
   // another view, another agent) is refused instead of being routed by the pin.
@@ -399,8 +428,17 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     }
   }
   // A thread already on the main agent cannot be continued under another agent.
-  if (explicit && explicit !== MAIN_AGENT_ID && !pinned && sessionId && await ctx.mainHasSession(sessionId)) {
-    throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
+  if (explicit && sessionId && method !== 'GET' && !knownPins.includes(explicit)) {
+    const targetExists = ctx.sessionExists ? await ctx.sessionExists(explicit, sessionId, { strict: true }) : false
+    if (!targetExists) {
+      const others = [...knownPins]
+      if (ctx.sessionExists && !others.length) {
+        for (const agent of registry.list()) if (agent.id !== explicit && agent.role !== 'recovery' && await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
+      } else if (!ctx.sessionExists && explicit !== MAIN_AGENT_ID && await ctx.mainHasSession(sessionId)) others.push(MAIN_AGENT_ID)
+      // Includes never-pinned private histories: a credential cannot claim their ids for another agent.
+      assertAgentTargets(registry, request, others)
+      if (others.length) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
+    }
   }
   // Unified Chats (spec/AGENTS.md): a new chat started on a private agent's confidential model belongs to that agent,
   // even when the client did not name it. Existing threads keep their agent; the operator surface never routes here.
@@ -408,10 +446,22 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   if (!explicit && !pinned && !operator && method === 'POST' && (upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions')
     && bodyValue && typeof bodyValue === 'object' && typeof registry.agentForModel === 'function') {
     const owner = registry.agentForModel({ model: bodyValue.model, provider: bodyValue.provider })
-    if (owner && !(sessionId && await ctx.mainHasSession(sessionId))) routed = owner.id
+    if (owner) assertAgentTargets(registry, request, [owner.id])
+    if (owner && !(sessionId && (ctx.sessionExists ? await ctx.sessionExists(owner.id, sessionId) : await ctx.mainHasSession(sessionId)))) routed = owner.id
   }
   assertAgentTargets(registry, request, [routed])
-  return { agentId: explicit || pinned || routed || MAIN_AGENT_ID, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
+  const newChat = method === 'POST' && ['/v1/runs', '/api/sessions'].includes(upstreamPath)
+  const agentId = explicit || pinned || routed || (newChat ? registry.defaultAgentId?.() : '') || MAIN_AGENT_ID
+  assertAgentTargets(registry, request, [agentId])
+  if (newChat && sessionId && !explicit && !knownPins.includes(agentId) && ctx.sessionExists && !await ctx.sessionExists(agentId, sessionId, { strict: true })) {
+    const others = []
+    for (const agent of registry.list()) if (agent.id !== agentId && agent.role !== 'recovery' && await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
+    assertAgentTargets(registry, request, others)
+    if (others.length) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
+  }
+  // Even an owner must name recovery explicitly; background/default/model routing never activates it.
+  if (registry.read(agentId)?.role === 'recovery' && (!explicit || principalOf(request).kind !== 'owner')) throw new AgentError(404, 'agent_not_found', 'agent.id')
+  return { agentId, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
 }
 
 function modelAllowed(agent, value) {
@@ -465,8 +515,6 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   // A thread is pinned only once its agent has accepted it, so a refused request never claims an id.
   let pinOnSuccess = ''
   const claim = (sessionId) => {
-    const existing = registry.pinnedAgent(sessionId)
-    if (existing && existing !== agent.id) registry.pin(sessionId, agent.id) // raises the usual pin conflict
     pinOnSuccess = sessionId
   }
   if (method === 'POST' && upstreamPath === '/v1/runs') {
@@ -522,7 +570,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
         const admission = JSON.parse(result.toString('utf8'))
-        registry.noteRun(typeof admission.run_id === 'string' ? admission.run_id : admission.id, agent.id)
+        registry.noteRun(typeof admission.run_id === 'string' ? admission.run_id : admission.id, agent.id, admission.session_id ?? value?.session_id)
       } catch { /* the client validates the admission */ }
     }
     if (pinAfter) {
@@ -534,7 +582,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
     // A thread read through its agent is that agent's from now on, even if it never appeared in a list.
     const readSession = method === 'GET' ? sessionIdFromPath(upstreamPath) : ''
-    if (readSession) { try { registry.pin(readSession, agent.id) } catch { /* already another agent's */ } }
+    if (readSession) registry.pin(readSession, agent.id)
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
@@ -578,9 +626,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
       // One thread already claimed by another agent must not break this agent's whole list.
-      for (const id of sessionIdsIn(result)) { try { registry.pin(id, agent.id) } catch { /* pinned elsewhere */ } }
+      for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
       if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
+    if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
       const payload=JSON.parse(result.toString('utf8')), row=payload.session||payload;
       row.wizard_retry_input=await fullRetryInput(async offset=> {

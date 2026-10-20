@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { migrateJson, qualifySideRecords } from './thread-reference.mjs'
 
 export const TITLE_MAX = 40
 // A title that was on screen for less than this before being replaced was never a recognition anchor
@@ -87,6 +88,7 @@ export class ThreadTitleStore {
     this.now = now
     this.threads = {}
     this.mtime = -1
+    migrateJson(statePath, value => value.schema === 1 ? { ...value, threads: qualifySideRecords(value.threads ?? {}) } : value)
     this.load()
   }
 
@@ -101,6 +103,7 @@ export class ThreadTitleStore {
         for (const [id, record] of Object.entries(data.threads)) {
           if (!ID.test(id) || !record || typeof record !== 'object') continue
           threads[id] = {
+            agent_id: record.agent_id ?? 'hermes', session_id: record.session_id ?? id,
             title: typeof record.title === 'string' ? record.title : '',
             locked: record.locked === true,
             appliedFor: Number.isFinite(record.appliedFor) ? record.appliedFor : null,
@@ -132,6 +135,7 @@ export class ThreadTitleStore {
 
   _put(sessionId, record) {
     if (!ID.test(sessionId)) throw Object.assign(new Error('Invalid session id'), { status: 400 })
+    record = { ...record, agent_id: 'hermes', session_id: sessionId }
     this._save({ ...this.load(), [sessionId]: record })
     return structuredClone(record)
   }
