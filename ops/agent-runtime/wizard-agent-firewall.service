@@ -4,8 +4,12 @@
 # place without a gap. Removing them is deliberate: `wizard-agent-firewall remove`.
 [Unit]
 Description=Wizard OS restricted-agent host firewall
-After=network-pre.target docker.service
+# Up before networking and Docker, so restricted containers (restart: unless-stopped) never start unguarded at boot.
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target docker.service shutdown.target
 Wants=network-pre.target
+Conflicts=shutdown.target
 
 [Service]
 Type=oneshot

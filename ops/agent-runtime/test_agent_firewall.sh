@@ -80,6 +80,26 @@ iptables -E WIZARD-AGENTS WIZARD-AGENTS-NEXT; iptables -E WIZARD-AGENT-PORT WIZA
 : > /tmp/gaps
 PATH=/tmp/shim:$PATH sh "$FW" apply 8929 >/dev/null
 [ ! -s /tmp/gaps ] && ok "no gap when recovering an interrupted refresh" || bad "recovery gap: $(head -1 /tmp/gaps)"
+# Interrupted while dropping the old set: old range chain gone, old listener chain still there (with rules, or
+# flushed) but no longer hooked; only the -NEXT hooks guard. Recovery must keep every guard hooked throughout.
+for stale in populated flushed; do
+  sh "$FW" apply 8929 >/dev/null
+  iptables -E WIZARD-AGENTS WIZARD-AGENTS-NEXT; iptables -E WIZARD-AGENT-PORT WIZARD-AGENT-PORT-NEXT
+  iptables -N WIZARD-AGENT-PORT
+  [ "$stale" = populated ] && iptables -A WIZARD-AGENT-PORT -i lo -j RETURN && iptables -A WIZARD-AGENT-PORT -j DROP
+  : > /tmp/gaps
+  PATH=/tmp/shim:$PATH sh "$FW" apply 8929 >/dev/null
+  [ ! -s /tmp/gaps ] && sh "$FW" check 8929 >/dev/null && [ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] &&
+    ok "no gap recovering a half-dropped old set ($stale listener chain)" || bad "half-dropped recovery ($stale): $(head -1 /tmp/gaps)"
+done
+# Interrupted while hooking in: only the listener -NEXT hook landed. The old range chain still guards; no gap.
+sh "$FW" apply 8929 >/dev/null
+iptables -N WIZARD-AGENT-PORT-NEXT; iptables -A WIZARD-AGENT-PORT-NEXT -j DROP; iptables -I INPUT 1 -p tcp --dport 8929 -j WIZARD-AGENT-PORT-NEXT
+iptables -N WIZARD-AGENTS-NEXT; iptables -A WIZARD-AGENTS-NEXT -j DROP; iptables -I INPUT 1 -s 10.251.0.0/16 -j WIZARD-AGENTS-NEXT
+: > /tmp/gaps
+PATH=/tmp/shim:$PATH sh "$FW" apply 8929 >/dev/null
+[ ! -s /tmp/gaps ] && sh "$FW" check 8929 >/dev/null && [ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] &&
+  ok "no gap recovering a half-hooked new set" || bad "half-hooked recovery: $(head -1 /tmp/gaps)"
 sh "$FW" check 8929 >/dev/null && [ "$(iptables -S | grep -c -- '-NEXT')" = 0 ] && ok "recovered refresh leaves one hooked set" || bad "recovery left a bad state"
 # Leftovers of a refresh interrupted while building (unhooked -NEXT chains) are cleaned; the live set stays.
 iptables -N WIZARD-AGENTS-NEXT; iptables -A WIZARD-AGENTS-NEXT -j ACCEPT

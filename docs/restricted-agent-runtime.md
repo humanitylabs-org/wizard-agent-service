@@ -49,7 +49,10 @@ model.
   every other listener, also when its stored network is missing or malformed (fail closed).
 - Host firewall: `ops/agent-runtime/agent-firewall.sh` and `wizard-agent-firewall.service`. Install them as root.
   A refresh builds the new chains and hooks them in before the old ones go, so the guard never drops; an
-  interrupted refresh is finished by the next `apply` rather than torn down. Stopping the unit leaves the rules in
-  place; removal is `wizard-agent-firewall remove`. The functional test is `test_agent_firewall.sh`, which runs in
-  a privileged throwaway container. It checks after every single iptables change that each guard is still hooked,
-  for a normal refresh and for recovery from an interrupted one.
+  interrupted refresh is settled by the next `apply`, chain by chain, from the hooks actually in place: a fully
+  hooked new chain replaces the old one, a partly hooked one is dropped while the old one still guards. The unit
+  runs before networking and Docker at boot, so restricted containers never start unguarded. Stopping the unit
+  leaves the rules in place; removal is `wizard-agent-firewall remove`. The functional test is
+  `test_agent_firewall.sh`, which runs in a privileged throwaway container. It checks after every single iptables
+  change that each guard is still hooked, for a normal refresh and for recovery from refreshes interrupted while
+  hooking in the new set, while dropping the old set, and before the rename.

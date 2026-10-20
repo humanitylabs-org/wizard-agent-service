@@ -29,26 +29,29 @@ range_hook() { iptables -C INPUT -s "$1" -j "$RANGE" 2>/dev/null; }
 port_hook() { iptables -C INPUT -p tcp --dport "$PORT" -j "$LISTEN" 2>/dev/null; }
 
 chain_exists() { iptables -S "$1" >/dev/null 2>&1; }
-hooked() { iptables -S INPUT | grep -q -E -- "-j $1\$"; }
-all_next_hooks() {
-  iptables -C INPUT -s "$UPLINK" -j "$RANGE$NEXT" 2>/dev/null && iptables -C INPUT -s "$SANDBOX" -j "$RANGE$NEXT" 2>/dev/null &&
+next_complete() { # the chain's -NEXT copy carries every INPUT hook that chain needs
+  if [ "$1" = "$RANGE" ]; then
+    iptables -C INPUT -s "$UPLINK" -j "$RANGE$NEXT" 2>/dev/null && iptables -C INPUT -s "$SANDBOX" -j "$RANGE$NEXT" 2>/dev/null
+  else
     iptables -S INPUT | grep -q -E -- "-j $LISTEN$NEXT\$"
+  fi
 }
 
-# An interrupted refresh can leave the -NEXT chains as the only live guard. Finish that refresh instead of
-# tearing them down: rename any hooked -NEXT chain whose old chain is gone; if every -NEXT hook is in place the
-# -NEXT set is complete, so drop the old set and rename. Anything else left over is unhooked or partial while the
-# old set is still whole, so it can go.
+# An interrupted refresh can leave -NEXT chains behind, sometimes as the only live guard. Each chain is settled on
+# its own, by the hooks actually in place: a -NEXT copy that carries every hook its chain needs is complete, so the
+# old chain (whatever is left of it) goes and the copy is renamed into place; a -NEXT copy missing a hook was still
+# being hooked in, which means the old chain was untouched and still guards, so the copy goes. Either way a hook is
+# only removed while a complete one guards the same traffic.
 recover() {
   for chain in "$RANGE" "$LISTEN"; do
-    if chain_exists "$chain$NEXT" && ! chain_exists "$chain" && hooked "$chain$NEXT"; then iptables -E "$chain$NEXT" "$chain"; fi
+    chain_exists "$chain$NEXT" || continue
+    if next_complete "$chain"; then
+      drop_chains "$chain"
+      iptables -E "$chain$NEXT" "$chain"
+    else
+      drop_chains "$chain$NEXT"
+    fi
   done
-  if chain_exists "$RANGE$NEXT" && chain_exists "$LISTEN$NEXT" && all_next_hooks; then
-    drop_chains "$RANGE" "$LISTEN"
-    iptables -E "$RANGE$NEXT" "$RANGE"
-    iptables -E "$LISTEN$NEXT" "$LISTEN"
-  fi
-  drop_chains "$RANGE$NEXT" "$LISTEN$NEXT"
 }
 
 drop_chains() { # chain names: every INPUT jump into them (whatever port), then the chains themselves
