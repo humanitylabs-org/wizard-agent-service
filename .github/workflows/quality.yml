@@ -21,6 +21,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Synthetic subscription broker and inventory contracts
+        run: |
+          python3 -m venv .fixture-venv
+          .fixture-venv/bin/pip install fastapi==0.133.1 httpx==0.28.1
+          .fixture-venv/bin/python tests/test_account_lifecycle.py
+          .fixture-venv/bin/python tests/test_provider_accounts.py
+          node --test tests/provider-accounts.node.mjs
       - name: Fixture boots
         run: |
           (WIZARD_FIXTURE_PORT=8799 node scripts/run-fixture.mjs &) ; sleep 3

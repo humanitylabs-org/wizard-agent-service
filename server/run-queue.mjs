@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
+import { annotateProviderSignOut } from './provider-reconnect.mjs'
 import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
@@ -47,6 +48,19 @@ const safeStatus = (value) => {
 const parseJson = (value, fallback) => {
   try { return JSON.parse(value) }
   catch { return fallback }
+}
+
+// A failed run whose provider sign-in expired names the connection app that fixes it
+// (provider-reconnect.mjs). Classified at read time so runs that failed before this
+// existed (and stored payloads) get the same plain message and Open button.
+const failureProjection = (record) => {
+  const payload = record.payload && typeof record.payload === 'object' ? record.payload : {}
+  const safeError = typeof payload.safe_error === 'string' ? payload.safe_error : ''
+  if (record.status !== 'failed') return { safeError }
+  const annotated = annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(record.body, null))
+  return annotated.wizard_reconnect
+    ? { safeError: annotated.safe_error, reconnect: annotated.wizard_reconnect }
+    : { safeError }
 }
 
 const queuedInputPreview = (body) => {
@@ -357,7 +371,7 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
-      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
+      ...failureProjection(record),
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
@@ -403,7 +417,11 @@ export class DurableRunQueue {
       )
       SELECT current.public_run_id, current.session_id, current.status,
         current.waiting_reason, current.body, current.idempotency_key,
-        json_object('safe_error', json_extract(current.payload_json, '$.safe_error')) AS payload_json,
+        json_object('safe_error', json_extract(current.payload_json, '$.safe_error'),
+          'error', current.payload_json -> '$.error',
+          'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
+          'runtime', current.payload_json -> '$.runtime',
+          'usage', json_object('runtime', current.payload_json -> '$.usage.runtime')) AS payload_json,
         current.created_at, current.updated_at
       FROM ranked JOIN wizard_run_queue current USING (public_run_id)
       WHERE ranked.position = 1
@@ -414,7 +432,7 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
-      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
+      ...failureProjection(record),
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,

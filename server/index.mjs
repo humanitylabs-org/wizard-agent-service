@@ -150,6 +150,10 @@ const server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  // My skin (server/my-skin.mjs): <Files root>/Skins/My skin.css by default (the user-files root, else the
+  // media root). WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
+  ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).
@@ -176,8 +180,14 @@ const server = createWizardServer({
   ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
   // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
+  // New container agents run in the restricted runtime (their own networks, edge sidecar to WIZARD_AGENT_PORT).
+  agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+if (process.env.WIZARD_AGENT_ISOLATION === 'restricted' && !process.env.WIZARD_AGENT_PORT) {
+  process.stderr.write('WIZARD_AGENT_ISOLATION=restricted needs WIZARD_AGENT_PORT (the agent-only listener); the service was not started.\n')
+  process.exit(1)
+}
 // Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
 if (process.env.WIZARD_AGENT_PORT) {
   // Agents reach the main listener's loopback too: without an owner proof, a loopback caller is the owner there.
@@ -187,8 +197,10 @@ if (process.env.WIZARD_AGENT_PORT) {
   }
   const agentHost = process.env.WIZARD_AGENT_HOST || host
   const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
-  if (!privateAddress.test(agentHost) && !(container && agentHost === '0.0.0.0')) {
-    process.stderr.write('WIZARD_AGENT_HOST must be a loopback or private network address.\n')
+  // 0.0.0.0 is allowed: every agent key is accepted only from that agent's own uplink subnet, and the host
+  // firewall admits this port from the agent uplink range only (the uplink gateways come and go with compose).
+  if (!privateAddress.test(agentHost) && agentHost !== '0.0.0.0') {
+    process.stderr.write('WIZARD_AGENT_HOST must be 0.0.0.0, a loopback or a private network address.\n')
     process.exit(1)
   }
   const agentPort = Number(process.env.WIZARD_AGENT_PORT)

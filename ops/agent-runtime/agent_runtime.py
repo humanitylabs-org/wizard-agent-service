@@ -25,10 +25,13 @@ Errors are short symbolic codes; secrets are never returned or logged.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -41,7 +44,29 @@ ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
 DEFAULT_IMAGE = "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2"
 DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
-LOCK = threading.Lock()
+# The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
+RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
+RESTRICTED_SERVICE = "agent"
+AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
+MANAGED_FILES = (".env", "config.yaml")
+SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
+UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
+SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
+LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
+_AGENT_LOCKS: dict = {}
+_AGENT_LOCKS_GUARD = threading.Lock()
+
+
+def agent_lock(agent_id: str) -> threading.Lock:
+    """One lifecycle lock per restricted agent: a slow or stuck agent never holds up the others."""
+    with _AGENT_LOCKS_GUARD:
+        return _AGENT_LOCKS.setdefault(agent_id, threading.Lock())
+
+
+def lifecycle_lock(chosen, restricted_driver, agent_id: str) -> threading.Lock:
+    """Restricted agents share no state between lifecycle actions, so they lock per agent; every other driver
+    keeps the global lock (RuntipiDriver._install patches process-wide wam.private functions)."""
+    return agent_lock(agent_id) if restricted_driver is not None and chosen is restricted_driver else LOCK
 
 
 class RuntimeFailure(Exception):
@@ -53,13 +78,15 @@ class RuntimeFailure(Exception):
 
 # ---------------------------------------------------------------- docker
 
-def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900, check: bool = True) -> subprocess.CompletedProcess:
+def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900, check: bool = True,
+           env: dict | None = None) -> subprocess.CompletedProcess:
     sock = Path("/var/run/docker.sock")
     if sock.exists() and os.access(sock, os.W_OK):
         cmd = ["docker", *args]
     else:   # the owner is in the docker group but this login session is not (e.g. a systemd user unit)
         cmd = ["sg", "docker", "-c", shlex.join(["docker", *args])]
-    run = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout)
+    run = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout,
+                         env={**os.environ, **env} if env else None)
     if check and run.returncode:
         sys.stderr.write(f"[agent-runtime] docker {' '.join(args[:3])} failed: {run.stderr[-400:]}\n")
         raise RuntimeFailure("docker_failed")
@@ -114,11 +141,17 @@ class Agents:
                 return line
         return ""
 
+    def managed(self, agent_id: str) -> Path:
+        """Where the Service writes a restricted agent's managed files (.env, config.yaml); synced into its home."""
+        return self.root / agent_id / "managed"
+
     def add_provider_keys(self, agent: dict) -> None:
-        """The Service writes home/.env without provider keys; add the ones this agent's provider needs."""
-        env_path = self.home(agent["id"]) / ".env"
+        """The Service writes .env without provider keys; add the ones this agent's provider needs."""
+        env_path = (self.managed(agent["id"]) if restricted(agent) else self.home(agent["id"])) / ".env"
         try:
             lines = env_path.read_text().splitlines()
+        except PermissionError:
+            raise RuntimeFailure("agent_home_not_writable", 409) from None
         except OSError:
             raise RuntimeFailure("agent_not_prepared", 409) from None
         lines = [line for line in lines if not line.startswith("TINFOIL_API_KEY=")]
@@ -128,9 +161,36 @@ class Agents:
                 raise RuntimeFailure("provider_not_configured", 503)
             lines.append(f"TINFOIL_API_KEY={key}")
         tmp = env_path.with_name(f".env.tmp-{os.getpid()}")
-        tmp.write_text("\n".join(lines) + "\n")
+        try:
+            tmp.write_text("\n".join(lines) + "\n")
+        except PermissionError:   # a restricted agent's home belongs to its container user after the first start
+            raise RuntimeFailure("agent_home_not_writable", 409) from None
         os.chmod(tmp, 0o600)
         tmp.replace(env_path)
+
+
+    def secret(self, agent_id: str, name: str) -> str:
+        try:
+            return (self.root / agent_id / name).read_text().strip()
+        except OSError:
+            return ""
+
+
+def restricted(agent: dict) -> bool:
+    return (agent.get("runtime") or {}).get("isolation") == "restricted"
+
+
+def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Network]:
+    """The agent's own /28 pair, as allocated by the Agent Service; anything else is refused."""
+    network = (agent.get("runtime") or {}).get("network") or {}
+    try:
+        uplink = ipaddress.ip_network(str(network.get("uplink")), strict=True)
+        sandbox = ipaddress.ip_network(str(network.get("sandbox")), strict=True)
+    except ValueError:
+        raise RuntimeFailure("agent_network_invalid", 400) from None
+    if uplink.prefixlen != 28 or sandbox.prefixlen != 28 or not uplink.subnet_of(UPLINK_POOL) or not sandbox.subnet_of(SANDBOX_POOL):
+        raise RuntimeFailure("agent_network_invalid", 400)
+    return uplink, sandbox
 
 
 # ---------------------------------------------------------------- package
@@ -253,6 +313,120 @@ class ComposeDriver:
     def stop(self, agent: dict) -> dict:
         docker(["compose", "-p", self.project(agent["id"]), "-f", str(self._file(agent)), "stop"], timeout=300)
         return {"ok": True}
+
+
+class RestrictedDriver:
+    """Runs an agent in the restricted runtime: the vendored compose file unchanged, configured by environment
+    (README environment contract). Kept off Runtipi's shared network; the compose project holds the agent and its
+    sidecars, so stop/start act on all of them."""
+
+    def __init__(self, agents: Agents, runtime_dir: Path, image: str, listener_port: int):
+        self.agents, self.image, self.listener_port = agents, image, listener_port
+        self.runtime_dir = runtime_dir.resolve()
+        self.compose_file = self.runtime_dir / "compose.yml"
+        verify_vendored(self.runtime_dir)
+
+    def project(self, agent_id: str) -> str:
+        return f"agent-{agent_id}"
+
+    def env(self, agent: dict) -> dict:
+        uplink, sandbox = agent_networks(agent)
+        api_key = self.agents.secret(agent["id"], "runtime.key")
+        gateway_key = self.agents.secret(agent["id"], "gateway.key")
+        if not api_key or not gateway_key:
+            raise RuntimeFailure("agent_not_prepared", 409)
+        env = {
+            "AGENT_PROJECT": self.project(agent["id"]),
+            "AGENT_HOME_VOLUME": str(self.agents.home(agent["id"])),
+            "AGENT_API_KEY": api_key,
+            "EDGE_TOKEN_SHA256": hashlib.sha256(gateway_key.encode()).hexdigest(),
+            "AGENT_UPLINK_SUBNET": str(uplink),
+            "AGENT_SANDBOX_SUBNET": str(sandbox),
+            "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
+            "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
+            "EDGE_UPSTREAM_PORT": str(self.listener_port),
+            "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
+        }
+        if self.image:
+            env["AGENT_IMAGE"] = self.image
+        return env
+
+    def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
+        return docker(["compose", "-p", self.project(agent["id"]), "-f", str(self.compose_file), *args],
+                      timeout=timeout, env=self.env(agent))
+
+    def sync_home(self, agent: dict) -> None:
+        """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
+        only the file capabilities, like the runtime's own home-init. The host never writes into the home itself."""
+        managed = self.agents.managed(agent["id"])
+        missing = [name for name in MANAGED_FILES if not (managed / name).is_file()]
+        if missing:
+            raise RuntimeFailure("agent_not_prepared", 409)
+        home = self.agents.home(agent["id"])
+        home.mkdir(mode=0o700, exist_ok=True)
+        # Only ever called with the agent stopped (see _prepare), so nothing in the home changes underneath us. The
+        # agent controlled it before, so nothing there is trusted: each file is written into a fresh directory made
+        # by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target. rename(2)
+        # replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes the sync
+        # fail, which only stops that agent.
+        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
+                         f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
+        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
+                  f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
+        name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
+        try:
+            docker(["run", "--rm", "--name", name, "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
+                    "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
+                    "-v", f"{home}:/opt/data", "-v", f"{managed}:/managed:ro", "--entrypoint", "/bin/sh", SIDECAR_IMAGE,
+                    "-c", script], timeout=120)
+        except subprocess.TimeoutExpired:
+            # Killing the docker client leaves the container running: remove it, then fail this agent only.
+            docker(["rm", "-f", name], timeout=60, check=False)
+            raise RuntimeFailure("agent_sync_timeout", 504)
+
+    def _prepare(self, agent: dict) -> None:
+        if (agent.get("model") or {}).get("provider") == "tinfoil":
+            # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
+            raise RuntimeFailure("restricted_provider_unsupported", 409)
+        self.agents.add_provider_keys(agent)
+        self._compose(agent, "build", timeout=1800)
+        # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
+        # starts it again with the new files.
+        self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
+        self.sync_home(agent)
+
+    def apply(self, agent: dict) -> dict:
+        self._prepare(agent)
+        project = self.project(agent["id"])
+        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
+        return {"ok": True, "driver": "restricted", "project": project}
+
+    def start(self, agent: dict) -> dict:
+        self._prepare(agent)
+        self._compose(agent, "up", "-d", timeout=1800)
+        return {"ok": True}
+
+    def stop(self, agent: dict) -> dict:
+        self._compose(agent, "stop", timeout=300)
+        return {"ok": True}
+
+
+def verify_vendored(runtime_dir: Path) -> None:
+    """The runtime is used exactly as reviewed: every file listed in SOURCE.txt must match its digest."""
+    try:
+        lines = (runtime_dir / "SOURCE.txt").read_text().splitlines()
+    except OSError:
+        raise SystemExit("restricted runtime: SOURCE.txt missing") from None
+    listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
+    if not any(name == "./compose.yml" for _, name in listed):
+        raise SystemExit("restricted runtime: compose.yml is not listed in SOURCE.txt")
+    for digest, name in listed:
+        try:
+            actual = hashlib.sha256((runtime_dir / name).read_bytes()).hexdigest()
+        except OSError:
+            raise SystemExit(f"restricted runtime: {name} missing") from None
+        if actual != digest:
+            raise SystemExit(f"restricted runtime: {name} differs from the reviewed revision")
 
 
 class RuntipiDriver:
@@ -440,8 +614,10 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     meta = payload.get("display_metadata") if isinstance(payload.get("display_metadata"), dict) else {}
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
-    cid = container or container_for(driver.project(agent["id"]), service_names(agent)[0])
-    run = docker(["exec", "-i", "-u", "hermes", cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container or container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
         code = (run.stderr.strip().splitlines() or ["delivery_failed"])[-1]
@@ -451,7 +627,16 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
 
 # ---------------------------------------------------------------- HTTP
 
-def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
+def driver_for(agent: dict, driver, restricted_driver):
+    """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
+    if restricted(agent):
+        if restricted_driver is None:
+            raise RuntimeFailure("restricted_runtime_unavailable", 503)
+        return restricted_driver
+    return driver
+
+
+def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
 
@@ -499,11 +684,12 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = ""):
                     self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
                     return
                 agent = agents.read(agent_id)
+                chosen = driver_for(agent, driver, restricted_driver)
                 if action == "deliver":
-                    self._json(200, deliver(driver, agent, payload))
+                    self._json(200, deliver(chosen, agent, payload))
                     return
-                with LOCK:
-                    result = getattr(driver, action)(agent)
+                with lifecycle_lock(chosen, restricted_driver, agent_id):
+                    result = getattr(chosen, action)(agent)
                 self._json(200, result)
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})
@@ -526,6 +712,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
+    ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
+                    help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
+    ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:
@@ -537,7 +726,11 @@ def main(argv: list[str] | None = None) -> int:
         driver = RuntipiDriver(agents, args.image, args.proxy_image, args.wam, args.home_mount)
     else:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container))
+    restricted_driver = None
+    if (args.restricted_runtime_dir / "compose.yml").exists():
+        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
+                                             args.agent_listener_port)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
     return 0

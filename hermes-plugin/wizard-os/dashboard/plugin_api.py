@@ -22,10 +22,70 @@ from datetime import timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from importlib.util import spec_from_file_location, module_from_spec
+
+_spec = spec_from_file_location('wizard_provider_accounts', Path(__file__).with_name('provider_accounts.py'))
+assert _spec is not None and _spec.loader is not None
+_accounts = module_from_spec(_spec)
+_spec.loader.exec_module(_accounts)
+_lspec = spec_from_file_location('wizard_account_lifecycle', Path(__file__).with_name('account_lifecycle.py'))
+assert _lspec is not None and _lspec.loader is not None
+_lifecycle = module_from_spec(_lspec)
+_lspec.loader.exec_module(_lifecycle)
 
 router = APIRouter()
+
+# Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
+# auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a
+# path that provably keeps that login; until then set WIZARD_ACCOUNT_CHANGES=1 only on a box that has been checked.
+def _changes_on() -> bool:
+    return os.environ.get('WIZARD_ACCOUNT_CHANGES', '0') == '1'
+_CHANGES_OFF = 'Adding and removing subscriptions here is switched off for now; manage them with stock Hermes.'
+
+
+@router.get('/provider-accounts/{provider}/operations/{operation}')
+def account_operation_status(provider: str, operation: str, response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    try:
+        return _lifecycle.broker.poll(provider, operation)
+    except _lifecycle.BrokerError:
+        raise HTTPException(404, 'Unknown operation') from None
+
+
+@router.post('/provider-accounts/{provider}/operations')
+async def account_operation(provider: str, request: Request, response: Response):
+    # Stock dashboard auth protects all plugin routes. Require a non-simple
+    # request too: cross-origin forms cannot initiate provider operations.
+    response.headers['Cache-Control'] = 'no-store'
+    if not _changes_on():
+        raise HTTPException(403, _CHANGES_OFF)
+    if request.headers.get('X-Wizard-Account-Action') != '1' or request.headers.get('content-type', '').split(';')[0] != 'application/json':
+        raise HTTPException(403, 'Account action header required')
+    if request.headers.get('sec-fetch-site') == 'cross-site':
+        raise HTTPException(403, 'Cross-site action rejected')
+    raw = b''
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > 4096:
+            raise HTTPException(413, 'Request too large')
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) - {'action', 'target', 'label', 'confirmed', 'operation', 'code'}:
+            raise _lifecycle.BrokerError('Invalid request')
+        action = body.get('action')
+        if action == 'cancel':
+            return _lifecycle.broker.cancel(provider, body.get('operation'))
+        if action == 'submit':
+            return _lifecycle.broker.submit(provider, body.get('operation'), body.get('code'))
+        return _lifecycle.broker.start(provider, action, body.get('target'), body.get('label', ''), body.get('confirmed'))
+    except _lifecycle.BrokerError as error:
+        raise HTTPException(409, str(error)) from None
+    except (ValueError, TypeError):
+        raise HTTPException(409, 'Invalid account request') from None
+    except Exception:
+        raise HTTPException(503, 'Account broker unavailable; check inventory before retrying') from None
 _CACHE: dict = {"at": 0.0, "value": None}
 _TTL = 60.0
 
@@ -82,6 +142,36 @@ def get_chatgpt_usage():
         value = {"ok": False, "reason": f"ChatGPT usage read failed ({type(e).__name__})."}
     _CACHE.update(at=now, value=value)
     return value
+
+
+@router.get('/provider-accounts/{provider}')
+def get_provider_accounts(provider: str):
+    if provider not in _accounts.PROVIDERS:
+        raise HTTPException(404, 'Unknown provider')
+    try:
+        result = _accounts.provider_accounts(provider)
+        # Changes off (the default): the listing needs no Hermes config at all.
+        if not _changes_on():
+            reason = _CHANGES_OFF
+            result['management'] = {**result['management'], 'status': 'off', 'message': reason}
+            result['actions'] = {k: False for k in result.get('actions', {})}
+            for row in result.get('accounts', []):
+                if isinstance(row.get('actions'), dict):
+                    row['actions'] = {k: False for k in row['actions']}
+            return result
+        from hermes_cli.config import load_config_readonly
+        auth = (load_config_readonly() or {}).get('auth') or {}
+        reason = None
+        if provider == 'chatgpt' and auth.get('codex_login_flow', 'device_code') != 'device_code':
+            reason = 'Account changes require the stock device_code login flow.'
+        if reason:
+            result['management'] = {**result['management'], 'status': 'blocked', 'message': reason}
+            result['actions'] = {k: False for k in result.get('actions', {})}
+            for row in result.get('accounts', []):
+                row['actions'] = {k: False for k in row.get('actions', {})}
+        return result
+    except Exception:
+        raise HTTPException(503, 'Hermes account inventory unavailable') from None
 
 
 # This file is imported directly by the dashboard (not as a Python package).
