@@ -46,7 +46,7 @@ import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
-import { agentPathAllowed, createPrincipalResolver, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
+import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 
@@ -109,7 +109,7 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser.
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG.
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
@@ -2166,6 +2166,7 @@ export function createWizardServer(options = {}) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
@@ -3657,6 +3658,8 @@ export function createWizardServer(options = {}) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
+    agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
+    agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
   })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
   try {
     if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
@@ -3681,7 +3684,8 @@ export function createWizardServer(options = {}) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await principals.attach(request)
-      if (principal.kind === 'refused') { sendJson(response, 401, { error: 'agent_credential_required', check: 'principal.agent_ingress' }); return }
+      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
