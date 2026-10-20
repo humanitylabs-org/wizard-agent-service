@@ -93,7 +93,12 @@ def main():
         dest = ROOT / 'src' / name
         dest.mkdir(exist_ok=True)
         with tarfile.open(stage / (name + '.tar')) as tf:
-            tf.extractall(dest, filter='data')
+            # The repo tracks a dev-only node_modules symlink to an absolute host path; drop it (npm ci rebuilds).
+            def keep(member, path):
+                if member.issym() and member.linkname.startswith('/'):
+                    return None
+                return tarfile.data_filter(member, path)
+            tf.extractall(dest, filter=keep)
     firewall = ROOT / 'src/service/ops/agent-runtime'
     run('sudo', 'install', '-m', '0755', str(firewall / 'agent-firewall.sh'), '/usr/local/sbin/wizard-agent-firewall')
     run('sudo', 'install', '-m', '0644', str(firewall / 'wizard-agent-firewall.service'), '/etc/systemd/system/wizard-agent-firewall.service')
