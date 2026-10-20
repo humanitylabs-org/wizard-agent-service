@@ -150,10 +150,11 @@ def relay(a):
     require(Path('/sys/class/net', bridge).exists(), 'relay bridge absent')
     out = Path(a.evidence_dir)
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    out.chmod(0o700)
     pcap = out / ('relay-' + str(time.time_ns()) + '.pcap')
     pcap.touch(mode=0o600, exist_ok=False)
     # File contains ciphertext and bearer tokens: private evidence only, never print packet contents.
-    cap = subprocess.Popen(['tcpdump', '-i', bridge, '-s', '0', '-U', '-w', str(pcap), 'tcp'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    cap = subprocess.Popen(['tcpdump', '-Z', 'root', '-i', bridge, '-s', '0', '-U', '-w', str(pcap), 'tcp'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         time.sleep(1)
         require(cap.poll() is None, 'tcpdump could not start')
