@@ -8,6 +8,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { aiConnectionUrl } from './ai-usage.mjs'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -35,15 +36,11 @@ export const OUTSIDE_TOOLS = [
 const OUTSIDE_IDS = new Set(OUTSIDE_TOOLS.map((tool) => tool.id))
 // Toolsets that touch files; `files: none` turns them off as well.
 const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
-// Tinfoil chat models an agent may be allowed to use.
-export const TINFOIL = {
-  id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
-}
+
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
 export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
-export const LOCAL = { id: 'local', label: 'This box (local model)', confidential: true, models: [] }
+
 // Providers that the AI Accounts app signs in. Offered for standard agents only.
 const AI_ACCOUNTS = new Map([['anthropic', 'Claude (AI Accounts)'], ['openai-codex', 'ChatGPT (AI Accounts)']])
 export const PRESETS = [
@@ -98,8 +95,16 @@ function writeTextAtomic(path, text, mode = 0o600) {
   renameSync(tmp, path)
 }
 
-export function isConfidentialProvider(provider) {
-  return provider === TINFOIL.id || provider === LOCAL.id
+export const migrateProvider = (id) => id === 'tinfoil' ? 'wizard-tinfoil' : id === 'local' ? 'wizard-local-model' : id
+
+export function privateProviderApps(value) {
+  return (Array.isArray(value?.apps) ? value.apps : []).filter((app) =>
+    /^[a-z0-9][a-z0-9-]{0,63}$/u.test(app?.id ?? '') && app?.private_inference &&
+    typeof app.private_inference === 'object' && !Array.isArray(app.private_inference))
+}
+
+export function isConfidentialProvider(provider, apps = []) {
+  return apps.some((app) => app.id === migrateProvider(provider) && app.private_inference)
 }
 
 function normalizeAppearance(value, privacy) {
@@ -143,16 +148,17 @@ export function normalizePermissions(base, patch = {}) {
 }
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
-function assertPrivateWalls(agent) {
+function assertPrivateWalls(agent, apps) {
   if (agent.privacy !== 'private') return
-  if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
+  if (!isConfidentialProvider(agent.model.provider, apps)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   if (agent.model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
 }
 
 function validateModel(model, providers, { privacy, confirmDowngrade = false } = {}) {
   if (!model || typeof model !== 'object' || Array.isArray(model)) fail(400, 'invalid_model', 'agent.model')
-  const provider = providers.find((item) => item.id === model.provider)
+  const provider = providers.find((item) => item.id === migrateProvider(model.provider))
   if (!provider) fail(400, 'unknown_provider', 'agent.model.provider')
+  if (provider.available === false) fail(503, 'private_provider_unavailable', 'agent.model.provider')
   if (privacy === 'private' && !provider.confidential && !confirmDowngrade) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   const known = provider.models.map((item) => item.id)
   if (typeof model.model !== 'string' || !known.includes(model.model)) fail(400, 'unknown_model', 'agent.model.model')
@@ -163,6 +169,7 @@ function validateModel(model, providers, { privacy, confirmDowngrade = false } =
   allowed = [...new Set(allowed)]
   if (!allowed.includes(model.model)) fail(400, 'invalid_allowed_models', 'agent.model.allowed_models')
   const fallback = model.fallback === true
+  if (provider.confidential && fallback) fail(409, 'private_no_fallback', 'agent.fallback')
   return { provider: provider.id, model: model.model, allowed_models: allowed, fallback }
 }
 
@@ -190,11 +197,11 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
  */
 export function agentForModel(agents, route) {
   const model = typeof route?.model === 'string' ? route.model.trim() : ''
-  const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
-  if (!model || !isConfidentialProvider(provider)) return null
+  const provider = typeof route?.provider === 'string' ? migrateProvider(route.provider.trim()) : ''
+  if (!model || !provider) return null
   return agents
     .filter((agent) => agent && agent.id !== MAIN_AGENT_ID && agent.privacy === 'private'
-      && agent.model?.provider === provider && Array.isArray(agent.model.allowed_models) && agent.model.allowed_models.includes(model))
+      && migrateProvider(agent.model?.provider) === provider && Array.isArray(agent.model.allowed_models) && agent.model.allowed_models.includes(model))
     .sort((a, b) => (Number(a.created_at) || 0) - (Number(b.created_at) || 0) || String(a.id).localeCompare(String(b.id)))[0] ?? null
 }
 
@@ -218,7 +225,7 @@ export function parseAgentFile(value, id) {
       ...value,
       label: cleanLabel(value.label, id),
       appearance: normalizeAppearance(value.appearance, value.privacy),
-      model: { provider: model.provider, model: model.model, allowed_models: model.allowed_models.filter((m) => typeof m === 'string'), fallback: model.fallback === true },
+      model: { provider: migrateProvider(model.provider), model: model.model, allowed_models: model.allowed_models.filter((m) => typeof m === 'string'), fallback: model.fallback === true },
       permissions: {
         preset: PRESET.has(preset) ? preset : 'standard',
         ...normalizePermissions({ outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' }, fields),
@@ -242,14 +249,9 @@ export function agentAppIds(agent) {
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
 const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
 
-/**
- * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
- * combination up front instead of starting an agent whose model route does not exist.
- */
+/** Kept as a compatibility export; every installed private provider has an in-seal client. */
 export function assertIsolationSupports(agent) {
-  if (agent.runtime?.isolation === 'restricted' && agent.model?.provider === TINFOIL.id) {
-    fail(409, 'restricted_provider_unsupported', 'agent.runtime.isolation', 'the restricted runtime has no Tinfoil attestation sidecar yet')
-  }
+  // Both drivers support the same in-seal private client.
 }
 
 export function wantsGateway(agent, gatewayUrl) {
@@ -258,9 +260,9 @@ export function wantsGateway(agent, gatewayUrl) {
 }
 
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
-export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '' } = {}) {
+export function hermesConfigYaml(agent, { privateProvider = agent.privacy === 'private', contextLength = 0, gatewayUrl = '' } = {}) {
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
-  tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
+  const clientUrl = `http://agent-${agent.id}-client:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
@@ -270,17 +272,15 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     'model:',
     `  default: ${yamlString(agent.model.model)}`,
   ]
-  if (agent.model.provider === TINFOIL.id) {
-    lines.push('  provider: custom', `  base_url: ${yamlString(tinfoilUrl)}`, '  api_key: ${TINFOIL_API_KEY}')
+  if (privateProvider) {
+    lines.push('  provider: custom', `  base_url: ${yamlString(clientUrl)}`, '  api_key: none')
     if (contextLength > 0) lines.push(`  context_length: ${Math.floor(contextLength)}`)
-  } else if (agent.model.provider === LOCAL.id) {
-    lines.push('  provider: custom', '  base_url: ${WIZARD_LOCAL_MODEL_URL}', '  api_key: ${WIZARD_LOCAL_MODEL_KEY}')
   } else {
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
-  const overrides = agent.model.provider === TINFOIL.id
+  const overrides = migrateProvider(agent.model.provider) === 'wizard-tinfoil'
     ? [...TINFOIL_NO_REASONING].filter((id) => (agent.model.allowed_models ?? [agent.model.model]).includes(id)) : []
   if (overrides.length) {
     lines.push('model_overrides:', '  custom:', ...overrides.flatMap((id) => [`    ${yamlString(id)}:`, '      supports_reasoning: false']))
@@ -298,7 +298,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
 
 export function agentEnvFile({ apiKey, gatewayKey = '' }) {
   return [
-    '# Managed by the Wizard OS Agent Service. Secrets for this agent only; the runtime adds provider keys below.',
+    '# Managed by the Wizard OS Agent Service. Secrets for this agent only; no provider keys.',
     `API_SERVER_KEY=${apiKey}`,
     'API_SERVER_HOST=0.0.0.0',
     'API_SERVER_PORT=8642',
@@ -346,7 +346,7 @@ export function createAgentRegistry(options = {}) {
   // sandbox networks and reach the Service only through their edge sidecar, which forwards to the agent-only listener.
   const isolation = options.isolation === 'restricted' ? 'restricted' : ''
   const restricted = (agent) => agent?.runtime?.isolation === 'restricted'
-  const gatewayUrlFor = (agent) => (restricted(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
+  const gatewayUrlFor = (agent) => ((restricted(agent) || agent?.runtime?.private_client) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
 
@@ -542,7 +542,7 @@ export function createAgentRegistry(options = {}) {
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
     // A restricted agent is reached only through its edge relay, published on host loopback at its port.
-    if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
+    if (restricted(agent) || agent.runtime?.private_client) return `http://${upstreamHost}:${agent.runtime.port}`
     if (upstreamMode === 'network') {
       const url = new URL(String(agent.runtime.api || ''))
       if (url.protocol !== 'http:' || url.hostname !== agent.runtime.app_id || url.username || url.password || url.pathname !== '/') {
@@ -579,8 +579,20 @@ export function createAgentRegistry(options = {}) {
   }
 
   async function providers() {
-    const out = [TINFOIL]
-    if (Array.isArray(options.localModels) && options.localModels.length) out.push({ ...LOCAL, models: options.localModels.map((id) => ({ id, label: id })) })
+    const out = await Promise.all(privateApps().map(async (app) => {
+      const kind = ['attested-relay', 'local'].includes(app.private_inference.kind) ? app.private_inference.kind : ''
+      const row = { id: app.id, label: cleanLabel(app.name, app.id), confidential: true, kind, models: [], available: false, error: 'private_provider_unavailable' }
+      const url = aiConnectionUrl(app, options.aiConnectionAddress === 'internal' ? 'internal' : 'local')
+      if (app.status !== 'running' || !url || !kind) return row
+      try {
+        const response = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(4000) })
+        if (!response.ok) return row
+        const value = await response.json()
+        const models = (Array.isArray(value.models) ? value.models : []).filter((m) => typeof m?.id === 'string' && m.id.length > 0 && m.id.length < 120).map((m) => ({ id: m.id, label: cleanLabel(m.label, m.id) }))
+        if (!models.length || (value.status && value.status !== 'connected')) return row
+        return { ...row, models, available: true, error: '' }
+      } catch { return row }
+    }))
     let main = []
     try { main = await mainProviders() } catch { main = [] }
     for (const item of Array.isArray(main) ? main : []) {
@@ -590,6 +602,29 @@ export function createAgentRegistry(options = {}) {
       if (models.length) out.push({ id, label: AI_ACCOUNTS.get(id), confidential: false, models: models.map((m) => ({ id: m, label: m })) })
     }
     return out
+  }
+
+  function privateApps() { return privateProviderApps(readJson(appsJsonPath)) }
+
+  function sealRuntime(agent) {
+    if (agent.privacy === 'private' || isConfidentialProvider(agent.model.provider, privateApps())) {
+      agent.model.fallback = false
+      agent.runtime = { ...agent.runtime, private_client: true, network: agent.runtime.network || nextNetwork() }
+    }
+  }
+
+  async function assertProviderAvailable(agent) {
+    if (agent.privacy !== 'private' && !agent.runtime?.private_client && !isConfidentialProvider(agent.model.provider, privateApps())) return
+    const app = privateApps().find((p) => p.id === agent.model.provider)
+    if (!app || app.status !== 'running') fail(503, 'private_provider_unavailable', 'agent.model.provider')
+    const url = aiConnectionUrl(app, options.aiConnectionAddress === 'internal' ? 'internal' : 'local')
+    let provider
+    try {
+      const response = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(4000) })
+      const value = response.ok ? await response.json() : {}
+      provider = { confidential: true, available: Array.isArray(value.models) && value.models.some((m) => m.id === agent.model.model) && (!value.status || value.status === 'connected') }
+    } catch { /* fail closed below */ }
+    if (!provider?.confidential || !provider.available) fail(503, 'private_provider_unavailable', 'agent.model.provider')
   }
 
   function installedApps() {
@@ -644,13 +679,13 @@ export function createAgentRegistry(options = {}) {
   /** The uplink subnet an agent's edge connects from ('' = this agent has no agent-only network). */
   function agentUplink(id) {
     const agent = read(id)
-    const uplink = restricted(agent) ? agent.runtime?.network?.uplink : ''
+    const uplink = (restricted(agent) || agent?.runtime?.private_client) ? agent.runtime?.network?.uplink : ''
     return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
   }
 
   /** Whether an agent runs in the restricted runtime (its key is then bound to the agent-only listener). */
   function agentRestricted(id) {
-    try { return restricted(read(id)) } catch { return false }
+    try { const agent = read(id); return restricted(agent) || Boolean(agent?.runtime?.private_client) } catch { return false }
   }
 
   function nextPort() {
@@ -678,10 +713,10 @@ export function createAgentRegistry(options = {}) {
       gateway = randomBytes(32).toString('base64url')
       writeTextAtomic(join(dir, 'gateway.key'), `${gateway}\n`)
     }
-    // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
+    // Provider credentials stay exclusively in the provider app.
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway }))
+    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { privateProvider: agent.privacy === 'private' || agent.runtime?.private_client || isConfidentialProvider(agent.model.provider, privateApps()), contextLength: options.contextLength, gatewayUrl: agentGateway }))
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
@@ -721,7 +756,8 @@ export function createAgentRegistry(options = {}) {
       },
       created_at: Math.floor(now() / 1000),
     }
-    assertPrivateWalls(agent)
+    assertPrivateWalls(agent, privateApps())
+    sealRuntime(agent)
     assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
     try {
@@ -780,13 +816,21 @@ export function createAgentRegistry(options = {}) {
     if (body.model !== undefined) {
       const confirm = body.confirm_downgrade === true
       next.model = validateModel({ ...agent.model, ...body.model, allowed_models: body.model?.allowed_models ?? (body.model?.model && body.model.model !== agent.model.model ? undefined : agent.model.allowed_models) }, await providers(), { privacy: agent.privacy, confirmDowngrade: confirm })
-      if (agent.privacy === 'private' && !isConfidentialProvider(next.model.provider)) {
+      if (agent.privacy === 'private' && !isConfidentialProvider(next.model.provider, privateApps())) {
         // #59: a downgrade would open the private agent's history to other agents. It stays private; move what the
         // owner approves into a standard agent instead (the private agent publishes copies, spec/AGENTS.md 6).
         sealed('a private agent cannot move to a public model')
       }
     }
-    assertPrivateWalls(next)
+    assertPrivateWalls(next, privateApps())
+    sealRuntime(next)
+    if (agent.runtime?.private_client && next.privacy !== 'private' && !isConfidentialProvider(next.model.provider, privateApps())) {
+      // Stop/revoke through the old record before publishing the new provider. Failure leaves the old seal intact.
+      if (!runtime?.delete) fail(503, 'runtime_unavailable', 'agent.runtime')
+      await runtime.delete(id)
+      delete next.runtime.private_client
+      if (!restricted(next)) delete next.runtime.network
+    }
     assertIsolationSupports(next)
     const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
@@ -804,9 +848,25 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    if (running) {
+      await assertProviderAvailable(agent)
+      sealRuntime(agent)
+      writeJsonAtomic(join(folder(id), 'agent.json'), agent, 0o600)
+      writeHarnessFiles(agent)
+    }
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
     try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     return agent
+  }
+
+  async function remove(id) {
+    const agent = read(id)
+    if (!agent || id === MAIN_AGENT_ID) fail(404, 'agent_not_found', 'agent.id')
+    if (!runtime?.delete) fail(503, 'runtime_unavailable', 'agent.runtime')
+    await runtime.delete(id)
+    // Retain owner data; deleting de-registers the agent, not its history.
+    rmSync(join(folder(id), 'agent.json'))
+    return { ok: true }
   }
 
   // Thread pins: session id -> agent id, set when the thread is created. Absent = the main agent.
@@ -836,7 +896,7 @@ export function createAgentRegistry(options = {}) {
   }
 
   return {
-    agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
+    agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, assertProviderAvailable, create, update, setRunning, remove,
     pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
@@ -881,6 +941,7 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
+    delete: (id) => call('POST', `/agents/${encodeURIComponent(id)}/delete`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
   }
 }

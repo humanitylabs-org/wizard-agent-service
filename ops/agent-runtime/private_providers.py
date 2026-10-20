@@ -1,0 +1,221 @@
+"""Private app control plane. No provider credential is read by this module."""
+import ipaddress
+import hashlib
+import json
+import os
+import re
+import secrets
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+RELAY_POOL = ipaddress.ip_network('10.252.0.0/16')
+NETWORK_LOCK = threading.Lock()
+CLIENT_IMAGE = 'ghcr.io/humanitylabs-org/wizard-private-client:0.1.0'
+CLIENT_UID = 1000  # agreed image user; EVIDENCE-client.md
+
+
+def migrate_provider(value):
+    return {'tinfoil': 'wizard-tinfoil', 'local': 'wizard-local-model'}.get(value, value)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class PrivateProviders:
+    def __init__(self, agents, apps_path, docker, failure, client_image=CLIENT_IMAGE):
+        self.agents, self.apps_path = agents, apps_path
+        self.docker, self.failure, self.client_image = docker, failure, client_image
+
+    def app(self, provider):
+        try:
+            apps = json.loads(self.apps_path.read_text()).get('apps', [])
+        except (OSError, ValueError):
+            apps = []
+        app = next((a for a in apps if a.get('id') == migrate_provider(provider)), None)
+        if not app or not isinstance(app.get('private_inference'), dict):
+            raise self.failure('private_provider_unavailable', 503)
+        spec = app['private_inference']
+        if (not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', app['id']) or
+                spec.get('kind') not in ('attested-relay', 'local') or
+                type(spec.get('relay_port')) is not int or not 1024 <= spec['relay_port'] <= 65535):
+            raise self.failure('private_provider_invalid', 409)
+        if app.get('status') != 'running':
+            raise self.failure('private_provider_unavailable', 503)
+        return app
+
+    def is_private(self, agent):
+        if agent.get('privacy') == 'private' or agent.get('runtime', {}).get('private_client'):
+            return True
+        try:
+            self.app(agent.get('model', {}).get('provider'))
+            return True
+        except self.failure:
+            # A previously linked provider stays private even after uninstall/stop.
+            return (self.agents.root / agent['id'] / 'runtime' / 'private-provider.json').exists()
+
+    def origin(self, app):
+        # Same host-network route as Agent Service aiConnectionUrl; never follow a redirect.
+        for value in (app.get('view', {}).get('local'), app.get('health')):
+            try:
+                url = urllib.parse.urlsplit(value or '')
+                if (url.scheme in ('http', 'https') and url.hostname in ('localhost', '127.0.0.1', '::1')
+                        and not url.username and not url.password):
+                    return f'{url.scheme}://{url.netloc}'
+            except ValueError:
+                pass
+        raise self.failure('private_provider_address_invalid', 409)
+
+    def request(self, app, method, path, body=None):
+        request = urllib.request.Request(self.origin(app) + path, method=method,
+                                         data=json.dumps(body).encode() if body is not None else None,
+                                         headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=5) as response:
+                raw = response.read(65537)
+                if len(raw) > 65536:
+                    raise ValueError('oversize response')
+                return json.loads(raw) if raw else {}
+        except (OSError, ValueError, urllib.error.URLError):
+            raise self.failure('private_provider_unavailable', 503) from None
+
+    def network(self, app):
+        name = 'wizard-relay-' + app['id']
+        with NETWORK_LOCK:
+            found = self.docker(['network', 'inspect', name], check=False, timeout=60)
+            if found.returncode:
+                ids = self.docker(['network', 'ls', '-q'], timeout=60).stdout.split()
+                networks = json.loads(self.docker(['network', 'inspect', *ids], timeout=60).stdout) if ids else []
+                used = [ipaddress.ip_network(c['Subnet']) for n in networks for c in (n.get('IPAM', {}).get('Config') or []) if c.get('Subnet')]
+                subnet = next((s for s in RELAY_POOL.subnets(new_prefix=24) if not any(s.overlaps(u) for u in used if s.version == u.version)), None)
+                if subnet is None:
+                    raise self.failure('relay_network_pool_exhausted', 503)
+                self.docker(['network', 'create', '--internal', '--subnet', str(subnet),
+                             '--opt', 'com.docker.network.bridge.inhibit_ipv4=true',
+                             '--label', 'wizard.private-provider=' + app['id'], name], timeout=60)
+                found = self.docker(['network', 'inspect', name], timeout=60)
+            value = json.loads(found.stdout)[0]
+            ranges = value.get('IPAM', {}).get('Config') or []
+            if (not value.get('Internal') or value.get('EnableIPv6') or value.get('Labels', {}).get('wizard.private-provider') != app['id'] or
+                    len(ranges) != 1 or ipaddress.ip_network(ranges[0]['Subnet']).prefixlen != 24 or
+                    not ipaddress.ip_network(ranges[0]['Subnet']).subnet_of(RELAY_POOL) or
+                    value.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true'):
+                raise self.failure('relay_network_unsafe', 409)
+            # Service labels work for both Runtipi and plain Compose; ambiguous installations fail closed.
+            ids = self.docker(['ps', '-q', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
+            if len(ids) != 1:
+                raise self.failure('private_provider_container_ambiguous', 503)
+            cid = ids[0]
+            info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
+            attachment = info.get('NetworkSettings', {}).get('Networks', {}).get(name)
+            alias = app['id'] + '-relay'
+            if attachment and alias not in (attachment.get('Aliases') or []):
+                raise self.failure('relay_network_alias_invalid', 409)
+            if not attachment:
+                self.docker(['network', 'connect', '--alias', alias, name, cid], timeout=60)
+                info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
+                if alias not in (info['NetworkSettings']['Networks'][name].get('Aliases') or []):
+                    raise self.failure('relay_network_attach_failed', 503)
+        return name
+
+    def revoke(self, agent):
+        runtime = self.agents.root / agent['id'] / 'runtime'
+        state = runtime / 'private-provider.json'
+        if not state.exists():
+            return
+        saved = json.loads(state.read_text())
+        # Keep the original app origin for revocation if its registry row was removed.
+        self.request(saved['app'], 'DELETE', '/api/private-clients/' + agent['id'])
+        state.unlink()
+        (runtime / 'relay-token').unlink(missing_ok=True)
+
+    def addresses(self, agent, app, network):
+        runtime = self.agents.root / agent['id'] / 'runtime'
+        with NETWORK_LOCK:
+            info = json.loads(self.docker(['network', 'inspect', network], timeout=60).stdout)[0]
+            subnet = ipaddress.ip_network(info['IPAM']['Config'][0]['Subnet'])
+            cid = self.docker(['ps', '-q', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.strip()
+            provider_ip = str(ipaddress.ip_interface(info['Containers'][cid]['IPv4Address']).ip)
+            used = {str(ipaddress.ip_interface(c['IPv4Address']).ip) for c in info.get('Containers', {}).values()}
+            own = None
+            for path in self.agents.root.glob('*/runtime/private-provider.json'):
+                try:
+                    saved = json.loads(path.read_text())
+                    if saved.get('link', {}).get('network') == network:
+                        ip = saved['link']['relay_ip']
+                        if path.parent == runtime:
+                            own = ip
+                        else:
+                            used.add(ip)
+                except (OSError, ValueError, KeyError):
+                    continue
+            relay_ip = own if own and own not in used else next((str(ip) for ip in subnet.hosts() if ip != subnet.network_address + 1 and str(ip) not in used), None)
+            if not relay_ip:
+                raise self.failure('relay_network_full', 503)
+            sandbox = ipaddress.ip_network(agent['runtime']['network']['sandbox'])
+            link = {'network': network, 'relay_ip': relay_ip, 'provider_ip': provider_ip,
+                    'sandbox_ip': str(sandbox.network_address + 3), 'relay_port': app['private_inference']['relay_port']}
+            # Reserve under the same lock so concurrent agents cannot pick the same static address.
+            state = runtime / 'private-provider.json'
+            state.write_text(json.dumps({'app': {'id': app['id'], 'view': {'local': self.origin(app)}}, 'link': link}))
+            os.chmod(state, 0o600)
+            return link
+
+    def firewall(self, agent, link=None):
+        script = Path(__file__).parent / 'private-client-firewall.sh'
+        image = 'wizard-private-firewall:local'
+        identity = hashlib.sha256(agent['id'].encode()).hexdigest()[:16]
+        args = ['apply', identity, link['sandbox_ip'], link['relay_ip'], link['provider_ip'], str(link['relay_port']),
+                str(ipaddress.ip_address(link['sandbox_ip']) - 1)] if link else ['remove', identity]
+        self.docker(['run', '--rm', '--network', 'host', '--read-only', '--user', '0:0',
+                     '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--security-opt', 'no-new-privileges:true',
+                     '-v', f'{script}:/firewall.sh:ro', image, 'sh', '/firewall.sh', *args], timeout=60)
+
+    def prepare(self, agent):
+        app = self.app(agent.get('model', {}).get('provider'))
+        runtime = self.agents.root / agent['id'] / 'runtime'
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state = runtime / 'private-provider.json'
+        if state.exists() and json.loads(state.read_text())['app']['id'] != app['id']:
+            self.revoke(agent)
+        network = self.network(app)
+        addresses = self.addresses(agent, app, network)
+        value = self.request(app, 'POST', '/api/private-clients', {'agent': agent['id']})
+        token, relay = value.get('token'), value.get('relay_url')
+        expected = f"http://{app['id']}-relay:{app['private_inference']['relay_port']}"
+        if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43,512}', token) or relay != expected:
+            self.request(app, 'DELETE', '/api/private-clients/' + agent['id'])
+            raise self.failure('private_provider_response_invalid', 502)
+        target = runtime / 'relay-token'
+        tmp = runtime / ('relay-token-' + secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        with os.fdopen(fd, 'w') as out:
+            out.write(token)
+        # Client runs non-root. The helper runs as the owner; use a no-network root helper to chown.
+        self.docker(['run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--cap-add', 'CHOWN',
+                     '--security-opt', 'no-new-privileges:true', '--user', '0:0', '-v', f'{runtime}:/tokens',
+                     '--entrypoint', '/bin/sh', 'restricted-agent-sidecars:local', '-c',
+                     f'chown {CLIENT_UID}:{CLIENT_UID} /tokens/{tmp.name}'], timeout=60)
+        tmp.replace(target)
+        # Store only the control-plane address, not tokens or provider metadata with secrets.
+        state.write_text(json.dumps({'app': {'id': app['id'], 'view': {'local': self.origin(app)}}, 'link': addresses}))
+        os.chmod(state, 0o600)
+        return {**addresses, 'app_id': app['id'], 'kind': app['private_inference']['kind'], 'relay_url': relay,
+                'network': network, 'token_file': str(target), 'models': agent.get('model', {}).get('allowed_models', [])}
+
+
+def client_service(link, image):
+    return {
+        'image': image, 'user': f'{CLIENT_UID}:{CLIENT_UID}', 'read_only': True,
+        'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no',
+        'environment': {'PROFILE': 'tinfoil' if link['kind'] == 'attested-relay' else 'passthrough',
+                        'RELAY_URL': link['relay_url'], 'RELAY_TOKEN_FILE': '/run/wizard/relay-token',
+                        'LISTEN_PORT': '3301', 'MODELS': ','.join(link['models'])},
+        'volumes': [link['token_file'] + ':/run/wizard/relay-token:ro'],
+        'networks': {'sandbox': {'ipv4_address': link['sandbox_ip']}, 'relay': {'ipv4_address': link['relay_ip']}},
+        'dns': ['127.0.0.1'], 'pids_limit': 128, 'mem_limit': '256m',
+    }
