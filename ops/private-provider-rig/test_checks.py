@@ -80,6 +80,18 @@ class ProbeTests(unittest.TestCase):
                 check.stop_provider(a)
         self.assertIn(('start', 'fixture'), calls)
 
+    def test_client_explicit_compose_name_keeps_all_network_assertions(self):
+        a = SimpleNamespace(agent='pp-test-fixture', client_container='project-client-1',
+                            provider_app='wizard-tinfoil', relay_port=8090, deny_url=[])
+        c = {'Id': 'client', 'NetworkSettings': {'Networks': {'sandbox': {}, 'wizard-relay-wizard-tinfoil': {}}}}
+        with patch.object(check, 'container', return_value=c) as target, \
+             patch.object(check, 'inspect', return_value={'Internal': True}), \
+             patch.object(check, 'probe', return_value=0), patch.object(check, 'blocked') as blocked, \
+             contextlib.redirect_stdout(io.StringIO()):
+            check.client(a)
+        target.assert_called_once_with('project-client-1')
+        self.assertEqual(blocked.call_count, 4)
+
     def test_baseline_failure_never_stops_provider(self):
         a = SimpleNamespace(trigger='/fixture', timeout=1)
         with patch.object(check, 'provider_containers', return_value=[{'Id': 'fixture'}]), \

@@ -194,7 +194,7 @@ def hermes(a):
 
 
 def client(a):
-    c = container('agent-' + a.agent + '-client')
+    c = container(a.client_container or 'agent-' + a.agent + '-client')
     nets = c['NetworkSettings']['Networks']
     expected_relay = 'wizard-relay-' + a.provider_app
     require(expected_relay in nets and len(nets) == 2, 'client must have only agent + relay networks')
@@ -217,7 +217,7 @@ def key_location(a):
         if scan_key(p, a.key_sha256):
             forbidden.append(str(p))
     container(a.hermes_container or 'agent-' + a.agent)
-    container('agent-' + a.agent + '-client')
+    container(a.client_container or 'agent-' + a.agent + '-client')
     for cid in docker('ps', '-aq').stdout.decode().split():
         c = inspect('container', cid)
         doc = json.dumps(c).encode()
@@ -280,6 +280,7 @@ def main():
     p.add_argument('--codeword')
     p.add_argument('--key-sha256')
     p.add_argument('--hermes-container')
+    p.add_argument('--client-container', help='Exact client container name for Compose-generated names')
     p.add_argument('--provider-container', action='append', default=[])
     p.add_argument('--provider-data', action='append', default=[])
     p.add_argument('--scan-root', action='append', default=[])
