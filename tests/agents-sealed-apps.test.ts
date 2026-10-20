@@ -1,12 +1,14 @@
 // #58 (which agents can use an app; the gateway serves each agent only its own apps) and
 // #59 (private agents are sealed: never a readable source). wizard-os spec/AGENTS.md sections 5 and 6.
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer, fixtureProvider } from './helpers/private-provider-fixture.mjs'
 import { hermesConfigYaml } from '../server/agents.mjs'
+import { markAgentIngress } from '../server/principals.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) } })
@@ -69,7 +71,7 @@ async function box(appUrls: Record<string, string>) {
 }
 function writeApps(dir: string, apps: unknown[]) {
   const path = join(dir, 'apps.json')
-  writeFileSync(path, JSON.stringify({ schema: 1, apps }))
+  writeFileSync(path, JSON.stringify({ schema: 1, apps: [...apps, fixtureProvider] }))
 }
 
 async function start(dir: string, main: { origin: string }, extra: Record<string, unknown> = {}) {
@@ -84,13 +86,29 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     bridgeWriteSkills: false, agentGatewayUrl: 'http://wizard-agent-service:8923/wizard/mcp', bridgeLog: () => {}, ...extra,
   })
   servers.push(svc)
+  // Simulate the trusted edge's network-bound ingress, rather than using private credentials on
+  // the owner listener. Scope assertions below still execute the real principal resolver.
+  svc.prependListener('request', (req) => {
+    for (const id of readdirSync(join(dir, 'agents'))) {
+      try {
+        const agent = JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
+        const key = readFileSync(join(dir, 'agents', id, 'gateway.key'), 'utf8').trim()
+        if (agent.runtime.private_client && req.headers.authorization === `Bearer ${key}`) {
+          markAgentIngress(req)
+          const base = agent.runtime.network.uplink.split('/')[0].split('.').map(Number)
+          base[3] += 2
+          Object.defineProperty(req.socket, 'remoteAddress', { value: base.join('.'), configurable: true })
+        }
+      } catch {}
+    }
+  })
   const address = await listen(svc) as import('node:net').AddressInfo
   return `http://127.0.0.1:${address.port}`
 }
 
 const json = (body: unknown, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
-const STANDARD = (label: string, extra: Record<string, unknown> = {}) => ({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard', ...extra } })
+const STANDARD = (label: string, extra: Record<string, unknown> = {}) => ({ label, harness: 'hermes', model: { provider: 'anthropic', model: 'claude-opus-5-5' }, permissions: { preset: 'standard', ...extra } })
 
 async function create(base: string, body: unknown, port?: number, dir?: string) {
   const r = await fetch(`${base}/wizard/v1/agents`, json(body))
@@ -261,7 +279,7 @@ describe('#59 private agents are sealed', () => {
       expect(await r.json()).toMatchObject({ check: 'agent.private_sealed' })
     }
     const still = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
-    expect(still).toMatchObject({ privacy: 'private', model: { provider: 'tinfoil' } })
+    expect(still).toMatchObject({ privacy: 'private', model: { provider: 'wizard-tinfoil', model: 'glm-5-3', fallback: false } })
   })
 
   it('a standard agent with other_agents raised still cannot read the private agent', async () => {

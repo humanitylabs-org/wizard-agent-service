@@ -77,13 +77,14 @@ class RestrictedDriverTest(unittest.TestCase):
         # Provider keys land in managed/.env, not in the home.
         self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
 
-    def test_tinfoil_agents_are_refused_before_anything_runs(self):
+    def test_missing_private_provider_fails_without_a_public_fallback(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         agent["model"] = {"provider": "tinfoil"}
+        agent['privacy'] = 'private'
         with self.assertRaises(ar.RuntimeFailure) as raised:
             self.driver.apply(agent)
-        self.assertEqual((raised.exception.code, raised.exception.status), ("restricted_provider_unsupported", 409))
-        self.assertEqual(self.calls, [])
+        self.assertEqual((raised.exception.code, raised.exception.status), ("private_provider_unavailable", 503))
+        self.assertFalse(any('up' in args for args, _ in self.calls))
 
     def test_sync_writes_through_a_fresh_temp_dir_and_renames(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})

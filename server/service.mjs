@@ -2164,7 +2164,7 @@ export function createWizardServer(options = {}) {
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
-    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath,
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, aiConnectionAddress: options.aiConnectionAddress,
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,

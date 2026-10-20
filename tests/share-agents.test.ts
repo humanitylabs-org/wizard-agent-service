@@ -5,7 +5,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((r) => s.close(() => r(undefined))) })
