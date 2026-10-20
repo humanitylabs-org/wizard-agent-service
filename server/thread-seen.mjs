@@ -4,8 +4,8 @@ import { dirname } from 'node:path'
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
 const THREAD_KEY = /^[A-Za-z0-9._:-]{1,320}$/
-const RUN_STATUSES = new Set(['idle', 'submitting', 'queued', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'])
-const READY_OR_ATTENTION_STATUSES = new Set(['completed', 'failed', 'interrupted', 'waiting_for_approval'])
+const RUN_STATUSES = new Set(['idle', 'submitting', 'queued', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'])
+const READY_OR_ATTENTION_STATUSES = new Set(['completed', 'failed', 'interrupted', 'waiting_for_approval', 'unknown'])
 
 function validRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -35,7 +35,8 @@ export function normalizeThreadSeenState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isFinite(value.initializedAt) || value.initializedAt < 0) return null
   if (!value.threads || typeof value.threads !== 'object' || Array.isArray(value.threads)) return null
   const entries = Object.entries(value.threads)
-  if (entries.length > MAX_THREAD_RECORDS) return null
+  // Hidden (owner-only) marks have their own capacity next to the visible ones.
+  if (entries.length > MAX_THREAD_RECORDS * 2) return null
   const threads = {}
   for (const [key, candidate] of entries) {
     if (!THREAD_KEY.test(key)) return null
@@ -87,12 +88,13 @@ function laterRecord(left, right) {
     : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt }
 }
 
-export function mergeThreadSeenStates(left, right) {
+export function mergeThreadSeenStates(left, right, { protect = null, keepInitializedAt = false } = {}) {
   if (!left) return right
   if (!right) return left
-  let changed = right.initializedAt < left.initializedAt
+  let changed = !keepInitializedAt && right.initializedAt < left.initializedAt
   const threads = { ...left.threads }
   for (const [key, record] of Object.entries(right.threads)) {
+    if (protect?.(key)) continue
     const selected = laterRecord(threads[key], record)
     if (selected !== threads[key]) {
       threads[key] = selected
@@ -100,8 +102,14 @@ export function mergeThreadSeenStates(left, right) {
     }
   }
   if (!changed) return left
-  const entries = Object.entries(threads).sort((a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])).slice(0, MAX_THREAD_RECORDS)
-  return { initializedAt: Math.min(left.initializedAt, right.initializedAt), threads: Object.fromEntries(entries) }
+  const order = (a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])
+  const all = Object.entries(threads)
+  // Protected records are kept whatever the caller sends and have their own capacity, so the number of visible
+  // records a caller can store never depends on how many hidden ones exist.
+  const kept = protect ? all.filter(([key]) => protect(key)).sort(order).slice(0, MAX_THREAD_RECORDS) : []
+  const rest = (protect ? all.filter(([key]) => !protect(key)) : all).sort(order).slice(0, MAX_THREAD_RECORDS)
+  const entries = [...kept, ...rest].sort(order)
+  return { initializedAt: keepInitializedAt ? left.initializedAt : Math.min(left.initializedAt, right.initializedAt), threads: Object.fromEntries(entries) }
 }
 
 export class ThreadSeenStore {
@@ -125,11 +133,13 @@ export class ThreadSeenStore {
     return this.scopes.get(scope) ?? null
   }
 
-  merge(scope, incoming) {
-    const state = normalizeThreadSeenState(incoming)
+  merge(scope, incoming, options = {}) {
+    let state = normalizeThreadSeenState(incoming)
+    // What a caller sends keeps the old limit; only stored state may hold hidden marks beyond it.
+    if (state && Object.keys(state.threads).length > MAX_THREAD_RECORDS) state = null
     if (!state) throw Object.assign(new Error('Invalid Wizard thread seen state'), { status: 400 })
     const previous = this.get(scope)
-    const merged = mergeThreadSeenStates(previous, state)
+    const merged = mergeThreadSeenStates(previous, state, options)
     this.scopes.set(scope, merged)
     while (this.scopes.size > MAX_ACCOUNT_SCOPES) this.scopes.delete(this.scopes.keys().next().value)
     if (merged !== previous) this.persist()

@@ -2,22 +2,39 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
+import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
+// Only service-owned continuation metadata selects the background lane. Manual
+// Continue is an interactive request; model text never determines scheduling.
+export const isBackgroundContinuation = record => Boolean(record.continuation)
+  && record.continuation.kind !== 'background-recovery'
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
 
 const nowSeconds = () => Date.now() / 1000
+const providerScope = record => {
+  const body = parseJson(record.body, {})
+  return JSON.stringify([record.runtime, body.provider || 'configured', body.model || 'configured'])
+}
+export function retryAfterSeconds(value, now = Date.now()) {
+  if (value === null || value === undefined || value === '') return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds
+  const date = Date.parse(String(value))
+  return Number.isFinite(date) ? Math.max(0, (date - now) / 1000) : 0
+}
 const safeStatus = (value) => {
   const status = String(value ?? '').toLowerCase()
   if (['accepted', 'pending', 'queued', 'submitting', 'started'].includes(status)) return 'running'
   if (['running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(status)) return status
-  return 'running'
+  return value === 'unknown' ? 'unknown' : 'running'
 }
 
 const parseJson = (value, fallback) => {
@@ -47,6 +64,7 @@ export class DurableRunQueue {
   constructor({
     statePath,
     maxActive = 8,
+    reservedInteractive = 0,
     pollIntervalMs = 1_500,
     retryDelayMs = 2_000,
     activeSessionIds = async () => [],
@@ -66,6 +84,8 @@ export class DurableRunQueue {
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
+    if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
+    this.reservedInteractive = reservedInteractive
     this.pollIntervalMs = Math.max(0, Number(pollIntervalMs) || 0)
     this.retryDelayMs = Math.max(50, Number(retryDelayMs) || 2_000)
     this.activeSessionIds = activeSessionIds
@@ -87,6 +107,9 @@ export class DurableRunQueue {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 5000;
+      CREATE TABLE IF NOT EXISTS wizard_provider_backoff (
+        scope TEXT PRIMARY KEY, retry_after REAL NOT NULL, failures INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS wizard_run_queue (
         public_run_id TEXT PRIMARY KEY,
         runtime TEXT NOT NULL,
@@ -109,10 +132,28 @@ export class DurableRunQueue {
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
     `)
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
+    }
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_attempted')) {
+      // Existing rows have unknown dispatch history. Never mutate their saved request.
+      this.database.exec("BEGIN IMMEDIATE; ALTER TABLE wizard_run_queue ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 0; UPDATE wizard_run_queue SET dispatch_attempted=1; COMMIT;")
+    }
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_body')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_body TEXT")
+    }
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'worker_dispatch_body')) {
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN worker_dispatch_body TEXT")
+    }
   }
 
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
+    // Normalize older terminal receipts without replaying or changing saved requests.
+    for (const record of this._rows("status = 'completed' AND runtime = 'direct' AND payload_json LIKE '%Provider authentication failed:%'")) {
+      const payload = normalizeProviderPreflightFailure(record.payload)
+      if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
+    }
     await this.tick(true)
     if (this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
@@ -138,6 +179,10 @@ export class DurableRunQueue {
       idempotencyKey: row.idempotency_key,
       requestHash: row.request_hash,
       body: row.body,
+      dispatchAttempted: Boolean(row.dispatch_attempted),
+      dispatchBody: row.dispatch_body ?? null,
+      workerDispatchBody: row.worker_dispatch_body ?? null,
+      continuation: parseJson(row.continuation_json, null),
       trustedPaths: parseJson(row.trusted_paths_json, []),
       status: row.status,
       upstreamRunId: row.upstream_run_id,
@@ -173,6 +218,16 @@ export class DurableRunQueue {
     if (!existing) return null
     if (existing.sessionId !== sessionId || existing.requestHash !== requestHash) throw requestError('idempotency key conflict', 409)
     return existing
+  }
+
+  /** Durable exact admission lookup: replay does not depend on which run is currently latest. */
+  byIdempotencyKey(runtime, key) { return this._existing(runtime, key) }
+
+  byBackgroundRecovery(id, sessionId) {
+    const row = this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime='direct' AND session_id=? AND json_extract(body,'$._wizard_background_recovery.id')=?
+      ORDER BY created_at LIMIT 1`).get(sessionId, id)
+    return row ? this._record(row) : null
   }
 
   admittedVoiceRun(runtime, sessionId, audioPaths) {
@@ -215,6 +270,18 @@ export class DurableRunQueue {
     return index < 0 ? 0 : index + 1
   }
 
+  freezeDispatchBody(publicRunId, body) {
+    // The transport calls this after preflight, immediately before run admission.
+    this.database.prepare('UPDATE wizard_run_queue SET dispatch_attempted=1, dispatch_body=COALESCE(dispatch_body, ?) WHERE public_run_id=?').run(String(body), publicRunId)
+    return this.get(publicRunId).dispatchBody
+  }
+
+  freezeWorkerDispatchBody(publicRunId, body) {
+    // Operator work can start before the parent acknowledgement is admitted.
+    this.database.prepare('UPDATE wizard_run_queue SET dispatch_attempted=1, worker_dispatch_body=COALESCE(worker_dispatch_body, ?) WHERE public_run_id=?').run(String(body), publicRunId)
+    return this.get(publicRunId).workerDispatchBody
+  }
+
   publicPayload(record) {
     const current = typeof record === 'string' ? this.get(record) : record
     if (!current) return null
@@ -242,13 +309,13 @@ export class DurableRunQueue {
     const records = this.database.prepare(`
       SELECT current.*
       FROM wizard_run_queue current
-      WHERE current.status IN ('queued','launching','running','waiting_for_approval','stopping')
-        AND NOT EXISTS (
+      WHERE current.status IN ('queued','launching','running','waiting_for_approval','stopping','unknown')
+        AND (current.status = 'unknown' OR NOT EXISTS (
           SELECT 1 FROM wizard_run_queue newer
           WHERE newer.session_id = current.session_id
             AND (newer.created_at > current.created_at
               OR (newer.created_at = current.created_at AND newer.public_run_id > current.public_run_id))
-        )
+        ))
       ORDER BY current.created_at, current.public_run_id
     `).all().map((row) => this._record(row))
     return records.map((record) => ({
@@ -257,11 +324,25 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
+      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     }))
+  }
+
+  // Sessions whose newest queued send is recent and never produced a finished answer here.
+  // Lets the thread list keep a brand-new thread visible when its first send failed or waits.
+  recentUnfinishedSessionIds(sinceSeconds, limit = 50) {
+    return this.database.prepare(`
+      SELECT session_id FROM wizard_run_queue
+       WHERE created_at >= ?
+       GROUP BY session_id
+      HAVING SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) = 0
+       ORDER BY MAX(created_at) DESC
+       LIMIT ?
+    `).all(Number(sinceSeconds), Number(limit)).map((row) => String(row.session_id))
   }
 
   latestProjections(sessionIds) {
@@ -272,13 +353,14 @@ export class DurableRunQueue {
     return this.database.prepare(`
       WITH ranked AS (
         SELECT public_run_id, ROW_NUMBER() OVER (
-          PARTITION BY session_id ORDER BY created_at DESC, public_run_id DESC
+          PARTITION BY session_id ORDER BY CASE WHEN status='unknown' THEN 0 ELSE 1 END, created_at DESC, public_run_id DESC
         ) AS position
         FROM wizard_run_queue
         ${ids ? `WHERE session_id IN (${ids.map(() => '?').join(',')})` : ''}
       )
       SELECT current.public_run_id, current.session_id, current.status,
         current.waiting_reason, current.body, current.idempotency_key,
+        json_object('safe_error', json_extract(current.payload_json, '$.safe_error')) AS payload_json,
         current.created_at, current.updated_at
       FROM ranked JOIN wizard_run_queue current USING (public_run_id)
       WHERE ranked.position = 1
@@ -289,11 +371,18 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
+      safeError: typeof record.payload?.safe_error === 'string' ? record.payload.safe_error : '',
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     }))
+  }
+
+  // Durable insertion order rather than UUID order for same-millisecond admissions.
+  latestForSession(sessionId) {
+    const row = this.database.prepare('SELECT * FROM wizard_run_queue WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(sessionId)
+    return row ? this._record(row) : null
   }
 
   async summary() {
@@ -305,6 +394,7 @@ export class DurableRunQueue {
     if (!Array.isArray(external)) livenessAvailable = false
     const activeSessions = new Set((Array.isArray(external) ? external : []).filter((value) => typeof value === 'string' && value))
     for (const record of this._rows("status IN ('launching','running','waiting_for_approval','stopping')")) activeSessions.add(record.sessionId)
+    for (const record of this._rows("status = 'unknown'")) activeSessions.delete(record.sessionId)
     let dispatchHealthy = false
     try { dispatchHealthy = Boolean(await this.canDispatch()) }
     catch { dispatchHealthy = false }
@@ -314,10 +404,15 @@ export class DurableRunQueue {
       queued: this._rows("status = 'queued'").length,
       dispatch_paused: !dispatchHealthy,
       liveness_available: livenessAvailable,
+      lane: 'interactive',
+      interactive_reserved: this.reservedInteractive,
+      provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
     }
   }
 
-  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [] }) {
+  // `continuation` is service authority (helper tokens; {kind:'background-recovery'} lets a manual Continue skip the
+  // automatic helper check). Never pass a caller-supplied value here.
+  async admit({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
@@ -340,9 +435,9 @@ export class DurableRunQueue {
       this.database.prepare(`
         INSERT INTO wizard_run_queue (
           public_run_id, runtime, session_id, idempotency_key, request_hash, body,
-          trusted_paths_json, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt)
+          trusted_paths_json, status, created_at, updated_at, continuation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt, JSON.stringify(continuation))
       this.database.exec('COMMIT')
     } catch (error) {
       try { this.database.exec('ROLLBACK') } catch { /* already rolled back */ }
@@ -356,6 +451,7 @@ export class DurableRunQueue {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
     if (TERMINAL.has(record.status)) return record
+    if (record.dispatchAttempted) throw requestError('Delivery outcome is not yet confirmed; refresh before stopping', 409)
     if (record.status !== 'queued') throw requestError('queued run already started', 409)
     return this._update(publicRunId, { status: 'cancelled', waitingReason: '', terminalAt: nowSeconds() })
   }
@@ -363,6 +459,7 @@ export class DurableRunQueue {
   async appendGuidance(publicRunId, guidance, trustedPaths = []) {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
+    if (record.dispatchAttempted) throw Object.assign(requestError('Delivery may already have started; this reply cannot be changed', 409), { code: 'dispatch_already_attempted' })
     if (record.status !== 'queued') throw requestError('queued run already started', 409)
     let guidanceContent = guidance
     if (Array.isArray(guidance) && guidance.length === 1 && guidance[0]?.role === 'user') guidanceContent = guidance[0].content
@@ -424,10 +521,12 @@ export class DurableRunQueue {
   }
 
   async _refresh(record, force) {
-    if (!record.upstreamRunId || !ACTIVE.has(record.status)) return record
+    if (!record.upstreamRunId || TERMINAL.has(record.status)) return record
     if (!force && nowSeconds() - record.updatedAt < 0.7) return record
     try {
       const result = await this.lookup(record)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const capacityStatus = safeStatus(result?.capacityStatus ?? result?.payload?.status)
       return this._update(record.publicRunId, {
         status: capacityStatus,
@@ -444,9 +543,12 @@ export class DurableRunQueue {
   async _launch(record) {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
+    if (fresh.upstreamRunId) return this._refresh(fresh, true)
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
+      const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
+      if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const status = safeStatus(result?.capacityStatus ?? result?.status ?? result?.payload?.status)
       current = this._update(record.publicRunId, {
         status,
@@ -458,13 +560,28 @@ export class DurableRunQueue {
         retryAfter: 0,
         terminalAt: TERMINAL.has(status) ? nowSeconds() : null,
       })
+      this.database.prepare('DELETE FROM wizard_provider_backoff WHERE scope=?').run(providerScope(current))
       return current
     } catch (error) {
       const status = Number(error?.status)
-      const retry = error instanceof TypeError || RETRIABLE.has(status)
+      if (status === 410 && (current.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(current.idempotencyKey))) {
+        return this._update(record.publicRunId, { status: 'cancelled', payload: { status: 'cancelled', safe_error: 'The helper request is no longer current.' }, waitingReason: '', terminalAt: nowSeconds() })
+      }
+      // Permanent admission failures never enter provider backoff or capacity retry.
+      const failure = admissionFailure(error)
+      const retry = !failure && (error instanceof TypeError || RETRIABLE.has(status))
+      let delay = this.retryDelayMs / 1000
+      if (retry && (status === 429 || error?.retryAfter)) {
+        const scope = providerScope(current)
+        const previous = this.database.prepare('SELECT failures, retry_after FROM wizard_provider_backoff WHERE scope=?').get(scope)
+        const failures = Math.min(10, Number(previous?.failures || 0) + 1)
+        // Bound only our exponential delay, never the provider's Retry-After.
+        delay = Math.max(retryDelaySeconds(String(error?.retryAfter ?? ''), delay), Math.min(60, delay * 2 ** (failures - 1)), Number(previous?.retry_after || 0) - nowSeconds())
+        this.database.prepare('INSERT OR REPLACE INTO wizard_provider_backoff VALUES(?,?,?)').run(scope, nowSeconds() + delay, failures)
+      }
       return this._update(record.publicRunId, retry
-        ? { status: 'queued', waitingReason: status === 429 ? 'provider_busy' : 'capacity', retryAfter: nowSeconds() + this.retryDelayMs / 1000 }
-        : { status: 'failed', payload: { status: 'failed', safe_error: 'Wizard could not start this queued work.' }, terminalAt: nowSeconds() })
+        ? { status: 'queued', waitingReason: status === 429 || error?.retryAfter ? 'provider_busy' : 'admission_retry', retryAfter: nowSeconds() + delay }
+        : { status: 'failed', payload: { status: 'failed', error: error?.upstreamError, safe_error: failure || 'Wizard could not start this queued work.' }, terminalAt: nowSeconds() })
     }
   }
 
@@ -495,7 +612,7 @@ export class DurableRunQueue {
   }
 
   async _tick(force) {
-    let activeRows = this._rows("status IN ('launching','running','waiting_for_approval','stopping')")
+    let activeRows = this._rows("status NOT IN ('queued','completed','failed','cancelled','interrupted')")
     for (const record of activeRows) {
       if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
       else await this._refresh(record, force)
@@ -515,6 +632,8 @@ export class DurableRunQueue {
     const activeSessions = new Set(external.filter((value) => typeof value === 'string' && value))
     activeRows = this._rows("status IN ('launching','running','waiting_for_approval','stopping')")
     for (const record of activeRows) activeSessions.add(record.sessionId)
+    const fenced = new Set(this._rows("status = 'unknown'").map(record => record.sessionId))
+    for (const id of fenced) activeSessions.delete(id)
 
     let dispatchHealthy = false
     try { dispatchHealthy = Boolean(await this.canDispatch()) }
@@ -524,14 +643,31 @@ export class DurableRunQueue {
       return
     }
 
-    for (const record of this._rows("status = 'queued'")) {
+    const pending = this._rows("status = 'queued'")
+    if (this.reservedInteractive) pending.sort((a, b) => Number(isBackgroundContinuation(a)) - Number(isBackgroundContinuation(b)))
+    for (const record of pending) {
       if (activeSessions.size >= this.maxActive) break
-      if (record.retryAfter > nowSeconds() || activeSessions.has(record.sessionId)) {
+      // Background turns may consume only the nonreserved total occupancy.
+      // Existing turns are never preempted; two slots stay reachable by people.
+      if (this.reservedInteractive && isBackgroundContinuation(record)
+          && activeSessions.size >= this.maxActive - this.reservedInteractive) {
+        this._update(record.publicRunId, { waitingReason: 'interactive_reserve' })
+        continue
+      }
+      const cooldown = this.database.prepare('SELECT retry_after FROM wizard_provider_backoff WHERE scope=?').get(providerScope(record))
+      if (Number(cooldown?.retry_after || 0) > nowSeconds()) {
+        this._update(record.publicRunId, { waitingReason: 'provider_busy' })
+        continue
+      }
+      if (record.retryAfter > nowSeconds()) continue
+      // Unknown holds only its session, not a global slot or the interactive reserve.
+      if (activeSessions.has(record.sessionId) || fenced.has(record.sessionId)) {
         this._update(record.publicRunId, { waitingReason: 'capacity' })
         continue
       }
       const launched = await this._launch(record)
       if (ACTIVE.has(launched.status)) activeSessions.add(launched.sessionId)
+      if (launched.status === 'unknown') fenced.add(launched.sessionId)
     }
     for (const record of this._rows("status = 'queued'")) {
       if (!record.waitingReason) this._update(record.publicRunId, { waitingReason: 'capacity' })

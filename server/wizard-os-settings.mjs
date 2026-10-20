@@ -147,12 +147,15 @@ export function readApps({ appsJsonPath, launcherPath }) {
     if (!id || seen.has(id)) continue
     // The shell is the thing drawing the launcher; it never gets a tile of its own.
     if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
+    // Agents are not apps (spec/AGENTS.md): an agent's container never gets a launcher tile; it lives in Agents.
+    if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
+      receives_voice_input: !!view && app.receives_voice_input === true,
     })
   }
   const launcher = readJsonFile(launcherPath, 256 * 1024)
@@ -165,6 +168,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url,
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
+      receives_voice_input: link.receives_voice_input === true,
     })
   }
   return { schema: 1, apps: out }
@@ -221,6 +225,9 @@ export function bootstrapPayload({ settings, settingsSource, capabilities }) {
       transcribe: capabilities.voice ? '/wizard/voice/transcribe' : '',
       route: capabilities.router ? '/wizard/v1/route' : '',
       upload: capabilities.files ? '/wizard/files/upload' : '',
+      uploads: capabilities.resumable_uploads ? '/wizard/v1/uploads' : '',
+      shares: capabilities.resumable_uploads ? '/wizard/v1/shares' : '',
+      user_files: capabilities.upload_destinations ? '/wizard/v1/user-files' : '',
     },
   }
 }

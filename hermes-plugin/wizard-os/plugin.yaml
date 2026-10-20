@@ -1,4 +1,4 @@
 name: wizard-os
-version: "0.2.3"
+version: "0.4.0"
 description: "Wizard OS: a short fixed system-prompt section telling the agent it is on a Wizard OS box and how to use installed apps (wizard-job-* pointer skills, then the app tools on the `wizard` MCP server). Keeps the pointer skills current from ~/.wizard-os/apps.json."
 author: "Humanity Labs"

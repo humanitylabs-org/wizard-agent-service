@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createAiUsageReader } from '../server/ai-usage.mjs'
+import { aiConnectionApps, aiConnectionUrl, createAiUsageReader } from '../server/ai-usage.mjs'
 import { createWizardServer } from '../server/service.mjs'
 
 const CLAUDE_TOKEN = 'sk-ant-oat-FIXTURE-CLAUDE-TOKEN'
@@ -381,6 +381,180 @@ describe('AI usage caching and failure handling', () => {
 
     expect(claude).toMatchObject({ status: 'unavailable', limits: [], error: { code: 'expired' } })
     expect(claude.error.message).toContain('expired')
+  })
+})
+
+// apps.json as the App Manager writes it, with one AI connection app per provider.
+function connectionApp(id: string, port: number, provides: string[], extra: Record<string, unknown> = {}) {
+  return {
+    id, name: id === 'claude' ? 'Claude' : 'ChatGPT', status: 'running', provides,
+    mcp: { url: `http://127.0.0.1:${port}/mcp`, internal: `http://${id}:${port}/mcp` },
+    view: { url: `https://box.example/${id}/`, local: `http://127.0.0.1:${port}/` },
+    health: `http://127.0.0.1:${port}/health`,
+    ...extra,
+  }
+}
+
+function appsJson(apps: unknown[]) {
+  const dir = mkdtempSync(join(tmpdir(), 'wizard-ai-apps-'))
+  const path = join(dir, 'apps.json')
+  writeFileSync(path, JSON.stringify({ apps }))
+  return path
+}
+
+const connectedClaude = {
+  contract: 'wizard.ai-connection/1', provider: 'claude', name: 'Claude', status: 'connected', plan: 'Max 20x', account: 'owner@example.com',
+  usage: {
+    fetchedAt: '2026-09-23T07:10:30.000Z',
+    limits: [{ id: 'weekly_all:weekly', label: 'All models · weekly', usedPercent: 12, remainingPercent: 88, resetsAt: '2026-09-26T01:00:00.000Z' }],
+    paid: { type: 'spend', enabled: true, currency: 'USD', exponent: 2, usedMinor: 720, limitMinor: 3000, balanceMinor: null, unlimited: false },
+  },
+  error: null,
+}
+
+const CLAUDE_APP_URL = 'http://127.0.0.1:8811/api/connection'
+
+describe('AI connection apps', () => {
+  const claudeApp = connectionApp('claude', 8811, ['ai-connection', 'claude-subscription'])
+
+  it('derives the connection URL from the app\'s own address, never from anything else', () => {
+    expect(aiConnectionUrl(claudeApp)).toBe(CLAUDE_APP_URL)
+    expect(aiConnectionUrl(claudeApp, 'internal')).toBe('http://claude:8811/api/connection')
+    expect(aiConnectionUrl({ ...claudeApp, view: { local: 'http://evil.example/' }, health: 'http://evil.example/health' })).toBe('')
+    expect(aiConnectionUrl({ ...claudeApp, mcp: { internal: 'http://other-app:8811/mcp' } }, 'internal')).toBe('')
+    expect(aiConnectionApps({ apps: [claudeApp, { ...claudeApp, id: 'stopped', status: 'exited' }, connectionApp('notes', 9000, ['notes'])] }))
+      .toEqual([{ appId: 'claude', provider: 'claude', name: 'Claude', url: CLAUDE_APP_URL }])
+  })
+
+  it('reads a connected app with usage as the provider row, keeping the shell\'s shape', async () => {
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? connectedClaude : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const claude = provider(await usage.read() as never, 'claude')
+
+    expect(claude).toEqual({
+      id: 'claude', name: 'Claude', status: 'ok', plan: 'Max 20x', fetchedAt: '2026-09-23T07:10:30.000Z',
+      limits: [{ id: 'weekly_all:weekly', label: 'All models · weekly', usedPercent: 12, remainingPercent: 88, resetsAt: '2026-09-26T01:00:00.000Z' }],
+      paid: { type: 'spend', enabled: true, currency: 'USD', exponent: 2, usedMinor: 720, limitMinor: 3000, balanceMinor: null, unlimited: false },
+      error: null,
+    })
+    expect(JSON.stringify(claude)).not.toContain('owner@example.com')
+    const call = fetcher.mock.calls.find((entry) => entry[0] === CLAUDE_APP_URL) as unknown[]
+    expect(call[1]).toMatchObject({ redirect: 'error' })
+    expect(JSON.stringify(call[1])).not.toContain('Authorization')
+  })
+
+  it('reports a not-connected app as unavailable with the app\'s own message', async () => {
+    const notConnected = { contract: 'wizard.ai-connection/1', provider: 'claude', name: 'Claude', status: 'not_connected', plan: null, account: null, usage: null, error: { code: 'signed_out', message: 'Claude is not connected. Open the Claude app to connect.' } }
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? notConnected : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+
+    expect(provider(await usage.read() as never, 'claude')).toEqual({
+      id: 'claude', name: 'Claude', status: 'unavailable', plan: null, fetchedAt: null, limits: [], paid: null,
+      error: { code: 'signed_out', message: 'Claude is not connected. Open the Claude app to connect.' },
+    })
+  })
+
+  it('keeps the last good read for under 30 minutes when the app becomes unreachable', async () => {
+    let clock = NOW
+    let down = false
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === CLAUDE_APP_URL && down) throw new TypeError('fetch failed')
+      return jsonResponse(url === CLAUDE_APP_URL ? connectedClaude : codexPayload)
+    })
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]), cacheMs: 1, now: () => clock }, fetcher)
+    const good = provider(await usage.read() as never, 'claude')
+    down = true
+    clock += 29 * 60_000
+    const stale = provider(await usage.read() as never, 'claude')
+
+    expect(stale).toMatchObject({ status: 'stale', limits: good.limits, fetchedAt: good.fetchedAt, error: { code: 'unreachable' } })
+    clock += 2 * 60_000
+    expect(provider(await usage.read() as never, 'claude')).toMatchObject({ status: 'unavailable', limits: [], error: { code: 'unreachable' } })
+  })
+
+  it('suppresses the host Claude reader when a Claude connection app is installed', async () => {
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? connectedClaude : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, unknown>> }
+
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['codex', 'claude'])
+    expect(fetcher.mock.calls.some((call) => String(call[0]).includes('anthropic'))).toBe(false)
+    expect(fetcher.mock.calls.map(bearer).some((value) => value.includes(CLAUDE_TOKEN))).toBe(false)
+  })
+
+  it('suppresses the host ChatGPT readers when a ChatGPT connection app is installed', async () => {
+    const chatgptApp = connectionApp('chatgpt', 8812, ['ai-connection', 'chatgpt-subscription'])
+    const fetcher = vi.fn(async (url: string) => String(url).includes('anthropic') ? jsonResponse(claudePayload)
+      : jsonResponse({ contract: 'wizard.ai-connection/1', provider: 'chatgpt', name: 'ChatGPT', status: 'expired', plan: 'Pro', usage: null, error: null }))
+    const { usage } = reader({ appsJsonPath: appsJson([chatgptApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, any>> }
+
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['claude', 'chatgpt'])
+    expect(provider(snapshot, 'chatgpt')).toMatchObject({ status: 'unavailable', plan: 'Pro', error: { code: 'expired' } })
+    expect(fetcher.mock.calls.some((call) => String(call[0]).includes('wham'))).toBe(false)
+  })
+
+  it('keeps the host ChatGPT usage behind a connected ChatGPT app that reports usage: null', async () => {
+    const chatgptApp = connectionApp('chatgpt', 8812, ['ai-connection', 'chatgpt-subscription'])
+    const fetcher = vi.fn(async (url: string) => String(url).includes('anthropic') ? jsonResponse(claudePayload)
+      : String(url).includes('wham') ? jsonResponse(codexPayload)
+      : jsonResponse({ contract: 'wizard.ai-connection/1', provider: 'chatgpt', name: 'ChatGPT', status: 'connected', plan: null, account: null, usage: null, error: null }))
+    const { usage } = reader({ appsJsonPath: appsJson([chatgptApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, any>> }
+    const hostOnly = provider(await reader().usage.read() as never, 'codex')
+
+    // One ChatGPT row, under the app's id and name, carrying the host reader's usage exactly.
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['claude', 'chatgpt'])
+    const chatgpt = provider(snapshot, 'chatgpt')
+    expect(chatgpt).toMatchObject({ status: 'ok', name: 'ChatGPT', error: null })
+    expect(chatgpt.limits).toEqual(hostOnly.limits)
+    expect(chatgpt.paid).toEqual(hostOnly.paid)
+    expect(chatgpt.plan).toBe(hostOnly.plan)
+    expect(chatgpt.limits.length).toBeGreaterThan(0)
+  })
+
+  it('keeps the ChatGPT app\'s own row when it reports usage: null and the host has no ChatGPT sign-in', async () => {
+    const chatgptApp = connectionApp('chatgpt', 8812, ['ai-connection', 'chatgpt-subscription'])
+    const fetcher = vi.fn(async (url: string) => String(url).includes('anthropic') ? jsonResponse(claudePayload)
+      : String(url).includes('wham') ? jsonResponse({}, 401)
+      : jsonResponse({ contract: 'wizard.ai-connection/1', provider: 'chatgpt', name: 'ChatGPT', status: 'connected', plan: 'Plus', account: null, usage: null, error: null }))
+    const { usage } = reader({ ...credentialFixture({ pool: [] }), codexAuthPath: '/nonexistent/auth.json', appsJsonPath: appsJson([chatgptApp]) }, fetcher)
+    const snapshot = await usage.read() as { providers: Array<Record<string, any>> }
+
+    expect(snapshot.providers.map((entry) => entry.id)).toEqual(['claude', 'chatgpt'])
+    expect(provider(snapshot, 'chatgpt')).toMatchObject({ status: 'ok', plan: 'Plus', limits: [], paid: null, error: null })
+  })
+
+  it('keeps the host readers unchanged when there is no apps.json', async () => {
+    const withoutApps = reader({ appsJsonPath: join(mkdtempSync(join(tmpdir(), 'wizard-no-apps-')), 'apps.json') })
+    const baseline = reader()
+    const a = await withoutApps.usage.read()
+    const b = await baseline.usage.read()
+
+    expect(a).toEqual(b)
+    expect((a as { providers: Array<Record<string, unknown>> }).providers.map((entry) => entry.id)).toEqual(['claude', 'codex'])
+    expect(withoutApps.fetcher.mock.calls.map((call) => call[0])).toEqual(baseline.fetcher.mock.calls.map((call) => call[0]))
+  })
+
+  it('picks up a newly installed connection app once the cache window passes', async () => {
+    let clock = NOW
+    const path = appsJson([])
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? connectedClaude : String(url).includes('anthropic') ? claudePayload : codexPayload))
+    const { usage } = reader({ appsJsonPath: path, cacheMs: 60_000, now: () => clock }, fetcher)
+    expect(provider(await usage.read() as never, 'claude').plan).toBe('Max 20x')
+    expect(fetcher.mock.calls.some((call) => call[0] === CLAUDE_APP_URL)).toBe(false)
+    writeFileSync(path, JSON.stringify({ apps: [claudeApp] }))
+    clock += 60_001
+    await usage.read()
+
+    expect(fetcher.mock.calls.some((call) => call[0] === CLAUDE_APP_URL)).toBe(true)
+  })
+
+  it('refuses a response that is not the connection contract', async () => {
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? { status: 'connected', usage: connectedClaude.usage } : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+
+    expect(provider(await usage.read() as never, 'claude')).toMatchObject({ status: 'unavailable', limits: [], error: { code: 'provider_error' } })
   })
 })
 

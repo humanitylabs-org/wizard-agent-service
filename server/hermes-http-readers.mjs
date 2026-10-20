@@ -52,9 +52,12 @@ export async function hermesRunTurnHeld(fetchImpl, origin, key, runId) {
   const raw = await response.text().catch(() => '')
   if (response.status === 404) return false
   if (!response.ok) throw new Error(`run status unknown (${response.status})`)
-  let status = ''
-  try { status = String(JSON.parse(raw)?.status ?? '') } catch { throw new Error('run status unreadable') }
+  let status = '', run
+  try { run = JSON.parse(raw); status = String(run?.status ?? '') } catch { throw new Error('run status unreadable') }
   if (RUN_TERMINAL.has(status)) return false
+  // Canonical admissions are authoritative even without a locally attached agent.
+  // An empty steer tests input validation, not canonical owner liveness.
+  if (run?.admission_id || Number.isSafeInteger(run?.execution_generation)) return true
   if (status !== 'running') return true
   return hermesRunHasAgent(fetchImpl, origin, key, runId)
 }
@@ -108,6 +111,17 @@ export function createFollowThroughFinder({ request, busy = () => false, prefix,
     }
     return pending
   }
+}
+
+/** Revalidate a service-captured HTTP completion; no receipt/state.db authority is invented. */
+export async function requireHttpContinuation(request, token, prefix, now = Date.now()) {
+  const stale = () => Object.assign(new Error('Helper request is no longer current'), { status: 410 })
+  if (token?.kind !== 'http-completion' || !token.sessionId || !Number.isSafeInteger(token.messageId)
+    || token.messageId <= 0 || !Number.isFinite(token.at) || token.at > now / 1000
+    || now / 1000 - token.at > 2 * 3600) throw stale()
+  const [last] = await latestMessages(request, token.sessionId, 1)
+  if (!last || last.role !== 'user' || Number(last.id) !== token.messageId || Number(last.timestamp) !== token.at
+    || !(last.display_kind === FOLLOW_THROUGH_DISPLAY_KIND || String(last.content ?? '').startsWith(prefix))) throw stale()
 }
 
 function isHumanSession(session) {
