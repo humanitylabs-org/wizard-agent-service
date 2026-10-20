@@ -226,9 +226,9 @@ class PrivateProviders:
             out.write(token)
         # Client runs non-root. The helper runs as the owner; use a no-network root helper to chown.
         self.docker(['run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--cap-add', 'CHOWN',
-                     '--security-opt', 'no-new-privileges:true', '--user', '0:0', '-v', f'{runtime}:/tokens',
+                     '--security-opt', 'no-new-privileges:true', '--user', '0:0', '-v', f'{tmp}:/relay-token',
                      '--entrypoint', '/bin/sh', 'restricted-agent-sidecars:local', '-c',
-                     f'chown {CLIENT_UID}:{CLIENT_UID} /tokens/{tmp.name}'], timeout=60)
+                     f'chown {CLIENT_UID}:{CLIENT_UID} /relay-token'], timeout=60)
         tmp.replace(target)
         # Store only the control-plane address, not tokens or provider metadata with secrets.
         state.write_text(json.dumps({'app': {'id': app['id'], 'view': {'local': self.origin(app)}}, 'link': addresses}))

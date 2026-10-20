@@ -88,7 +88,13 @@ class PrivateProviderTest(unittest.TestCase):
         self.assertEqual(migrate_provider('another-app'), 'another-app')
 
     def test_mint_rotate_revoke_real_http_and_token_outside_home(self):
+        commands = []
+        self.provider.docker = lambda args, **kw: (commands.append(args), subprocess.CompletedProcess(args, 0, '', ''))[1]
         link = self.provider.prepare(self.agent)
+        helper = commands[0]
+        self.assertTrue(helper[helper.index('-v') + 1].endswith(':/relay-token'))
+        self.assertNotIn(':/tokens', ' '.join(helper))
+        self.assertEqual(helper[-1], 'chown 1000:1000 /relay-token')
         target = Path(link['token_file'])
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o400)
         self.assertEqual(target.parent, self.root / 'agents/probe/runtime')
