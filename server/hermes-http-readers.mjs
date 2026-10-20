@@ -68,6 +68,16 @@ async function latestMessages(request, sessionId, limit) {
   return listOf(payload).slice().reverse()
 }
 
+// Hermes persists display-only failure boundaries and, on older versions, raw interruption
+// diagnostics as assistant text. They close an incomplete turn; they are never an answer.
+function isFailedTurnBoundary(row) {
+  const text = String(row?.content ?? '').trim()
+  return row?.display_kind === 'failed_turn'
+    || /^Operation interrupted:/u.test(text)
+    || text === 'Your request was not processed. Send it again if you still want me to carry it out.'
+    || text === 'This turn did not complete. Some actions may already have run; verify their effects before resending.'
+}
+
 /**
  * After an abandoned run: `completed` when the thread's last assistant text since the run started
  * is followed only by tool rows (the answer reached the person), otherwise `interrupted`.
@@ -77,6 +87,7 @@ export async function readAbandonedRunOutcomeHttp(request, sessionId, startedAt)
   for (const row of await latestMessages(request, sessionId, 50)) {
     if (Number(row?.timestamp ?? 0) < since) break
     if (row?.display_kind === 'hidden' || row?.role === 'tool') continue
+    if (row?.role === 'assistant' && isFailedTurnBoundary(row)) return 'interrupted'
     if (row?.role === 'assistant' && !String(row?.content ?? '').trim()) continue
     return row?.role === 'assistant' ? 'completed' : 'interrupted'
   }
@@ -92,6 +103,7 @@ export async function readInterruptedRunOutcomeHttp(request, sessionId, startedA
   for (const row of await latestMessages(request, sessionId, 50)) {
     if (Number(row?.timestamp ?? 0) < since) break
     if (row?.display_kind === 'hidden' || row?.role === 'tool') continue
+    if (row?.role === 'assistant' && isFailedTurnBoundary(row)) return 'interrupted'
     if (row?.role === 'assistant' && !String(row?.content ?? '').trim()) continue
     const toolCalls = Array.isArray(row?.tool_calls) ? row.tool_calls.length > 0 : Boolean(row?.tool_calls)
     return row?.role === 'assistant' && !toolCalls ? 'completed' : 'interrupted'
