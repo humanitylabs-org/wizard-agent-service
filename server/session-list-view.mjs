@@ -31,6 +31,14 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     .replace(/\[(?:Browser dogfooding|System note)[^\]]*\][\s\S]*$/m, ' ')
     .replace(/[#*_`>]+/g, ' ').replace(/\s+/g, ' ').trim();
 
+  // Provider sign-in expired (Agent Service provider-reconnect.mjs): which connection app fixes it.
+  const RECONNECT = { claude: ['wizard-claude', 'Claude'], chatgpt: ['wizard-chatgpt', 'ChatGPT'] };
+  function reconnectRow(v) {
+    const app = v && typeof v === 'object' && v.kind === 'provider_signed_out' ? RECONNECT[v.provider] : null;
+    if (!app || v.app_id !== app[0]) return null;
+    return { provider: v.provider, appId: app[0], name: app[1], installed: v.installed !== false,
+      appStatus: ['connected', 'signed_out', 'expired'].includes(v.app_status) ? v.app_status : 'unknown' };
+  }
   const ATTN = new Set(['needs_you', 'check', 'done', 'fyi']);
   function attentionOf(v) {
     if (!v || typeof v !== 'object' || !ATTN.has(v.state)) return null;
@@ -57,6 +65,8 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       source: item.source || '',
       status,
       safeError: typeof item.wizard_safe_error === 'string' ? item.wizard_safe_error : '',
+      // Provider sign-in expired: the connection app that fixes it (provider-reconnect.mjs).
+      reconnect: reconnectRow(item.wizard_reconnect),
       archived: !!item.archived, hidden: !!item.hidden,
       messageCount: Number.isSafeInteger(item.message_count) ? item.message_count : undefined,
       lastUserAt, lastAssistantAt,
@@ -91,7 +101,7 @@ export function listRow(item, q = '') {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  for (const key of ['safeError','critical','waitingOn','helperStatus','attention']) if (!row[key]) delete row[key];
+  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','attention']) if (!row[key]) delete row[key];
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;
