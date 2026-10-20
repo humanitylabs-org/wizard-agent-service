@@ -1,7 +1,7 @@
 // Read-only subscription quota reads for Settings → AI usage.
 //
 // Installed AI connection apps (apps.json `provides: ai-connection`, contract
-// wizard.ai-connection/1) are read first: each one owns its provider's sign-in
+// wizard.ai-connection/1 or /2) are read first: each one owns its provider's sign-in
 // and reports status and usage on its own `/api/connection`. A provider with no
 // connection app falls back to the sign-in the host already keeps for its own
 // CLIs. Credentials stay inside this process: nothing here writes, refreshes,
@@ -477,6 +477,9 @@ function codexSources(options, now) {
  */
 
 export const AI_CONNECTION_CONTRACT = 'wizard.ai-connection/1'
+// /2 keeps every /1 status, plan, account and usage field and only adds a
+// `models` catalogue for the Connection Router, so both read the same way.
+export const AI_CONNECTION_CONTRACTS = new Set([AI_CONNECTION_CONTRACT, 'wizard.ai-connection/2'])
 const AI_CONNECTION_PROVIDES = 'ai-connection'
 const CONNECTION_ERROR_CODES = new Set([SIGNED_OUT, EXPIRED, UNREACHABLE, PROVIDER_ERROR])
 const CONNECTION_STATUS_CODES = new Map([['not_connected', SIGNED_OUT], ['expired', EXPIRED], ['error', PROVIDER_ERROR]])
@@ -573,7 +576,7 @@ function connectionPaid(paid) {
 }
 
 export function connectionRow(identity, payload, now) {
-  if (!payload || typeof payload !== 'object' || payload.contract !== AI_CONNECTION_CONTRACT || payload.provider !== identity.id) {
+  if (!payload || typeof payload !== 'object' || !AI_CONNECTION_CONTRACTS.has(payload.contract) || payload.provider !== identity.id) {
     return unavailable(identity, PROVIDER_ERROR, `${identity.name} app answered with an unknown contract.`)
   }
   const plan = text(payload.plan, 40) || null
