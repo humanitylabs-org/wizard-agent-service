@@ -22,7 +22,9 @@ IMAGE_SHA = 'cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927'
 def main():
     p = argparse.ArgumentParser(__doc__)
     p.add_argument('--rig-root', required=True, type=Path)
-    p.add_argument('--reset', action='store_true')
+    modes = p.add_mutually_exclusive_group()
+    modes.add_argument('--reset', action='store_true')
+    modes.add_argument('--recreate-failed', action='store_true', help='delete only pp-rig when provisioning failed before a baseline')
     p.add_argument('--validate', action='store_true')
     a = p.parse_args()
     root = a.rig_root.resolve()
@@ -83,6 +85,14 @@ def main():
 
     vm = root / 'lima' / VM
     baseline = root / 'baseline'
+    if a.recreate_failed:
+        assert not baseline.exists(), 'clean baseline exists; use --reset instead'
+        assert not (root / 'evidence/ready.json').exists(), 'ready rig exists; refuse failed-rig recreation'
+        assert vm.is_dir(), 'failed rig missing'
+        marker = shell('cat', '/etc/pp-rig', capture=True).decode().strip()
+        assert marker == 'pp-private-providers', 'refuse unmarked guest'
+        run('limactl', 'stop', VM, timeout=180)
+        run('limactl', 'delete', '--force', VM, timeout=180)
     if a.reset:
         assert (baseline / 'manifest.json').is_file(), 'no clean baseline'
         run('limactl', 'stop', VM, timeout=180)
