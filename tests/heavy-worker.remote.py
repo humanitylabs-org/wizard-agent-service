@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Execute on Thales only: real RPC, process, restart and shared-lock semantics."""
+import fcntl
 import importlib.util
 import json
 from contextlib import closing
@@ -36,12 +37,18 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         return json.loads(proc.stdout)
 
-    def submit(self, code, timeout=15):
+    def submit(self, code, timeout=15, lane=None):
         job_id = 'heavy_' + uuid.uuid4().hex
         self.ids.append(job_id)
         spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', code], 'timeout_seconds': timeout}
+        if lane:
+            spec['lane'] = lane
         self.rpc('submit', job_id, spec)
         return job_id, spec
+
+    def raw_rpc(self, value):
+        return subprocess.run([sys.executable, str(SCRIPT), '--root', str(self.root), '--lock', str(self.lock)],
+                              input=json.dumps(value), text=True, capture_output=True, timeout=10)
 
     def wait(self, job_id, states):
         deadline = time.monotonic() + 20
@@ -207,6 +214,83 @@ class WorkerTests(unittest.TestCase):
         a, _ = self.submit(code)
         self.assertEqual(self.wait(a, ('completed', 'failed'))['state'], 'completed')
 
+
+    # --- light lane -------------------------------------------------------
+    def hold_shared_lock(self):
+        self.base.mkdir(parents=True, exist_ok=True)
+        holder = self.lock.open('a')
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return holder
+
+    def test_light_job_runs_while_shared_lock_is_held_and_heavy_waits(self):
+        holder = self.hold_shared_lock()
+        try:
+            heavy, _ = self.submit("from pathlib import Path; Path('heavy-ran').touch()")
+            light, _ = self.submit("from pathlib import Path; Path('light-ran').touch(); print('light done')", lane='light')
+            result = self.wait(light, ('completed',))
+            self.assertEqual(result['receipt']['exit_code'], 0)
+            self.assertTrue((self.base / 'light-ran').exists())
+            time.sleep(1.5)
+            row = self.rpc('status', heavy)
+            self.assertEqual((row['state'], row['reason']), ('queued', 'worker_busy'))
+            self.assertFalse((self.base / 'heavy-ran').exists())
+        finally:
+            holder.close()
+        self.wait(heavy, ('completed',))
+
+    def test_light_jobs_stay_out_of_the_heavy_spool(self):
+        light, spec = self.submit("print('x')", lane='light')
+        self.wait(light, ('completed',))
+        with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM jobs WHERE id=?', (light,)).fetchone())
+        with closing(sqlite3.connect(self.root / 'light' / 'jobs.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (light,)).fetchone()[0], 'completed')
+        # Duplicate submit is idempotent and never re-executes.
+        self.assertEqual(self.rpc('submit', light, spec)['state'], 'completed')
+
+    def test_light_lane_is_one_at_a_time_and_fifo(self):
+        a, _ = self.submit("import time; from pathlib import Path; Path('order').open('a').write('a'); time.sleep(1.5)", lane='light')
+        self.wait(a, ('running',))
+        b, _ = self.submit("from pathlib import Path; Path('order').open('a').write('b')", lane='light')
+        self.assertEqual(self.rpc('status', b)['state'], 'queued')
+        self.wait(a, ('completed',)); self.wait(b, ('completed',))
+        self.assertEqual((self.base / 'order').read_text(), 'ab')
+
+    def test_light_lane_limits_and_identity(self):
+        job = 'heavy_' + uuid.uuid4().hex
+        base = {'cwd': str(self.base), 'argv': [sys.executable, '-c', 'print(1)']}
+        for spec in ({**base, 'timeout_seconds': 901, 'lane': 'light'},
+                     {**base, 'timeout_seconds': 60, 'lane': 'gpu'}):
+            proc = self.raw_rpc({'action': 'submit', 'job_id': job, 'spec': spec})
+            self.assertEqual(proc.returncode, 1)
+            self.assertEqual(json.loads(proc.stdout), {'error': 'worker_rpc_failed'})
+        # Same identity cannot move between lanes.
+        light, spec = self.submit("print('x')", lane='light')
+        heavy_spec = {k: v for k, v in spec.items() if k != 'lane'}
+        self.assertEqual(self.raw_rpc({'action': 'submit', 'job_id': light, 'spec': heavy_spec}).returncode, 1)
+
+    def test_light_cancel_routes_to_light_spool(self):
+        holder = self.hold_shared_lock()
+        try:
+            a, _ = self.submit("import time; time.sleep(10)", lane='light')
+            self.wait(a, ('running',))
+            b, _ = self.submit("from pathlib import Path; Path('must-not-exist').touch()", lane='light')
+            self.rpc('cancel', b); self.rpc('cancel', a)
+            self.wait(a, ('cancelled',)); self.wait(b, ('cancelled',))
+            self.assertFalse((self.base / 'must-not-exist').exists())
+        finally:
+            holder.close()
+
+    def test_light_job_cannot_borrow_the_android_shared_lock(self):
+        helper = SCRIPT.parent / 'android-build-thales.py'
+        code = f"import importlib.util; s=importlib.util.spec_from_file_location('a',{str(helper)!r}); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.BASE={str(self.base)!r};\nwith m.shared_worker_lock(True): print('ACQUIRED-' + 'MARK')"
+        self.base.mkdir(parents=True, exist_ok=True); self.lock.touch()
+        a, _ = self.submit(code, lane='light')
+        result = self.wait(a, ('completed', 'failed'))
+        self.assertEqual(result['state'], 'failed')
+        log = Path(result['receipt']['log_path']).read_text()
+        self.assertIn('inherited lock identity mismatch', log)
+        self.assertNotIn('ACQUIRED-MARK', log)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -3,6 +3,14 @@
 
 The dispatcher owns a process lock; the shared build lock is held across the
 whole child process group. A lost dispatcher never blindly retries a command.
+
+Lanes: a job without ``lane`` (or ``lane: heavy``) runs under the shared
+Android/VM worker lock exactly as before. ``lane: light`` is for short packaging
+work (image packaging from prebuilt binaries, static app builds, canaries) capped
+at LIGHT_MAX_SECONDS. Light jobs live in their own spool (``<root>/light``) with
+their own exclusive lock, so they never wait behind heavy work and a heavy-only
+dispatcher (including an older release) can never see, claim or repeat them.
+Within each lane the original one-at-a-time, never-retry semantics are unchanged.
 """
 import argparse
 import fcntl
@@ -19,6 +27,16 @@ import time
 import shutil
 
 TERMINAL = ('completed', 'failed', 'cancelled', 'interrupted')
+LANES = ('heavy', 'light')
+LIGHT_MAX_SECONDS = 900
+
+
+def light_root(root):
+    return Path(root) / 'light'
+
+
+def light_lock(root):
+    return light_root(root) / 'packaging.lock'
 
 
 def connect(root):
@@ -62,6 +80,11 @@ def validate(spec):
         raise ValueError('invalid command')
     if not isinstance(spec.get('timeout_seconds'), int) or not 1 <= spec['timeout_seconds'] <= 86400:
         raise ValueError('invalid deadline')
+    lane = spec.get('lane', 'heavy')
+    if lane not in LANES:
+        raise ValueError('invalid lane')
+    if lane == 'light' and spec['timeout_seconds'] > LIGHT_MAX_SECONDS:
+        raise ValueError('light lane deadline too long')
     return {**spec, 'cwd': str(cwd)}
 
 
@@ -95,7 +118,10 @@ def execute(root, job_id, worker_fd, execution_fd):
             state, reason = 'failed', 'deadline'
         else:
             with (root / (job_id + '.log')).open('ab', buffering=0) as log:
-                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd)}
+                # A light job's fd is the packaging lock: helpers that verify the
+                # shared Android lock inode (android-build-thales) fail closed.
+                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
+                       'WIZARD_WORKER_LANE': spec.get('lane', 'heavy')}
                 # The command and all non-detached descendants stay in OUR group.
                 process = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
@@ -230,28 +256,56 @@ def dispatch(root, lock_path):
                         pass
 
 
+def spawn_dispatcher(root, lock_path):
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--root', str(root),
+                      '--lock', str(lock_path), '--dispatch'], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def find(root, job_id):
+    """Spool holding job_id: heavy (root) first, then light. Never creates a spool."""
+    for lane_root in (root, light_root(root)):
+        if (lane_root / 'jobs.sqlite3').exists():
+            db = connect(lane_root)
+            try:
+                if db.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
+                    return lane_root
+            finally:
+                db.close()
+    return None
+
+
 def rpc(root, lock_path, value):
-    db = connect(root)
     job_id = value.get('job_id', '')
     if not re.fullmatch(r'heavy_[0-9a-f]{32}', job_id):
         raise ValueError('invalid job identity')
     action = value['action']
+    if action not in ('submit', 'cancel', 'status'):
+        raise ValueError('invalid action')
+    target = find(root, job_id)
     if action == 'submit':
-        spec = json.dumps(validate(value['spec']), sort_keys=True, separators=(',', ':'))
+        validated = validate(value['spec'])
+        wanted = light_root(root) if validated.get('lane') == 'light' else root
+        if target is not None and target != wanted:
+            raise ValueError('idempotency conflict')
+        target = wanted
+        spec = json.dumps(validated, sort_keys=True, separators=(',', ':'))
+        db = connect(target)
         db.execute('INSERT OR IGNORE INTO jobs(id,spec,state,created,updated) VALUES (?,?,\'queued\',?,?)',
                    (job_id, spec, time.time(), time.time()))
         row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
         if row['spec'] != spec:
             raise ValueError('idempotency conflict')
-    elif action == 'cancel':
-        db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), job_id))
-    elif action != 'status':
-        raise ValueError('invalid action')
+    else:
+        db = connect(target or root)
+        if action == 'cancel':
+            db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), job_id))
     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
     db.close()
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--root', str(root),
-                      '--lock', str(lock_path), '--dispatch'], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Every RPC ensures each existing lane has a dispatcher (submit/exit races).
+    spawn_dispatcher(root, lock_path)
+    if (light_root(root) / 'jobs.sqlite3').exists():
+        spawn_dispatcher(light_root(root), light_lock(root))
     return public(row)
 
 

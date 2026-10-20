@@ -39,6 +39,7 @@ describe('title format', () => {
     expect(STATUS_INSTRUCTIONS).toContain('"title":"Wizard OS · Desks"')
     expect(STATUS_INSTRUCTIONS).toContain('Return the thread\'s current title exactly')
     expect(WIZARD_RUN_INSTRUCTIONS).toContain('Project · Feature')
+    expect(WIZARD_RUN_INSTRUCTIONS).toContain("hand that tab over with the Browser app's handoff tool")
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur - Captions' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur · Captions' })
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped' }))).toEqual({ state: 'done', ask: 'Shipped' })
   })
@@ -74,7 +75,9 @@ describe('when a title changes', () => {
 
   it('tells each run what the thread is called', () => {
     expect(titleContextLine('DeFleur · Captions', {})).toContain('“DeFleur · Captions”')
-    expect(titleContextLine('Captions', { locked: true })).toContain('James named it himself')
+    const locked = titleContextLine('Captions', { locked: true })
+    expect(locked).toContain('“Captions”, and that title is fixed')
+    expect(locked).not.toMatch(/James|himself|herself/u)
   })
 })
 

@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { searchHermesSessionText, readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -26,11 +26,12 @@ import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
+import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRouter } from './wizard-os-settings.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
@@ -40,9 +41,14 @@ import { requireCurrentContinuation, helperContinueRequestAllowed } from './help
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
+import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
+import { listPayload } from './session-list-view.mjs'
+import { fullRetryInput } from './session-detail.mjs'
+import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
-import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 
@@ -105,7 +111,7 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown.
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG. Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the plain-CSS file Skins/My skin.css in their Files (Files app tools), which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS only, no @import or outside URLs; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
@@ -117,9 +123,9 @@ ${APP_PROVENANCE_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
-  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
+  { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order', 'limit', 'offset', 'include_compacted', 'view']) },
   { method: 'POST', pattern: new RegExp(`^/api/sessions/${ID}/model$`), query: new Set() },
@@ -139,9 +145,15 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
   if (!route) return false
   for (const name of searchParams.keys()) if (!route.query.has(name)) return false
   if (pathname === '/api/sessions' && method === 'GET') {
+    if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
+    if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
+    if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
+    if (['window','q','overrides','cursor'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
+  if (/^\/api\/sessions\/[^/]+$/.test(pathname) && searchParams.has('view') && searchParams.get('view') !== 'detail') return false
   if (/\/messages$/.test(pathname)) {
     if (searchParams.has('order') && !['latest', 'oldest'].includes(searchParams.get('order'))) return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
@@ -415,6 +427,26 @@ export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   }
 }
 
+// A brand-new thread whose first send failed (or still waits) has no Hermes messages yet, so every
+// list reader drops it and James's message vanishes. Keep it listed from the Wizard run queue,
+// which still holds the exact text, so it shows with its failure and Retry (17 Oct 2026 incident).
+export function readPendingFirstSendSessions(sessionDbPath, sessionIds) {
+  if (!sessionDbPath || !existsSync(sessionDbPath) || !sessionIds.length) return []
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    return database.prepare(`
+      SELECT id, source, model, title, started_at, ended_at, end_reason, message_count,
+             parent_session_id, last_activity_at AS last_active, pinned, archived, hidden
+        FROM sessions
+       WHERE id IN (${sessionIds.map(() => '?').join(',')})
+         AND COALESCE(message_count, 0) = 0 AND hidden = 0 AND archived = 0 AND parent_session_id IS NULL
+    `).all(...sessionIds).map((session) => ({
+      ...session, pinned: Boolean(session.pinned), archived: false, hidden: false,
+      wizard_pending_first_send: true,
+    }))
+  } catch { return [] } finally { database.close() }
+}
+
 function mergeArchivedSessions(result, archivedSessions) {
   if (!archivedSessions.length) return result
   try {
@@ -434,7 +466,8 @@ function isHumanSession(session, operator) {
   if (!session || typeof session.id !== 'string') return false
   const operatorSession = session.id.startsWith(OPERATOR_SESSION_PREFIX)
   if (operatorSession !== operator || session.hidden === true) return false
-  if (typeof session.message_count === 'number' && session.message_count <= 0) return false
+  if (typeof session.message_count === 'number' && session.message_count <= 0
+    && !(session.wizard_pending_first_send === true && !operator)) return false
   if (operator) return session.id.startsWith(OPERATOR_USER_SESSION_PREFIX)
   return isDirectHumanSessionIdentity(session.id, session.source)
 }
@@ -546,12 +579,27 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               // thread settles like a finished turn (Done/Defer, no reply, no Retry).
               projected.status = latestDirect.status
               if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
+              // Provider sign-in expired: name the connection app that fixes it (provider-reconnect.mjs).
+              if (latestDirect.reconnect) projected.wizard_reconnect = latestDirect.reconnect
+              if (!projected.preview && latestDirect.preview) projected.preview = latestDirect.preview
+              if (projected.wizard_pending_first_send) {
+                // A send Wizard never delivered: show it as an error thread with James's own words and Retry.
+                const words = String(latestDirect.preview || '').replace(/\[WIZARD_FILES_V1\][\s\S]*?(\[\/WIZARD_FILES_V1\]|$)/gu, '').trim()
+                if (words) projected.wizard_request_preview = words
+                projected.preview = words || 'Voice message'
+                if (!projected.title) projected.title = (words || 'Voice message').replace(/\s+/gu, ' ').slice(0, 60)
+                if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
+              }
             }
             // A failure James explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
               const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
-              if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) delete projected.status
+              if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) {
+                delete projected.status
+                delete projected.wizard_reconnect
+                if (projected.wizard_pending_first_send) return null  // James dismissed a send that never went through
+              }
             }
             // Internal machine turns (helper results, follow-through nudges) never become the list preview.
             if (typeof projected.preview === 'string' && /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through)/u.test(projected.preview)) {
@@ -599,6 +647,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           }
           return projected
         })
+        .filter(Boolean)
       return Buffer.from(JSON.stringify(payload))
     }
   } catch { /* pass through the upstream error body */ }
@@ -719,8 +768,12 @@ function historyTimestamp(value) {
 
 export function durableInlineImage(part) {
   if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return null
-  const match = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
-  if (!match || !match[2]) return null
+  // Linear check: a repeated-group regex over multi-megabyte base64 overflows V8's regex stack
+  // (RangeError), which turned a whole thread's history read into 502 "Couldn't load this thread".
+  const head = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,/i)
+  const body = head ? part.image_url.url.slice(head[0].length) : ''
+  if (!head || !body || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body) || body.slice(0, -2).includes('=')) return null
+  const match = [head[0] + body, head[1], body]
   const declaredMime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
   if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(declaredMime)) return null
   const bytes = Buffer.from(match[2], 'base64')
@@ -2036,6 +2089,19 @@ export function createWizardServer(options = {}) {
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
+    // Read-only transcript check for sends whose connection dropped mid-request (gateway restart).
+    // false = Hermes never recorded this message, so the queue may replay it instead of failing it.
+    deliveryProbe: !hermesStatePath ? null : (sessionId, sinceMs, text) => {
+      if (!existsSync(hermesStatePath)) return null
+      const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+      try {
+        const since = Number(sinceMs) / 1000
+        const row = text
+          ? db.prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND role='user' AND timestamp>=? AND instr(content, ?) > 0").get(String(sessionId), since, String(text))
+          : db.prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND role='user' AND timestamp>=?").get(String(sessionId), since)
+        return Number(row?.n || 0) > 0
+      } catch { return null } finally { db.close() }
+    },
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
     sessionRoute: sessionId => {
       // Never infer a host state.db path on portable installs. Explicit client locks still work
@@ -2105,6 +2171,7 @@ export function createWizardServer(options = {}) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
@@ -2261,6 +2328,7 @@ export function createWizardServer(options = {}) {
   // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
   // "Agent adapter" keeps the list.
+  const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? readPendingFirstSendSessions(hermesStatePath, ids) : []))
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
   const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionReader = options.canonicalSessionReader
@@ -2909,6 +2977,14 @@ export function createWizardServer(options = {}) {
         console.log(`[stale-run-guard] released ${record.sessionId} run ${record.upstreamRunId} as ${verdict.status}`)
         try { appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
       },
+      interruptOutcome: options.interruptOutcomeReader
+        ?? ((record) => readInterruptedRunOutcomeHttp((path) => hermesJson(path), record.sessionId, record.createdAt)),
+      onInterruptRecovery: (record, decision) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, session_id: record?.sessionId,
+          upstream_run_id: record?.upstreamRunId, ...decision }
+        console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
+        try { appendFileSync(resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+      },
     })
   }
 
@@ -2954,8 +3030,29 @@ export function createWizardServer(options = {}) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const canonicalSessionPage = async (operator, searchParams) => {
+  const listWindowPage = createListWindows()
+  const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
+    if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
+      const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+      if (!access) throw Object.assign(new Error('access required'), {status:403})
+      const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
+        const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
+        const rows = []
+        // Truth/helper readers cap at 200 IDs. Keep batches at the existing page size.
+        for (let i=0; i<all.length; i+=100) {
+          const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
+          const batch = JSON.parse(result.toString('utf8')).data
+          if (searchParams.get('q')) {
+            const hits = searchHermesSessionText(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
+            for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
+          }
+          rows.push(...batch)
+        }
+        return rows
+      } })
+    }
     const now = Date.now()
     const requestedOffset = Number(searchParams.get('offset'))
     const offset = Number.isSafeInteger(requestedOffset) ? Math.max(0, requestedOffset) : 0
@@ -3133,6 +3230,75 @@ export function createWizardServer(options = {}) {
       }))
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
+  }
+
+  // A thread whose last run failed on an expired provider sign-in gets the connection app to open
+  // (installed or not) and that app's current reading. The usage read is cached and bounded here,
+  // so a slow connection app never holds up Chats.
+  const decorateReconnectRows = async (result) => {
+    try {
+      const payload = JSON.parse(result.toString('utf8'))
+      const rows = ['data', 'sessions'].flatMap((key) => Array.isArray(payload?.[key]) ? payload[key] : [])
+        .filter((row) => row && row.wizard_reconnect)
+      if (!rows.length) return result
+      const installedApps = readApps({ appsJsonPath, launcherPath }).apps
+      const usage = await Promise.race([
+        aiUsageReader.read().catch(() => null),
+        new Promise((done) => setTimeout(() => done(null), 400).unref?.()),
+      ])
+      decorateReconnect(rows, { installedApps, usage })
+      return Buffer.from(JSON.stringify(payload))
+    } catch { return result }
+  }
+
+  // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
+  const projectSessionList = async (result, operator, canonicalPage, firstPage) => {
+          result = canonicalPage
+            ? result
+            : mergeArchivedSessions(result, archivedSessionReader())
+          if (!operator && runQueue && firstPage) {
+            try {
+              const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
+              result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
+            } catch { /* optional: never break ordinary Chats */ }
+          }
+          const listedSessionIds = sessionIdsInList(result)
+          const recentExternalReferences = canonicalPage
+            // A Wizard run may legitimately remain active for hours. The run endpoint is
+            // authoritative and terminal results are cached, so never age an admitted run
+            // out of Working merely because its request is more than five minutes old.
+            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
+            : undefined
+          const [helmActivities, externalRuns] = operator
+            ? [[], []]
+            : await Promise.all([
+                readHelmActivities(),
+                readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
+              ])
+          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
+          result = filterSessionList(
+            result,
+            operator,
+            [...operatorWorkers.values()],
+            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
+            externalRuns,
+            sessionTruth,
+            helmActivities,
+            Boolean(canonicalPage),
+            dismissedFailureStore,
+          )
+          if (!operator) result = await decorateReconnectRows(result)
+          if (backgroundResults) {
+            try { result = await backgroundResults.project(result) }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          }
+          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
+          result = decorateSessionTitles(result, operator)
+          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+    return result
   }
 
   const safeQueueValue = (value, record) => {
@@ -3441,6 +3607,9 @@ export function createWizardServer(options = {}) {
       userFiles = null
     }
   }
+  // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
+  const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
+  if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -3509,9 +3678,44 @@ export function createWizardServer(options = {}) {
     stream.pipe(response)
   }
 
+  // Owner vs agent authentication: one principal per request, resolved before any route.
+  const principals = createPrincipalResolver({
+    ownerProof: options.ownerProof ?? '',
+    requireAccess,
+    accessVerified: (request) => accessVerified(request, accessVerifier),
+    internalCall,
+    agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
+    mainAgentId: MAIN_AGENT_ID,
+    agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
+    agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
+  })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
+  try {
+    if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
+      process.stderr.write('Warning: a private agent exists but no owner proof is configured (WIZARD_OWNER_PROOF_FILE); every local caller counts as the owner.\n')
+    }
+  } catch { /* the registry reports its own errors */ }
+
+  // Session ids (and `runtime:id` keys) that belong to a private agent the caller may not open.
+  const hiddenSession = (request, key) => {
+    if (!agents || typeof key !== 'string') return false
+    const ids = [key, key.split(':').slice(1).join(':')].filter(Boolean)
+    return ids.some((id) => { const pinned = agents.pinnedAgent(id); return Boolean(pinned) && isPrivateAgent(agents, pinned) && !mayOpenAgent(request, pinned) })
+  }
+  const withoutHiddenSessions = (request, records) => {
+    if (!records || typeof records !== 'object' || Array.isArray(records) || ownerLike(principalOf(request))) return records
+    return Object.fromEntries(Object.entries(records).filter(([key]) => !hiddenSession(request, key)))
+  }
+  const withoutHiddenSeen = (request, state) => (state && typeof state === 'object' && state.threads && typeof state.threads === 'object'
+    ? { ...state, threads: withoutHiddenSessions(request, state.threads) } : state)
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      const principal = await principals.attach(request)
+      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      // An agent credential reaches only the agent surfaces; the rest is the owner's.
+      if (principal.kind === 'agent' && !agentPathAllowed(url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
         const authenticated = requireAccess && await accessVerified(request, accessVerifier)
         if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
@@ -3565,6 +3769,17 @@ export function createWizardServer(options = {}) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!uploads) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         const parts = url.pathname.split('/').slice(3)
+        // A share or upload on a private agent the caller may not open: same answer as one that does not exist.
+        const hiddenShare = (share) => Boolean(agents && share?.agent && isPrivateAgent(agents, share.agent) && !mayOpenAgent(request, share.agent))
+        const assertUploadVisible = async (id) => {
+          const record = await uploads.getUpload(id)
+          if (record?.share_id) {
+            let share = null
+            try { share = uploads.getShare(record.share_id) } catch { share = null }
+            if (!share || hiddenShare(share)) throw new UploadError(404, 'not_found')
+          }
+          return record
+        }
         try {
           if (parts[0] === 'uploads') {
             if (parts.length === 1 && request.method === 'POST') {
@@ -3584,6 +3799,7 @@ export function createWizardServer(options = {}) {
               return
             }
             if (parts.length >= 2 && !UPLOAD_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
+            if (parts.length >= 2) await assertUploadVisible(parts[1])
             if (parts.length === 2 && request.method === 'GET') {
               const { upload_id, offset, bytes, chunk_bytes, status, file, error } = uploads.publicUpload(await uploads.getUpload(parts[1]))
               sendJson(response, 200, { upload_id, offset, bytes, chunk_bytes, status, ...(file ? { file } : {}), ...(error ? { error } : {}) }, { 'Upload-Offset': String(offset) })
@@ -3612,11 +3828,16 @@ export function createWizardServer(options = {}) {
             if (parts.length === 1 && request.method === 'POST') {
               if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
               const input = parseShareRequest(parseJsonBody(await readBoundedBody(request, 64 * 1024)))
+              // Who may send to the named agent is checked first; a replay is answered only to a caller who may see it.
+              // A hidden agent gets exactly the answer of an agent that does not exist.
+              if (agents && input.agent && isPrivateAgent(agents, input.agent) && !mayOpenAgent(request, input.agent)) throw new UploadError(409, 'agent_unavailable', { agent: input.agent })
               const replay = uploads.replayShare(input)
+              if (replay && hiddenShare(replay)) { sendJson(response, 404, { error: 'agent_not_found' }); return }
               if (replay) { sendJson(response, 201, uploads.publicShare(replay), { 'Idempotency-Replayed': 'true' }); return }
               const routed = await resolveShareAgent(input.agent)
               let threadId = input.thread
               if (threadId) {
+                if (hiddenSession(request, threadId)) throw new UploadError(404, 'thread_not_found')
                 if (!await shareThreadExists(threadId, routed)) throw new UploadError(404, 'thread_not_found')
               } else threadId = `wizard_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}`
               const { share, replayed } = await uploads.createShare(input, { ...routed, thread_id: threadId, thread_new: !input.thread })
@@ -3625,12 +3846,50 @@ export function createWizardServer(options = {}) {
             }
             if (parts.length === 2 && request.method === 'GET') {
               if (!SHARE_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
-              sendJson(response, 200, uploads.publicShare(uploads.getShare(parts[1])))
+              const share = uploads.getShare(parts[1])
+              if (hiddenShare(share)) { sendJson(response, 404, { error: 'not_found' }); return }
+              sendJson(response, 200, uploads.publicShare(share))
               return
             }
           }
           sendJson(response, parts.length <= 3 ? 405 : 404, { error: parts.length <= 3 ? 'method_not_allowed' : 'not_found' })
         } catch (error) { sendUploadError(response, error) }
+        return
+      }
+      if (url.pathname === '/wizard/v1/my-skin') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.method === 'GET' || request.method === 'HEAD') {
+          if (url.searchParams.get('format') === 'json') { sendJson(response, 200, mySkin ? mySkin.info() : { path: '', exists: false, bytes: 0, max_bytes: MY_SKIN_MAX_BYTES, empty: true, too_large: false, unavailable: true }); return }
+          const body = Buffer.from(mySkin ? mySkin.css() : '', 'utf8')
+          const tag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"`
+          const headers = { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-cache', ETag: tag, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; font-src 'self' data:" }
+          if (String(request.headers['if-none-match'] ?? '') === tag) { response.writeHead(304, headers); response.end(); return }
+          response.writeHead(200, { ...headers, 'Content-Length': String(body.length) })
+          response.end(request.method === 'HEAD' ? undefined : body)
+          return
+        }
+        if (request.method !== 'PUT' && request.method !== 'DELETE') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
+        // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let host
+          try { host = new URL(request.headers.origin).host } catch { host = '' }
+          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
+        try {
+          if (request.method === 'DELETE') mySkin.reset()
+          else {
+            if (!/^text\/css(?:;|$)/iu.test(String(request.headers['content-type'] ?? '').trim())) { sendJson(response, 415, { error: 'css_required' }); return }
+            mySkin.write((await readBoundedBody(request, MY_SKIN_MAX_BYTES)).toString('utf8'))
+          }
+          sendJson(response, 200, mySkin.info())
+        } catch (error) {
+          const status = error instanceof MySkinError ? error.status : error?.status === 413 ? 413 : 500
+          sendJson(response, status, { error: error instanceof MySkinError ? error.code : status === 413 ? 'my_skin_too_large' : 'my_skin_failed' })
+        }
         return
       }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
@@ -4069,7 +4328,7 @@ export function createWizardServer(options = {}) {
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
         const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
-          sendJson(response, 200, { state: threadDispositionStore.get(scope) }); return
+          sendJson(response, 200, { state: withoutHiddenSessions(request, threadDispositionStore.get(scope)) }); return
         }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
           sendJson(response, 415, { error: 'json_required' }); return
@@ -4084,6 +4343,8 @@ export function createWizardServer(options = {}) {
           if (originHost !== publicHost) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         }
         const body = parseJsonBody(await readBoundedBody(request, 1024))
+        // A private thread's side state is the owner's: refused before anything is stored.
+        if (hiddenSession(request, body?.sessionId) || hiddenSession(request, `${body?.runtime}:${body?.sessionId}`)) { sendJson(response, 404, { error: 'not_found' }); return }
         const record = threadDispositionStore.set(scope, body.runtime, body.sessionId, body.deferred)
         sendJson(response, 200, { record }); return
       }
@@ -4094,14 +4355,20 @@ export function createWizardServer(options = {}) {
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
         const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
-          sendJson(response, 200, { state: threadSeenStore.get(scope) })
+          sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
           return
         }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
           sendJson(response, 415, { error: 'json_required' }); return
         }
         const state = parseJsonBody(await readBoundedBody(request, 256 * 1024))
-        sendJson(response, 200, { state: threadSeenStore.merge(scope, state) })
+        // Seen marks for private threads the caller may not open are dropped before the merge, not after.
+        // A non-owner merges only into what it can see: hidden records sit outside the size cap, and it cannot
+        // move the store's start time back, so it can neither push out nor reset the owner's private marks.
+        const owner = ownerLike(principalOf(request))
+        const merged = owner ? threadSeenStore.merge(scope, state)
+          : threadSeenStore.merge(scope, withoutHiddenSeen(request, state), { protect: (key) => hiddenSession(request, key), keepInitializedAt: true })
+        sendJson(response, 200, { state: withoutHiddenSeen(request, merged) })
         return
       }
 
@@ -4112,7 +4379,9 @@ export function createWizardServer(options = {}) {
         let sessionId
         try { sessionId = decodeURIComponent(failureDismissal[1]) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        if ((await readBoundedBody(request, 2)).length) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Wizard UX posts '{}'; accept an empty body or an empty JSON object.
+        const dismissBody = (await readBoundedBody(request, 64)).toString('utf8').trim()
+        if (dismissBody && dismissBody !== '{}') { sendJson(response, 400, { error: 'invalid_request' }); return }
         // Resolve the failure identity the way the session list projects it:
         // the newest bound external run, the newest Helm activity, else the
         // canonical session revision.
@@ -4123,6 +4392,10 @@ export function createWizardServer(options = {}) {
         } catch { /* read-only projection; the dismissal can still persist */ }
         if (!failureKey) {
           try { failureKey = String((await readHelmActivities()).find((activity) => activity.sessionId === sessionId)?.activityId ?? '') } catch { /* optional */ }
+        }
+        if (!failureKey) {
+          // Failed Wizard queue sends: the list keys these by the newest queue run (latestDirect.publicRunId).
+          try { failureKey = String(runQueue?.latestProjections([sessionId])?.[0]?.publicRunId ?? '') } catch { /* optional */ }
         }
         try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
         catch { sendJson(response, 400, { error: 'invalid_request' }); return }
@@ -4183,6 +4456,7 @@ export function createWizardServer(options = {}) {
         let agentResolution = null
         if (agentCtx) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
+          if (principalOf(request).kind === 'agent' && (operator || agentResolution.agentId !== principalOf(request).agentId)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
@@ -4202,6 +4476,8 @@ export function createWizardServer(options = {}) {
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
+        // Record the owner's Stop before it reaches Hermes, so the resulting `cancelled` is never auto-resumed.
+        if (runQueue && request.method === 'POST' && /^\/v1\/runs\/[^/]+\/stop$/.test(upstreamPath)) runQueue.markOwnerStop(upstreamPath.split('/')[3])
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
           return
@@ -4348,9 +4624,10 @@ export function createWizardServer(options = {}) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
+        for (const key of ['window','q','overrides','cursor']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
-          ? await canonicalSessionPage(operator, url.searchParams)
+          ? await canonicalSessionPage(operator, url.searchParams, request)
           : null
         const upstream = canonicalPage
           ? new Response(JSON.stringify(canonicalPage), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -4497,45 +4774,18 @@ export function createWizardServer(options = {}) {
           void refreshCanonicalSessions().catch(() => undefined)
         }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
-          result = canonicalPage
-            ? result
-            : mergeArchivedSessions(result, archivedSessionReader())
-          const listedSessionIds = sessionIdsInList(result)
-          const firstPage = Number(url.searchParams.get('offset') ?? 0) === 0
-          const recentExternalReferences = canonicalPage
-            // A Wizard run may legitimately remain active for hours. The run endpoint is
-            // authoritative and terminal results are cached, so never age an admitted run
-            // out of Working merely because its request is more than five minutes old.
-            ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
-            : undefined
-          const [helmActivities, externalRuns] = operator
-            ? [[], []]
-            : await Promise.all([
-                readHelmActivities(),
-                readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
-              ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
-          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
-          result = filterSessionList(
-            result,
-            operator,
-            [...operatorWorkers.values()],
-            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
-            externalRuns,
-            sessionTruth,
-            helmActivities,
-            Boolean(canonicalPage),
-            dismissedFailureStore,
-          )
-          if (backgroundResults) {
-            try { result = await backgroundResults.project(result) }
-            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
+        }
+        if (upstream.ok && !operator && request.method === 'GET' && url.searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          const payload = JSON.parse(result.toString('utf8'))
+          const row = payload.session || payload
+          if (row?.id) {
+            const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
+            const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
+            const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
+            detailed.wizard_retry_input = truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
-          result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
-          result = decorateSessionTitles(result, operator)
-          if (agents && !operator) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
           result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
@@ -4572,6 +4822,9 @@ export function createWizardServer(options = {}) {
         }
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
+        if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'))))
+        }
         response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
         if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick(request.method === 'GET' ? 'delivered_history' : 'accepted_main')
@@ -4694,6 +4947,15 @@ export function createWizardServer(options = {}) {
     server.on('close', () => watcher.stop())
   }
   return server
+}
+
+/**
+ * The agent-only listener: what agent containers are given instead of the main address. Same routes and state
+ * as `server`, but every request must carry that agent's own credential (no owner proof, no anonymous access),
+ * so an agent cannot fall back to the local-automation surface by leaving its credential off.
+ */
+export function createAgentIngress(server) {
+  return createServer((request, response) => server.emit('request', markAgentIngress(request), response))
 }
 
 export async function listen(server, host = '127.0.0.1', port = 0) {
