@@ -21,7 +21,7 @@ type Upstream = Map<string, { status: string, output?: string | null }>
 
 // One "process" of the Agent Service: a queue over the shared state file and the shared Hermes runs.
 function serviceProcess(statePath: string, upstream: Upstream, launched: string[], options: {
-  outcome?: (record: { sessionId: string }) => string | null,
+  outcome?: (record: { sessionId: string }) => string | null | Promise<string | null>,
   decisions?: Array<{ state: string, reason: string, recoveryRunId: string }>,
 } = {}) {
   const queue = new DurableRunQueue({
@@ -72,6 +72,17 @@ async function liveRunThenRestart(opts: Parameters<typeof serviceProcess>[3] = {
 }
 
 describe('restart during a live run', () => {
+  it('resumes once when the transcript ends with a persisted interruption diagnostic', async () => {
+    const t = await liveRunThenRestart({ outcome: () => readInterruptedRunOutcomeHttp(async () => ({ data: [
+      { role: 'assistant', content: 'Operation interrupted: waiting for model response (70.2s elapsed).', timestamp: Date.now() / 1000 + 1 },
+    ] }), 'wizard_wisdom', 0) })
+    expect(t.after.get(t.original)?.status).toBe('interrupted')
+    expect(t.after.interruptRecovery(t.original)?.state).toBe('admitted')
+    expect(t.launched).toEqual(['wos-native-rec-1', INTERRUPT_RECOVERY_PREFIX + t.original])
+    await t.after.tick(true)
+    expect(t.launched).toHaveLength(2)
+  })
+
   it('marks the cut run interrupted (Needs retry) and resumes it once under a stable recovery key', async () => {
     const decisions: Array<{ state: string, reason: string, recoveryRunId: string }> = []
     const t = await liveRunThenRestart({ outcome: () => 'interrupted', decisions })
