@@ -16,7 +16,7 @@ Stage on the Mac's external work volume (never its internal disk):
 
 Submit a **heavy** job with cwd = rig root, argv = `[/opt/homebrew/bin/python3, <rig root>/worker.py, --rig-root, <rig root>]`, timeout 7200. The durable worker owns the shared `worker.lock`; do not execute this command over a foreground SSH session, self-acquire a second lock, or launch a background child. Subagents prepare and return this exact job specification to their parent for admission. `--validate` is read-only and safe before admission.
 
-The worker reuses the exact Ubuntu base and configuration pattern from the previous agents-mvp rig, not its mutable guest disk (which might contain secrets). It copies that cached base to the rig's external-volume cache, checks the pinned SHA256, creates VM `pp-private-providers` in `<rig root>/lima`, and mounts **only** the staging directory, read-only. It does not modify or boot any existing VM.
+The worker reuses the exact Ubuntu base and configuration pattern from the previous agents-mvp rig, not its mutable guest disk (which might contain secrets). It copies that cached base to the rig's external-volume cache, checks the pinned SHA256, creates VM `pp-rig` in `<rig root>/lima`, and mounts **only** the staging directory, read-only. It does not modify or boot any existing VM.
 
 Readiness is **not** implied by staging or by a queue receipt. After actual execution, require `<rig root>/evidence/ready.json`, successful forwarded health reads, and all six `DRY_RUN` lines in `evidence/provision.log`. The full service suite and locked-run-bridge test also run inside the new guest before readiness. A failure leaves logs and the VM for diagnosis; it will not silently overwrite that VM on retry.
 
@@ -26,10 +26,10 @@ On the Mac:
 
 ```sh
 export LIMA_HOME="<rig root>/lima"
-limactl shell --workdir /home/rig pp-private-providers
+limactl shell --workdir /home/rig pp-rig
 ```
 
-Loopback forwards on the Mac: Agent Service `18787`, App Manager `17790`, runtime helper `17795`, Runtipi `18480`. No public or Tailscale binding. For another host, use SSH `-L` through the Mac. The generated `<rig root>/lima/pp-private-providers/ssh.config` also supports ordinary SSH.
+Loopback forwards on the Mac: Agent Service `18787`, App Manager `17790`, runtime helper `17795`, Runtipi `18480`. No public or Tailscale binding. For another host, use SSH `-L` through the Mac. The generated `<rig root>/lima/pp-rig/ssh.config` also supports ordinary SSH.
 
 The worker stops **only this VM**, APFS-clones its raw disk and EFI into `<rig root>/baseline/`, then reboots and checks health. This clean baseline predates any candidate app or provider key. Reset is the same admitted heavy job plus `--reset`: stop this VM, replace only its own disk/EFI using APFS clones from the manifest, restart, verify health. This is intentionally destructive only to this disposable rig's post-baseline state. Never delete/rewrite another lane's VMs. VM baseline/reset must be proven by execution; these instructions are not runtime evidence.
 

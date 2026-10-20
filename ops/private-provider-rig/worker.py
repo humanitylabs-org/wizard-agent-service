@@ -14,7 +14,7 @@ import subprocess
 import time
 import urllib.request
 
-VM = 'pp-private-providers'
+VM = 'pp-rig'  # short: Lima socket paths must stay under 104 chars
 IMAGE_URL = 'https://cloud-images.ubuntu.com/releases/noble/release-20260615/ubuntu-24.04-server-cloudimg-arm64.img'
 IMAGE_SHA = 'cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927'
 
