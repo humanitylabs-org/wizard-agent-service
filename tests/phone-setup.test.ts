@@ -327,7 +327,7 @@ describe('setup API (box-local listener)', () => {
 })
 
 describe('tailnet listener with settings-driven Tailscale access', () => {
-  async function stack({ proxyPeers = ['127.0.0.1', '::1'], env = {}, shellOrigin = '' }: { proxyPeers?: string[], env?: { origin?: string, logins?: string }, shellOrigin?: string } = {}) {
+  async function stack({ proxyPeers = ['127.0.0.1', '::1'], env = {}, shellOrigin = '', ownerProof = '' }: { proxyPeers?: string[], env?: { origin?: string, logins?: string }, shellOrigin?: string, ownerProof?: string } = {}) {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
     const appsJsonPath = join(dir, 'apps.json')
@@ -339,7 +339,7 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
       onVerified: (request: IncomingMessage) => (server as any)?.phoneSetup?.noteOwnerRequest(request),
     })
     server = createWizardServer({
-      requireAccess: false, tailnetVerifier, settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
+      requireAccess: false, ownerProof, tailnetVerifier, settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
       mcpToken: 'fixture-mcp', wizardOsHome: dir, bridgeWriteSkills: false, bridgeWatchMs: 0,
       followThrough: false, archivedSessionReader: () => [], ...(shellOrigin ? { tailnetShellOrigin: shellOrigin } : {}),
     })
@@ -449,6 +449,16 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
     expect(put.status).toBe(200)
     const local = await call(s.local, '/wizard/thread-dispositions')
     expect(JSON.stringify(local.body)).toContain('wizard_t1')
+  })
+
+  it('keeps owner-proof local ingress separate from the enrolled Serve owner', async () => {
+    const s = await stack({ ownerProof: 'synthetic-owner-proof-for-phone-regression' })
+    s.enroll()
+    expect((await call(s.local, '/wizard/v1/setup')).status).toBe(403)
+    expect((await call(s.local, '/wizard/v1/setup', { headers: owner })).status).toBe(403)
+    expect((await call(s.local, '/wizard/v1/setup', { headers: { 'x-wizard-owner-proof': 'synthetic-owner-proof-for-phone-regression' } })).status).toBe(200)
+    expect((await call(s.tailnet, '/wizard/v1/setup', { headers: owner })).status).toBe(200)
+    expect((await call(s.tailnet, '/wizard/v1/agents', { headers: owner })).status).toBe(200)
   })
 
   it('records phone_seen when the owner arrives through Serve from a phone', async () => {
