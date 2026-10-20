@@ -78,7 +78,8 @@ class PrivateProviders:
     def request(self, app, method, path, body=None):
         request = urllib.request.Request(self.origin(app) + path, method=method,
                                          data=json.dumps(body).encode() if body is not None else None,
-                                         headers={'Content-Type': 'application/json'})
+                                         headers={'Content-Type': 'application/json', 'Origin': self.origin(app),
+                                                  'X-Wizard-Request': '1'})
         try:
             with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=5) as response:
                 raw = response.read(65537)

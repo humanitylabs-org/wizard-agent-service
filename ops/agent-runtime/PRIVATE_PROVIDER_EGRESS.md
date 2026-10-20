@@ -159,7 +159,8 @@ The runner uses only `pp-test-` resources. It exercises the **actual reconciler*
 not hand-built equivalent networks: allowed TLS to inference/ATC, forbidden host/
 IP/v6 literal/port80/plain-HTTP, blocked direct IPv4/IPv6/host/DNS, reconcile/restart
 with the same probes, local no-proxy, preserved owner health/key-save/private-token
-routes through fixed ingress, and a real completion from the PR #16 image through
+routes through fixed ingress (using the actual runtime Origin/X-Wizard-Request
+write headers), and a real completion from the PR #16 image through
 the PR #3 relay behind the proxy. It additionally exercises the Python SDK's
 existing decrypting EHBP path, and checks no probe codeword in app data/logs or
 proxy logs. It saves the key only through the app's route into isolated **tmpfs**;

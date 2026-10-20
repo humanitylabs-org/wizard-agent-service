@@ -29,7 +29,13 @@ class PrivateProviderTest(unittest.TestCase):
             def log_message(self, format, *args):
                 pass
 
+            def owner_write(self):
+                if self.headers.get('Origin') != test.origin or self.headers.get('X-Wizard-Request') != '1':
+                    self.send_response(403); self.end_headers(); return False
+                return True
+
             def do_POST(self):
+                if not self.owner_write(): return
                 value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 test.calls.append(('POST', self.path, value))
                 token = secrets.token_urlsafe(32)
@@ -39,6 +45,7 @@ class PrivateProviderTest(unittest.TestCase):
                 self.wfile.write(json.dumps({'token': token, 'relay_url': f"http://{test.app_id}-relay:8090"}).encode())
 
             def do_DELETE(self):
+                if not self.owner_write(): return
                 test.calls.append(('DELETE', self.path))
                 test.tokens.pop(self.path.rsplit('/', 1)[-1], None)
                 self.send_response(204)

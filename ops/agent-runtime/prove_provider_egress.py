@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from provider_egress import ProviderEgress
+from private_providers import PrivateProviders
 
 PREFIX='pp-test-egress'
 containers=[]; networks=[]
@@ -140,7 +141,8 @@ def main():
                 os.environ.pop('PP_TEST_KEY',None); values.clear()
             print('KEY_SAVE',json.dumps({k:v for k,v in result.items() if k in ('status','credentialStored','credentialVerified')}),flush=True)
             status=request(origin+'/api/connection'); assert status['credentialStored'] and status['models']
-            token=request(origin+'/api/private-clients',{'agent':'pp-test-client'},headers=headers)['token']
+            token=PrivateProviders(None,None,None,Failure).request(app,'POST','/api/private-clients',{'agent':'pp-test-client'})['token']
+            print('RUNTIME_OWNER_TOKEN_WRITE_PASS',flush=True)
             models=[m['id'] if isinstance(m,dict) else m for m in status['models']]
             print('AVAILABLE_CHAT_MODELS',json.dumps(models),flush=True)
             model=next((m for m in ('llama3-3-70b','gpt-oss-120b','deepseek-v4-1-flash','kimi-k3') if m in models),models[0])
