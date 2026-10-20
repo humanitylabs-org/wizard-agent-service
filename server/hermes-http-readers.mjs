@@ -84,6 +84,22 @@ export async function readAbandonedRunOutcomeHttp(request, sessionId, startedAt)
 }
 
 /**
+ * After a restart cut a run: 'completed' only when a real answer (assistant text with no tool calls)
+ * landed after the run started; a tool-call commentary row or an empty interrupted row is not an answer.
+ */
+export async function readInterruptedRunOutcomeHttp(request, sessionId, startedAt) {
+  const since = Number(startedAt) || 0
+  for (const row of await latestMessages(request, sessionId, 50)) {
+    if (Number(row?.timestamp ?? 0) < since) break
+    if (row?.display_kind === 'hidden' || row?.role === 'tool') continue
+    if (row?.role === 'assistant' && !String(row?.content ?? '').trim()) continue
+    const toolCalls = Array.isArray(row?.tool_calls) ? row.tool_calls.length > 0 : Boolean(row?.tool_calls)
+    return row?.role === 'assistant' && !toolCalls ? 'completed' : 'interrupted'
+  }
+  return 'interrupted'
+}
+
+/**
  * Threads waiting on a follow-through: the newest message is a background-delegation completion
  * row and no run of ours is active on the thread. Only threads whose last_active moved are re-read.
  */

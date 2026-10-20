@@ -30,7 +30,7 @@ import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRou
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
@@ -2972,6 +2972,14 @@ export function createWizardServer(options = {}) {
         console.log(`[stale-run-guard] released ${record.sessionId} run ${record.upstreamRunId} as ${verdict.status}`)
         try { appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
       },
+      interruptOutcome: options.interruptOutcomeReader
+        ?? ((record) => readInterruptedRunOutcomeHttp((path) => hermesJson(path), record.sessionId, record.createdAt)),
+      onInterruptRecovery: (record, decision) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, session_id: record?.sessionId,
+          upstream_run_id: record?.upstreamRunId, ...decision }
+        console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
+        try { appendFileSync(resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+      },
     })
   }
 
@@ -4404,6 +4412,8 @@ export function createWizardServer(options = {}) {
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
+        // Record the owner's Stop before it reaches Hermes, so the resulting `cancelled` is never auto-resumed.
+        if (runQueue && request.method === 'POST' && /^\/v1\/runs\/[^/]+\/stop$/.test(upstreamPath)) runQueue.markOwnerStop(upstreamPath.split('/')[3])
         if (queuedProxyRecord && request.method === 'GET' && queuedPath[2] === 'events') {
           await streamQueuedRunEvents(queuedProxyRecord, operator, request, response)
           return
