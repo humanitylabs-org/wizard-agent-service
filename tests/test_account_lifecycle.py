@@ -22,7 +22,8 @@ if args[1]=='remove':
     rows=[r for r in rows if r['id']!=args[3]]
 else:
     assert args[1]=='add' and '--type' in args and '--no-browser' in args
-    label=args[args.index('--label')+1]
+    assert '--label' not in args
+    label=[a for a in args if a.startswith('--label=')][0][len('--label='):]
     if args[2]=='anthropic':
         print('https://claude.ai/oauth/authorize?response_type=code&code_challenge_method=S256&state=fixture',flush=True)
         print('Authorization code: ',end='',flush=True)
@@ -112,6 +113,15 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(m.BrokerError): other.start('chatgpt','add',confirmed=True)
         self.b.cancel('chatgpt',j['id']); self.wait(j)
         self.assertEqual(other.jobs,{})
+    def test_label_starting_with_dash_rejected(self):
+        for bad in ('-x','--help',' -v'):
+            with self.assertRaises(m.BrokerError): self.b.start('chatgpt','add',label=bad,confirmed=True)
+        self.assertEqual(self.b.jobs,{})
+    def test_reconnect_passes_inventory_label_as_single_argv_token(self):
+        self.original[0]['label']='-dash';self.path.write_text(json.dumps(self.original))
+        out=self.wait(self.b.start('chatgpt','reconnect','aa11bb',confirmed=True))
+        self.assertEqual(out['status'],'succeeded')
+        self.assertEqual(json.loads(self.path.read_text())[-1]['label'],'-dash')
     def test_colliding_id_label_is_not_a_fallback_target(self):
         self.original[1]['label']='aa11bb';self.path.write_text(json.dumps(self.original))
         with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove','aa11bb',confirmed=True)

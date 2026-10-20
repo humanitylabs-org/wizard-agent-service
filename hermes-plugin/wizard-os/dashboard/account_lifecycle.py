@@ -68,6 +68,9 @@ class Broker:
                 raise BrokerError('The browser broker requires the stock device_code login flow')
         if not isinstance(label, str) or len(label) > 60 or re.search(r'[\x00-\x1f\x7f]|sk-|eyJ', label):
             raise BrokerError('Invalid nickname')
+        # The nickname reaches the stock CLI's argv; a leading '-' would be parsed as a flag.
+        if label.lstrip().startswith('-'):
+            raise BrokerError('Invalid nickname')
         with self.lock:
             if any(j['status'] not in TERMINAL for j in self.jobs.values()):
                 raise BrokerError('Another account operation is active')
@@ -76,7 +79,7 @@ class Broker:
                 raise BrokerError('Add does not accept a target')
             before = {r['id'] for r in self.rows(provider)}
             args = ['auth', 'remove', PROVIDERS[provider], target] if action == 'remove' else [
-                'auth', 'add', PROVIDERS[provider], '--type', 'oauth', '--label', label or (row or {}).get('label') or 'Subscription', '--no-browser']
+                'auth', 'add', PROVIDERS[provider], '--type', 'oauth', '--label=' + (label or (row or {}).get('label') or 'Subscription'), '--no-browser']
             env = dict(os.environ, PYTHONUNBUFFERED='1', BROWSER='/bin/true')
             # No shell, no output files, no provider tokens in arguments.
             if self.lock_path is None:
