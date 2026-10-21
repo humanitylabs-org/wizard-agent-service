@@ -137,6 +137,7 @@ export class DurableRunQueue {
     this.onInterruptRecovery = onInterruptRecovery
     this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
     this.leaselessSince = new Map()
+    this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.timer = null
     this.tickPromise = null
     this.closed = false
@@ -171,6 +172,8 @@ export class DurableRunQueue {
       );
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
+      CREATE INDEX IF NOT EXISTS wizard_run_queue_terminal
+        ON wizard_run_queue(terminal_at, public_run_id) WHERE terminal_at IS NOT NULL;
       CREATE TABLE IF NOT EXISTS wizard_owner_stops (
         run_id TEXT PRIMARY KEY, at REAL NOT NULL
       );
@@ -672,7 +675,9 @@ export class DurableRunQueue {
 
   async _refresh(record, force) {
     if (!record.upstreamRunId || TERMINAL.has(record.status)) return record
-    if (!force && nowSeconds() - record.updatedAt < 0.7) return record
+    if (!force && nowSeconds() - (this.refreshedAt.get(record.publicRunId) ?? record.updatedAt) < 0.7) return record
+    this.refreshedAt.set(record.publicRunId, nowSeconds())
+    if (this.refreshedAt.size > 256) this.refreshedAt.delete(this.refreshedAt.keys().next().value)
     try {
       const result = await this.lookup(record)
       const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
@@ -686,10 +691,17 @@ export class DurableRunQueue {
         this.database.prepare("INSERT OR IGNORE INTO wizard_interrupt_recovery(public_run_id, state, at) VALUES(?, 'pending', ?)")
           .run(record.publicRunId, nowSeconds())
       }
+      const workerRunId = result?.workerRunId ?? record.workerRunId
+      // An UPDATE rewrites the whole row, saved request body included (up to ~6 MB with
+      // attachments): ~30-70 ms and MBs of journal per running reply every 1.5 s. Write only
+      // when something changed, plus a 30 s heartbeat so updated_at stays fresh.
+      if (capacityStatus === record.status && !TERMINAL.has(capacityStatus) && workerRunId === record.workerRunId
+          && !record.waitingReason && record.terminalAt === null && nowSeconds() - record.updatedAt < 30
+          && JSON.stringify(nextPayload ?? null) === JSON.stringify(record.payload ?? null)) return record
       return this._update(record.publicRunId, {
         status: capacityStatus,
         payload: nextPayload,
-        workerRunId: result?.workerRunId ?? record.workerRunId,
+        workerRunId,
         waitingReason: '',
         terminalAt: TERMINAL.has(capacityStatus) ? nowSeconds() : null,
       })
@@ -834,10 +846,20 @@ export class DurableRunQueue {
       if (!record.waitingReason) this._update(record.publicRunId, { waitingReason: 'capacity' })
     }
 
+    this._pruneTerminal()
+  }
+
+  // Retention: finished runs older than 7 days go, keeping the newest 128 of those. terminal_at
+  // sits after the request body, so without wizard_run_queue_terminal this scanned every saved
+  // body under a write lock each 1.5 s tick (~70 ms, ~20% of a core). Once a minute is plenty.
+  _pruneTerminal(force = false) {
+    const now = nowSeconds()
+    if (!force && now - (this.lastPruneAt ?? 0) < 60) return
+    this.lastPruneAt = now
     this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (
-      SELECT public_run_id FROM wizard_run_queue
+      SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
        WHERE terminal_at IS NOT NULL AND terminal_at < ?
        ORDER BY terminal_at DESC LIMIT -1 OFFSET 128
-    )`).run(nowSeconds() - 7 * 24 * 60 * 60)
+    )`).run(now - 7 * 24 * 60 * 60)
   }
 }

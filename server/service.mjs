@@ -3083,6 +3083,19 @@ export function createWizardServer(options = {}) {
           try { return await listCache.served() }
           catch (error) { listCache.fellBack(error) }
         }
+        const q = searchParams.get('q')
+        if (q && listCache.mode() === 'on') {
+          // Search reuses the shared list snapshot; only the message-text lookup is per query.
+          // Rows are shared with other clients, so matches get a copy, never a mutation.
+          try {
+            const cached = await listCache.served()
+            const hits = new Map()
+            for (let i=0; i<cached.length; i+=200) {
+              for (const [id, text] of searchHermesSessionText(hermesStatePath, cached.slice(i,i+200).map(s=>s.id), q)) hits.set(id, text)
+            }
+            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
+          } catch (error) { listCache.fellBack(error) }
+        }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
         // Truth/helper readers cap at 200 IDs. Keep batches at the existing page size.

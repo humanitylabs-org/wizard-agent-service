@@ -92,8 +92,13 @@ export function searchHermesSessionText(path, sessionIds, query) {
   try {
     const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x=>x.name));
     const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
-    const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL ORDER BY timestamp DESC`;
-    for (const row of db.prepare(sql).iterate(...ids)) {
+    // Let SQLite drop non-matching messages before they become JS strings (the costly part):
+    // instr(lower()) folds ASCII only, so it prefilters only ASCII words; the JS check below
+    // stays the authority.
+    const ascii = words.filter(w => /^[\x00-\x7f]+$/.test(w));
+    const prefilter = ascii.map(() => ' AND instr(lower(content), ?) > 0').join('');
+    const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL${prefilter} ORDER BY timestamp DESC`;
+    for (const row of db.prepare(sql).iterate(...ids, ...ascii)) {
       if (hits.has(row.session_id)) continue;
       const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
       if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
