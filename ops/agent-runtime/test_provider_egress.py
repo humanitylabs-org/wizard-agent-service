@@ -105,16 +105,16 @@ class PolicyTests(unittest.TestCase):
         import subprocess
         calls = []
         manager = ProviderEgress(lambda args, **kw: (calls.append(args) or subprocess.CompletedProcess(args,0,'','')), Failure)
-        value = self.fixture(); value['Config']['Env'] = []
+        value = self.fixture(); value['Config']['Env'] = []; value['Name'] = '/provider'
         value['NetworkSettings'] = {'Networks': {'wzpr-a':{}, 'wzpr-b':{}, 'wizard-egress-example':{}}}
         def inspect(kind, name):
-            if kind == 'network': return {'Containers':{'cid':{'IPv4Address':'10.253.0.2/24'}}}
+            if kind == 'network': return {'IPAM':{'Config':[{'Subnet':'10.253.0.0/24'}]}, 'Containers':{'cid':{'Name':'provider','IPv4Address':'10.253.0.2/24'}}}
             if name == 'cid': return copy.deepcopy(value)
             return None
         manager.inspect = inspect
         manager.network = lambda app: 'wizard-egress-example'
-        self.assertEqual(manager.reconcile({'id':'example','private_inference':{'kind':'local','egress':[]}},'cid',['wzpr-a','wzpr-b']), '10.253.0.2')
-        self.assertFalse(any(c[:2] == ['network','disconnect'] for c in calls))
+        self.assertEqual(manager.reconcile({'id':'example','private_inference':{'kind':'local','egress':[]}},'cid',['wzpr-a','wzpr-b']), {'network':'wizard-egress-example','hosts':[]})
+        self.assertFalse(any(c[:2] == ['network','disconnect'] and c[3] in {'wzpr-a','wzpr-b'} for c in calls))
         self.assertIn(['start','cid'], calls)
 
     def test_failure_stops_before_validation_and_never_starts(self):
