@@ -322,7 +322,19 @@ def main():
         known = command(['ssh-keygen', '-F', get('BUILD_ADDRESS'), '-f', str(owner / '.ssh/known_hosts')])
         line = next(x.split() for x in known.splitlines() if not x.startswith('#') and ' ssh-ed25519 ' in x)
         (scoped / 'known_hosts').write_text(host + ' ' + ' '.join(line[1:]) + '\n')
-        creds = [(owner / '.ssh', scoped), (owner / '.config/gh/hosts.yml', owner / '.config/gh/hosts.yml')]
+        ghdir = root / 'scoped-gh'
+        ghdir.mkdir(mode=0o700)
+        shutil.copy2(owner / '.config/gh/hosts.yml', ghdir / 'hosts.yml')
+        # gh 2.46 migrates even `auth status`. Migrate ONLY the private staged
+        # copy with the exact imported image, then mount it read-only at runtime.
+        command(['docker', 'run', '--rm', '--read-only', '--network', plan['network'],
+                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                 '--user', f'{os.getuid()}:{os.getgid()}', '--tmpfs', '/tmp:rw,mode=1777',
+                 '-e', 'HOME=/tmp', '-e', 'GH_CONFIG_DIR=/config',
+                 '--mount', f'type=bind,src={ghdir},dst=/config',
+                 '--entrypoint', 'gh', image, 'auth', 'status'])
+        emit(gh_private_copy_migrated_with_import_image=True, gh_migration_exit_code=0)
+        creds = [(owner / '.ssh', scoped), (owner / '.config/gh/hosts.yml', ghdir / 'hosts.yml')]
         # Borrow only the current Anthropic access grant, never the refresh token.
         claude = root / 'claude-access.json'
         m.dump(claude, without_refresh(json.loads((owner / '.claude/.credentials.json').read_text())))
