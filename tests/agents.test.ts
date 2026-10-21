@@ -533,7 +533,10 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const dir=box(),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_delete'])
     const {base}=await start(dir,main);await withPrivate(dir,base,privateApi.port)
     const path='/wizard/hermes/api/sessions/private_delete?agent=private'
-    expect((await fetch(base+path.replace('?agent=private',''),{method:'DELETE'})).status).toBe(409)
+    for(const method of ['GET','HEAD','DELETE','PATCH','POST']) {
+      const init: RequestInit = ['PATCH','POST'].includes(method) ? {...json({title:'not applied'}),method} : {method}
+      expect((await fetch(base+path.replace('?agent=private',''),init)).status).toBe(409)
+    }
     expect((await fetch(base+path,{method:'DELETE'})).status).toBe(200)
     expect((await fetch(base+path)).status).toBe(404)
     expect(privateApi.seen.filter(r=>r.method==='DELETE')).toHaveLength(1)
