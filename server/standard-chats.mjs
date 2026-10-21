@@ -54,7 +54,11 @@ export function readStandardMemory(statePath, name, secrets = []) {
     const extra = Math.max(1,...secrets.map(s=>Buffer.byteLength(s)))
     if (extra>4096) throw new AgentError(503,'unsafe_credential_config','standard_chats.memory')
     const buf = Buffer.alloc(24000+extra), size = readSync(fd,buf,0,buf.length,0)
-    return { name, text: redact(buf.subarray(0,size).toString('utf8'),secrets).slice(0,24000), truncated: size>24000 }
+    // Preserve byte length while masking: otherwise redaction could pull an unfinished
+    // credential from the overread tail into the public prefix (also true with UTF-8).
+    const masked = secrets.reduce((s,key)=>s.split(key).join('[redacted]'.padEnd(Buffer.byteLength(key),' ')),buf.subarray(0,size).toString('utf8'))
+    const safe = Buffer.from(masked,'utf8')
+    return { name, text: safe.subarray(0,24000).toString('utf8'), truncated: size>24000 || safe.length>24000 }
   } catch (error) { if (error.code === 'ENOENT') return { name, text: '', missing: true }; throw error }
   finally { if (fd !== undefined) closeSync(fd) }
 }

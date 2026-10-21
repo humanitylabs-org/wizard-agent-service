@@ -532,6 +532,11 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(JSON.stringify(readResult)).not.toContain(token.slice(0,16))
     const memoryResult=await(await call('standard_memory_read',{name:'MEMORY.md'})).json()
     expect(JSON.stringify(memoryResult)).not.toContain(token.slice(0,16))
+    // Multibyte input must not expose an unfinished key in the overread tail.
+    writeFileSync(join(dir,'memories','MEMORY.md'),'€'.repeat(8000)+'x'.repeat(Buffer.byteLength(token)-10)+token)
+    const unicodeResult=await(await call('standard_memory_read',{name:'MEMORY.md'})).json()
+    expect(JSON.stringify(unicodeResult)).not.toContain(token.slice(0,8))
+    expect(JSON.parse(unicodeResult.result.content[0].text).text).toBe('€'.repeat(8000))
     const prefixResult=await(await call('standard_chats_search',{query:token.slice(0,8)+'*'})).json()
     expect(JSON.parse(prefixResult.result.content[0].text).results).toEqual([])
     const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
@@ -557,6 +562,15 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(main.seen.filter(r=>r.method==='DELETE')).toHaveLength(0)
     const token=readFileSync(join(dir,'agents','private','gateway.key'),'utf8').trim()
     expect((await fetch(base+path,{method:'DELETE',headers:{Authorization:`Bearer ${token}`}})).status).toBe(403)
+  })
+  it('never persists a private transcript-derived fingerprint, even from an older owner client',async()=>{
+    const dir=box(),file=join(dir,'seen.json'),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_seen'])
+    const {base}=await start(dir,main,{threadSeenStatePath:file});await withPrivate(dir,base,privateApi.port)
+    const key='agent/private/direct:private_seen',now=Date.now()
+    const result=await fetch(base+'/wizard/thread-seen',{...json({schema:1,initializedAt:now,threads:{[key]:{seenAt:now,assistantAt:now,messageCount:2,updatedAt:now,previewFingerprint:'transcript-derived-hash',agent_id:'private',session_id:'private_seen'}}}),method:'PUT'})
+    expect(result.status).toBe(200);expect((await result.json()).state.threads[key].previewFingerprint).toBe('private')
+    expect(readFileSync(file,'utf8')).not.toContain('transcript-derived-hash')
+    expect((await(await fetch(base+'/wizard/thread-seen')).json()).state.threads[key].previewFingerprint).toBe('private')
   })
   it('private FTS uses only its own database and excludes hidden probes', () => {
     const dir=box(),home=join(dir,'agents','private','home');mkdirSync(home,{recursive:true});historyFixture(join(home,'state.db'))
