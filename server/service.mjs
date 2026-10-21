@@ -3220,7 +3220,18 @@ function buildWizardServer(options, lifetime) {
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
-      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) return refreshCanonicalSessions()
+      // A new assistant reply refreshes the listing, but a busy Hermes can take seconds to answer
+      // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
+      // short moment, then serve the last listing; the refresh bumps the generation and the list
+      // snapshot rebuilds as soon as it lands.
+      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) {
+        const fresh = refreshCanonicalSessions()
+        const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
+        let timer
+        const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
+        const sessions = await Promise.race([fresh.catch(() => null), late]).finally(() => clearTimeout(timer))
+        return Array.isArray(sessions) ? sessions : canonicalSessionCache.sessions
+      }
       if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
       return canonicalSessionCache.sessions
     }
