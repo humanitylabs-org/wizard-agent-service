@@ -113,13 +113,7 @@ def main():
     compose = run('sudo', 'docker', 'compose', 'version', '--short', capture=True).stdout.decode().strip().removeprefix('v')
     assert len(compose.split('.')) == 3 and all(p.isdigit() for p in compose.split('.')), 'non-semver Compose: ' + compose
     print('COMPOSE_SEMVER', compose, flush=True)
-    # Stateful bridge-peer policy requires this module, including after baseline reboot.
-    write(ROOT / 'br_netfilter.conf', 'br_netfilter\n')
-    run('sudo', 'install', '-m', '0644', str(ROOT / 'br_netfilter.conf'), '/etc/modules-load.d/pp-rig.conf')
-    run('sudo', 'modprobe', 'br_netfilter')
-    run('sudo', 'sysctl', '-w', 'net.bridge.bridge-nf-call-iptables=1')
-    write(ROOT / 'bridge-netfilter.conf', 'net.bridge.bridge-nf-call-iptables = 1\n')
-    run('sudo', 'install', '-m', '0644', str(ROOT / 'bridge-netfilter.conf'), '/etc/sysctl.d/90-pp-rig.conf')
+    # Network topology must not rely on optional bridge-netfilter or owner module loading.
     run('sudo', 'usermod', '-aG', 'docker', USER)
     run('sudo', 'systemctl', 'enable', '--now', 'docker')
     run('sudo', 'loginctl', 'enable-linger', USER)
