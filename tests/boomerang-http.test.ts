@@ -25,12 +25,13 @@ describe('boomerang HTTP API',()=>{
  it('delivers one ntfy notification after due, survives repeated scans, and only deep-links context',async()=>{
   let now=Date.parse('2026-10-21T08:00:00Z');const notifications:any[]=[]
   const dir=mkdtempSync(join(tmpdir(),'boom-notify-'));dirs.push(dir)
-  const server=createWizardServer({upstreamOrigin:'http://127.0.0.1:9',hermesKey:'fixture',requireAccess:false,agents:false,agentBridge:false,followThrough:false,joinedDelegation:'off',runQueue:false,boomerangStatePath:join(dir,'boom.db'),now:()=>now,boomerangNotifyOrigin:'http://notifications.invalid',boomerangNotifyTopic:'wizard',boomerangPollIntervalMs:250,fetchImpl:async(url:any,init:any)=>{notifications.push({url:String(url),body:JSON.parse(init.body)});return new Response('',{status:200})}})
+  const server=createWizardServer({upstreamOrigin:'http://127.0.0.1:9',hermesKey:'fixture',requireAccess:false,agents:false,agentBridge:false,followThrough:false,joinedDelegation:'off',runQueue:false,boomerangStatePath:join(dir,'boom.db'),now:()=>now,boomerangNotifyOrigin:'http://notifications.invalid',boomerangNotifyTopic:'wizard',boomerangShellOrigin:'https://owner.example.invalid',boomerangPollIntervalMs:250,fetchImpl:async(url:any,init:any)=>{notifications.push({url:String(url),body:JSON.parse(init.body)});return new Response('',{status:200})}})
   servers.push(server);const a=await listen(server),base=`http://127.0.0.1:${a.port}`
   const due=new Date(now+1_000).toISOString();let r=await fetch(base+'/wizard/v1/boomerangs',json('POST',{...payload,due_at:due}));expect(r.status).toBe(201);const created=(await r.json()).reminder
   now+=2_000;await fetch(base+'/wizard/v1/boomerangs');await new Promise(r=>setTimeout(r,350));await fetch(base+'/wizard/v1/boomerangs')
-  expect(notifications).toHaveLength(1);expect(notifications[0].url).toBe('http://notifications.invalid/wizard')
-  expect(notifications[0].body.click).toBe(`/wizard-os-home/?session=wizard_synthetic_1&boomerang=${created.id}`)
+  expect(notifications).toHaveLength(1);expect(notifications[0].url).toBe('http://notifications.invalid')
+  expect(notifications[0].body.topic).toBe('wizard')
+  expect(notifications[0].body.click).toBe(`https://owner.example.invalid/wizard-os-home/?session=wizard_synthetic_1&boomerang=${created.id}`)
   expect(JSON.stringify(notifications[0])).not.toMatch(/runs|submit|prompt=/)
  })
  it('exposes an owner-agent tool that sets an explicit durable reminder without executing it',async()=>{
@@ -45,5 +46,14 @@ describe('boomerang HTTP API',()=>{
  it('rejects past dates and cross-site writes',async()=>{
   const base=await scene();expect((await fetch(base+'/wizard/v1/boomerangs',json('POST',{...payload,due_at:'2026-10-21T07:00:00Z'}))).status).toBe(400)
   expect((await fetch(base+'/wizard/v1/boomerangs',{...json('POST',payload),headers:{'Content-Type':'application/json','Sec-Fetch-Site':'cross-site'}})).status).toBe(403)
+ })
+ it('rejects offset-less, impossible-calendar and invalid-zone reminders plus missing message anchors',async()=>{
+  const base=await scene()
+  for (const change of [
+   {due_at:'2026-10-21T09:00:00'},
+   {due_at:'2026-02-30T09:00:00Z'},
+   {timezone:'Mars/Olympus'},
+   {anchor_at:null},
+  ]) expect((await fetch(base+'/wizard/v1/boomerangs',json('POST',{...payload,client_request_id:crypto.randomUUID(),...change}))).status).toBe(400)
  })
 })

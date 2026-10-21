@@ -37,13 +37,14 @@ The box-only Wizard MCP gateway exposes `boomerang_set` (Hermes name `mcp__wizar
 
 ## Delivery
 
-The scheduler atomically claims each overdue reminder once. Due state in SQLite is authoritative and is recovered on restart. When `WIZARD_NOTIFICATIONS_ORIGIN` is configured it also posts a best-effort ntfy notification to `/<WIZARD_NOTIFICATIONS_TOPIC>`. The click URL contains only the canonical Wizard session and reminder IDs; it never includes or submits prompt text.
+The scheduler atomically marks overdue reminders due and keeps a durable notification outbox. Failed ntfy deliveries retry with bounded backoff across service restarts; successful deliveries are not sent again by later scans. When both notification and shell origins are configured it publishes ntfy's root JSON API with an explicit topic and an absolute private-shell click URL. The click URL contains only the canonical Wizard session and reminder IDs; it never includes or submits prompt text. As with any HTTP outbox, a process crash after ntfy accepts a request but before the local commit can produce a duplicate rather than lose the reminder.
 
 ## Configuration
 
 - `WIZARD_BOOMERANG_STATE_PATH` (default: `$HERMES_HOME/state/wizard-mobile/boomerang.sqlite3`)
 - `WIZARD_NOTIFICATIONS_ORIGIN` (Compose: `http://notifications-engine:8080`)
 - `WIZARD_NOTIFICATIONS_TOPIC` (default: `wizard`)
+- `WIZARD_SHELL_ORIGIN` (absolute private owner URL, for example `https://wizard.example.invalid`)
 
 The state directory must be on the existing persistent Hermes/Wizard volume.
 
