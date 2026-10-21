@@ -173,6 +173,45 @@ def restricted(agent: dict) -> bool:
     return (agent.get("runtime") or {}).get("isolation") == "restricted"
 
 
+def agent_identity(agent: dict) -> tuple[int, int]:
+    """Recorded non-root identity; older restricted records use the original new-agent default."""
+    runtime = agent.get('runtime') or {}
+    uid, gid = runtime.get('uid', AGENT_UID), runtime.get('gid', AGENT_UID)
+    if any(type(v) is not int or not 1 <= v <= 2147483647 for v in (uid, gid)):
+        raise RuntimeFailure('agent_identity_invalid', 409)
+    return uid, gid
+
+
+def legacy_identity(agent: dict, agents: Agents) -> dict:
+    """Metadata only: never stat, open or traverse an agent home. Refuse unknown/root identities."""
+    runtime = agent.get('runtime') or {}
+    if 'uid' in runtime or 'gid' in runtime:
+        if 'uid' not in runtime or 'gid' not in runtime:
+            raise RuntimeFailure('agent_identity_invalid', 409)
+        uid, gid = agent_identity(agent)
+    elif restricted(agent):
+        uid, gid = agent_identity(agent)
+    else:
+        ids = docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + runtime['app_id']], timeout=60).stdout.split()
+        if len(ids) != 1:
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        doc = json.loads(docker(['inspect', ids[0]], timeout=60).stdout)[0]
+        if not any(m.get('Source') == str(agents.home(agent['id'])) and m.get('Destination') == '/opt/data' for m in doc.get('Mounts', [])):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        config = doc.get('Config') or {}
+        env = dict(v.split('=', 1) for v in config.get('Env', []) if '=' in v)
+        user = config.get('User', '')
+        # Stock legacy images launch as root and drop to HERMES_UID/GID in their entrypoint.
+        # For an explicit non-root numeric user, Config.User is the effective identity.
+        launcher = user in ('', 'root', '0', '0:0', 'root:root')
+        pair = [env.get('HERMES_UID', ''), env.get('HERMES_GID', '')] if launcher else user.split(':')
+        if len(pair) != 2 or not all(isinstance(v, str) and re.fullmatch(r'[0-9]+', v) for v in pair):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        uid, gid = map(int, pair)
+        agent_identity({'runtime': {'uid': uid, 'gid': gid}})
+    return {'uid': uid, 'gid': gid}
+
+
 def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Network]:
     """The agent's own /28 pair, as allocated by the Agent Service; anything else is refused."""
     network = (agent.get("runtime") or {}).get("network") or {}
@@ -223,10 +262,10 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
 
 def private_compose_doc(agent, *, image, client_image, home_source, link, listener_port, main):
     uplink, sandbox = agent_networks(agent)
-    uid, gid = (AGENT_UID, AGENT_UID) if restricted(agent) or os.getuid() == 0 else (os.getuid(), os.getgid())
+    uid, gid = agent_identity(agent)
     client = service_names(agent)[1]
     edge = f"agent-{agent['id']}-edge"
-    # No auto-start after Docker/host restart: volatile firewall policy must be rebuilt before any client starts.
+    # No auto-start after Docker/host restart: private topology must be reconciled before any client starts.
     hardening = {'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no'}
     services = {
         main: {**hardening, 'image': image or DEFAULT_IMAGE, 'user': f'{uid}:{gid}',
@@ -381,6 +420,7 @@ class RestrictedDriver:
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
         only the file capabilities, like the runtime's own home-init. The host never writes into the home itself."""
+        uid, gid = agent_identity(agent)
         managed = self.agents.managed(agent["id"])
         missing = [name for name in MANAGED_FILES if not (managed / name).is_file()]
         if missing:
@@ -392,10 +432,10 @@ class RestrictedDriver:
         # by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target. rename(2)
         # replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes the sync
         # fail, which only stops that agent.
-        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
+        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {uid}:{gid} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
         script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
-                  f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
+                  f' chown {uid}:{gid} /opt/data; chmod 700 /opt/data')
         name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
         try:
             docker(["run", "--rm", "--name", name, "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
@@ -408,17 +448,16 @@ class RestrictedDriver:
             raise RuntimeFailure("agent_sync_timeout", 504)
 
     def _prepare(self, agent: dict) -> None:
+        uid, gid = agent_identity(agent)  # refuse root before any writes, builds or network mutation
         self.agents.add_provider_keys(agent)
         if self.agents.providers.is_private(agent):
             docker(['build', '-t', SIDECAR_IMAGE, str(self.runtime_dir / 'sidecars')], timeout=1800)
-            docker(['build', '-t', 'wizard-private-firewall:local', str(Path(__file__).parent / 'private-firewall')], timeout=300)
             self._compose(agent, 'down', '--remove-orphans', timeout=300)
             link = self.agents.providers.prepare(agent)
-            self.agents.providers.firewall(agent, link)
             path = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
             path.write_text(compose_doc(agent, image=self.image or DEFAULT_IMAGE,
                                        proxy_image=self.agents.providers.client_image,
-                                       home_source=str(self.agents.home(agent['id'])), uid=AGENT_UID, gid=AGENT_UID,
+                                       home_source=str(self.agents.home(agent['id'])), uid=uid, gid=gid,
                                        ports=True, private_link=link, listener_port=self.listener_port,
                                        main_service=RESTRICTED_SERVICE))
         self._compose(agent, "build", timeout=1800)
@@ -446,7 +485,6 @@ class RestrictedDriver:
     def delete(self, agent: dict) -> dict:
         self._compose(agent, 'down', '--remove-orphans', timeout=300)
         self.agents.providers.revoke(agent)
-        self.agents.providers.firewall(agent)
         (self.agents.root / agent['id'] / 'runtime' / 'private-compose.json').unlink(missing_ok=True)
         return {'ok': True}
 
@@ -656,7 +694,7 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
     cid = container or container_for(driver.project(agent["id"]), service)
-    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    user = ":".join(map(str, agent_identity(agent))) if restricted(agent) else "hermes"
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -702,7 +740,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|deliver)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|deliver|identity)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -724,6 +762,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
                     return
                 agent = agents.read(agent_id)
+                if action == "identity":
+                    self._json(200, legacy_identity(agent, agents))
+                    return
                 chosen = driver_for(agent, driver, restricted_driver)
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
@@ -779,6 +820,8 @@ def main(argv: list[str] | None = None) -> int:
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
                                              args.agent_listener_port)
+    for failure in agents.providers.reconcile_installed():
+        sys.stderr.write('[agent-runtime] provider reconciliation failed: ' + json.dumps(failure) + '\n')
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

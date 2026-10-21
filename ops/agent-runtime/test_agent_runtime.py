@@ -173,6 +173,37 @@ class RestrictedDriverTest(unittest.TestCase):
             ar.container_for = real
         self.assertEqual(seen, [("agent-daily", "agent")])
 
+    def test_legacy_identity_and_uid_are_metadata_only(self):
+        agent = agent_folder(self.tmp / 'agents', 'old', None, isolation='')
+        doc = {'Config': {'User': 'root', 'Env': ['HERMES_UID=1000', 'HERMES_GID=1000']},
+               'Mounts': [{'Source': str(self.agents.home('old')), 'Destination': '/opt/data'}]}
+        def fake(args, **kw):
+            return type('R', (), {'stdout': 'cid' if args[0] == 'ps' else json.dumps([doc]), 'returncode': 0})()
+        ar.docker = fake
+        self.assertEqual(ar.legacy_identity(agent, self.agents), {'uid': 1000, 'gid': 1000})
+        doc['Config']['Env'] = ['HERMES_UID=0', 'HERMES_GID=1000']
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+        doc['Config']['Env'] = []
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+        doc['Config']['User'] = '1001:1002'
+        self.assertEqual(ar.legacy_identity(agent, self.agents), {'uid': 1001, 'gid': 1002})
+        doc['Mounts'] = []
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+
+    def test_recorded_identity_controls_sync_and_refuses_root_before_mutation(self):
+        agent = agent_folder(self.tmp / 'agents', 'old', {'uplink': '10.250.0.16/28', 'sandbox': '10.251.0.16/28'})
+        agent['runtime'].update(uid=1000, gid=1001)
+        self.driver.sync_home(agent)
+        script = self.calls[-1][0][-1]
+        self.assertIn('chown 1000:1001', script)
+        self.assertNotIn('10000', script)
+        self.assertNotIn('chown -R', script)
+        self.calls.clear()
+        for uid in (0, -1, True, '1000', None):
+            agent['runtime']['uid'] = uid
+            with self.assertRaises(ar.RuntimeFailure): self.driver.apply(agent)
+        self.assertEqual(self.calls, [])
+
     def test_vendored_runtime_is_checked(self):
         copy = self.tmp / "runtime"
         shutil.copytree(ar.RESTRICTED_DIR, copy)

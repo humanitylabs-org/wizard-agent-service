@@ -129,13 +129,13 @@ describe('agents registry and API', () => {
     expect(stored(first.id).model.provider).toBe('wizard-tinfoil')
   })
 
-  it('without isolation, new agents keep the existing runtime shape', async () => {
+  it('without isolation, new private agents still get restricted managed-file placement', async () => {
     const dir = box()
     const main = await fakeHermes('main')
     const { base } = await start(dir, main)
     const { agent } = await withPrivate(dir, base)
     const runtime = JSON.parse(readFileSync(join(dir, 'agents', agent.id, 'agent.json'), 'utf8')).runtime
-    expect(runtime.isolation).toBeUndefined()
+    expect(runtime).toMatchObject({ isolation: 'restricted', uid: 10000, gid: 10000 })
     expect(runtime.private_client).toBe(true)
     expect(runtime.network).toMatchObject({ uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' })
   })
@@ -182,10 +182,10 @@ describe('agents registry and API', () => {
     expect(stored).toMatchObject({ schema: 1, id: 'private', runtime: { kind: 'container', app_id: 'agent-private', api: 'http://agent-private:8642', port: 47650 } })
     const key = readFileSync(join(folder, 'runtime.key'), 'utf8').trim()
     expect(key.length).toBeGreaterThan(30)
-    const env = readFileSync(join(folder, 'home', '.env'), 'utf8')
+    const env = readFileSync(join(folder, 'managed', '.env'), 'utf8')
     expect(env).toContain(`API_SERVER_KEY=${key}`)
     expect(env).not.toContain('TINFOIL_API_KEY')
-    const config = readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')
+    const config = readFileSync(join(folder, 'managed', 'config.yaml'), 'utf8')
     expect(config).toContain('base_url: "http://agent-private-client:3301/v1"')
     expect(config).toContain('fallback_providers: []')
     for (const tool of ['web', 'browser', 'image_gen', 'tts', 'vision', 'delegation', 'x_search']) expect(config).toContain(`"${tool}"`)
@@ -232,7 +232,7 @@ describe('agents registry and API', () => {
     expect(patch.status).toBe(200)
     const { agent } = await patch.json()
     expect(agent).toMatchObject({ label: 'Vault', appearance: { glyph: 'key', hue: 30 }, privacy: 'private', permissions: { preset: 'private', outside_tools: ['web'], wizard_apps: ['meditate'], agent_apps: ['transcriber'], files: 'shared-read' } })
-    const config = readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')
+    const config = readFileSync(join(dir, 'agents', 'private', 'managed', 'config.yaml'), 'utf8')
     expect(config).not.toMatch(/disabled_toolsets: \[[^\]]*"web"/)
     expect(config).toMatch(/disabled_toolsets: \[[^\]]*"browser"/)
     expect(calls).toEqual(['apply private', 'apply private'])
