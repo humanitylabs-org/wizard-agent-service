@@ -142,9 +142,23 @@ def scan_key(path, target):
     return False
 
 
+def relay_network(a):
+    c = container(a.client_container or 'agent-' + a.agent + '-client')
+    name = 'wzpr-' + hashlib.sha256(a.agent.encode()).hexdigest()[:24]
+    require(name in c['NetworkSettings']['Networks'], 'client missing per-agent relay')
+    net = inspect('network', name)
+    labels = net.get('Labels') or {}
+    require(net['Internal'] and labels.get('wizard.private-agent') == a.agent and
+            labels.get('wizard.private-provider') == a.provider_app, 'relay ownership/internal mismatch')
+    providers = provider_containers(a)
+    require(len(providers) == 1, 'provider ambiguous')
+    require(set(net.get('Containers', {})) == {c['Id'], providers[0]['Id']}, 'per-agent relay must have exactly client + provider')
+    return net
+
+
 def relay(a):
     require(a.codeword and a.trigger, '--codeword and --trigger required')
-    net = inspect('network', 'wizard-relay-' + a.provider_app)
+    net = relay_network(a)
     require(net['Internal'], 'relay network is not internal')
     bridge = net.get('Options', {}).get('com.docker.network.bridge.name') or 'br-' + net['Id'][:12]
     require(Path('/sys/class/net', bridge).exists(), 'relay bridge absent')
@@ -196,7 +210,7 @@ def hermes(a):
 def client(a):
     c = container(a.client_container or 'agent-' + a.agent + '-client')
     nets = c['NetworkSettings']['Networks']
-    expected_relay = 'wizard-relay-' + a.provider_app
+    expected_relay = relay_network(a)['Name']
     require(expected_relay in nets and len(nets) == 2, 'client must have only agent + relay networks')
     for name in nets:
         require(inspect('network', name)['Internal'], 'client attached to noninternal network')

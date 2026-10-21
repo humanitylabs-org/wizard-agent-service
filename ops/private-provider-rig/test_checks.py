@@ -83,13 +83,19 @@ class ProbeTests(unittest.TestCase):
     def test_client_explicit_compose_name_keeps_all_network_assertions(self):
         a = SimpleNamespace(agent='pp-test-fixture', client_container='project-client-1',
                             provider_app='wizard-tinfoil', relay_port=8090, deny_url=[])
-        c = {'Id': 'client', 'NetworkSettings': {'Networks': {'sandbox': {}, 'wizard-relay-wizard-tinfoil': {}}}}
+        name = 'wzpr-' + hashlib.sha256(a.agent.encode()).hexdigest()[:24]
+        c = {'Id': 'client', 'NetworkSettings': {'Networks': {'sandbox': {}, name: {}}}}
+        net = {'Name':name, 'Internal':True,
+               'Labels':{'wizard.private-agent':a.agent,'wizard.private-provider':a.provider_app},
+               'Containers':{'client':{},'provider':{}}}
         with patch.object(check, 'container', return_value=c) as target, \
-             patch.object(check, 'inspect', return_value={'Internal': True}), \
+             patch.object(check, 'provider_containers', return_value=[{'Id':'provider'}]), \
+             patch.object(check, 'inspect', return_value=net), \
              patch.object(check, 'probe', return_value=0), patch.object(check, 'blocked') as blocked, \
              contextlib.redirect_stdout(io.StringIO()):
             check.client(a)
-        target.assert_called_once_with('project-client-1')
+        self.assertEqual(target.call_count, 2)
+        self.assertTrue(all(call.args == ('project-client-1',) for call in target.call_args_list))
         self.assertEqual(blocked.call_count, 4)
 
     def test_baseline_failure_never_stops_provider(self):
