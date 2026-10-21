@@ -223,10 +223,10 @@ class OfflineCensusTest(unittest.TestCase):
         original = self.home / 'state.db'
         target = self.home / 'saved.db'
         real_read = offline_index.read_ids
-        def swap(path):
+        def swap(path, **kw):
             original.rename(target)
             original.symlink_to(target)
-            return real_read(path)
+            return real_read(path, **kw)
         with patch.object(offline_index, 'read_ids', swap), self.assertRaises(ValueError):
             offline_index.snapshot(self.home, True)
 
@@ -274,6 +274,51 @@ class OfflineCensusTest(unittest.TestCase):
         self.assertEqual(result['ids'], ['private-id', 'wal-id'])
         self.assertNotEqual(result['files']['state.db-wal'], 'absent')
         self.assertNotIn('must never read', json.dumps(result))
+
+    def _home_files(self):
+        return {p.name: (p.read_bytes(), p.stat().st_mode) for p in self.home.iterdir()}
+
+    def test_wal_clean_close_is_censused_without_creating_files(self):
+        # Hermes keeps state.db in WAL mode; a graceful stop (compose down, SIGTERM) checkpoints
+        # and deletes -wal/-shm on the last close, leaving a WAL-header db with no siblings.
+        with closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute("INSERT INTO sessions VALUES('wal-clean-id')")
+            db.commit()
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), ['state.db'])
+        self.assertEqual((self.home / 'state.db').read_bytes()[18:20], b'\x02\x02')  # WAL format
+        for mode in (0o700, 0o500):
+            with self.subTest(home_mode=oct(mode)):
+                os.chmod(self.home, mode)
+                try:
+                    before = self._home_files()
+                    result = offline_index.snapshot(self.home, True)
+                    self.assertEqual(sorted(result['ids']), ['private-id', 'wal-clean-id'])
+                    self.assertEqual(self._home_files(), before)
+                    self.assertNotIn('must never read', json.dumps(result))
+                finally:
+                    os.chmod(self.home, 0o700)
+
+    def test_empty_wal_without_shm_is_immutable_and_frames_without_shm_fail_closed(self):
+        with closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+        (self.home / 'state.db-wal').write_bytes(b'')
+        before = self._home_files()
+        self.assertEqual(offline_index.snapshot(self.home, True)['ids'], ['private-id'])
+        self.assertEqual(self._home_files(), before)
+        (self.home / 'state.db-wal').write_bytes(b'x' * 64)
+        with self.assertRaises(ValueError):
+            offline_index.snapshot(self.home, True)
+
+    def test_owner_mtime_reset_still_changes_generation(self):
+        path = self.home / 'state.db'
+        sealed = offline_index.snapshot(self.home)['files']['state.db']
+        st = path.stat()
+        with closing(sqlite3.connect(path)) as db:
+            db.execute("UPDATE sessions SET id='private-id' WHERE id='private-id'")
+            db.commit()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertNotEqual(offline_index.snapshot(self.home)['files']['state.db'], sealed)
 
     def test_ids_view_cannot_read_messages(self):
         with closing(sqlite3.connect(self.home / 'state.db')) as db:

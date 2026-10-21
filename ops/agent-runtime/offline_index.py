@@ -14,7 +14,8 @@ NAMES = ("state.db", "state.db-wal", "state.db-shm")
 
 
 def identity(st):
-    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
+    # ctime is included because a file owner can reset mtime with utime() but cannot set ctime.
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
 
 
 def snapshot(home, include_ids=False):
@@ -45,7 +46,18 @@ def snapshot(home, include_ids=False):
             # swapped after os.open must not redirect the SQLite open to an owner file.
             # Python's sqlite3 API does not expose SQLITE_OPEN_NOFOLLOW. The tiny C-API
             # reader below uses the stdlib extension or a shared SQLite on static builds.
-            result["ids"] = read_ids(path)
+            wal, shm = files["state.db-wal"], files["state.db-shm"]
+            if shm == "absent" and (wal == "absent" or wal[2] == 0):
+                # Cleanly closed database (WAL mode deletes -wal/-shm on last close, or a
+                # rollback-journal db): no frames to replay, so read it as immutable. This
+                # creates no -wal/-shm in the agent home; the lifecycle lock plus the
+                # before/after stat identity fence any concurrent change.
+                result["ids"] = read_ids(path, immutable=True)
+            elif wal != "absent" and wal[2] > 0 and shm == "absent":
+                # Committed WAL frames without an index: SQLite would have to build and write one.
+                raise ValueError("wal_without_index")
+            else:
+                result["ids"] = read_ids(path)
         for name, expected in files.items():
             try:
                 current = (home / name).lstat()
@@ -58,7 +70,7 @@ def snapshot(home, include_ids=False):
         return result
 
 
-def read_ids(path):
+def read_ids(path, immutable=False):
     import ctypes as c
     import _sqlite3
     import ctypes.util
@@ -82,7 +94,7 @@ def read_ids(path):
     try:
         # Force read-only SHM as well as DB/WAL. SQLite can reconstruct a private
         # WAL index for a stopped database without writing read marks to disk.
-        uri = path.as_uri() + '?mode=ro&readonly_shm=1'
+        uri = path.as_uri() + ('?mode=ro&immutable=1' if immutable else '?mode=ro&readonly_shm=1')
         if lib.sqlite3_open_v2(uri.encode(), c.byref(db), 0x00000001 | 0x00000040 | 0x01000000, None):
             raise ValueError("index_open_failed")
         # Deny views/triggers or virtual tables that could make the ids query read

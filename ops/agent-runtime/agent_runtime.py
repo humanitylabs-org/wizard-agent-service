@@ -603,7 +603,7 @@ def read_index(driver, agent: dict, *, ids: bool = False) -> dict:
             raise ValueError()
         for key in ('state.db', 'state.db-wal', 'state.db-shm'):
             item = value['files'][key]
-            if item != 'absent' and (not isinstance(item, list) or len(item) != 4
+            if item != 'absent' and (not isinstance(item, list) or len(item) != 5
                                     or any(type(n) is not int or n < 0 for n in item)):
                 raise ValueError()
         if ids and (not isinstance(value.get('ids'), list) or len(value['ids']) > 100000
