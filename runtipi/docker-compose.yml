@@ -20,6 +20,8 @@ services:
       WIZARD_APPS_JSON_PATH: /wizard-os/apps.json
       WIZARD_APPS_MCP_ADDRESS: internal
       WIZARD_APPS_SKILLS_INLINE: "1"
+      WIZARD_NOTIFICATIONS_ORIGIN: http://notifications-engine:8080
+      WIZARD_NOTIFICATIONS_TOPIC: wizard
       WIZARD_AGENT_ARTIFACT_ROOTS: /hermes/cache/images:/media
       WIZARD_ROUTER_URL: ${WIZARD_ROUTER_URL}
       WIZARD_ROUTER_MODEL: ${WIZARD_ROUTER_MODEL}
