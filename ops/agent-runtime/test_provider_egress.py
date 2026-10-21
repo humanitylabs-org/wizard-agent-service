@@ -129,7 +129,7 @@ class PolicyTests(unittest.TestCase):
             if name == 'cid': return copy.deepcopy(value)
             return None
         manager.inspect = inspect; manager.network = lambda app: 'wizard-egress-example'
-        app = {'id':'example','view':None,'health':'http://127.0.0.1:18804/healthz','private_inference':{'kind':'attested-relay','egress':['inference.tinfoil.sh']}}
+        app = {'id':'example','view':None,'health':'http://127.0.0.1:18804/healthz','private_inference':{'kind':'attested-relay','relay_port':8090,'egress':['inference.tinfoil.sh']}}
         self.assertEqual(manager.reconcile(app,'cid',[])['hosts'], ['inference.tinfoil.sh'])
         self.assertIn(['start','cid'],calls)
 
