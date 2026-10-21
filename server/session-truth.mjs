@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
-import { replyAppId } from './thread-status.mjs'
+import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
@@ -205,6 +205,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         }
         if (!current.lastAssistantAt && visibleAssistant) {
           current.lastAssistantAt = timestamp
+          // The agent's own status line on its latest reply, while no newer request follows it.
+          // Lets the list show it for threads past the history-read preview window.
+          if (latestVisibleRole === 'assistant') {
+            const status = parseStatus(row.content)
+            if (status) current.status = status
+          }
         }
         if (current.lastUserAt && current.lastAssistantAt) break
       }
