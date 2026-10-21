@@ -2,7 +2,8 @@
 //
 // It lives OUTSIDE the shell image, in the owner's Files root (Runtipi's media/ folder on a Wizard OS box):
 //
-//     <files root>/Skins/My skin.css
+//     <files root>/Skins/My skin/skin.css (legacy Skins/My skin.css still works)
+//     <files root>/Skins/My skin/skin.js  (read-only here; device-local owner approval in the shell)
 //
 // so shell and skin updates never touch it, the owner sees it in Files, and their agent edits it with the
 // Files app tools like any other text file. An empty file (or one holding only comments) means the base skin
@@ -13,20 +14,26 @@
 // non-styling at-rules, and no url()/string that points at another origin. Writes (PUT/DELETE) are the
 // owner's only, same-origin, and atomic. Nothing here can stop the shell from rendering: a missing,
 // unreadable, oversized or unwritable file reads as an empty My skin.
+// /script serves the separate, bounded module verbatim with its SHA-256. Approval belongs only to the
+// owner's device; this service never approves scripts and exposes no script write endpoint.
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
-export const MY_SKIN_RELATIVE = 'Skins/My skin.css'
+export const MY_SKIN_RELATIVE = 'Skins/My skin/skin.css'
+export const MY_SKIN_LEGACY = 'Skins/My skin.css'
+export const MY_SKIN_SCRIPT = 'Skins/My skin/skin.js'
 export const MY_SKIN_MAX_BYTES = 64 * 1024
 
 export const MY_SKIN_TEMPLATE = `/* My skin
  *
- * Your own look, on top of whichever skin you picked in Settings > Skins.
+ * Your own look, on top of whichever skin you picked in Settings > Look.
  * Wizard OS and skin updates never change this file. Leave it empty to see
  * the skin exactly as its author made it.
  *
  * Write plain CSS, or ask your agent: "change my skin so ...".
+ * Optional behaviour: sibling skin.js uses the skin hook API. After every script edit,
+ * only you can turn that exact version on in Settings > Look (on this device).
  * Target every skin, or one of them:
  *   html[data-skin] body { letter-spacing: .01em; }
  *   html[data-skin="nebula"] .dock { opacity: .9; }
@@ -114,37 +121,58 @@ export class MySkinError extends Error {
 
 /**
  * root: the owner's Files root (WIZARD_USER_FILES_ROOT or WIZARD_MEDIA_ROOT); path: an explicit file
- * (WIZARD_MY_SKIN_PATH) for boxes without a Files root.
+ * (WIZARD_MY_SKIN_PATH) for boxes without a Files root (its optional module is sibling skin.js).
  */
 export function createMySkin({ root = '', path = '' } = {}) {
   const base = root ? resolve(String(root)) : ''
-  const file = path ? resolve(String(path)) : base ? join(base, ...MY_SKIN_RELATIVE.split('/')) : ''
-  if (!file) return null
-  const top = base || dirname(file)
+  const preferred = path ? resolve(String(path)) : base ? join(base, ...MY_SKIN_RELATIVE.split('/')) : ''
+  if (!preferred) return null
+  const legacy = base && !path ? join(base, ...MY_SKIN_LEGACY.split('/')) : ''
+  const scriptFile = base && !path ? join(base, ...MY_SKIN_SCRIPT.split('/')) : join(dirname(preferred), 'skin.js')
+  const top = base || dirname(preferred)
+  // Only absence selects the legacy file: a present but invalid folder file never reveals older CSS.
+  const selected = () => {
+    try { lstatSync(preferred); return preferred } catch (e) { if (e.code !== 'ENOENT') return preferred }
+    if (legacy) { try { lstatSync(legacy); return legacy } catch { /* a new box uses the folder form */ } }
+    return preferred
+  }
+  const relative = () => base && !path ? selected() === legacy ? MY_SKIN_LEGACY : MY_SKIN_RELATIVE : ''
 
   // Confined to the root after resolving symlinks; the file itself must be a regular file, never a link.
-  function confined() {
+  function confined(file) {
     let realTop
     try { realTop = realpathSync(top) } catch { return null }
-    let dir
-    try { dir = realpathSync(dirname(file)) } catch { return { realTop, dirMissing: true } }
+    let dir, parent = dirname(file), dirMissing = false
+    // Check the nearest existing ancestor before mkdir too: a Skins symlink must not create folders outside Files.
+    for (;;) {
+      try { dir = realpathSync(parent); break } catch {
+        if (parent === dirname(parent)) return null
+        parent = dirname(parent); dirMissing = true
+      }
+    }
     if (dir !== realTop && !dir.startsWith(realTop + sep)) return null
-    return { realTop, dirMissing: false }
+    return { realTop, dirMissing }
   }
 
-  function readRaw() {
-    const where = confined(); if (!where || where.dirMissing) return { exists: false, text: '' }
+  function readRaw(file = selected()) {
+    const where = confined(file); if (!where || where.dirMissing) return { exists: false, text: '' }
     let st
     try { st = lstatSync(file) } catch { return { exists: false, text: '' } }
     if (!st.isFile()) return { exists: false, text: '' }
     if (st.size > MY_SKIN_MAX_BYTES) return { exists: true, text: '', tooLarge: true, bytes: st.size }
-    try { return { exists: true, text: readFileSync(file, 'utf8'), bytes: st.size } } catch { return { exists: false, text: '' } }
+    try {
+      const body = readFileSync(file)
+      if (body.length > MY_SKIN_MAX_BYTES) return { exists: true, text: '', tooLarge: true, bytes: body.length }
+      return { exists: true, text: body.toString('utf8'), body, bytes: body.length }
+    } catch { return { exists: false, text: '' } }
   }
 
   function write(text) {
+    const file = selected()
     const body = String(text ?? '')
     if (Buffer.byteLength(body, 'utf8') > MY_SKIN_MAX_BYTES) throw new MySkinError(413, 'my_skin_too_large')
     if (/[\u0000]/u.test(body)) throw new MySkinError(400, 'my_skin_invalid')
+    if (!confined(file)) throw new MySkinError(503, 'my_skin_unwritable')
     // Never create the Files root itself: no root = no My skin (it reads as empty).
     try { lstatSync(top) } catch { throw new MySkinError(503, 'my_skin_unwritable') }
     try {
@@ -152,7 +180,7 @@ export function createMySkin({ root = '', path = '' } = {}) {
       // Group-writable, so the Files app (same group on a box) can save the owner's edits.
       if (made) chmodSync(dirname(file), 0o775)
     } catch { throw new MySkinError(503, 'my_skin_unwritable') }
-    const where = confined(); if (!where || where.dirMissing) throw new MySkinError(503, 'my_skin_unwritable')
+    const where = confined(file); if (!where || where.dirMissing) throw new MySkinError(503, 'my_skin_unwritable')
     try { const st = lstatSync(file); if (!st.isFile()) throw new MySkinError(409, 'my_skin_not_a_file') } catch (error) { if (error instanceof MySkinError) throw error }
     const tmp = join(dirname(file), `.my-skin-${randomBytes(6).toString('hex')}.tmp`)
     try {
@@ -165,14 +193,21 @@ export function createMySkin({ root = '', path = '' } = {}) {
     }
   }
 
+  function script() {
+    const raw = readRaw(scriptFile)
+    return { exists: raw.exists, sha256: raw.body ? createHash('sha256').update(raw.body).digest('hex') : null,
+      bytes: raw.bytes ?? 0, body: raw.body ?? null }
+  }
   return {
-    file,
-    relative: base && !path ? MY_SKIN_RELATIVE : '',
+    get file() { return selected() },
+    get relative() { return relative() },
+    script,
     /** What the shell applies: sanitised CSS ('' = base skin exactly). */
     css() { const raw = readRaw(); return raw.tooLarge ? '' : sanitizeMySkin(raw.text) },
     info() {
       const raw = readRaw()
-      return { path: base && !path ? MY_SKIN_RELATIVE : '', exists: raw.exists, bytes: raw.bytes ?? 0, max_bytes: MY_SKIN_MAX_BYTES,
+      const { body, ...scriptInfo } = script()
+      return { path: relative(), exists: raw.exists, bytes: raw.bytes ?? 0, max_bytes: MY_SKIN_MAX_BYTES, script: scriptInfo,
         empty: raw.tooLarge ? true : mySkinEmpty(sanitizeMySkin(raw.text)), too_large: Boolean(raw.tooLarge) }
     },
     write,
