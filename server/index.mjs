@@ -152,8 +152,8 @@ const server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
-  // My skin (server/my-skin.mjs): <Files root>/Skins/My skin.css by default (the user-files root, else the
-  // media root). WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
+  // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
