@@ -4,6 +4,8 @@ This directory changes no production service code. It prepares a fresh Ubuntu 24
 
 ## Worker admission
 
+Configure the approved external mount explicitly with `--work-volume` or `WIZARD_WORK_VOLUME` (no default). Resolved rig roots must be named `rig` and contained within it; sibling-prefix and symlink escapes are refused. Execution additionally requires that volume to be a mounted filesystem. The host admission configuration must point to its approved external storage, not an internal work directory.
+
 Stage on the Mac's external work volume (never its internal disk):
 
 - `stage/service.tar`: `git archive` of this pushed branch (service code unchanged from its main base).
@@ -14,7 +16,7 @@ Stage on the Mac's external work volume (never its internal disk):
 - `worker.py`: this directory's worker, at the rig root.
 - `checks/`: copy of this directory's checks, at the rig root.
 
-Submit a **heavy** job with cwd = rig root, argv = `[/opt/homebrew/bin/python3, <rig root>/worker.py, --rig-root, <rig root>]`, timeout 7200. The durable worker owns the shared `worker.lock`; do not execute this command over a foreground SSH session, self-acquire a second lock, or launch a background child. Subagents prepare and return this exact job specification to their parent for admission. `--validate` is read-only and safe before admission.
+Submit a **heavy** job with cwd = rig root, argv = `[/opt/homebrew/bin/python3, <rig root>/worker.py, --rig-root, <rig root>, --work-volume, <approved external volume>]`, timeout 7200. The durable worker owns the shared `worker.lock`; do not execute this command over a foreground SSH session, self-acquire a second lock, or launch a background child. Subagents prepare and return this exact job specification to their parent for admission. `--validate` is read-only and safe before admission.
 
 The worker reuses the exact Ubuntu base and configuration pattern from the previous agents-mvp rig, not its mutable guest disk (which might contain secrets). It copies that cached base to the rig's external-volume cache, checks the pinned SHA256, creates VM `pp-rig` in `<rig root>/lima`, and mounts **only** the staging directory, read-only. It does not modify or boot any existing VM.
 
