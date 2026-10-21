@@ -3152,19 +3152,23 @@ export function createWizardServer(options = {}) {
   // Threads past the preview window (or on later pages) get no history read, so the backfill is matched
   // against the list's own wizard_last_assistant_at instead. Applies only when that reply is the thread's
   // latest turn (no newer user message), exactly like the history path.
-  const backfillFromList = (session, operator) => {
+  // The agent's own [WIZARD_STATUS_V1] line on that reply (read from session truth) wins over the
+  // backfill file, matching the history path's `messages.status ?? backfill` order.
+  const backfillFromList = (session, operator, sessionTruth = null) => {
     if (operator || !session || typeof session.id !== 'string' || session.wizard_attention) return session
     const assistantAt = Number(session.wizard_last_assistant_at)
     const userAt = Number(session.wizard_last_user_at)
     if (!Number.isFinite(assistantAt) || assistantAt <= 0 || (Number.isFinite(userAt) && userAt > assistantAt)) return session
-    const attention = statusBackfill.lookup(session.id, assistantAt)
+    const truth = sessionTruth?.get?.(session.id)
+    const own = truth?.status && Math.abs(Number(truth.lastAssistantAt) - assistantAt) <= 2 ? truth.status : null
+    const attention = own ?? statusBackfill.lookup(session.id, assistantAt)
     return attention ? { ...session, wizard_attention: attention } : session
   }
-  const backfillSessionList = (result, operator) => {
+  const backfillSessionList = (result, operator, sessionTruth = null) => {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
-      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => backfillFromList(session, operator))
+      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => backfillFromList(session, operator, sessionTruth))
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
@@ -3249,13 +3253,13 @@ export function createWizardServer(options = {}) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
-  const enrichSessionListMessages = async (result, operator) => {
+  const enrichSessionListMessages = async (result, operator, sessionTruth = null) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator)
+          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -3269,7 +3273,7 @@ export function createWizardServer(options = {}) {
             const headers = new Headers({ Accept: 'application/json' })
             if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
             const response = await fetchImpl(historyUrl, { method: 'GET', headers, signal: AbortSignal.timeout(1_500) })
-            if (!response.ok) return backfillFromList(session, operator)
+            if (!response.ok) return backfillFromList(session, operator, sessionTruth)
             messages = latestVisibleSessionMessages(await response.json(), operator, completions, records)
             sessionMessageCache.set(cacheKey, { signature, messages })
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
@@ -3357,7 +3361,7 @@ export function createWizardServer(options = {}) {
             try { result = await backgroundResults.project(result) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
     return result
   }
