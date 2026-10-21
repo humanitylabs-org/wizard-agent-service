@@ -2,8 +2,8 @@
 """Opt-in real Docker move + independently installed host recovery API rehearsal.
 
 Only --install/--skills-source are read from the live home. All agent content and
-credentials are fake. No systemd command, production unit, production port or
-live Agent Service request is made. The API checks do not invoke a paid model.
+credentials are fake. No systemd lifecycle/installation command, production unit,
+production port or live Agent Service request is made. The API checks do not invoke a paid model.
 """
 import argparse
 import hashlib
