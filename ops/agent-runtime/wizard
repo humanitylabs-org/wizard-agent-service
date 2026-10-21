@@ -1,0 +1,10 @@
+#!/bin/sh
+# Owner CLI; do not expose this host runtime command through an agent tool.
+set -eu
+if [ "${1:-}" != agent ] || [ "${2:-}" != import ] || [ "${3:-}" != hermes ]; then
+  printf '%s\n' 'usage: wizard agent import hermes scan|approve|apply|undo|route-default|lifecycle ...' >&2
+  exit 2
+fi
+shift 3
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec uv run --no-project --with 'PyYAML>=6.0.2,<7' python "$here/hermes_import.py" "$@"

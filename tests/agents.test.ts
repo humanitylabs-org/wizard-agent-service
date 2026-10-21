@@ -98,6 +98,31 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('preserves imported memory/auth harness bytes and fails closed on lost import keys', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base, calls } = await start(dir, main)
+    const response = await fetch(`${base}/wizard/v1/agents`, json({ label: 'Imported', harness: 'hermes', model: { provider: 'anthropic', model: 'claude-opus-5-5' }, permissions: { preset: 'standard' } }, { 'Idempotency-Key': 'import-fixture' }))
+    expect(response.status).toBe(201)
+    const { agent } = await response.json()
+    const folder = join(dir, 'agents', agent.id)
+    const record = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    record.imported = { schema: 1, format: 'hermes' }
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify(record))
+    const original = 'memory:\n  provider: holographic\nplugins:\n  hermes-memory-store:\n    hrr_dim: 2048\n'
+    writeFileSync(join(folder, 'home', 'config.yaml'), original)
+    writeFileSync(join(folder, 'home', 'auth.json'), '{"fixture":"not-a-credential"}')
+    const started = await fetch(`${base}/wizard/v1/agents/${agent.id}/start`, json({}))
+    expect(started.status).toBe(202)
+    expect(calls).toContain(`start ${agent.id}`)
+    expect(readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')).toBe(original)
+    expect(readFileSync(join(folder, 'home', 'auth.json'), 'utf8')).toBe('{"fixture":"not-a-credential"}')
+    writeFileSync(join(folder, 'runtime.key'), '')
+    const refused = await fetch(`${base}/wizard/v1/agents/${agent.id}/start`, json({}))
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ error: 'import_keys_unavailable' })
+    expect(readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')).toBe(original)
+  })
   it('restricted isolation gives each new agent its own uplink/sandbox /28 and the edge as its gateway', async () => {
     const dir = box()
     const main = await fakeHermes('main')

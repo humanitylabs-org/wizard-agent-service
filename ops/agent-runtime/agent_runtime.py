@@ -674,6 +674,15 @@ def offline_census(driver, agent: dict) -> dict:
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if isinstance(driver, ImportDriver):
+        # Imports have no compose generation. Absence in a compose label lookup
+        # MUST NOT mint a false stopped seal for an actually running import.
+        if action in {'inspect', 'census'}:
+            raise RuntimeFailure('import_offline_census_unavailable', 503)
+        result = getattr(driver, action)(agent)
+        if action == 'stop':
+            return {**result, 'census': None, 'census_error': 'import_offline_census_unavailable'}
+        return result
     if action == 'inspect':
         return inspect_runtime(driver, agent)[0]
     if action == 'census':
@@ -744,8 +753,12 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
-    cid = container or container_for(driver.project(agent["id"]), service)
-    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(driver.project(agent['id']), service))
+    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    if isinstance(driver, ImportDriver):
+        label = docker(['inspect', '--format', '{{index .Config.Labels "wizard.import.id"}}', cid], timeout=10).stdout.strip()
+        if label != agent['id']:
+            raise RuntimeFailure('import_container_not_owned', 409)
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -756,12 +769,39 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
 
 # ---------------------------------------------------------------- HTTP
 
+class ImportDriver:
+    """Existing host helper, own-home only; never route an import through Runtipi install."""
+    def __init__(self, agents):
+        self.agents = agents
+
+    def _action(self, agent, action):
+        path = self.agents.root / agent['id'] / 'import-journal.json'
+        interpreter = os.environ.get('WIZARD_IMPORT_PYTHON')
+        command = ([interpreter] if interpreter else ['uv', 'run', '--no-project', '--with', 'PyYAML>=6.0.2,<7', 'python'])
+        result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'lifecycle', str(path), action],
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeFailure('import_lifecycle_failed', 502)
+        return json.loads(result.stdout)
+
+    def start(self, agent):
+        return self._action(agent, 'start')
+
+    def stop(self, agent):
+        return self._action(agent, 'stop')
+
+    def apply(self, agent):
+        return self._action(agent, 'apply')
+
+
 def driver_for(agent: dict, driver, restricted_driver):
     """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
     if restricted(agent):
         if restricted_driver is None:
             raise RuntimeFailure("restricted_runtime_unavailable", 503)
         return restricted_driver
+    if agent.get('imported') == {'schema': 1, 'format': 'hermes'}:
+        return ImportDriver(driver.agents)
     return driver
 
 

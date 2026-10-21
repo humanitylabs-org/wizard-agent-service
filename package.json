@@ -9,7 +9,7 @@
     "start": "node server/index.mjs",
     "start:local": "node --env-file=.env.local server/index.mjs",
     "fixture": "node scripts/run-fixture.mjs",
-    "test": "vitest run && node --test tests/chat-photo-*.node.mjs tests/chats-install-e2e.node.mjs && python3 tests/test_chat_photo_reader.py"
+    "test": "node scripts/test-hermes-import.mjs && vitest run && node --test tests/chat-photo-*.node.mjs tests/chats-install-e2e.node.mjs && python3 tests/test_chat_photo_reader.py"
   },
   "dependencies": {
     "jose": "^6.2.12"

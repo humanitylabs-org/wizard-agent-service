@@ -671,6 +671,13 @@ export function createAgentRegistry(options = {}) {
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
+    // Imported agents keep their full memory/settings/auth. Their host driver merges
+    // only Wizard-owned fields on start/apply; a fresh generated config would erase
+    // their memory backend and provider login. Keys already exist from admission.
+    if (agent.imported?.schema === 1 && agent.imported?.format === 'hermes') {
+      if (rotateKey || !apiKey(agent.id) || !gatewayKey(agent.id)) fail(409, 'import_keys_unavailable', 'agent.import')
+      return
+    }
     const dir = folder(agent.id)
     // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
@@ -831,6 +838,8 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    // An imported Hermes keeps its keys from admission; never start it with a missing key (fail closed, nothing regenerated).
+    if (running && agent.imported?.schema === 1 && agent.imported?.format === 'hermes' && (!apiKey(id) || !gatewayKey(id))) fail(409, 'import_keys_unavailable', 'agent.import')
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
