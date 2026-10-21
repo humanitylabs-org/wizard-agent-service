@@ -8,6 +8,7 @@ import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -110,7 +111,7 @@ it('DEFAULT_GUESS: hidden, missing and hermes guesses have identical status and 
 
 it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserves archived client creation', async () => {
   const rows = []
-  for (const baseline of process.env.WAS_ROLLBACK_BASE_DIR ? [process.env.WAS_ROLLBACK_BASE_DIR, ''] : ['']) {
+  for (const baseline of archivedMainDir() ? [archivedMainDir()!, ''] : ['']) {
     if (baseline) process.env.WAS_S2C_BASELINE = baseline; else delete process.env.WAS_S2C_BASELINE
     try {
       const s = await scene(), secondary = await s.create('Offline')

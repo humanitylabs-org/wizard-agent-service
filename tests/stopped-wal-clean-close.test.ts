@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -78,8 +79,8 @@ async function scene({ queued = false, factory = createWizardServer, driver = ''
 }
 
 
-it.skipIf(!process.env.WAS_ROLLBACK_BASE_DIR && process.env.REQUIRE_ROLLBACK_REHEARSAL !== '1').each(['runtipi', 'restricted'])('R5_WAL_CLEAN_STOPPED: %s Hermes WAL home after clean close versus archived main', async driver => {
-  const base = process.env.WAS_ROLLBACK_BASE_DIR!
+it.skipIf(!archivedMainDir()).each(['runtipi', 'restricted'])('R5_WAL_CLEAN_STOPPED: %s Hermes WAL home after clean close versus archived main', async driver => {
+  const base = archivedMainDir()!
   const baseline = (await import(/* @vite-ignore */ `${base}/server/service.mjs`)).createWizardServer
   const rows: any[] = []
   for (const [label, factory] of [['main', baseline], ['current', createWizardServer]] as const) {
@@ -113,7 +114,7 @@ it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal 
   for (const mode of ['clean', 'hot']) {
     const s = await scene({ driver }), secondary = await s.create('Offline')
     const home = join(s.agentsDir, secondary.id, 'home')
-    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, process.env.TMPDIR!], { encoding: 'utf8' })
+    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' })
     const filesBeforeStop = readdirSync(home).sort()
     const stop = await s.call(`/wizard/v1/agents/${secondary.id}/stop`, 'POST', {})
     let catalog: any = null
@@ -123,7 +124,7 @@ it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal 
     const recovered = execFileSync('python3', ['-c', `import sqlite3,shutil,tempfile,os,sys
 d=tempfile.mkdtemp(dir=sys.argv[2])
 [shutil.copy2(os.path.join(sys.argv[1],n), d) for n in os.listdir(sys.argv[1])]
-print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, process.env.TMPDIR!], { encoding: 'utf8' }).trim()
+print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' }).trim()
     rows.push({ mode, filesBeforeStop, stop: stop.status, sealed: Boolean(catalog?.seal), sealHasId: Boolean(catalog?.ids?.includes('wizard_secondary_committed')),
       sealIds: catalog?.ids?.length ?? null, chosen: chosen.status, mainCreated: s.histories.get('hermes')!.has('wizard_secondary_committed'),
       secondaryHasAfterRecovery: recovered === '1', filesAfter: readdirSync(home).sort() })

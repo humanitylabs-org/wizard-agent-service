@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -101,9 +102,8 @@ it('R4_INFLIGHT_SEAL_INVALIDATION: a full lifecycle round during inspect cannot 
   expect(s.histories.get(hidden.id)!.has(id)).toBe(true)
 })
 
-it.each(['runtipi', 'restricted'])('R4_UNSEALABLE_STOPPED: %s real helper stop semantics preserve archived-main 201', async driver => {
-  const base = process.env.WAS_ROLLBACK_BASE_DIR
-  if (!base) throw new Error('WAS_ROLLBACK_BASE_DIR required for real archived-main comparison')
+it.skipIf(!archivedMainDir()).each(['runtipi', 'restricted'])('R4_UNSEALABLE_STOPPED: %s real helper stop semantics preserve archived-main 201', async driver => {
+  const base = archivedMainDir()!
   const baseline = (await import(/* @vite-ignore */ `${base}/server/service.mjs`)).createWizardServer
   const rows = []
   for (const factory of [baseline, createWizardServer]) {
