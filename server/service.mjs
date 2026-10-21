@@ -1409,11 +1409,47 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
     return projected
   }
+  // Compaction can re-emit an older message as a new row (byte-exact role and timestamp) with
+  // the alerts that followed it merged onto its end. Hermes' content-keyed display dedupe keeps
+  // both, and the merged copy lands after the owner's newest question, reading as extra replies
+  // to it. Drop that copy when it is the earlier message plus only text other rows on this page
+  // already paint; anything else stays, so no text can disappear.
+  const replayKey = (item) => {
+    const role = item?.role ?? item?.author
+    const at = item?.timestamp
+    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${role}\u0000${at}` : ''
+  }
+  const mergedReplay = (earlier, later, pageTexts) => {
+    if (later === earlier) return true
+    if (!earlier || !later.startsWith(earlier)) return false
+    let rest = later.slice(earlier.length)
+    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest.trim()
+  }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
       const seen = new Set()
+      const sourceOf = (item, index) => source?.[index] ?? item
+      const firstByKey = new Map()
+      value.forEach((item, index) => {
+        const key = replayKey(sourceOf(item, index))
+        if (key && !firstByKey.has(key)) firstByKey.set(key, index)
+      })
+      const repeated = new Set(value.flatMap((item, index) => {
+        const key = replayKey(sourceOf(item, index))
+        return key && firstByKey.get(key) !== index ? [index] : []
+      }))
+      const pageTexts = repeated.size
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+            .sort((a, b) => b.length - a.length)
+        : []
       return value.flatMap((item, index) => {
-        const sourceItem = source?.[index] ?? item
+        const sourceItem = sourceOf(item, index)
+        if (repeated.has(index)) {
+          const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
+          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+        }
         if (legacyInternalHistoryMessage(item) && !historyRunContext(sourceItem)) return []
         const projected = visit(item, sourceItem)
         if (projected?.display_kind === 'run_context') {
