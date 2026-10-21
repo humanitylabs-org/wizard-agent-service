@@ -119,7 +119,7 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
   heavyWorker: {
-    host: process.env.WIZARD_HEAVY_SSH_HOST,
+    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
     script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
     root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
     lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,

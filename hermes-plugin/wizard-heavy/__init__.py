@@ -87,7 +87,7 @@ def register(ctx):
         ('wizard_heavy_submit', submit,
          'Submit authorized sustained tests/builds to the durable Thales resource queue. '
          'Returns promptly even while another job is running. Source/work directory must already be on '
-         '/Volumes/ThalesMedia; stage source first. The command runs under the shared build lock. '
+         'the configured heavy root; stage source first. The command runs under the shared build lock. '
          'Use a stable key per intended job; retry with the same key, never generate another to poll. '
          'No credentials in command arguments. No background/detached children. After receipt, finish '
          'this turn; do not sleep or poll. The service will resume this originating thread with evidence. '

@@ -17,15 +17,15 @@ No Stock implementation was copied. Its staged source was inspected read-only; t
 
 All sustained execution runs on Thales, under:
 
-`/Volumes/ThalesMedia/wizard-qa/helper-status-release-20261012/`
+`${WIZARD_WORK_ROOT}/wizard-qa/helper-status-release-20261012/`
 
 Environment:
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
-export HERMES_HOME=/Volumes/ThalesMedia/wizard-qa/helper-status-release-20261012/isolated-hermes
-export TMPDIR=/Volumes/ThalesMedia/wizard-qa/helper-status-release-20261012/tmp
-cd /Volumes/ThalesMedia/wizard-qa/helper-status-release-20261012/svc
+export HERMES_HOME=${WIZARD_WORK_ROOT}/wizard-qa/helper-status-release-20261012/isolated-hermes
+export TMPDIR=${WIZARD_WORK_ROOT}/wizard-qa/helper-status-release-20261012/tmp
+cd ${WIZARD_WORK_ROOT}/wizard-qa/helper-status-release-20261012/svc
 npm test
 ```
 

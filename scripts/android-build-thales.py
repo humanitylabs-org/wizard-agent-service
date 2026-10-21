@@ -20,8 +20,10 @@ import uuid
 from contextlib import contextmanager
 
 P = pathlib.Path
-BASE = '/Volumes/ThalesMedia/AndroidBuilds'
-SDK = '/opt/homebrew/share/android-commandlinetools'
+HEAVY_ROOT = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+HOST = os.environ.get('WIZARD_BUILD_HOST')
+BASE = str(P(HEAVY_ROOT) / 'AndroidBuilds') if HEAVY_ROOT else None
+SDK = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or '/opt/homebrew/share/android-commandlinetools'
 BUILD_TOOLS = P(SDK) / 'build-tools' / '35.0.0'
 EXCLUDED = {
     '.git', '.worktrees', '.ui-generations', '.gradle', '.cxx', 'build',
@@ -251,11 +253,11 @@ def collect_artifacts(source, gradle, tasks, expected_signer):
     return artifacts
 
 
-def failure_receipt(job, cfg, phase, host='thales'):
+def failure_receipt(job, cfg, phase, host=None):
     """A stable, non-secret terminal record for all route failures."""
     return {
         'status': 'failed',
-        'host': host,
+        'host': host or HOST,
         'job': str(job),
         'source_revision': cfg.get('revision'),
         'source_manifest_sha256': cfg.get('manifest_sha256'),
@@ -330,7 +332,7 @@ def worker(config_path):
             artifacts = collect_artifacts(source, gradle, cfg['tasks'], expected_signer)
             receipt = {
                 'status': 'ok',
-                'host': 'thales',
+                'host': HOST,
                 'job': str(job),
                 'source_revision': cfg['revision'],
                 'source_manifest_sha256': cfg['manifest_sha256'],
@@ -350,6 +352,10 @@ def worker(config_path):
 
 
 def main():
+    if not HEAVY_ROOT or not P(HEAVY_ROOT).is_absolute():
+        raise SystemExit('heavy lane not configured: set WIZARD_HEAVY_ROOT')
+    if not HOST:
+        raise SystemExit('set WIZARD_BUILD_HOST for the remote build worker')
     if len(sys.argv) > 1 and sys.argv[1] == '--worker':
         return worker(sys.argv[2])
     ap = argparse.ArgumentParser(description=__doc__)
@@ -405,11 +411,11 @@ def main():
         'manifest_sha256': None,
     }
     phase = 'preflight'
-    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', 'thales']
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', HOST]
     try:
         # Connection preflight before any bulk local staging. No VPS execution fallback.
-        run(ssh + ['test -d /Volumes/ThalesMedia && test -x ' + SDK + '/platform-tools/adb && test -x ' + str(BUILD_TOOLS / 'apksigner') + ' && test -x ' + str(BUILD_TOOLS / 'aapt2')])
-        tmpbase = private_directory(P.home() / '.hermes/cache/scratch')
+        run(ssh + ['test -d ' + shlex.quote(HEAVY_ROOT) + ' && test -x ' + shlex.quote(SDK + '/platform-tools/adb') + ' && test -x ' + shlex.quote(str(BUILD_TOOLS / 'apksigner')) + ' && test -x ' + shlex.quote(str(BUILD_TOOLS / 'aapt2'))])
+        tmpbase = private_directory(P(os.environ.get('HERMES_HOME', P.home() / '.hermes')) / 'cache/scratch')
         phase = 'snapshot'
         with tempfile.TemporaryDirectory(prefix='android-thales-', dir=tmpbase) as td:
             stage = private_directory(td)
@@ -424,7 +430,7 @@ def main():
             shutil.copy2(__file__, stage / 'worker.py')
             os.chmod(stage / 'worker.py', 0o600)
             write_private_json(output / 'source-manifest.json', cfg)
-            write_private_json(output / 'job.json', {'host': 'thales', 'job': job, 'status': 'started', 'phase': 'remote-stage'})
+            write_private_json(output / 'job.json', {'host': HOST, 'job': job, 'status': 'started', 'phase': 'remote-stage'})
             phase = 'remote-stage'
             remote_prepare = (
                 'set -eu; umask 077; mkdir -p ' + shlex.quote(BASE + '/jobs') + '; '
@@ -437,10 +443,11 @@ def main():
             )
             run(ssh + [remote_prepare])
             phase = 'source-copy'
-            run(['scp', '-q', stage / 'source.tar.gz', stage / 'job.json', stage / 'worker.py', 'thales:' + job + '/'])
+            run(['scp', '-q', stage / 'source.tar.gz', stage / 'job.json', stage / 'worker.py', HOST + ':' + job + '/'])
             if a.prepare_only:
-                prepared = {'host': 'thales', 'job': job, 'status': 'prepared',
-                            'cwd': job, 'argv': ['/opt/homebrew/bin/python3', job + '/worker.py', '--worker', job + '/job.json'],
+                prepared = {'host': HOST, 'job': job, 'status': 'prepared',
+                            'cwd': job, 'argv': ['env', 'WIZARD_HEAVY_ROOT=' + HEAVY_ROOT, 'WIZARD_BUILD_HOST=' + HOST,
+                                                 'ANDROID_HOME=' + SDK, '/opt/homebrew/bin/python3', job + '/worker.py', '--worker', job + '/job.json'],
                             'source_revision': cfg['revision'], 'source_manifest_sha256': cfg['manifest_sha256'],
                             'receipt_path': job + '/receipt.json'}
                 write_private_json(output / 'job.json', prepared)
@@ -448,12 +455,13 @@ def main():
                 return
             phase = 'build'
             with open_private(output / 'build.log') as log:
-                run(ssh + ['/opt/homebrew/bin/python3 ' + shlex.quote(job + '/worker.py') + ' --worker ' + shlex.quote(job + '/job.json')], stdout=log, stderr=subprocess.STDOUT)
+                run(ssh + [shlex.join(['env', 'WIZARD_HEAVY_ROOT=' + HEAVY_ROOT, 'WIZARD_BUILD_HOST=' + HOST,
+                                     'ANDROID_HOME=' + SDK, '/opt/homebrew/bin/python3', job + '/worker.py', '--worker', job + '/job.json'])], stdout=log, stderr=subprocess.STDOUT)
             phase = 'receipt-copy'
-            run(['scp', '-q', 'thales:' + job + '/receipt.json', output / 'receipt.json'])
+            run(['scp', '-q', HOST + ':' + job + '/receipt.json', output / 'receipt.json'])
             os.chmod(output / 'receipt.json', 0o600)
             receipt = json.loads((output / 'receipt.json').read_text())
-            if receipt.get('status') != 'ok' or receipt['host'] != 'thales' or receipt['job'] != job or receipt['source_manifest_sha256'] != cfg['manifest_sha256']:
+            if receipt.get('status') != 'ok' or receipt['host'] != HOST or receipt['job'] != job or receipt['source_manifest_sha256'] != cfg['manifest_sha256']:
                 raise RuntimeError('receipt identity mismatch')
             if task_requires_apk(tasks) and not receipt.get('artifacts'):
                 raise RuntimeError('assemble receipt missing artifacts')
@@ -464,15 +472,15 @@ def main():
                     raise RuntimeError('invalid artifact path')
                 dest = output / 'artifacts' / rel
                 private_directory(dest.parent)
-                run(['scp', '-q', 'thales:' + job + '/source/' + rel.as_posix(), dest])
+                run(['scp', '-q', HOST + ':' + job + '/source/' + rel.as_posix(), dest])
                 os.chmod(dest, 0o600)
                 if digest(dest) != artifact['sha256'] or dest.stat().st_size != artifact['bytes']:
                     raise RuntimeError('artifact transfer mismatch')
-            write_private_json(output / 'job.json', {'host': 'thales', 'job': job, 'status': 'ok', 'phase': 'complete'})
+            write_private_json(output / 'job.json', {'host': HOST, 'job': job, 'status': 'ok', 'phase': 'complete'})
             print(json.dumps(receipt, indent=2))
     except Exception:
         # Persist a terminal, redactable local result for remote/build/copy failures.
-        write_private_json(output / 'job.json', {'host': 'thales', 'job': job, 'status': 'failed', 'phase': phase})
+        write_private_json(output / 'job.json', {'host': HOST, 'job': job, 'status': 'failed', 'phase': phase})
         write_private_json(output / 'receipt.json', failure_receipt(job, cfg, phase))
         raise RuntimeError('Android build route failed during ' + phase) from None
 

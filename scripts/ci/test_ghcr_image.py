@@ -66,7 +66,7 @@ class ImageContract(unittest.TestCase):
         registry.return_value.manifest.return_value = (DIGEST, {})
         with tempfile.TemporaryDirectory() as temp:
             env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
-                   'WIZARD_CI_ROOT': '/Volumes/ThalesMedia/Test',
+                   'WIZARD_CI_ROOT': temp, 'WIZARD_HEAVY_ROOT': temp,
                    'WIZARD_CI_WORKER_LOCK': temp + '/worker.lock',
                    'GITHUB_ACTOR': 'test', 'GHCR_TOKEN': 'unit-test-only'}
             with patch.dict(os.environ, env), patch.object(ci.tempfile, 'TemporaryDirectory') as directory:

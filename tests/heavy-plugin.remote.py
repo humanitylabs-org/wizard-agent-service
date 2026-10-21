@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -48,6 +49,9 @@ def scope(values):
 
 class ScopedPluginTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='heavy-plugin-')
+        self.addCleanup(self.temp.cleanup)
+        self.fixture_cwd = str(Path(self.temp.name) / 'fixture')
         self.received = []
         received = self.received
 
@@ -70,12 +74,13 @@ class ScopedPluginTests(unittest.TestCase):
         self.thread.start()
         self.origin = f'http://127.0.0.1:{self.server.server_port}'
         self.env = patch.dict(os.environ, {'WIZARD_HEAVY_ORIGIN': 'http://127.0.0.1:1',
-                                          'WIZARD_HEAVY_TOKEN': 'fixture-wrong-process-profile'})
+                                          'WIZARD_HEAVY_TOKEN': 'fixture-wrong-process-profile',
+                                          'WIZARD_HEAVY_ROOT': self.temp.name})
         self.env.start()
         secret_scope.set_multiplex_active(True)
         self.ctx = Context()
         plugin.register(self.ctx)  # no scope at import/registration time
-        self.args = {'key': 'same-stable-key', 'cwd': '/Volumes/ThalesMedia/fixture', 'argv': ['true']}
+        self.args = {'key': 'same-stable-key', 'cwd': self.fixture_cwd, 'argv': ['true']}
 
     def tearDown(self):
         secret_scope.set_multiplex_active(False)
@@ -131,14 +136,14 @@ class ScopedPluginTests(unittest.TestCase):
     def test_heavy_spec_is_unchanged_without_lane(self):
         self.submit_spec(self.args)
         self.assertEqual(self.received[-1][2]['spec'],
-                         {'cwd': '/Volumes/ThalesMedia/fixture', 'argv': ['true'], 'timeout_seconds': 3600})
+                         {'cwd': self.fixture_cwd, 'argv': ['true'], 'timeout_seconds': 3600})
         self.submit_spec({**self.args, 'lane': 'heavy'})
         self.assertNotIn('lane', self.received[-1][2]['spec'])
 
     def test_light_lane_is_forwarded_with_short_default_deadline(self):
         self.submit_spec({**self.args, 'lane': 'light'})
         self.assertEqual(self.received[-1][2]['spec'],
-                         {'cwd': '/Volumes/ThalesMedia/fixture', 'argv': ['true'], 'timeout_seconds': 900, 'lane': 'light'})
+                         {'cwd': self.fixture_cwd, 'argv': ['true'], 'timeout_seconds': 900, 'lane': 'light'})
 
     def test_light_lane_rejects_long_deadline_and_unknown_lane_before_http(self):
         before = len(self.received)

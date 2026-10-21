@@ -121,6 +121,11 @@ describe('transactional pair migration and restoration', () => {
     if (!archived) { const reason = 'Rollback rehearsal needs WAS_ROLLBACK_BASE_DIR or git object 859c548'; console.warn(reason); context.skip(reason); return }
     const dir = directory(), old = archived, stores = join(dir, 'stores'), agentsDir = join(stores, 'agents')
     mkdirSync(stores)
+    // Archived code predates configurable roots. Read its historical admission prefix
+    // for this no-execution migration fixture; never require that path on disk.
+    const legacySource = readFileSync(join(old, 'server/heavy-queue.mjs'), 'utf8')
+    const legacyRoot = legacySource.match(/spec\.cwd\.startsWith\('([^']+)'\)/)?.[1]
+    if (!legacyRoot) throw new Error('archived heavy cwd guard changed; review rollback fixture')
     const driver = `
       import { createAgentRegistry } from ${JSON.stringify(join(old, 'server/agents.mjs'))};
       import { ThreadSeenStore } from ${JSON.stringify(join(old, 'server/thread-seen.mjs'))};
@@ -134,7 +139,7 @@ describe('transactional pair migration and restoration', () => {
         registry.pin('direct:literal',agent.id);
         seen.merge('owner',{initializedAt:0,threads:{'direct:direct:literal':{updatedAt:'2026-10-21T00:00:00Z',previewFingerprint:'abc',seenAt:1}}});
       }
-      const job=heavy.submit({sessionId:'operator:literal',origin:'origin',key:mode,spec:{cwd:'/Volumes/ThalesMedia/tests',argv:['true'],timeout_seconds:1}});
+      const job=heavy.submit({sessionId:'operator:literal',origin:'origin',key:mode,spec:{cwd:${JSON.stringify(join(legacyRoot, 'tests'))},argv:['true'],timeout_seconds:1}});
       console.log(JSON.stringify({pin:registry.pinnedAgent('direct:literal'),seen:seen.get('owner'),job:job.job_id}));heavy.close();
     `
     const runOld = (mode: string) => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', driver, stores, mode], { encoding: 'utf8' }).trim())
