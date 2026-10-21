@@ -854,7 +854,7 @@ def route_default(journal_path, *, acknowledge_cutover=False):
     require(not journal.get('settings_after_value_hash'), 'cutover_already_journalled')
     root = path.parent.parent.parent
     settings = root / 'settings.json'
-    main = root / 'agents/hermes/agent.json'
+    main = root / 'agents/.main-agent.json'
     previous = json.loads(settings.read_text()) if settings.exists() else {}
     previous_main = json.loads(main.read_text()) if main.exists() else None
     updated = json.loads(json.dumps(previous))
@@ -883,7 +883,7 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
         return {'id': journal['id'], 'state': 'undone', 'undo_seconds': journal.get('undo_seconds'), 'journal': str(path)}
     require(directory.name == journal['id'] and path.name == 'import-journal.json', 'journal_location')
     settings = directory.parent.parent / 'settings.json'
-    main = directory.parent / 'hermes/agent.json'
+    main = directory.parent / '.main-agent.json'
     if journal.get('settings_after_value_hash'):
         current = json.loads(settings.read_text()) if settings.exists() else {}
         current_main = json.loads(main.read_text()) if main.exists() else None

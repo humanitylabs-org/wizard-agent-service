@@ -189,7 +189,7 @@ def model_exercise(service, agent, target, model):
     emit(known_fact_sha256=hashlib.sha256(fact.encode()).hexdigest())
     prompt = ('This is one authorized hidden import acceptance check. Do not load skills or do any other work. '
               'Use your terminal tool to run exactly these two independent read-only checks: '
-              'gh auth status ; then ssh -o BatchMode=yes thales echo ok . '
+              'gh auth status ; then ssh -o BatchMode=yes ' + shlex.quote(os.environ[PREFIX + 'BUILD_HOST']) + ' echo ok . '
               'Use fact_store action=search to recall an existing fact about Thales. '
               'The fact to find is: ' + fact + '\n'
               'After the tools finish, reply IMPORT_C_OK, give each literal exit code, and state the recalled fact. '
@@ -260,7 +260,7 @@ def model_exercise(service, agent, target, model):
         m.require(provider == model['provider'], 'session_provider_mismatch')
     m.require('IMPORT_C_OK' in reply and fact in reply and fact_ok, 'acceptance_reply_or_fact_failed')
     m.require(terminals and all(t['exit_code'] == 0 for t in terminals), 'acceptance_terminal_tool_failed')
-    m.require(any('gh auth status' in (t['command'] or '') for t in terminals) and any('thales' in (t['command'] or '') for t in terminals), 'acceptance_terminal_commands_missing')
+    m.require(any('gh auth status' in (t['command'] or '') for t in terminals) and any(os.environ[PREFIX + 'BUILD_HOST'] in (t['command'] or '') for t in terminals), 'acceptance_terminal_commands_missing')
     return session
 
 
@@ -305,12 +305,12 @@ def main():
         scoped = root / 'scoped-ssh'
         scoped.mkdir(mode=0o700)
         relay_addr, relay_port = get('RELAY_ADDRESS'), int(get('RELAY_PORT'))
-        ssh_cfg = ('Host thales\n  HostName ' + relay_addr + '\n  Port ' + str(relay_port) + '\n  User ' + get('BUILD_USER') +
-                   '\n  IdentityFile ' + str(owner / '.ssh/id_ed25519') + '\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  HostKeyAlias thales\n  UserKnownHostsFile ' + str(owner / '.ssh/known_hosts') + '\n')
+        ssh_cfg = ('Host ' + host + '\n  HostName ' + relay_addr + '\n  Port ' + str(relay_port) + '\n  User ' + get('BUILD_USER') +
+                   '\n  IdentityFile ' + str(owner / '.ssh/id_ed25519') + '\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  HostKeyAlias ' + host + '\n  UserKnownHostsFile ' + str(owner / '.ssh/known_hosts') + '\n')
         (scoped / 'config').write_text(ssh_cfg)
         known = command(['ssh-keygen', '-F', get('BUILD_ADDRESS'), '-f', str(owner / '.ssh/known_hosts')])
         line = next(x.split() for x in known.splitlines() if not x.startswith('#') and ' ssh-ed25519 ' in x)
-        (scoped / 'known_hosts').write_text('thales ' + ' '.join(line[1:]) + '\n')
+        (scoped / 'known_hosts').write_text(host + ' ' + ' '.join(line[1:]) + '\n')
         creds = [(owner / '.ssh', scoped), (owner / '.config/gh/hosts.yml', owner / '.config/gh/hosts.yml')]
         # Borrow only the current Anthropic access grant, never the refresh token.
         claude = root / 'claude-access.json'
@@ -360,7 +360,7 @@ def main():
              container_user=inspect['Config']['User'], model=cfg['model'],
              mounts=[{'destination': x['Destination'], 'rw': x['RW'], 'type': x['Type']} for x in inspect['Mounts']])
         probe(container, ['id'])
-        probe(container, ['ssh', '-o', 'BatchMode=yes', 'thales', 'true'])
+        probe(container, ['ssh', '-o', 'BatchMode=yes', host, 'true'])
         probe(container, ['gh', 'auth', 'status'])
         probe(container, ['git', '-C', str(workspace / 'wizard-os'), 'fetch', '--dry-run'])
         probe(container, ['sh', '-c', 'p="$1/.hermes-import-c-write-$$"; printf probe > "$p" && test "$(cat "$p")" = probe && rm "$p" && test ! -e "$p"', 'probe', str(workspace)])

@@ -318,7 +318,7 @@ class ImportTests(unittest.TestCase):
         previous = {'agents': {'default_agent_id': 'philosopher'}, 'appearance': {'skin': 'old'}}
         previous_main = {'role': 'standard', 'label': 'Original host agent'}
         m.dump(self.wizard / 'settings.json', previous)
-        m.dump(self.wizard / 'agents/hermes/agent.json', previous_main)
+        m.dump(self.wizard / 'agents/.main-agent.json', previous_main)
         p = self.plan()
         p.update(mode='take-over', source_units=['hermes-fixture.service'])
         m.approve(p)
@@ -329,10 +329,10 @@ class ImportTests(unittest.TestCase):
             m.route_default(result['journal'])
         m.route_default(result['journal'], acknowledge_cutover=True)
         self.assertEqual(json.loads((self.wizard / 'settings.json').read_text())['agents']['default_agent_id'], 'fixture-agent')
-        self.assertEqual(json.loads((self.wizard / 'agents/hermes/agent.json').read_text())['role'], 'recovery')
+        self.assertEqual(json.loads((self.wizard / 'agents/.main-agent.json').read_text())['role'], 'recovery')
         self.undo(result)
         self.assertEqual(json.loads((self.wizard / 'settings.json').read_text()), previous)
-        self.assertEqual(json.loads((self.wizard / 'agents/hermes/agent.json').read_text()), previous_main)
+        self.assertEqual(json.loads((self.wizard / 'agents/.main-agent.json').read_text()), previous_main)
     def test_undo_is_idempotent_at_archived_receipt(self):
         result = self.undo(self.apply())
         again = self.undo(result)
