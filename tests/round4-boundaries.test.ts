@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createWizardServer } from './helpers/private-provider-fixture.mjs'
+import { createWizardServer, fixtureProvider, fixtureModels } from './helpers/private-provider-fixture.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
 import { archivedMainDir } from './support/archived-main'
@@ -164,7 +164,10 @@ it('R4_N1: catalogContains snapshots epoch and seal even when a driver reuses it
     stop: async () => { state = 'stopped'; return { ok: true, census: { status: state, generation: 'reused-token', ids: [] } } },
     start: async () => { state = 'running'; return {} },
   }
-  const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), runtime, tinfoilUrl: 'http://127.0.0.1:9/v1', fetchImpl: async () => json({ data: [], has_more: false }) })
+  const appsJsonPath = join(dir, 'apps.json')
+  writeFileSync(appsJsonPath, JSON.stringify({ schema: 1, apps: [fixtureProvider] }))
+  const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), appsJsonPath, runtime,
+    fetchImpl: async (url: string) => String(url) === 'http://127.0.0.1:1/api/connection' ? json({ status: 'connected', models: fixtureModels }) : json({ data: [], has_more: false }) })
   const { agent } = await registry.create({ label: 'Private', permissions: { preset: 'private' }, model: { provider: 'tinfoil', model: 'glm-5-3' } })
   await registry.setRunning(agent.id, false)
   expect(await registry.catalogContains(agent.id, 'wizard_unseen')).toBe(false)
