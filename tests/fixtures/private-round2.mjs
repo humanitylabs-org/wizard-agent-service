@@ -31,7 +31,7 @@ const dbpath=join(root,'state.db')
 function history(path,rows){const db=new DatabaseSync(path);db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,source TEXT,parent_session_id TEXT,hidden INTEGER);CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL);CREATE VIRTUAL TABLE messages_fts USING fts5(content,content='messages',content_rowid='id');`);for(const row of rows){db.prepare('INSERT INTO sessions VALUES(?,?,?,?,0)').run(row.id,row.title,row.source,null);for(const msg of row.messages)db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(msg.id,row.id,msg.role,msg.content,msg.timestamp)}db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");db.close()}
 history(dbpath,mainRows)
 const service=createWizardServer({upstreamOrigin:main.origin,hermesKey:'fixture-key',requireAccess:false,agentBridge:false,
- uxDir:process.env.QA_UX_DIR,uxPrefix:'wizard-os-home',wizardOsHome:root,hermesStatePath:dbpath,
+ uxDir:process.env.QA_UX_DIR,uxPrefix:'wizard-os-home',wizardOsHome:root,
  appsJsonPath:join(root,'apps.json'),settingsPath:join(root,'settings.json'),threadSeenStatePath:join(root,'seen.json'),followThrough:false,
  agentRuntime:{apply:async()=>({ok:true}),start:async()=>({ok:true}),stop:async()=>({ok:true})},agentBasePort:47650})
 const addr=await listen(service,'127.0.0.1',9743),base=`http://127.0.0.1:${addr.port}`
