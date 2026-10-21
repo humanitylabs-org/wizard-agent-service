@@ -16,7 +16,7 @@ const profileRunCache = new WeakMap()
 // Profile gateways return raw sessions, not Wizard's run projection. Reconcile only
 // runs admitted to this exact agent/thread pair; never consult another profile.
 async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
-  if (agent.runtime.kind !== 'profile') return rows
+  if (agent.runtime?.kind !== 'profile') return rows
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx)
   return Promise.all(rows.map(async row => {
@@ -636,8 +636,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       const listing = JSON.parse(result.toString('utf8'))
-      for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, listing[key], headers, secrets)
-      result = Buffer.from(JSON.stringify(listing))
+      if (searchParams.get('window') !== 'archive-50' && !searchParams.has('q')) {
+        for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, listing[key], headers, secrets)
+        result = Buffer.from(JSON.stringify(listing))
+      }
       registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
