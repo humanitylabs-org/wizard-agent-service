@@ -433,7 +433,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     const agent = registry.read(target)
     if (operator) throw new AgentError(agent?.privacy === 'private' ? 409 : 404, agent?.privacy === 'private' ? 'private_agent_sealed' : 'agent_not_found', agent?.privacy === 'private' ? 'agent.private_sealed' : 'agent.id')
     // Session reads only: a run id is returned to the one who started the run and polled by it.
-    if (agent?.privacy === 'private' && ['GET','DELETE'].includes(method) && !explicit && sessionId && !runId) {
+    if (agent?.privacy === 'private' && !explicit && sessionId && !runId) {
       throw new AgentError(409, 'private_agent_sealed', 'agent.private_sealed', 'open this thread in its own agent\'s Chats')
     }
   }

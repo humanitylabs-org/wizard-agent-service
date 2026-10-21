@@ -4118,7 +4118,7 @@ function buildWizardServer(options, lifetime) {
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
       const pair = sideReference(key, record)
       const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, agent_id: agent, session_id: pair.session_id }]
+      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
     })) }
   }
 
@@ -4167,9 +4167,9 @@ function buildWizardServer(options, lifetime) {
         if (++rate.count>30) { sendJson(response,429,{error:'standard_chats_rate_limited'},{'Retry-After':'60'}); return }
         standardRetrievalRate.set(agent.id,rate)
         const rpc = parseJsonBody(await readBoundedBody(request,16384))
-        let result = standardChatRpc(agent,principal,rpc,hermesStatePath)
+        const secrets = [hermesKey,options.inboxToken || '',...(agents.credentialValues?.() || [])].filter(Boolean)
+        let result = standardChatRpc(agent,principal,rpc,hermesStatePath,secrets)
         const serialized = JSON.stringify(result)
-        const secrets = [...(agentCtx?.mainSecrets || []),...(agents.credentialValues?.() || [])]
         if (result && secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1,-1)))) {
           result = {jsonrpc:'2.0',id:rpc?.id ?? null,result:{content:[{type:'text',text:'unsafe_content'}],isError:true}}
         }

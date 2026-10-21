@@ -506,8 +506,20 @@ describe('private round 2: read-only standard retrieval, private search and dele
     mkdirSync(join(dir,'memories'));writeFileSync(join(dir,'memories','MEMORY.md'),'fixture-key')
     const call=(name: string,args: any)=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:`Bearer ${token}`}))
     for(const [name,args] of [['standard_chats_search',{query:'lighthouse'}],['standard_chat_read',{session_id:'standard'}],['standard_memory_read',{name:'MEMORY.md'}]] as const) {
-      const result=await(await call(name,args)).json();expect(result.result.isError).toBe(true);expect(result.result.content[0].text).toBe('unsafe_content');expect(JSON.stringify(result)).not.toContain(token)
+      const result=await(await call(name,args)).json();expect(result.result.isError).toBe(false);expect(JSON.stringify(result)).not.toContain(token);expect(JSON.stringify(result)).not.toContain('fixture-key')
+      const payload=JSON.parse(result.result.content[0].text)
+      if(name==='standard_chats_search')expect(payload.results).toEqual([])
+      else expect(JSON.stringify(payload)).toContain('[redacted')
     }
+    // A full credential spanning the 8k read / 24k memory boundary cannot leak a prefix.
+    const alter=new DatabaseSync(path);alter.prepare("UPDATE messages SET content=? WHERE session_id='standard'").run('x'.repeat(7980)+token+' lighthouse');alter.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");alter.close()
+    writeFileSync(join(dir,'memories','MEMORY.md'),'x'.repeat(23980)+token+' tail')
+    const readResult=await(await call('standard_chat_read',{session_id:'standard'})).json()
+    expect(JSON.stringify(readResult)).not.toContain(token.slice(0,16))
+    const memoryResult=await(await call('standard_memory_read',{name:'MEMORY.md'})).json()
+    expect(JSON.stringify(memoryResult)).not.toContain(token.slice(0,16))
+    const prefixResult=await(await call('standard_chats_search',{query:token.slice(0,8)+'*'})).json()
+    expect(JSON.parse(prefixResult.result.content[0].text).results).toEqual([])
     const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
     expect((await malformed.json()).error.code).toBe(-32600)
   })
