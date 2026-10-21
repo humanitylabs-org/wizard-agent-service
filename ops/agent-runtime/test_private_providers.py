@@ -88,6 +88,13 @@ class PrivateProviderTest(unittest.TestCase):
         self.thread.join()
         self.tmp.cleanup()
 
+    def test_null_hosted_view_uses_loopback_health_origin(self):
+        self.entry['view'] = None
+        self.entry['health'] = self.origin + '/healthz'
+        self.apps.write_text(json.dumps({'apps': [self.entry]}))
+        self.assertEqual(self.provider.origin(self.entry), self.origin)
+        self.assertTrue(self.provider.prepare(self.agent)['token_file'])
+
     def test_legacy_ids_migrate_only_at_read(self):
         self.assertEqual(migrate_provider('tinfoil'), 'wizard-tinfoil')
         self.assertEqual(migrate_provider('local'), 'wizard-local-model')
