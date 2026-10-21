@@ -105,6 +105,24 @@ test('an archive thread whose old queue run is pruned (or changes) is re-project
   assert.equal(row(added.rows, 's180').wizard_last_run_id, 'wizardq_new')
 })
 
+test('warm (recently active, quiet) threads are rebuilt once a minute, not on every build', async () => {
+  const w = world()
+  let t = 0
+  const p = createHybridProjector({ now: () => t, warmMaxAgeMs: 60_000 })
+  const warm = new Set(['s150', 's160'])
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  w.projected.length = 0; t = 30_000
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100), [], 'within a minute: served from cache')
+  w.projected.length = 0; t = 61_000
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100).filter((id) => warm.has(id)).sort(), ['s150', 's160'])
+  const changed = w.sessions.map((s) => (s.id === 's160' ? { ...s, message_count: 9 } : s))
+  w.projected.length = 0; t = 62_000
+  await p.project({ sessions: changed, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100), ['s160'], 'a new message still rebuilds at once')
+})
+
 test('removed threads drop out; new threads appear', async () => {
   const w = world()
   const p = createHybridProjector({ now: () => 0 })

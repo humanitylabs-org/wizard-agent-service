@@ -49,6 +49,25 @@ export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
 export const LOCAL = { id: 'local', label: 'This box (local model)', confidential: true, models: [] }
 // Providers that the AI Accounts app signs in. Offered for standard agents only.
 const AI_ACCOUNTS = new Map([['anthropic', 'Claude (AI Accounts)'], ['openai-codex', 'ChatGPT (AI Accounts)']])
+// An agent container reaches Claude through the box's one Claude sign-in (the Claude app's shared login volume,
+// mounted at /claude by the agent runtime) and the Hermes image's Claude Code subscription provider; it never gets
+// an Anthropic API key. Model ids use that provider's catalogue spelling (claude-fable-5-1, not claude-fable-5.1).
+export const CLAUDE_AGENT_PROVIDER = 'claude-subscription-directsdk-experimental'
+export const claudeModelId = (id) => (/^claude-/u.test(id) ? id.replace(/\./gu, '-') : id)
+// Hermes' always-loaded memory files: an agent may raise their budgets (e.g. a long user profile), within bounds.
+export const MEMORY_LIMITS = { user_chars: [500, 12000], notes_chars: [500, 12000] }
+export function normalizeMemory(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) fail(400, 'invalid_memory', 'agent.memory')
+  const out = {}
+  for (const [key, [min, max]] of Object.entries(MEMORY_LIMITS)) {
+    if (value[key] === undefined) continue
+    if (!Number.isInteger(value[key]) || value[key] < min || value[key] > max) fail(400, 'invalid_memory', `agent.memory.${key}`)
+    out[key] = value[key]
+  }
+  for (const key of Object.keys(value)) if (!(key in MEMORY_LIMITS)) fail(400, 'invalid_memory', `agent.memory.${key}`)
+  return Object.keys(out).length ? out : undefined
+}
 export const PRESETS = [
   {
     id: 'private', label: 'Private',
@@ -277,6 +296,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     if (contextLength > 0) lines.push(`  context_length: ${Math.floor(contextLength)}`)
   } else if (agent.model.provider === LOCAL.id) {
     lines.push('  provider: custom', '  base_url: ${WIZARD_LOCAL_MODEL_URL}', '  api_key: ${WIZARD_LOCAL_MODEL_KEY}')
+  } else if (agent.model.provider === 'anthropic') {
+    lines.push(`  provider: ${yamlString(CLAUDE_AGENT_PROVIDER)}`)
   } else {
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
@@ -295,6 +316,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     lines.push('mcp_servers:', '  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
+  if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)
+  if (agent.memory?.notes_chars) lines.push(`  memory_char_limit: ${agent.memory.notes_chars}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -605,7 +628,8 @@ export function createAgentRegistry(options = {}) {
     for (const item of Array.isArray(main) ? main : []) {
       const id = item?.slug ?? item?.id
       if (!AI_ACCOUNTS.has(id) || item.authenticated === false) continue
-      const models = (Array.isArray(item.models) ? item.models : []).map((m) => (typeof m === 'string' ? m : m?.id)).filter((m) => typeof m === 'string' && m.length < 120).slice(0, 12)
+      let models = (Array.isArray(item.models) ? item.models : []).map((m) => (typeof m === 'string' ? m : m?.id)).filter((m) => typeof m === 'string' && m.length < 120).slice(0, 12)
+      if (id === 'anthropic') models = [...new Set(models.map(claudeModelId))]
       if (models.length) out.push({ id, label: AI_ACCOUNTS.get(id), confidential: false, models: models.map((m) => ({ id: m, label: m })) })
     }
     return out
@@ -728,6 +752,7 @@ export function createAgentRegistry(options = {}) {
       schema: AGENT_SCHEMA, id, label, harness: 'hermes', privacy: preset.privacy,
       appearance: normalizeAppearance(body.appearance, preset.privacy),
       model, permissions,
+      ...(normalizeMemory(body.memory) ? { memory: normalizeMemory(body.memory) } : {}),
       runtime: {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
         // port is retained for schema/old records, but restricted agents never publish or use it.
@@ -800,6 +825,11 @@ export function createAgentRegistry(options = {}) {
       if (!next.label) fail(400, 'label_required', 'agent.label')
     }
     if (body.appearance !== undefined) next.appearance = normalizeAppearance(body.appearance, next.privacy)
+    if (body.memory !== undefined) {
+      const memory = normalizeMemory(body.memory)
+      if (memory) next.memory = memory
+      else delete next.memory
+    }
     if (body.permissions !== undefined) {
       const { preset, ...rest } = body.permissions ?? {}
       if (preset !== undefined && preset !== agent.permissions.preset) fail(409, 'preset_fixed', 'agent.permissions.preset', 'adjust fields instead of switching preset')

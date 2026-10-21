@@ -203,6 +203,13 @@ def service_names(agent: dict) -> tuple[str, str]:
     return app_id, f"{app_id}-tinfoil"
 
 
+CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
+
+
+def uses_claude_login(agent: dict) -> bool:
+    return agent.get("privacy") == "standard" and (agent.get("model") or {}).get("provider") == "anthropic"
+
+
 def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
@@ -217,6 +224,13 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         "x-runtipi": {"is_main": True, "internal_port": 8642},
     }
     services = {main: hermes}
+    doc_volumes = {}
+    if uses_claude_login(agent):
+        # The box's one Claude sign-in (the Claude app's volume). Only a standard agent on Claude gets it: a private
+        # agent never sees a public provider's login.
+        hermes["volumes"].append("claude-login:/claude")   # the top-level key below, named after the real volume
+        hermes["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"] = "/claude"
+        doc_volumes["claude-login"] = {"name": CLAUDE_LOGIN_VOLUME, "external": True}
     if (agent.get("model") or {}).get("provider") == "tinfoil":
         hermes["depends_on"] = [proxy]
         services[proxy] = {
@@ -231,6 +245,8 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     if ports:
         hermes["ports"] = [f"127.0.0.1:{agent['runtime']['port']}:8642"]
     doc = {"services": services, "x-runtipi": {"schema_version": 2, "overrides": []}}
+    if doc_volumes:
+        doc["volumes"] = doc_volumes
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
 
 

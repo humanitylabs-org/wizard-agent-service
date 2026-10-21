@@ -39,6 +39,26 @@ def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str
     return agent
 
 
+class ClaudeLoginMountTest(unittest.TestCase):
+    def doc(self, privacy, provider):
+        agent = {"id": "phil", "privacy": privacy, "model": {"provider": provider},
+                 "runtime": {"app_id": "agent-phil", "port": 18651}}
+        return json.loads(ar.compose_doc(agent, image="img", proxy_image="proxy", home_source="/h", uid=1000, gid=1000, ports=False))
+
+    def test_standard_claude_agent_mounts_the_shared_login(self):
+        doc = self.doc("standard", "anthropic")
+        svc = doc["services"]["agent-phil"]
+        self.assertIn("claude-login:/claude", svc["volumes"])
+        self.assertEqual(svc["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"], "/claude")
+        self.assertEqual(doc["volumes"]["claude-login"], {"name": "wizard-ai-accounts-claude", "external": True})
+
+    def test_private_or_other_provider_never_gets_it(self):
+        for privacy, provider in (("private", "anthropic"), ("private", "tinfoil"), ("standard", "openai-codex")):
+            doc = self.doc(privacy, provider)
+            self.assertNotIn("volumes", doc)
+            self.assertFalse(any("/claude" in v for v in doc["services"]["agent-phil"]["volumes"]))
+
+
 class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
