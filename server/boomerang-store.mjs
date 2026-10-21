@@ -4,12 +4,12 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
-const OFFSET_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/u
+const OFFSET_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})$/u
 const iso = (value, label = 'due_at') => {
   const raw = String(value ?? ''), match = OFFSET_ISO.exec(raw)
   if (!match) throw Object.assign(new Error(`${label} must be ISO 8601 with an explicit offset`), { status: 400 })
-  const [, ys, mos, ds, hs, mins, ss = '0', millis = '0', offset] = match
-  const [y, mo, d, h, min, sec, ms] = [ys, mos, ds, hs, mins, ss, millis.padEnd(3, '0')].map(Number)
+  const [, ys, mos, ds, hs, mins, ss = '0', fraction = '0', offset] = match
+  const [y, mo, d, h, min, sec, ms] = [ys, mos, ds, hs, mins, ss, fraction.slice(0, 3).padEnd(3, '0')].map(Number)
   const calendar = new Date(Date.UTC(y, mo - 1, d, h, min, sec, ms))
   if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== mo - 1 || calendar.getUTCDate() !== d
     || calendar.getUTCHours() !== h || calendar.getUTCMinutes() !== min || calendar.getUTCSeconds() !== sec) {
