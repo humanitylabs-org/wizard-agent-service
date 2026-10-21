@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 // Run stream keeper: a tiny long-lived process that holds the model-locked reply streams.
 //
 // Hermes runs a model-locked Wizard turn inside the open POST /api/sessions/<id>/chat/stream
@@ -146,7 +147,8 @@ export function defaultKeeperSocket(env = process.env, home = env.HOME || '') {
   return `${state}/run-stream-keeper.sock`
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Compare real paths: the unit starts it through the release `current` symlink, which import.meta.url resolves.
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   const socketPath = defaultKeeperSocket(process.env, homedir())
   mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 })
   if (existsSync(socketPath)) rmSync(socketPath)
