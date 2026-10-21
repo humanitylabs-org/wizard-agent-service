@@ -40,7 +40,7 @@ class ClaudeLoginMountTest(unittest.TestCase):
     def test_standard_claude_agent_mounts_the_shared_login(self):
         doc = self.doc("standard", "anthropic")
         svc = doc["services"]["agent-phil"]
-        self.assertIn("wizard-ai-accounts-claude:/claude", svc["volumes"])
+        self.assertIn("claude-login:/claude", svc["volumes"])
         self.assertEqual(svc["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"], "/claude")
         self.assertEqual(doc["volumes"]["claude-login"], {"name": "wizard-ai-accounts-claude", "external": True})
 
