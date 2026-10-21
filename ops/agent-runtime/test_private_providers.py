@@ -62,6 +62,8 @@ class PrivateProviderTest(unittest.TestCase):
         self.apps.write_text(json.dumps({'apps': [self.entry]}))
         self.agents = ar.Agents(self.root / 'agents', apps_path=self.apps)
         self.provider = self.agents.providers
+        self.image_patch = patch.object(self.provider, 'require_client_image')
+        self.image_patch.start()
         self.provider.docker = lambda *a, **kw: subprocess.CompletedProcess(a, 0, '', '')
         self.network = patch.object(self.provider, 'network', return_value='wzpr-probe')
         self.network.start()
@@ -77,6 +79,7 @@ class PrivateProviderTest(unittest.TestCase):
 
     def tearDown(self):
         self.network.stop()
+        self.image_patch.stop()
         self.cleanup_patch.stop()
         self.egress_patch.stop()
         self.address_patch.stop()
@@ -308,6 +311,17 @@ class PrivateProviderTest(unittest.TestCase):
         self.assertIn(['rm','-f','client'], calls)
         self.assertIn(['network','rm',name], calls)
         self.assertNotIn(['rm','-f','provider'], calls)
+
+    def test_older_client_images_fail_before_network_or_token_work(self):
+        self.image_patch.stop()
+        self.provider.docker = lambda args, **kw: subprocess.CompletedProcess(args,0,json.dumps([{'Config':{'Labels':{'wizard.private-client.sandbox-bind':'v1'}}}]),'')
+        self.provider.require_client_image()
+        for value in ([{'Config':{'Labels':{}}}], [], [{'Config':{'Labels':{'wizard.private-client.sandbox-bind':'v0'}}}]):
+            self.provider.docker = lambda args, **kw: subprocess.CompletedProcess(args,0,json.dumps(value),'')
+            with self.assertRaises(ar.RuntimeFailure) as error:
+                self.provider.prepare(self.agent)
+            self.assertEqual(error.exception.code,'private_client_image_unsafe')
+        self.provider.network.assert_not_called()
 
     def test_private_runtime_has_no_bridge_firewall_dependency(self):
         text = (Path(__file__).parent / 'agent_runtime.py').read_text()

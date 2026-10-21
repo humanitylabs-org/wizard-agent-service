@@ -13,6 +13,10 @@ neither it nor the provider process needs host networking or firewall privileges
   The client API binds only its sandbox IP (`LISTEN_HOST`), never its relay IP.
   Tinfoil management binds only its egress IP, never a relay IP; spoofed HTTP
   Host/Origin headers cannot expose token minting or other non-relay ports.
+  Runtime admission requires the reviewed client image capability label
+  `wizard.private-client.sandbox-bind=v1`; older images that ignore LISTEN_HOST
+  fail closed before network changes or token minting. Installers must build/pin
+  the bind-aware client, not reuse the previous wildcard-listener image.
 - `wizard-egress-<app>`: runtime-owned internal bridge, IPv4-only /24 from
   `10.253.0.0/16`, `inhibit_ipv4=true`. Provider `.2`, system edge `.3`. No other peers.
 - Provider: **only its per-agent relay networks plus its one internal egress network**, read-only, cap-drop ALL,

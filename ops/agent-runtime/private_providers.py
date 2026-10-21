@@ -293,8 +293,19 @@ class PrivateProviders:
             os.chmod(state, 0o600)
             return link
 
+    def require_client_image(self):
+        result = self.docker(['image', 'inspect', self.client_image], check=False, timeout=60)
+        try:
+            labels = json.loads(result.stdout)[0]['Config'].get('Labels') or {}
+        except (ValueError, KeyError, IndexError, TypeError):
+            labels = {}
+        if result.returncode or labels.get('wizard.private-client.sandbox-bind') != 'v1':
+            raise self.failure('private_client_image_unsafe', 409)
+
     def prepare(self, agent):
         app = self.app(agent.get('model', {}).get('provider'))
+        # Older clients ignore LISTEN_HOST and expose plaintext on relay interfaces.
+        self.require_client_image()
         runtime = self.agents.root / agent['id'] / 'runtime'
         runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
         state = runtime / 'private-provider.json'
