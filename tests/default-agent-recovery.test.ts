@@ -16,13 +16,15 @@ const owner = { 'X-Wizard-Owner-Proof': proof }
 const cleanup: (() => any)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 const json = (value: any, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
-async function scene({ queued = false, manifest = null as any } = {}) {
+async function scene({ queued = false, manifest = null as any, badOptional = false } = {}) {
   // Run only the fresh-box snapshot against an archived contract base to prove byte compatibility.
   const makeServer = process.env.WAS_S2C_BASELINE ? (await import(/* @vite-ignore */ `${process.env.WAS_S2C_BASELINE}/server/service.mjs`)).createWizardServer : createWizardServer
   const dir = mkdtempSync(join(tmpdir(), 'default-agent-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   const settingsPath = join(dir, 'settings.json'), agentsDir = join(dir, 'agents')
   const manifestPath = join(dir, 'voice-manifest.json')
+  const optionalPaths = { threadTitleStatePath: join(dir, 'titles.json'), subjectsPath: join(dir, 'subjects.json'), threadStatusBackfillPath: join(dir, 'status.json') }
+  if (badOptional) for (const path of Object.values(optionalPaths)) writeFileSync(path, '{bad')
   if (manifest) writeFileSync(manifestPath, JSON.stringify(manifest))
   const appsJsonPath = join(dir, 'apps.json')
   writeFileSync(appsJsonPath, JSON.stringify({ schema: 1, apps: [{ id: 'notes', name: 'Notes', agent_binding: true, status: 'running', view: { url: '/notes/' }, mcp: { url: 'http://127.0.0.1:9876/mcp' } }] }))
@@ -57,6 +59,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     agentUpstreamMode: 'localhost', agentTinfoilUrl: 'http://127.0.0.1:9/v1', settingsPath, appsJsonPath, wizardOsHome: dir,
     requireAccess: false, ownerProof: proof, agentBridge: false, followThrough: false, voiceRouting: false, mySkin: false, joinedDelegation: 'prefer',
     voiceRecoveryManifestPath: manifestPath,
+    ...(badOptional ? optionalPaths : {}),
     ...(queued ? { runQueueStatePath: join(dir, 'queue.sqlite'), runQueuePollIntervalMs: 0, dispatchHealthReader: () => dispatch.healthy, activeSessionReader: () => [] } : {}),
     threadSeenStatePath: join(dir, 'seen.json'), threadDispositionStatePath: join(dir, 'dispositions.json') })
   await new Promise<void>(resolve => service.listen(0, '127.0.0.1', resolve))
@@ -71,6 +74,12 @@ async function scene({ queued = false, manifest = null as any } = {}) {
 }
 
 describe('persisted default and recovery contract', () => {
+  it('starts and serves chats with corrupt optional metadata, preserving every corrupt byte', async () => {
+    const s = await scene({ badOptional: true })
+    expect((await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })).status).toBe(201)
+    expect((await s.call('/wizard/v1/bootstrap')).status).toBe(200)
+    for (const name of ['titles', 'subjects', 'status']) expect(readFileSync(join(s.dir, name + '.json'), 'utf8')).toBe('{bad')
+  })
   it('a stopped unrelated agent does not couple server-minted new chats to its availability', async () => {
     const s = await scene(), offline = await s.create('Offline')
     s.status.set(offline.id, 'stopped')
@@ -427,6 +436,8 @@ describe('persisted default and recovery contract', () => {
     const first = new DurableRunQueue(options)
     await first.admit({ runtime: 'direct', sessionId: 'wizard_old', idempotencyKey: 'old', requestHash: 'a'.repeat(64), body: '{"input":"old"}' })
     first.close()
+    // Reset the creation inventory when downgrading this fixture to the archived schema.
+    rmSync(join(dir, '.agent-pairs-v1.inventory.json'))
     const legacy = new DatabaseSync(path)
     legacy.exec('PRAGMA wal_autocheckpoint=0; ALTER TABLE wizard_run_queue DROP COLUMN agent_id; ALTER TABLE wizard_run_queue DROP COLUMN recovery_authorized')
     legacy.prepare('UPDATE wizard_run_queue SET body=?,continuation_json=?').run('{"input":"wal-only"}', JSON.stringify({ kind: 'helper', sessionId: 'wizard_old', receipt: { sessionId: 'wizard_old' } }))

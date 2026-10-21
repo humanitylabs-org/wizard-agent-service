@@ -9,10 +9,10 @@
 // A title the owner sets (a rename from a Wizard client, or any user-authority title Hermes holds
 // that the agent did not write) locks the thread: the agent's proposals are ignored from then on.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { migrateOptionalJson, qualifyRawThreadRecords } from './thread-reference.mjs'
+import { migrateOptionalJson, atomicStoreWrite, qualifyRawThreadRecords } from './thread-reference.mjs'
 
 export const TITLE_MAX = 40
 // A title that was on screen for less than this before being replaced was never a recognition anchor
@@ -88,7 +88,10 @@ export class ThreadTitleStore {
     this.now = now
     this.threads = {}
     this.mtime = -1
-    this.migrationReady = migrateOptionalJson(statePath, value => value.schema === 1 ? { ...value, threads: qualifyRawThreadRecords(value.threads ?? {}) } : value)
+    this.migrationReady = migrateOptionalJson(statePath, value => {
+      if (value?.schema !== 1 || !value.threads) throw new Error('Invalid title projection')
+      return { ...value, threads: qualifyRawThreadRecords(value.threads) }
+    })
     this.load()
   }
 
@@ -125,9 +128,7 @@ export class ThreadTitleStore {
   _save(threads) {
     if (this.statePath && this.migrationReady) {
       mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-      const temporary = `${this.statePath}.${process.pid}.tmp`
-      writeFileSync(temporary, JSON.stringify({ schema: 1, threads }), { mode: 0o600 })
-      renameSync(temporary, this.statePath)
+      atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, threads }))
       try { this.mtime = statSync(this.statePath).mtimeMs } catch { this.mtime = -1 }
     }
     this.threads = threads

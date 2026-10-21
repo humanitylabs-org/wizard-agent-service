@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { migrateJson, qualifySideRecords, qualifyRawThreadRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
+import { migrateJson, atomicStoreWrite, qualifySideRecords, qualifyRawThreadRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
 
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
@@ -121,7 +121,10 @@ export class ThreadSeenStore {
     this.statePath = statePath
     this.scopes = new Map()
     if (!statePath || !existsSync(statePath)) return
-    migrateJson(statePath, value => ({ ...value, scopes: Object.fromEntries(Object.entries(value.scopes ?? {}).map(([scope, state]) => [scope, { ...state, threads: qualifySideRecords(state.threads ?? {}) }])) }))
+    migrateJson(statePath, value => {
+      if (value?.schema !== 1 || !value.scopes || typeof value.scopes !== 'object' || Array.isArray(value.scopes)) throw new Error('Invalid seen authority')
+      return { ...value, scopes: Object.fromEntries(Object.entries(value.scopes).map(([scope, state]) => [scope, { ...state, threads: qualifySideRecords(state.threads) }])) }
+    })
     let payload
     try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
     catch { throw new Error('Wizard thread seen state is invalid') }
@@ -155,9 +158,7 @@ export class ThreadSeenStore {
   persist() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    const temporary = `${this.statePath}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify({ schema: 1, scopes: Object.fromEntries(this.scopes) }), { mode: 0o600 })
-    renameSync(temporary, this.statePath)
+    atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, scopes: Object.fromEntries(this.scopes) }))
   }
 }
 
@@ -172,7 +173,10 @@ export class DismissedFailureStore {
     this.statePath = statePath
     this.dismissals = new Map()
     if (!statePath || !existsSync(statePath)) return
-    migrateJson(statePath, value => ({ ...value, dismissals: qualifyRawThreadRecords(value.dismissals ?? {}) }))
+    migrateJson(statePath, value => {
+      if (value?.schema !== 1) throw new Error('Invalid dismissal authority')
+      return { ...value, dismissals: qualifyRawThreadRecords(value.dismissals) }
+    })
     let payload
     try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
     catch { throw new Error('Wizard dismissed failure state is invalid') }
@@ -211,8 +215,6 @@ export class DismissedFailureStore {
   persist() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    const temporary = `${this.statePath}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify({ schema: 1, dismissals: Object.fromEntries(this.dismissals) }), { mode: 0o600 })
-    renameSync(temporary, this.statePath)
+    atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, dismissals: Object.fromEntries(this.dismissals) }))
   }
 }

@@ -94,13 +94,13 @@ export function projectStatusMarkers(result) {
 export class StatusBackfill {
   constructor(path) {
     this.path = path || ''
-    migrateOptionalJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
+    this.migrationReady = migrateOptionalJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
     this.mtime = -1
     this.threads = {}
   }
 
   load() {
-    if (!this.path || !existsSync(this.path)) { this.threads = {}; return this.threads }
+    if (!this.migrationReady || !this.path || !existsSync(this.path)) { this.threads = {}; return this.threads }
     try {
       const { mtimeMs } = statSync(this.path)
       if (mtimeMs === this.mtime) return this.threads

@@ -21,7 +21,7 @@ import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
-import { sideReference, sideKey, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
+import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
@@ -2414,9 +2414,7 @@ export function createWizardServer(options = {}) {
   const persistOperatorWorkers = () => {
     if (!operatorWorkerStatePath) return
     mkdirSync(dirname(operatorWorkerStatePath), { recursive: true, mode: 0o700 })
-    const temporary = `${operatorWorkerStatePath}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify([...operatorWorkers.values()].slice(-100).map(row => ({ ...row, agent_id: MAIN_AGENT_ID, session_id: row.operatorSessionId, worker_agent_id: MAIN_AGENT_ID }))), { mode: 0o600 })
-    renameSync(temporary, operatorWorkerStatePath)
+    atomicStoreWrite(operatorWorkerStatePath, JSON.stringify([...operatorWorkers.values()].slice(-100).map(row => ({ ...row, agent_id: MAIN_AGENT_ID, session_id: row.operatorSessionId, worker_agent_id: MAIN_AGENT_ID }))))
   }
 
   const hermesJson = async (path, init = {}, preserveStatus = false) => {
@@ -2992,7 +2990,7 @@ export function createWizardServer(options = {}) {
           upstream_run_id: record.upstreamRunId, status: verdict.status, run_age_s: Math.round(Date.now() / 1000 - record.createdAt),
           leaseless_s: Math.round(leaselessSeconds) }
         console.log(`[stale-run-guard] released ${record.sessionId} run ${record.upstreamRunId} as ${verdict.status}`)
-        try { appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+        try { withStoreLock(staleRunLogPath, () => appendFileSync(staleRunLogPath, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
       interruptOutcome: options.interruptOutcomeReader
         ?? ((record) => readInterruptedRunOutcomeHttp((path) => hermesJson(path), record.sessionId, record.createdAt)),
@@ -3000,7 +2998,7 @@ export function createWizardServer(options = {}) {
         const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, agent_id: record?.agent_id ?? MAIN_AGENT_ID, session_id: record?.sessionId,
           upstream_run_id: record?.upstreamRunId, ...decision }
         console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
-        try { appendFileSync(resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+        try { const path = resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
     })
   }
@@ -3773,7 +3771,8 @@ export function createWizardServer(options = {}) {
       if (typeof value.agent_id === 'string' && typeof value.session_id === 'string') agents.pin(value.session_id, value.agent_id)
       for (const child of Object.values(value)) indexRows(child)
     }
-    const jsonPaths = [options.threadTitleStatePath, options.threadStatusBackfillPath, options.subjectsPath,
+    const jsonPaths = [...(threadTitleStore.migrationReady ? [options.threadTitleStatePath] : []),
+      ...(statusBackfill.migrationReady ? [options.threadStatusBackfillPath] : []), ...(subjectCatalog.migrationReady ? [options.subjectsPath] : []),
       options.threadSeenStatePath, options.threadDispositionStatePath, options.dismissedFailureStatePath,
       operatorWorkerStatePath, options.voiceRecoveryManifestPath, join(agents.agentsDir, '.run-threads.json'),
       ...(runQueueStatePath ? [join(dirname(runQueueStatePath), 'model-locked-admissions.json')] : [])]
@@ -3782,13 +3781,17 @@ export function createWizardServer(options = {}) {
       try { indexRows(JSON.parse(readFileSync(path, 'utf8'))) }
       catch { console.warn('[agent-pairs] pair-index projection unavailable; no negative history claim made') }
     }
+
     for (const path of [runQueueStatePath, uploadStatePath, options.heavyStatePath].filter(Boolean)) {
       if (!existsSync(path)) continue
       const db = new DatabaseSync(path, { readOnly: true })
       try {
         for (const [table, sessionColumn] of [['wizard_run_queue', 'session_id'], ['heavy_jobs', 'session'], ['shares', 'session_id']]) {
           if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue
-          indexRows(db.prepare(`SELECT agent_id, ${sessionColumn} AS session_id FROM ${table}`).all())
+          const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name)
+          const agentColumn = columns.includes('agent_id') ? 'agent_id' : table === 'shares' ? "COALESCE(NULLIF(agent,''),'hermes')" : "'hermes'"
+          const session = columns.includes(sessionColumn) ? sessionColumn : 'thread_id'
+          indexRows(db.prepare(`SELECT ${agentColumn} AS agent_id, ${session} AS session_id FROM ${table}`).all())
         }
       } finally { db.close() }
     }

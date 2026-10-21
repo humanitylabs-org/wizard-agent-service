@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { migrateJson, qualifySideRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
+import { migrateJson, atomicStoreWrite, qualifySideRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
 
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
 const validRecord = (record) => record && typeof record.deferred === 'boolean'
@@ -13,7 +13,10 @@ export class ThreadDispositionStore {
     this.statePath = statePath
     this.scopes = new Map()
     if (!statePath || !existsSync(statePath)) return
-    migrateJson(statePath, value => ({ ...value, scopes: Object.fromEntries(Object.entries(value.scopes ?? {}).map(([scope, records]) => [scope, qualifySideRecords(records)])) }))
+    migrateJson(statePath, value => {
+      if (value?.schema !== 1 || !value.scopes || typeof value.scopes !== 'object' || Array.isArray(value.scopes)) throw new Error('Invalid disposition authority')
+      return { ...value, scopes: Object.fromEntries(Object.entries(value.scopes).map(([scope, records]) => [scope, qualifySideRecords(records)])) }
+    })
     const data = JSON.parse(readFileSync(statePath, 'utf8'))
     if (data?.schema !== 1 || !data.scopes || typeof data.scopes !== 'object' || Array.isArray(data.scopes)) throw new Error('Invalid thread disposition state')
     for (const [scope, records] of Object.entries(data.scopes)) {
@@ -43,9 +46,7 @@ export class ThreadDispositionStore {
     const next = new Map(this.scopes).set(scope, records)
     if (this.statePath) {
       mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-      const temporary = `${this.statePath}.${process.pid}.tmp`
-      writeFileSync(temporary, JSON.stringify({ schema: 1, scopes: Object.fromEntries(next) }), { mode: 0o600 })
-      renameSync(temporary, this.statePath)
+      atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, scopes: Object.fromEntries(next) }))
     }
     this.scopes = next
     return record

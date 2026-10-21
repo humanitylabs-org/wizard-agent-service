@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { migrateJson } from './thread-reference.mjs'
+import { migrateJson, atomicStoreWrite } from './thread-reference.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
 // Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
@@ -64,9 +64,7 @@ export class LockedRunBridge {
   save() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    const p = this.statePath + '.' + process.pid + '.tmp'
-    writeFileSync(p, JSON.stringify([...this.entries]), { mode: 0o600 })
-    renameSync(p, this.statePath)
+    atomicStoreWrite(this.statePath, JSON.stringify([...this.entries]))
   }
   async fetch(url, init = {}) {
     const target = new URL(url)

@@ -71,13 +71,13 @@ export function normalizeSubjects(raw) {
 export class SubjectCatalog {
   constructor(path = '') {
     this.path = path || ''
-    migrateOptionalJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
+    this.migrationReady = migrateOptionalJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
     this.mtime = -1
     this.data = normalizeSubjects({})
   }
 
   load() {
-    if (!this.path || !existsSync(this.path)) { this.mtime = -1; this.data = normalizeSubjects({}); return this.data }
+    if (!this.migrationReady || !this.path || !existsSync(this.path)) { this.mtime = -1; this.data = normalizeSubjects({}); return this.data }
     try {
       const { mtimeMs, size } = statSync(this.path)
       if (mtimeMs === this.mtime) return this.data

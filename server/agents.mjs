@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readSettings } from './wizard-os-settings.mjs'
-import { migrateJson, threadKey, threadReference } from './thread-reference.mjs'
+import { migrateJson, atomicStoreWrite, threadKey, threadReference } from './thread-reference.mjs'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -88,9 +88,7 @@ function readJson(path) {
 }
 
 function writeJsonAtomic(path, value, mode = 0o600) {
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode })
-  renameSync(tmp, path)
+  atomicStoreWrite(path, `${JSON.stringify(value, null, 2)}\n`, { inventory: /\.(?:threads|run-threads)\.json$/u.test(path) })
 }
 
 function writeTextAtomic(path, text, mode = 0o600) {
@@ -869,6 +867,7 @@ export function createAgentRegistry(options = {}) {
     pinsCache = next
   }
   const runsPath = join(agentsDir, '.run-threads.json')
+  migrateJson(runsPath, value => value)
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
   function noteRun(runId, agentId, sessionId = '') {
     if (typeof runId !== 'string' || !runId) return

@@ -19,7 +19,7 @@ import { createReadStream, existsSync, mkdirSync, statfsSync, unlinkSync, chmodS
 import { open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { backupSqlite } from './thread-reference.mjs'
+import { withSqliteMigration } from './thread-reference.mjs'
 
 export const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 export const UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024
@@ -89,7 +89,8 @@ export function createUploadStore(options) {
   const hadState = existsSync(statePath)
   const db = new DatabaseSync(statePath)
   try { chmodSync(statePath, 0o600) } catch { /* best effort */ }
-  db.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
+  withSqliteMigration(db, statePath, hadState, () => {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS uploads (
       id TEXT PRIMARY KEY, client_upload_id TEXT NOT NULL UNIQUE, share_id TEXT, share_index INTEGER,
       target TEXT NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -104,9 +105,10 @@ export function createUploadStore(options) {
       status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, delivered_at INTEGER);`)
   if (!db.prepare('PRAGMA table_info(shares)').all().some(row => row.name === 'agent_id')) {
-    if (hadState) backupSqlite(db, statePath)
-    db.exec("BEGIN IMMEDIATE; ALTER TABLE shares ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'; ALTER TABLE shares ADD COLUMN session_id TEXT NOT NULL DEFAULT ''; ALTER TABLE shares ADD COLUMN request_default INTEGER NOT NULL DEFAULT 0; UPDATE shares SET agent_id=COALESCE(NULLIF(agent,''),'hermes'), session_id=thread_id; COMMIT;")
+    db.exec("ALTER TABLE shares ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'; ALTER TABLE shares ADD COLUMN session_id TEXT NOT NULL DEFAULT ''; ALTER TABLE shares ADD COLUMN request_default INTEGER NOT NULL DEFAULT 0; UPDATE shares SET agent_id=COALESCE(NULLIF(agent,''),'hermes'), session_id=thread_id;")
   }
+  })
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
   const now = options.now ?? (() => Date.now())
   const statfs = options.statfs ?? ((dir) => statfsSync(dir))
   const reserveBytes = Number.isFinite(options.reserveBytes) && options.reserveBytes >= 0 ? options.reserveBytes : UPLOAD_RESERVE_BYTES

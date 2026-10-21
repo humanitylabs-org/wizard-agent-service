@@ -11,6 +11,7 @@ import { StatusBackfill } from '../server/thread-status.mjs'
 import { SubjectCatalog } from '../server/thread-subjects.mjs'
 import { LockedRunBridge } from '../server/locked-run-bridge.mjs'
 import { DurableHeavyQueue } from '../server/heavy-queue.mjs'
+import { DurableRunQueue } from '../server/run-queue.mjs'
 import { createUploadStore } from '../server/uploads.mjs'
 import { migrateJson, migrateJsonLines, qualifyContinuation } from '../server/thread-reference.mjs'
 
@@ -20,6 +21,37 @@ const directory = () => { const dir = mkdtempSync(join(tmpdir(), 'agent-pair-sto
 const suffix = '.pre-agent-pairs-v1.bak'
 
 describe('agent-pair store migrations', () => {
+  it.each(['direct:literal', 'operator:literal'])('SQLite and continuation stores close over repeated write/restart cycles for %s', async id => {
+    const dir = directory(), queueOptions = { statePath: join(dir, 'runs.sqlite'), pollIntervalMs: 0, canDispatch: () => false, launch: async () => ({}), lookup: async () => ({}) }
+    const heavyOptions = { statePath: join(dir, 'heavy.sqlite'), intervalMs: 0, transport: async () => ({}), continuation: async () => ({}), current: async () => true }
+    const uploadOptions = { statePath: join(dir, 'uploads.sqlite'), sweepIntervalMs: 0, reserveBytes: 0, log: () => {}, target: () => ({ kind: 'local', stagingDir: dir, finalize: async () => ({}) }) }
+    for (let generation = 1; generation <= 2; generation++) {
+      const key = `g${generation}`
+      let queue = new DurableRunQueue(queueOptions)
+      await queue.admit({ runtime: 'direct', sessionId: id, idempotencyKey: key, requestHash: 'a'.repeat(64), body: '{}', continuation: { kind: 'helper', sessionId: id } }); queue.close()
+      queue = new DurableRunQueue(queueOptions)
+      expect(queue.byIdempotencyKey('direct', key)).toMatchObject({ agent_id: 'hermes', sessionId: id }); queue.close()
+      let heavy = new DurableHeavyQueue(heavyOptions)
+      const job = heavy.submit({ sessionId: id, origin: key, key, watermark: null, spec: { cwd: '/Volumes/ThalesMedia/tests', argv: ['true'], timeout_seconds: 1 } }); heavy.close()
+      heavy = new DurableHeavyQueue(heavyOptions)
+      expect(heavy.get(job.job_id)).toMatchObject({ agent_id: 'hermes', session_id: id }); heavy.close()
+      let uploads = createUploadStore(uploadOptions)
+      const { share } = await uploads.createShare({ client_share_id: key, note: '', files: [{ filename: 'fixture', bytes: 1 }] }, { agent: 'hermes', thread_id: id, thread_new: false, target: 'files' }); uploads.close()
+      uploads = createUploadStore(uploadOptions)
+      expect(uploads.publicShare(uploads.getShare(share!.id))).toMatchObject({ agent_id: 'hermes', session_id: id }); uploads.close()
+      const registry = createAgentRegistry({ agentsDir: join(dir, 'agents') }); registry.noteRun(key, 'hermes', id)
+      expect(createAgentRegistry({ agentsDir: join(dir, 'agents') }).runAgent(key)).toBe('hermes')
+      const voice = join(dir, 'voice.json'), operator = join(dir, 'operator.json')
+      writeFileSync(voice, JSON.stringify({ version: 1, entries: [{ sessionId: id, receipt: { sessionId: id } }] }))
+      writeFileSync(operator, JSON.stringify([{ operatorSessionId: id }]))
+      for (let restart = 0; restart < 2; restart++) {
+        migrateJson(voice, (value: any) => ({ ...value, entries: value.entries.map((row: any) => qualifyContinuation(row)) }))
+        migrateJson(operator, (rows: any[]) => rows.map(row => ({ ...row, agent_id: row.agent_id ?? 'hermes', session_id: row.session_id ?? row.operatorSessionId, worker_agent_id: row.worker_agent_id ?? 'hermes' })))
+        expect(JSON.parse(readFileSync(voice, 'utf8')).entries[0]).toMatchObject({ session_id: id, receipt: { session_id: id } })
+        expect(JSON.parse(readFileSync(operator, 'utf8'))[0].session_id).toBe(id)
+      }
+    }
+  })
   it.each(['direct:literal', 'operator:literal'])('raw and runtime-prefixed stores close over write/restart/write/restart for %s', id => {
     const dir = directory(), title = join(dir, 'titles.json'), dismissed = join(dir, 'dismissed.json')
     const seenPath = join(dir, 'seen.json'), dispositionsPath = join(dir, 'dispositions.json')
@@ -115,6 +147,8 @@ describe('agent-pair store migrations', () => {
     const dir = directory(), path = join(dir, 'uploads.sqlite')
     const opts = { statePath: path, target: () => null, sweepIntervalMs: 0, defaultAgentId: () => 'new-default' }
     let store = createUploadStore(opts); store.close()
+    // The fixture is being turned into a pre-migration store, not a new-format-created store.
+    rmSync(join(dir, '.agent-pairs-v1.inventory.json'))
     const db = new DatabaseSync(path)
     db.exec('ALTER TABLE shares DROP COLUMN agent_id; ALTER TABLE shares DROP COLUMN session_id; ALTER TABLE shares DROP COLUMN request_default')
     db.prepare(`INSERT INTO shares(id,client_share_id,agent,thread_id,thread_new,target,status,created_at,updated_at) VALUES('sh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','old','imported','wizard_same',1,'agent:imported','uploading',1,1)`).run()

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { backupSqlite } from './thread-reference.mjs'
+import { withSqliteMigration } from './thread-reference.mjs'
 
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -48,22 +48,22 @@ export class DurableHeavyQueue {
     const hadState = existsSync(statePath)
     this.db = new DatabaseSync(statePath)
     chmodSync(statePath, 0o600)
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    withSqliteMigration(this.db, statePath, hadState, () => {
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS heavy_jobs(id TEXT PRIMARY KEY, session TEXT NOT NULL,
         origin TEXT NOT NULL, key TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL,
         UNIQUE(session,origin,key));`)
     if (!this.db.prepare('PRAGMA table_info(heavy_jobs)').all().some(row => row.name === 'agent_id')) {
-      if (hadState) backupSqlite(this.db, statePath)
-      this.db.exec('BEGIN IMMEDIATE')
-      try {
+
         this.db.exec("ALTER TABLE heavy_jobs ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'")
         for (const row of this.db.prepare('SELECT id,session,data FROM heavy_jobs').all()) {
           const job = JSON.parse(row.data)
           this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify({ ...job, agent_id: 'hermes', session_id: row.session }), row.id)
         }
-        this.db.exec('COMMIT')
-      } catch (error) { this.db.exec('ROLLBACK'); throw error }
+
     }
+    })
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     Object.assign(this, { transport, continuation, current, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {

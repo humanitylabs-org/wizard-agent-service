@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { backupSqlite, qualifyContinuation } from './thread-reference.mjs'
+import { withSqliteMigration, qualifyContinuation } from './thread-reference.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
 import { annotateProviderSignOut } from './provider-reconnect.mjs'
@@ -145,10 +145,8 @@ export class DurableRunQueue {
     const hadState = existsSync(this.statePath)
     this.database = new DatabaseSync(this.statePath)
     chmodSync(this.statePath, 0o600)
+    withSqliteMigration(this.database, this.statePath, hadState, () => {
     this.database.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
-      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS wizard_provider_backoff (
         scope TEXT PRIMARY KEY, retry_after REAL NOT NULL, failures INTEGER NOT NULL
       );
@@ -182,24 +180,21 @@ export class DurableRunQueue {
       );
     `)
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'agent_id')) {
-      if (hadState) backupSqlite(this.database, this.statePath)
-      this.database.exec('BEGIN IMMEDIATE')
-      try {
+
         this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'; ALTER TABLE wizard_run_queue ADD COLUMN recovery_authorized INTEGER NOT NULL DEFAULT 0;")
         if (this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
           for (const row of this.database.prepare('SELECT public_run_id,session_id,continuation_json FROM wizard_run_queue').all()) {
             this.database.prepare('UPDATE wizard_run_queue SET continuation_json=? WHERE public_run_id=?').run(JSON.stringify(qualifyContinuation(JSON.parse(row.continuation_json), row.session_id)), row.public_run_id)
           }
         }
-        this.database.exec('COMMIT')
-      } catch (error) { this.database.exec('ROLLBACK'); throw error }
+
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_attempted')) {
       // Existing rows have unknown dispatch history. Never mutate their saved request.
-      this.database.exec("BEGIN IMMEDIATE; ALTER TABLE wizard_run_queue ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 0; UPDATE wizard_run_queue SET dispatch_attempted=1; COMMIT;")
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 0; UPDATE wizard_run_queue SET dispatch_attempted=1;")
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_body')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_body TEXT")
@@ -207,6 +202,8 @@ export class DurableRunQueue {
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'worker_dispatch_body')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN worker_dispatch_body TEXT")
     }
+    })
+    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
   }
 
   async initialize() {
