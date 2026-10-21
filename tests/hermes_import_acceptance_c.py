@@ -205,6 +205,8 @@ def model_exercise(service, agent, target, model):
     prompt = ('This is one authorized hidden import acceptance check. Do not load skills or do any other work. '
               'Use your terminal tool to run exactly these two independent read-only checks: '
               'gh auth status ; then ssh -o BatchMode=yes ' + shlex.quote(os.environ[PREFIX + 'BUILD_HOST']) + ' echo ok . '
+              'Run them as two separate terminal calls, with each command verbatim: no extra echo, semicolons or pipelines. '
+              'The terminal result already reports exit_code. '
               'Use fact_store action=search to recall an existing fact about Thales. '
               'The fact to find is: ' + fact + '\n'
               'After the tools finish, reply IMPORT_C_OK, give each literal exit code, and state the recalled fact. '
@@ -235,8 +237,11 @@ def model_exercise(service, agent, target, model):
         session_row = dict(db.execute('SELECT * FROM sessions WHERE id=?', (session,)).fetchone())
         messages = [dict(r) for r in db.execute('SELECT * FROM messages WHERE session_id=? ORDER BY id', (session,))]
     actual_model = session_row.get('model')
-    provider = session_row.get('provider')
+    model_config = session_row.get('model_config') or {}
+    model_config = json.loads(model_config) if isinstance(model_config, str) else model_config
+    provider = session_row.get('billing_provider') or session_row.get('provider') or model_config.get('provider')
     emit(session_model=actual_model, session_provider=provider,
+         session_model_config_keys=sorted(model_config),
          session_metadata_columns=[k for k in session_row if 'model' in k or 'provider' in k],
          canonical_message_roles=[r.get('role') for r in messages])
     tool_calls, results = [], []
@@ -262,20 +267,23 @@ def model_exercise(service, agent, target, model):
         args = json.loads(args) if isinstance(args, str) else args
         match = next((p for cid, p in results if cid == call.get('id')), None)
         if name == 'terminal':
+            out = str(match.get('output') or '') if isinstance(match, dict) else ''
+            out = '\n'.join(line for line in out.splitlines() if not re.search(r'token\s*:', line, re.I))
             terminals.append({'command': args.get('command'), 'exit_code': match.get('exit_code') if isinstance(match, dict) else None,
-                              'ok_output': 'ok' in str(match)})
+                              'output': out})
         if name == 'fact_store' and args.get('action') == 'search':
             fact_ok = fact in json.dumps(match, ensure_ascii=False)
     reply = '\n'.join(str(r.get('content', '')) for r in rows if r.get('role') == 'assistant')
     emit(terminal_tool_results=terminals, fact_store_existing_fact_verified=fact_ok,
-         model_reply_marker='IMPORT_C_OK' in reply, model_reply_recalled_fact=fact in reply)
+         model_reply_marker='IMPORT_C_OK' in reply, model_reply_recalled_fact=fact in reply,
+         model_reply_redacted=reply.replace(fact, '[existing fact verified by SHA256]'))
     m.require(actual_model == model['default'], 'session_model_mismatch')
-    # Some schema versions expose provider in run metadata instead of the session row.
-    if provider is not None:
-        m.require(provider == model['provider'], 'session_provider_mismatch')
+    m.require(provider == model['provider'], 'session_provider_mismatch')
     m.require('IMPORT_C_OK' in reply and fact in reply and fact_ok, 'acceptance_reply_or_fact_failed')
+    expected_commands = {'gh auth status', 'ssh -o BatchMode=yes ' + os.environ[PREFIX + 'BUILD_HOST'] + ' echo ok'}
+    m.require({t['command'] for t in terminals} == expected_commands, 'acceptance_terminal_commands_not_verbatim')
     m.require(terminals and all(t['exit_code'] == 0 for t in terminals), 'acceptance_terminal_tool_failed')
-    m.require(any('gh auth status' in (t['command'] or '') for t in terminals) and any(os.environ[PREFIX + 'BUILD_HOST'] in (t['command'] or '') for t in terminals), 'acceptance_terminal_commands_missing')
+    m.require(any(t['output'].strip() == 'ok' for t in terminals if t['command'].startswith('ssh ')), 'acceptance_ssh_tool_output_not_ok')
     return session
 
 
