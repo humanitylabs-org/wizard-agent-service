@@ -109,8 +109,17 @@ def main():
             if src.exists():
                 snapshot_small_db(src, home / name)
                 copied.append(name + ' (read-only SQLite snapshot)')
-        canary.copy_access_only(source, home)
-        print(json.dumps({'rehearsal_auth_access_only_no_refresh_grants': True}))
+        # Rehearsal must keep the live main provider and every provider/pool structure.
+        # The fresh Codex canary's copy_access_only() intentionally rewrites auth;
+        # using it here dropped Anthropic credentials and selected the wrong route.
+        def access_only(value):
+            if isinstance(value, dict):
+                return {k: access_only(v) for k, v in value.items() if 'refresh' not in k.lower()}
+            if isinstance(value, list):
+                return [access_only(v) for v in value]
+            return value
+        m.dump(home / 'auth.json', access_only(json.loads((source / 'auth.json').read_text())))
+        print(json.dumps({'rehearsal_auth_all_provider_structures_no_refresh_grants': True}))
         omitted = sorted(p.name for p in source.iterdir() if p.name not in SOURCE_ITEMS and p.name not in {'state.db', 'memory_store.db', 'shared-state.db'})
         stats = reduced_db(source / 'state.db', home / 'state.db')
         # Every copied session is hidden BEFORE its runtime can start. No test input
@@ -148,7 +157,7 @@ def main():
         target = wizard / 'agents' / agent / 'home'
         m.require(target.stat().st_ino == inode, 'rehearsal_not_atomic_move')
         unchanged = all(m.file_hash(target / rel) == h for rel, h in identities.items())
-        with sqlite3.connect(target / 'state.db') as db:
+        with contextlib.closing(sqlite3.connect(target / 'state.db')) as db:
             counts = [db.execute('SELECT count(*) FROM ' + table).fetchone()[0] for table in ['sessions', 'messages']]
         jobs = json.loads((target / 'cron/jobs.json').read_text())
         paused = all(not j.get('enabled', True) and j.get('state') == 'paused' for j in jobs.get('jobs', []) if isinstance(jobs, dict))

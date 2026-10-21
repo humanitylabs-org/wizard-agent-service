@@ -277,7 +277,10 @@ def scan(source, *, owner_home=None):
     sessions = None
     if not is_zip and (source / 'state.db').exists():
         try:
-            with sqlite3.connect((source / 'state.db').as_uri() + '?mode=ro', uri=True, timeout=2) as db:
+            # A SQLite connection context only commits/rolls back; it does NOT
+            # close descriptors. A leaked read-only WAL reader can retain an
+            # O_RDWR -shm fd and make the subsequent stopped-writer census fail.
+            with contextlib.closing(sqlite3.connect((source / 'state.db').as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
                 sessions = db.execute('SELECT count(*) FROM sessions').fetchone()[0]
         except sqlite3.Error:
             sessions = 'unavailable'
@@ -372,6 +375,11 @@ def validate_plan(plan, wizard_home):
         if not item.get('approved'):
             continue
         action = item.get('action', item['proposal'])
+        if 'credential_source' in item:
+            require(action == 'carry secret' and item['kind'] == 'credential', 'credential_source_action')
+            scoped = Path(safe_mount(item['credential_source'], owner_home=plan['owner_home'], wizard_home=wizard_home, source=plan['source']))
+            require(scoped.is_relative_to(Path(plan['owner_home']).resolve()), 'credential_outside_owner_home')
+            require(not scoped.is_relative_to(Path(plan['source']).resolve()), 'credential_source_inside_home')
         require(action in {'mount ro', 'mount rw', 'carry secret', 'available in image', 'leave behind'}, 'dependency_action')
         if action in {'mount ro', 'mount rw', 'carry secret'}:
             mount = Path(safe_mount(item['path'], owner_home=plan['owner_home'], wizard_home=wizard_home, source=plan['source']))
@@ -748,7 +756,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
         wire(home, plan, api_key, gateway_key)
         for item in plan['dependencies']:
             if item.get('approved') and item.get('action', item['proposal']) == 'carry secret':
-                src = Path(item['path'])
+                src = Path(item.get('credential_source', item['path']))
                 require(src.is_relative_to(plan['owner_home']), 'credential_outside_owner_home')
                 dest = directory / 'credentials' / digest(item['path'])
                 dest.parent.mkdir(mode=0o700, exist_ok=True)

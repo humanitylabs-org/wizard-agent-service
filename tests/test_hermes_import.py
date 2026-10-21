@@ -82,6 +82,64 @@ class ImportTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN', p['summary']['credential_names'])
         self.assertTrue(any(i['path'] == '/work/project' and i['references'] == ['skills/sample/SKILL.md:1'] for i in p['dependencies']))
         self.assertTrue(any(i['kind'] == 'host-service' for i in p['dependencies']))
+    def test_scan_closes_sqlite_reader_before_writer_census(self):
+        import sqlite3
+        with contextlib.closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('CREATE TABLE sessions (id TEXT)')
+            db.commit()
+        connections = []
+        real_connect = m.sqlite3.connect
+        def tracked(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        with patch.object(m.sqlite3, 'connect', side_effect=tracked):
+            self.plan()
+        self.assertTrue(connections)
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+
+    def test_scoped_credential_source_preserves_logical_destination(self):
+        ssh = self.owner / '.ssh'
+        ssh.mkdir()
+        (ssh / 'owner-key').write_text('must never be carried')
+        scoped = self.owner / 'scoped-ssh'
+        scoped.mkdir()
+        (scoped / 'config').write_text('Host build-only\n')
+        p = self.plan()
+        p['dependencies'] = [{'kind': 'credential', 'path': str(ssh), 'credential_source': str(scoped),
+                              'proposal': 'carry secret', 'action': 'carry secret', 'approved': True}]
+        m.approve(p)
+        result = self.apply(p)
+        carried = self.wizard / 'agents/fixture-agent/credentials' / m.digest(str(ssh))
+        self.assertEqual(sorted(x.name for x in carried.iterdir()), ['config'])
+        self.undo(result)
+        self.assertTrue((ssh / 'owner-key').exists())
+        self.assertTrue(scoped.exists())
+
+    def test_scoped_credential_source_is_approval_bound_and_sealed(self):
+        ssh = self.owner / '.ssh'
+        ssh.mkdir()
+        scoped = self.owner / 'scoped-ssh'
+        scoped.mkdir()
+        p = self.plan()
+        item = {'kind': 'credential', 'path': str(ssh), 'credential_source': str(scoped),
+                'proposal': 'carry secret', 'approved': True}
+        p['dependencies'] = [item]
+        m.approve(p)
+        item['credential_source'] = str(self.wizard)
+        with self.assertRaisesRegex(m.ImportFailure, 'plan_not_approved'):
+            m.validate_plan(p, self.wizard)
+        m.approve(p)
+        with self.assertRaisesRegex(m.ImportFailure, 'mount_sealed'):
+            m.validate_plan(p, self.wizard)
+        item['credential_source'] = str(scoped)
+        item['kind'] = 'folder'
+        m.approve(p)
+        with self.assertRaisesRegex(m.ImportFailure, 'credential_source_action'):
+            m.validate_plan(p, self.wizard)
+
     def test_approval_bound_to_every_selection(self):
         p = self.plan()
         p['port'] += 1
