@@ -18,7 +18,7 @@ describe('boomerang HTTP API',()=>{
  it('creates, lists, reschedules, acknowledges and cancels without starting an agent run',async()=>{
   const base=await scene();let r=await fetch(base+'/wizard/v1/boomerangs',json('POST',payload));expect(r.status).toBe(201);const created=(await r.json()).reminder
   r=await fetch(base+'/wizard/v1/boomerangs');expect((await r.json()).reminders).toHaveLength(1)
-  r=await fetch(`${base}/wizard/v1/boomerangs/${created.id}`,json('PATCH',{due_at:'2026-10-21T10:00:00Z',timezone:'Asia/Bangkok'}));expect((await r.json()).reminder.due_at).toBe('2026-10-21T10:00:00.000Z')
+  r=await fetch(`${base}/wizard/v1/boomerangs/${created.id}`,json('PATCH',{due_at:'2026-10-21T10:00:00Z',timezone:'Asia/Bangkok',note:'Edited note'}));expect((await r.json()).reminder).toMatchObject({due_at:'2026-10-21T10:00:00.000Z',note:'Edited note'})
   r=await fetch(`${base}/wizard/v1/boomerangs/${created.id}`,{method:'DELETE',headers:{'Sec-Fetch-Site':'cross-site'}});expect(r.status).toBe(403)
   r=await fetch(`${base}/wizard/v1/boomerangs/${created.id}`,{method:'DELETE'});expect((await r.json()).reminder.status).toBe('cancelled')
  })

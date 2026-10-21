@@ -4782,7 +4782,7 @@ function buildWizardServer(options, lifetime) {
         else if (request.method === 'PATCH' && !boomerangAction[2]) {
           if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
           const body = parseJsonBody(await readBoundedBody(request, 2 * 1024))
-          reminder = boomerangStore.reschedule(scope, id, body.due_at, body.timezone)
+          reminder = boomerangStore.reschedule(scope, id, body.due_at, body.timezone, body.note)
         } else { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         sendJson(response, 200, { reminder }); return
       }

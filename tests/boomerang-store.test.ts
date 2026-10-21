@@ -56,8 +56,8 @@ describe('BoomerangStore', () => {
 
   it('cancels and reschedules without delivering stale work', () => {
     const s = store(Date.parse('2026-10-21T08:00:00.000Z')); const db = s.open(); const created = db.create(reminder())
-    const moved = db.reschedule('wizard-account-local', created.id, '2026-10-21T11:00:00.000Z', 'Asia/Bangkok')
-    expect(moved.due_at).toBe('2026-10-21T11:00:00.000Z'); expect(moved.status).toBe('scheduled')
+    const moved = db.reschedule('wizard-account-local', created.id, '2026-10-21T11:00:00.000Z', 'Asia/Bangkok', 'Edited note')
+    expect(moved.due_at).toBe('2026-10-21T11:00:00.000Z'); expect(moved.status).toBe('scheduled'); expect(moved.note).toBe('Edited note')
     expect(db.cancel('wizard-account-local', created.id).status).toBe('cancelled')
     expect(db.claimDue(Date.parse('2026-10-22T00:00:00.000Z'))).toEqual([]); db.close()
   })

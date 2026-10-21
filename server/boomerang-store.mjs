@@ -95,11 +95,11 @@ export class BoomerangStore {
     this.db.prepare("UPDATE boomerang_reminders SET status='cancelled',updated_at=? WHERE scope=? AND id=? AND status IN ('scheduled','due')").run(at, scope, id)
     return this.get(scope, id)
   }
-  reschedule(scope, id, dueAt, timezone) {
+  reschedule(scope, id, dueAt, timezone, note) {
     const due = iso(dueAt), displayedZone = zone(timezone)
     if (Date.parse(due) <= this.now()) throw Object.assign(new Error('due_at must be in the future'), { status: 400 })
-    const at = new Date(this.now()).toISOString()
-    this.db.prepare("UPDATE boomerang_reminders SET due_at=?,timezone=?,status='scheduled',delivered_at=NULL,notification_status='pending',notification_attempts=0,notification_next_at=NULL,notification_error=NULL,updated_at=? WHERE scope=? AND id=? AND status!='cancelled'").run(due, displayedZone, at, scope, id)
+    const at = new Date(this.now()).toISOString(), nextNote = note === undefined ? this.get(scope, id)?.note ?? '' : clean(note, 500)
+    this.db.prepare("UPDATE boomerang_reminders SET due_at=?,timezone=?,note=?,status='scheduled',delivered_at=NULL,notification_status='pending',notification_attempts=0,notification_next_at=NULL,notification_error=NULL,updated_at=? WHERE scope=? AND id=? AND status!='cancelled'").run(due, displayedZone, nextNote, at, scope, id)
     return this.get(scope, id)
   }
   acknowledge(scope, id) {
