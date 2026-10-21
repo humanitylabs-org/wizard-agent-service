@@ -3990,7 +3990,7 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, await writes[route]())
         return
       }
-        if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
+      if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
         const authenticated = requireAccess && await accessVerified(request, accessVerifier)
         if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
         const refusal = helperContinueRequestAllowed(request,{authenticated,trustedOrigins:options.helperContinueOrigins ?? []})
