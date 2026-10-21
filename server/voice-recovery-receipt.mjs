@@ -76,9 +76,13 @@ function verifiedBlob(upload, inboxDbPath, blobRoot, expectedHash) {
  * This never admits work, acknowledges audio, or mutates any durable state.
  */
 export function resolveVoiceRecoveryReceipt({ request, manifestPath, queueDbPath, inboxDbPath, blobRoot }) {
+  const agentId = request?.agent_id ?? 'hermes'
+  if (request && Object.hasOwn(request, 'agent_id')) { const { agent_id, ...rest } = request; request = rest }
   if (!exactFields(request, REQUEST_FIELDS)
     || !['sessionId', 'intentId', 'sourceFileId'].every((key) => safeId(request[key]))
     || !digest(request.audioSha256) || !digest(request.inputSha256)) throw receiptError(400)
+  // This evidence source and queue belong to the external Hermes runtime, never a same-id imported history.
+  if (agentId !== 'hermes') return null
 
   let queue
   let inbox
@@ -86,11 +90,12 @@ export function resolveVoiceRecoveryReceipt({ request, manifestPath, queueDbPath
     if (![manifestPath, queueDbPath, inboxDbPath, blobRoot].every((path) => typeof path === 'string' && path.length > 0)) return null
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     if (!exactFields(manifest, ['version', 'entries']) || manifest.version !== 1 || !Array.isArray(manifest.entries)
-      || !manifest.entries.every((entry) => exactFields(entry, ENTRY_FIELDS)
+      || !manifest.entries.every((entry) => exactFields(entry, [...ENTRY_FIELDS, ...['agent_id', 'session_id'].filter(key => Object.hasOwn(entry, key))])
+        && (!Object.hasOwn(entry, 'session_id') || entry.session_id === entry.sessionId)
         && ['sessionId', 'sourceFileId', 'recoveredRunId', 'recoveryIdempotencyKey'].every((key) => safeId(entry[key]))
         && digest(entry.audioSha256) && digest(entry.inputSha256))) throw receiptError(503)
 
-    const audioEntries = manifest.entries.filter((entry) => ['sessionId', 'sourceFileId', 'audioSha256']
+    const audioEntries = manifest.entries.filter((entry) => (entry.agent_id ?? 'hermes') === agentId && ['sessionId', 'sourceFileId', 'audioSha256']
       .every((key) => entry[key] === request[key]))
     // The audio is already attested as recovered: changed text must block resend,
     // not be mistaken for an absent recovery receipt.
@@ -105,9 +110,10 @@ export function resolveVoiceRecoveryReceipt({ request, manifestPath, queueDbPath
     if (!statSync(queueDbPath).isFile() || !statSync(inboxDbPath).isFile()) return null
     queue = new DatabaseSync(queueDbPath, { readOnly: true })
     inbox = new DatabaseSync(inboxDbPath, { readOnly: true })
+    const agentFilter = queue.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'agent_id') ? " AND agent_id = 'hermes'" : ''
     const run = queue.prepare(`SELECT body FROM wizard_run_queue
       WHERE public_run_id = ? AND runtime = 'direct' AND session_id = ?
-        AND idempotency_key = ? AND status = 'completed'`).get(entry.recoveredRunId, entry.sessionId, entry.recoveryIdempotencyKey)
+        AND idempotency_key = ? AND status = 'completed'${agentFilter}`).get(entry.recoveredRunId, entry.sessionId, entry.recoveryIdempotencyKey)
     if (!run) return null
     const body = JSON.parse(run.body)
     if (!body || typeof body.input !== 'string'
@@ -124,6 +130,7 @@ export function resolveVoiceRecoveryReceipt({ request, manifestPath, queueDbPath
     return {
       version: 1,
       sessionId: request.sessionId,
+      agent_id: agentId, session_id: request.sessionId,
       intentId: request.intentId,
       sourceFileId: request.sourceFileId,
       audioSha256: request.audioSha256,

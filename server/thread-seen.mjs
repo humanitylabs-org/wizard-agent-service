@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { migrateJson, atomicStoreWrite, qualifySideRecords, qualifyRawThreadRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
 
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
@@ -22,6 +23,7 @@ function validRecord(value) {
   if (assistantActivityAt !== undefined && (typeof assistantActivityAt !== 'string' || assistantActivityAt.length > 100 || !Number.isFinite(Date.parse(assistantActivityAt)))) return null
   if (!Number.isFinite(seenAt) || seenAt < 0) return null
   return {
+    ...(value.agent_id !== undefined ? { agent_id: value.agent_id, session_id: value.session_id } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
     ...(status !== undefined ? { status } : {}),
     updatedAt,
@@ -39,7 +41,9 @@ export function normalizeThreadSeenState(value) {
   if (entries.length > MAX_THREAD_RECORDS * 2) return null
   const threads = {}
   for (const [key, candidate] of entries) {
-    if (!THREAD_KEY.test(key)) return null
+    let pair
+    try { pair = sideReference(key, candidate) } catch { return null }
+    if (!THREAD_KEY.test(pair.legacyKey)) return null
     const record = validRecord(candidate)
     if (!record) return null
     threads[key] = record
@@ -117,6 +121,10 @@ export class ThreadSeenStore {
     this.statePath = statePath
     this.scopes = new Map()
     if (!statePath || !existsSync(statePath)) return
+    migrateJson(statePath, value => {
+      if (value?.schema !== 1 || !value.scopes || typeof value.scopes !== 'object' || Array.isArray(value.scopes)) throw new Error('Invalid seen authority')
+      return { ...value, scopes: Object.fromEntries(Object.entries(value.scopes).map(([scope, state]) => [scope, { ...state, threads: qualifySideRecords(state.threads) }])) }
+    })
     let payload
     try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
     catch { throw new Error('Wizard thread seen state is invalid') }
@@ -138,6 +146,7 @@ export class ThreadSeenStore {
     // What a caller sends keeps the old limit; only stored state may hold hidden marks beyond it.
     if (state && Object.keys(state.threads).length > MAX_THREAD_RECORDS) state = null
     if (!state) throw Object.assign(new Error('Invalid Wizard thread seen state'), { status: 400 })
+    state = { ...state, threads: qualifySideRecords(state.threads) }
     const previous = this.get(scope)
     const merged = mergeThreadSeenStates(previous, state, options)
     this.scopes.set(scope, merged)
@@ -149,9 +158,7 @@ export class ThreadSeenStore {
   persist() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    const temporary = `${this.statePath}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify({ schema: 1, scopes: Object.fromEntries(this.scopes) }), { mode: 0o600 })
-    renameSync(temporary, this.statePath)
+    atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, scopes: Object.fromEntries(this.scopes) }))
   }
 }
 
@@ -166,6 +173,10 @@ export class DismissedFailureStore {
     this.statePath = statePath
     this.dismissals = new Map()
     if (!statePath || !existsSync(statePath)) return
+    migrateJson(statePath, value => {
+      if (value?.schema !== 1) throw new Error('Invalid dismissal authority')
+      return { ...value, dismissals: qualifyRawThreadRecords(value.dismissals) }
+    })
     let payload
     try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
     catch { throw new Error('Wizard dismissed failure state is invalid') }
@@ -173,26 +184,26 @@ export class DismissedFailureStore {
       throw new Error('Wizard dismissed failure state is invalid')
     }
     for (const [sessionId, record] of Object.entries(payload.dismissals).slice(0, MAX_DISMISSED_FAILURES)) {
-      if (!SESSION_KEY.test(sessionId)) continue
+      if (!SESSION_KEY.test(record.session_id)) continue
       if (!record || typeof record !== 'object' || Array.isArray(record)) continue
       const failureKey = typeof record.failureKey === 'string' ? record.failureKey : ''
       const dismissedAt = Number(record.dismissedAt)
       if (!failureKey || !Number.isFinite(dismissedAt) || dismissedAt < 0) continue
-      this.dismissals.set(sessionId, { failureKey, dismissedAt })
+      this.dismissals.set(sessionId, { failureKey, dismissedAt, agent_id: record.agent_id ?? 'hermes', session_id: record.session_id ?? sessionId })
     }
   }
 
-  isDismissed(sessionId, failureKey = '') {
-    const record = this.dismissals.get(sessionId)
+  isDismissed(sessionId, failureKey = '', agentId = 'hermes') {
+    const record = this.dismissals.get(sideKey(agentId, sessionId))
     if (!record) return false
     return failureKey === '' || record.failureKey === failureKey
   }
 
-  dismiss(sessionId, failureKey) {
-    if (!SESSION_KEY.test(sessionId) || typeof failureKey !== 'string' || !failureKey) {
+  dismiss(sessionId, failureKey, agentId = 'hermes') {
+    if (!validAgentId(agentId) || !SESSION_KEY.test(sessionId) || typeof failureKey !== 'string' || !failureKey) {
       throw Object.assign(new Error('invalid dismissal'), { status: 400 })
     }
-    this.dismissals.set(sessionId, { failureKey, dismissedAt: Date.now() })
+    this.dismissals.set(sideKey(agentId, sessionId), { failureKey, dismissedAt: Date.now(), agent_id: agentId, session_id: sessionId })
     while (this.dismissals.size > MAX_DISMISSED_FAILURES) {
       const oldest = [...this.dismissals.entries()].sort((left, right) => left[1].dismissedAt - right[1].dismissedAt)[0]
       if (!oldest) break
@@ -204,8 +215,6 @@ export class DismissedFailureStore {
   persist() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    const temporary = `${this.statePath}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify({ schema: 1, dismissals: Object.fromEntries(this.dismissals) }), { mode: 0o600 })
-    renameSync(temporary, this.statePath)
+    atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, dismissals: Object.fromEntries(this.dismissals) }))
   }
 }

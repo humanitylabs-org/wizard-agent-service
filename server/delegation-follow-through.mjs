@@ -47,7 +47,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
         if (delegationId && receiptConsumed(database, sessionId, delegationId)) return null
         const receipt = delegationId ? readUndeliveredHelperReceipts(sessionDbPath, { now, delegationId, includeDelivered: true })
           .find(r => r.sessionId === sessionId) : null
-        return { sessionId, messageId: Number(row.message_id), at: Number(row.at),
+        return { agent_id: 'hermes', session_id: sessionId, sessionId, messageId: Number(row.message_id), at: Number(row.at),
           ...(delegationId ? { delegationId, key: receiptKey(delegationId), input: receipt?.input
             ?? RECEIPT_PREFIX + delegationId + '\nThe saved helper findings below arrived. Finish the original request under its latest instructions and release authority.\n\n' + row.content } : {}) }
       }).filter(Boolean)
@@ -64,9 +64,9 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
  */
 export function startDelegationFollowThrough({ sessionDbPath = '', find = () => findPendingFollowThroughs(sessionDbPath), admit, enabled, allowSession = () => true, eligible = async () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
-  let busy = false
-  const tick = async () => {
-    if (busy) return
+  let busy = false, stopped = false, pending
+  const runTick = async () => {
+    if (busy || stopped) return
     busy = true
     try {
       if (!(await enabled())) return
@@ -101,7 +101,12 @@ export function startDelegationFollowThrough({ sessionDbPath = '', find = () => 
       busy = false
     }
   }
+  const tick = () => {
+    if (stopped) return Promise.resolve()
+    if (!pending) pending = runTick().finally(() => { pending = null })
+    return pending
+  }
   const timer = setInterval(tick, intervalMs)
   timer.unref?.()
-  return { stop: () => clearInterval(timer), tick }
+  return { stop: () => { stopped = true; clearInterval(timer); return pending }, tick }
 }

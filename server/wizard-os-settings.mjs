@@ -43,7 +43,7 @@ function validDayStart(value) {
 }
 
 /** Normalised settings. Unknown fields are ignored; nothing here is secret. */
-export function normalizeSettings(raw) {
+export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes' } = {}) {
   const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   const owner = value.owner && typeof value.owner === 'object' ? value.owner : {}
   const agent = value.agent && typeof value.agent === 'object' ? value.agent : {}
@@ -56,6 +56,7 @@ export function normalizeSettings(raw) {
     : []
   return {
     schema: 1,
+    agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
       place: cleanText(owner.place, 80),
@@ -114,13 +115,13 @@ export function resolveFastRouter(settings, fallback = null, env = process.env) 
 }
 
 /** Read settings.json on every call (it is tiny), so edits apply without a restart. */
-export function readSettings(path) {
-  if (!path || !existsSync(path)) return { settings: normalizeSettings({}), source: 'default' }
+export function readSettings(path, options = {}) {
+  if (!path || !existsSync(path)) return { settings: normalizeSettings({}, options), source: 'default' }
   try {
     if (statSync(path).size > 64 * 1024) throw new Error('too large')
-    return { settings: normalizeSettings(JSON.parse(readFileSync(path, 'utf8'))), source: 'file' }
+    return { settings: normalizeSettings(JSON.parse(readFileSync(path, 'utf8')), options), source: 'file' }
   } catch {
-    return { settings: normalizeSettings({}), source: 'invalid' }
+    return { settings: normalizeSettings({}, options), source: 'invalid' }
   }
 }
 

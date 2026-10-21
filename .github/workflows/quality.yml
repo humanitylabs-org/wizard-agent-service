@@ -20,7 +20,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Fetch the archived main release for rollback/compatibility comparisons
+        run: git fetch --no-tags --depth=1 origin 859c548d43081a5e28a37680e796d07041971601
       - run: npm test
+        env:
+          REQUIRE_ROLLBACK_REHEARSAL: '1'
       - name: Synthetic subscription broker and inventory contracts
         run: |
           python3 -m venv .fixture-venv

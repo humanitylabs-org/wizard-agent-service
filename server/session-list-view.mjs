@@ -60,7 +60,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     const latestAt = optIso(latest?.timestamp ?? latest?.created_at);
     const userAt = optIso(lastUser?.timestamp ?? lastUser?.created_at);
     return {
-      id, runtime: 'direct',
+      id, runtime: 'direct', agent_id: item.agent_id || item.agent?.id || (typeof item.agent === 'string' ? item.agent : '') || 'hermes', session_id: id,
       title: String(item.title || item.name || 'Untitled chat'),
       source: item.source || '',
       status,

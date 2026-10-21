@@ -9,9 +9,10 @@
 // A title the owner sets (a rename from a Wizard client, or any user-authority title Hermes holds
 // that the agent did not write) locks the thread: the agent's proposals are ignored from then on.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { migrateOptionalJson, atomicStoreWrite, qualifyRawThreadRecords } from './thread-reference.mjs'
 
 export const TITLE_MAX = 40
 // A title that was on screen for less than this before being replaced was never a recognition anchor
@@ -87,11 +88,15 @@ export class ThreadTitleStore {
     this.now = now
     this.threads = {}
     this.mtime = -1
+    this.migrationReady = migrateOptionalJson(statePath, value => {
+      if (value?.schema !== 1 || !value.threads) throw new Error('Invalid title projection')
+      return { ...value, threads: qualifyRawThreadRecords(value.threads) }
+    })
     this.load()
   }
 
   load() {
-    if (!this.statePath || !existsSync(this.statePath)) return this.threads
+    if (!this.migrationReady || !this.statePath || !existsSync(this.statePath)) return this.threads
     try {
       const { mtimeMs } = statSync(this.statePath)
       if (mtimeMs === this.mtime) return this.threads
@@ -101,6 +106,7 @@ export class ThreadTitleStore {
         for (const [id, record] of Object.entries(data.threads)) {
           if (!ID.test(id) || !record || typeof record !== 'object') continue
           threads[id] = {
+            agent_id: record.agent_id ?? 'hermes', session_id: record.session_id ?? id,
             title: typeof record.title === 'string' ? record.title : '',
             locked: record.locked === true,
             appliedFor: Number.isFinite(record.appliedFor) ? record.appliedFor : null,
@@ -120,11 +126,9 @@ export class ThreadTitleStore {
   }
 
   _save(threads) {
-    if (this.statePath) {
+    if (this.statePath && this.migrationReady) {
       mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
-      const temporary = `${this.statePath}.${process.pid}.tmp`
-      writeFileSync(temporary, JSON.stringify({ schema: 1, threads }), { mode: 0o600 })
-      renameSync(temporary, this.statePath)
+      atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, threads }))
       try { this.mtime = statSync(this.statePath).mtimeMs } catch { this.mtime = -1 }
     }
     this.threads = threads
@@ -132,6 +136,7 @@ export class ThreadTitleStore {
 
   _put(sessionId, record) {
     if (!ID.test(sessionId)) throw Object.assign(new Error('Invalid session id'), { status: 400 })
+    record = { ...record, agent_id: 'hermes', session_id: sessionId }
     this._save({ ...this.load(), [sessionId]: record })
     return structuredClone(record)
   }
