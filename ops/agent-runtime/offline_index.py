@@ -10,7 +10,7 @@ import stat
 import sys
 
 
-NAMES = ("state.db", "state.db-wal", "state.db-shm")
+NAMES = ("state.db", "state.db-wal", "state.db-shm", "state.db-journal")
 
 
 def identity(st):
@@ -46,7 +46,11 @@ def snapshot(home, include_ids=False):
             # swapped after os.open must not redirect the SQLite open to an owner file.
             # Python's sqlite3 API does not expose SQLITE_OPEN_NOFOLLOW. The tiny C-API
             # reader below uses the stdlib extension or a shared SQLite on static builds.
-            wal, shm = files["state.db-wal"], files["state.db-shm"]
+            wal, shm, journal = files["state.db-wal"], files["state.db-shm"], files["state.db-journal"]
+            if journal != "absent" and journal[2] > 0:
+                # A non-empty rollback journal may be hot (crash mid-commit). Only a writable
+                # open can roll it back, and immutable mode would read the torn state.
+                raise ValueError("hot_journal")
             if shm == "absent" and (wal == "absent" or wal[2] == 0):
                 # Cleanly closed database (WAL mode deletes -wal/-shm on last close, or a
                 # rollback-journal db): no frames to replay, so read it as immutable. This

@@ -264,7 +264,7 @@ class OfflineCensusTest(unittest.TestCase):
         db.execute("INSERT INTO sessions VALUES('wal-id')")
         db.commit()
         # Model a stopped/crashed runtime with committed WAL, no surviving writer.
-        bundle = {name: (self.home / name).read_bytes() for name in offline_index.NAMES}
+        bundle = {name: (self.home / name).read_bytes() for name in offline_index.NAMES if (self.home / name).exists()}
         db.close()
         for name, data in bundle.items():
             (self.home / name).write_bytes(data)
@@ -309,6 +309,21 @@ class OfflineCensusTest(unittest.TestCase):
         (self.home / 'state.db-wal').write_bytes(b'x' * 64)
         with self.assertRaises(ValueError):
             offline_index.snapshot(self.home, True)
+
+    def test_hot_rollback_journal_fails_closed_and_empty_journal_reads(self):
+        # Hermes falls back to journal_mode=DELETE on NFS/FUSE/ZFS. A crash mid-commit leaves a hot
+        # journal; immutable mode would read the torn db and omit committed ids (review R6-B1).
+        journal = self.home / 'state.db-journal'
+        journal.write_bytes(b'\xd9\xd5\x05\xf9\x20\xa1\x63\xd7' + b'\x00' * 504)
+        before = self._home_files()
+        with self.assertRaises(ValueError):
+            offline_index.snapshot(self.home, True)
+        self.assertEqual(self._home_files(), before)
+        journal.write_bytes(b'')
+        self.assertEqual(offline_index.snapshot(self.home, True)['ids'], ['private-id'])
+        sealed = offline_index.snapshot(self.home)['files']
+        journal.unlink()
+        self.assertNotEqual(offline_index.snapshot(self.home)['files'], sealed)
 
     def test_owner_mtime_reset_still_changes_generation(self):
         path = self.home / 'state.db'

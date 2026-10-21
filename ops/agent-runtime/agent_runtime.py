@@ -601,7 +601,7 @@ def read_index(driver, agent: dict, *, ids: bool = False) -> dict:
         value = json.loads(run.stdout)
         if not isinstance(value, dict) or not isinstance(value.get('files'), dict):
             raise ValueError()
-        for key in ('state.db', 'state.db-wal', 'state.db-shm'):
+        for key in ('state.db', 'state.db-wal', 'state.db-shm', 'state.db-journal'):
             item = value['files'][key]
             if item != 'absent' and (not isinstance(item, list) or len(item) != 5
                                     or any(type(n) is not int or n < 0 for n in item)):

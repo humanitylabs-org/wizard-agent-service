@@ -106,3 +106,35 @@ it.each(['runtipi', 'restricted'])('R5_DELETE_JOURNAL_CONTROL: %s rollback-journ
   console.log('R5_DELETE_JOURNAL_CONTROL', driver, chosen.status)
   expect(chosen.status).toBe(201)
 })
+
+// Regression (review round 6, R6-B1): a hot rollback journal must never yield a seal.
+it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal secondary -> census fails closed (review R6-B1)', async driver => {
+  const rows: any[] = []
+  for (const mode of ['clean', 'hot']) {
+    const s = await scene({ driver }), secondary = await s.create('Offline')
+    const home = join(s.agentsDir, secondary.id, 'home')
+    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, process.env.TMPDIR!], { encoding: 'utf8' })
+    const filesBeforeStop = readdirSync(home).sort()
+    const stop = await s.call(`/wizard/v1/agents/${secondary.id}/stop`, 'POST', {})
+    let catalog: any = null
+    try { catalog = JSON.parse(readFileSync(join(s.agentsDir, '.session-catalog.json'), 'utf8')).agents[secondary.id] } catch {}
+    const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_secondary_committed', source: 'wizard-mobile' })
+    // What the secondary will have when it restarts (SQLite rolls the hot journal back on first open with write access).
+    const recovered = execFileSync('python3', ['-c', `import sqlite3,shutil,tempfile,os,sys
+d=tempfile.mkdtemp(dir=sys.argv[2])
+[shutil.copy2(os.path.join(sys.argv[1],n), d) for n in os.listdir(sys.argv[1])]
+print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, process.env.TMPDIR!], { encoding: 'utf8' }).trim()
+    rows.push({ mode, filesBeforeStop, stop: stop.status, sealed: Boolean(catalog?.seal), sealHasId: Boolean(catalog?.ids?.includes('wizard_secondary_committed')),
+      sealIds: catalog?.ids?.length ?? null, chosen: chosen.status, mainCreated: s.histories.get('hermes')!.has('wizard_secondary_committed'),
+      secondaryHasAfterRecovery: recovered === '1', filesAfter: readdirSync(home).sort() })
+  }
+  console.log('R6_HOT_JOURNAL', driver, JSON.stringify(rows))
+  expect(rows[0].chosen).not.toBe(201)
+  expect(rows[0].mainCreated).toBe(false)
+  expect(rows[1].secondaryHasAfterRecovery).toBe(true)
+  // Hot journal: no seal, so the claim fails closed and main never mints the secondary's id.
+  expect(rows[1].sealed).toBe(false)
+  expect(rows[1].chosen).not.toBe(201)
+  expect(rows[1].mainCreated).toBe(false)
+  expect(rows[1].filesAfter).toEqual(rows[1].filesBeforeStop)
+}, 60000)
