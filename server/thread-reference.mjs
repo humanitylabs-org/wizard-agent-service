@@ -36,6 +36,11 @@ export function qualifyRawThreadRecords(records) {
     return [sideKey(agent_id, session_id), { ...record, agent_id, session_id }]
   }))
 }
+// Optional projections must preserve corrupt bytes, including on later writes.
+export function migrateOptionalJson(path, transform) {
+  try { migrateJson(path, transform); return true }
+  catch { console.warn('[agent-pairs] optional metadata unavailable; original bytes preserved'); return false }
+}
 export function backupJson(path) {
   const backup = `${path}.pre-agent-pairs-v1.bak`
   if (!existsSync(backup)) {

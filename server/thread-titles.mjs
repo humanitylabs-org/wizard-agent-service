@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { migrateJson, qualifySideRecords } from './thread-reference.mjs'
+import { migrateOptionalJson, qualifyRawThreadRecords } from './thread-reference.mjs'
 
 export const TITLE_MAX = 40
 // A title that was on screen for less than this before being replaced was never a recognition anchor
@@ -88,12 +88,12 @@ export class ThreadTitleStore {
     this.now = now
     this.threads = {}
     this.mtime = -1
-    migrateJson(statePath, value => value.schema === 1 ? { ...value, threads: qualifySideRecords(value.threads ?? {}) } : value)
+    this.migrationReady = migrateOptionalJson(statePath, value => value.schema === 1 ? { ...value, threads: qualifyRawThreadRecords(value.threads ?? {}) } : value)
     this.load()
   }
 
   load() {
-    if (!this.statePath || !existsSync(this.statePath)) return this.threads
+    if (!this.migrationReady || !this.statePath || !existsSync(this.statePath)) return this.threads
     try {
       const { mtimeMs } = statSync(this.statePath)
       if (mtimeMs === this.mtime) return this.threads
@@ -123,7 +123,7 @@ export class ThreadTitleStore {
   }
 
   _save(threads) {
-    if (this.statePath) {
+    if (this.statePath && this.migrationReady) {
       mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
       const temporary = `${this.statePath}.${process.pid}.tmp`
       writeFileSync(temporary, JSON.stringify({ schema: 1, threads }), { mode: 0o600 })

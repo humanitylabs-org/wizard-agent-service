@@ -19,7 +19,7 @@
 // subjects pass through exactly as the agent wrote them.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { migrateJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
+import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 
 const SUBJECT_MAX = 40
 const ABOUT_MAX = 120
@@ -71,7 +71,7 @@ export function normalizeSubjects(raw) {
 export class SubjectCatalog {
   constructor(path = '') {
     this.path = path || ''
-    migrateJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
+    migrateOptionalJson(this.path, value => value.threads && typeof value.threads === 'object' && !Array.isArray(value.threads) ? { ...value, threads: qualifyRawThreadRecords(value.threads) } : value)
     this.mtime = -1
     this.data = normalizeSubjects({})
   }

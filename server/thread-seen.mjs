@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { migrateJson, qualifySideRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
+import { migrateJson, qualifySideRecords, qualifyRawThreadRecords, sideReference, sideKey, validAgentId } from './thread-reference.mjs'
 
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
@@ -172,7 +172,7 @@ export class DismissedFailureStore {
     this.statePath = statePath
     this.dismissals = new Map()
     if (!statePath || !existsSync(statePath)) return
-    migrateJson(statePath, value => ({ ...value, dismissals: qualifySideRecords(value.dismissals ?? {}) }))
+    migrateJson(statePath, value => ({ ...value, dismissals: qualifyRawThreadRecords(value.dismissals ?? {}) }))
     let payload
     try { payload = JSON.parse(readFileSync(statePath, 'utf8')) }
     catch { throw new Error('Wizard dismissed failure state is invalid') }
@@ -180,7 +180,7 @@ export class DismissedFailureStore {
       throw new Error('Wizard dismissed failure state is invalid')
     }
     for (const [sessionId, record] of Object.entries(payload.dismissals).slice(0, MAX_DISMISSED_FAILURES)) {
-      if (!SESSION_KEY.test(sideReference(sessionId, record).legacyKey)) continue
+      if (!SESSION_KEY.test(record.session_id)) continue
       if (!record || typeof record !== 'object' || Array.isArray(record)) continue
       const failureKey = typeof record.failureKey === 'string' ? record.failureKey : ''
       const dismissedAt = Number(record.dismissedAt)

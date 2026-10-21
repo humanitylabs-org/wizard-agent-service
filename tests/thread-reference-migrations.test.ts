@@ -3,7 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { DismissedFailureStore } from '../server/thread-seen.mjs'
+import { DismissedFailureStore, ThreadSeenStore } from '../server/thread-seen.mjs'
+import { ThreadDispositionStore } from '../server/thread-dispositions.mjs'
+import { createAgentRegistry } from '../server/agents.mjs'
 import { ThreadTitleStore } from '../server/thread-titles.mjs'
 import { StatusBackfill } from '../server/thread-status.mjs'
 import { SubjectCatalog } from '../server/thread-subjects.mjs'
@@ -18,6 +20,47 @@ const directory = () => { const dir = mkdtempSync(join(tmpdir(), 'agent-pair-sto
 const suffix = '.pre-agent-pairs-v1.bak'
 
 describe('agent-pair store migrations', () => {
+  it.each(['direct:literal', 'operator:literal'])('raw and runtime-prefixed stores close over write/restart/write/restart for %s', id => {
+    const dir = directory(), title = join(dir, 'titles.json'), dismissed = join(dir, 'dismissed.json')
+    const seenPath = join(dir, 'seen.json'), dispositionsPath = join(dir, 'dispositions.json')
+    for (let generation = 1; generation <= 2; generation++) {
+      new ThreadTitleStore(title).recordRename(id, { from: '', to: `Title ${generation}`, by: 'you' })
+      new DismissedFailureStore(dismissed).dismiss(id, `run-${generation}`)
+      const seen = new ThreadSeenStore(seenPath)
+      seen.merge('owner', { initializedAt: 0, threads: { [`direct:${id}`]: { updatedAt: '2026-10-21T00:00:00Z', previewFingerprint: 'abc', seenAt: generation } } })
+      new ThreadDispositionStore(dispositionsPath).set('owner', 'direct', id, generation === 1)
+      expect(new ThreadTitleStore(title).get(id)).toMatchObject({ title: `Title ${generation}`, session_id: id })
+      expect(new DismissedFailureStore(dismissed).isDismissed(id, `run-${generation}`)).toBe(true)
+      expect(new ThreadSeenStore(seenPath).get('owner').threads[`direct:${id}`]).toMatchObject({ session_id: id, seenAt: generation })
+      expect(new ThreadDispositionStore(dispositionsPath).get('owner')[`direct:${id}`]).toMatchObject({ session_id: id, deferred: generation === 1 })
+      const registry = createAgentRegistry({ agentsDir: join(dir, 'agents') }); registry.pin(id, 'hermes')
+      expect(createAgentRegistry({ agentsDir: join(dir, 'agents') }).pinnedAgent(id)).toBe('hermes')
+      // These are externally authored raw journals, not service mutation APIs.
+      const status = join(dir, 'status.json'), subject = join(dir, 'subjects.json'), locked = join(dir, 'locked.json'), journal = join(dir, 'journal.jsonl')
+      writeFileSync(status, JSON.stringify({ threads: { [id]: { state: 'done', ask: `Done ${generation}`, assistant_at: generation } } }))
+      writeFileSync(subject, JSON.stringify({ subjects: ['Main'], threads: { [id]: { subject: 'Main' } } }))
+      writeFileSync(locked, JSON.stringify([['key', { sessionId: id, runId: `run-${generation}`, state: 'done' }]]))
+      writeFileSync(journal, JSON.stringify({ sessionId: id }) + '\n')
+      for (let restart = 0; restart < 2; restart++) {
+        expect(new StatusBackfill(status).lookup(id, generation)?.state).toBe('done')
+        expect(new SubjectCatalog(subject).resolve(id, 'Other')).toBe('Main')
+        new LockedRunBridge({ origin: 'http://127.0.0.1:1', statePath: locked })
+        expect(JSON.parse(readFileSync(locked, 'utf8'))[0][1].session_id).toBe(id)
+        migrateJsonLines(journal)
+        expect(JSON.parse(readFileSync(journal, 'utf8')).session_id).toBe(id)
+      }
+    }
+  })
+
+  it.each([ThreadTitleStore, SubjectCatalog, StatusBackfill])('malformed optional %s starts degraded without rewriting bytes', Type => {
+    const path = join(directory(), 'bad.json'); writeFileSync(path, '{bad')
+    const store = new Type(path)
+    if (store instanceof ThreadTitleStore) { expect(store.get('id')).toBeNull(); store.recordRename('id', { from: '', to: 'Later', by: 'you' }) }
+    if (store instanceof SubjectCatalog) expect(store.resolve('id', 'Original')).toBe('Original')
+    if (store instanceof StatusBackfill) expect(store.lookup('id', 1)).toBeNull()
+    expect(readFileSync(path, 'utf8')).toBe('{bad')
+    expect(existsSync(path + suffix)).toBe(false)
+  })
   it('titles, dismissed failures and model-route journal keep original backups, explicit Hermes pairs, and idempotent bytes', () => {
     const dir = directory(), title = join(dir, 'titles.json'), dismissed = join(dir, 'dismissed.json'), locked = join(dir, 'locked.json')
     const original: Record<string, string> = {
