@@ -331,6 +331,7 @@ export function createAgentBridge({
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
   agentForToken = () => '', appsFor = () => null,
+  localTools = [],
 }) {
   let mtime = null
   let apps = []
@@ -428,6 +429,10 @@ export function createAgentBridge({
   async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const out = [metaTool()]
+    for (const tool of localTools) if (tool && /^[A-Za-z0-9_.-]{1,51}$/u.test(tool.name) && typeof tool.run === 'function') out.push({
+      name: tool.name, description: clean(tool.description, 1000),
+      inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
+    })
     const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
     for (const [app, tools] of lists) {
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
@@ -455,6 +460,17 @@ export function createAgentBridge({
       const r = await wizardApps(agentId)
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
       return r
+    }
+    const local = localTools.find((tool) => tool?.name === name && typeof tool.run === 'function')
+    if (local) {
+      try {
+        const value = await local.run(args && typeof args === 'object' ? args : {}, { agentId })
+        log(JSON.stringify({ event: 'call', app: 'wizard', tool: name, agent: agentId, ms: Date.now() - started, ok: true }))
+        return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] }
+      } catch (error) {
+        log(JSON.stringify({ event: 'call', app: 'wizard', tool: name, agent: agentId, ms: Date.now() - started, ok: false }))
+        return failure(clean(error?.message, 300) || 'tool failed')
+      }
     }
     // An app this agent may not use is answered exactly like an app that is not installed (#58).
     const app = visible(agentId).find((a) => typeof name === 'string' && name.startsWith(`${a.prefix}__`))

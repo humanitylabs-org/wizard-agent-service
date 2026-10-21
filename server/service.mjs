@@ -21,6 +21,7 @@ import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
+import { BoomerangStore } from './boomerang-store.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
@@ -2176,7 +2177,7 @@ export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
   const paths = ['runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
-    'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
+    'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath', 'boomerangStatePath'].map(key => options[key]).filter(Boolean)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
   const dirs = paths.map(path => dirname(resolve(String(path))))
   if (home) dirs.push(resolve(home))
@@ -2241,6 +2242,20 @@ function buildWizardServer(options, lifetime) {
   })
   lifetime.own(() => Promise.allSettled([...lockedBridge.streams]))
   const fetchImpl = (url, init) => lockedBridge.fetch(url, init)
+  const boomerangStore = options.boomerangStatePath ? new BoomerangStore(resolve(String(options.boomerangStatePath)), { now: options.now ?? Date.now }) : null
+  const boomerangTools = boomerangStore ? [{
+    name: 'boomerang_set',
+    description: '[Wizard OS] Set a durable reminder for an exact ISO date/time. This only resurfaces the thread or message; it never sends or runs the prompt.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['session_id', 'due_at', 'timezone'], properties: {
+      session_id: { type: 'string', description: 'Exact Wizard session id' }, due_at: { type: 'string', description: 'ISO 8601 instant with offset, e.g. 2026-10-22T09:00:00+07:00' },
+      timezone: { type: 'string', description: 'Displayed IANA timezone, e.g. Asia/Bangkok' }, target_kind: { type: 'string', enum: ['thread', 'message'], default: 'thread' },
+      anchor_at: { type: 'number', exclusiveMinimum: 0, description: 'Exact message timestamp in milliseconds for a message reminder' }, context: { type: 'string', maxLength: 500 }, note: { type: 'string', maxLength: 500 },
+      idempotency_key: { type: 'string', description: 'Stable retry key; reuse it when retrying the same request' },
+    } },
+    run: (args, { agentId }) => boomerangStore.create({ scope: 'wizard-account-local', sessionId: args.session_id, runtime: 'direct', agentId: agentId || 'hermes',
+      targetKind: args.target_kind || 'thread', anchorAt: args.anchor_at, context: args.context, note: args.note, dueAt: args.due_at, timezone: args.timezone,
+      clientRequestId: args.idempotency_key || `agent-${randomUUID()}` }),
+  }] : []
 
   // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
@@ -2263,6 +2278,7 @@ function buildWizardServer(options, lifetime) {
       fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
+      localTools: boomerangTools,
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
@@ -2524,6 +2540,33 @@ function buildWizardServer(options, lifetime) {
   })
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
+  let boomerangDelivery = Promise.resolve([])
+  const deliverBoomerangsOnce = async () => {
+    if (!boomerangStore) return []
+    const due = boomerangStore.claimDue()
+    const pending = options.boomerangNotifyOrigin && options.boomerangShellOrigin ? boomerangStore.pendingNotifications() : []
+    for (const reminder of pending) {
+      try {
+        const shell = new URL('/wizard-os-home/', String(options.boomerangShellOrigin))
+        shell.searchParams.set('session', reminder.session_id); shell.searchParams.set('boomerang', reminder.id)
+        if (!['http:', 'https:'].includes(shell.protocol) || shell.username || shell.password || shell.hash) throw new Error('Invalid Wizard shell origin')
+        const notification = await rawFetchImpl(String(options.boomerangNotifyOrigin).replace(/\/$/u, ''), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic: options.boomerangNotifyTopic || 'wizard', title: 'Wizard reminder',
+            message: reminder.note || reminder.context || 'A deferred thread is ready', click: shell.href }),
+        })
+        if (!notification.ok) throw new Error(`ntfy HTTP ${notification.status}`)
+        await notification.body?.cancel().catch(() => undefined)
+        boomerangStore.notificationSent(reminder.id)
+      } catch (error) { boomerangStore.notificationFailed(reminder.id, error?.message || 'notification failed') }
+    }
+    return due
+  }
+  const deliverBoomerangs = () => {
+    const run = boomerangDelivery.then(deliverBoomerangsOnce, deliverBoomerangsOnce)
+    boomerangDelivery = run.catch(() => [])
+    return run
+  }
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
   const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
   // The subject each thread was last served with, so the next run can be told to keep it.
@@ -4687,6 +4730,63 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, { record }); return
       }
 
+      if (url.pathname === '/wizard/v1/boomerangs' && ['GET', 'POST'].includes(request.method ?? '')) {
+        if (!boomerangStore || url.searchParams.size > 1 || [...url.searchParams.keys()].some(key => key !== 'session_id')) { sendJson(response, 404, { error: 'not_found' }); return }
+        const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+        if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
+        const scope = requireAccess ? accountScope(access.claims) : 'wizard-account-local'
+        await deliverBoomerangs()
+        if (request.method === 'GET') {
+          const sessionId = url.searchParams.get('session_id') || ''
+          if (sessionId && hiddenSession(request, sessionId)) { sendJson(response, 404, { error: 'not_found' }); return }
+          const reminders = boomerangStore.list(scope, { sessionId }).filter(reminder => {
+            if (hiddenSession(request, reminder.session_id)) return false
+            try { return sideAgent(request, reminder.session_id, reminder.agent_id) === reminder.agent_id } catch { return false }
+          })
+          sendJson(response, 200, { reminders }); return
+        }
+        if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let originHost
+          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          if (originHost !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        const body = parseJsonBody(await readBoundedBody(request, 8 * 1024))
+        const sessionId = body.session_id ?? body.sessionId
+        if (hiddenSession(request, sessionId)) { sendJson(response, 404, { error: 'not_found' }); return }
+        const agentId = sideAgent(request, sessionId, body.agent_id ?? '')
+        const reminder = boomerangStore.create({ scope, sessionId, runtime: body.runtime ?? 'direct', agentId,
+          targetKind: body.target_kind, anchorAt: body.anchor_at, context: body.context, note: body.note,
+          dueAt: body.due_at, timezone: body.timezone, clientRequestId: body.client_request_id })
+        sendJson(response, 201, { reminder }); return
+      }
+
+      const boomerangAction = url.pathname.match(/^\/wizard\/v1\/boomerangs\/([^/]+)(?:\/(acknowledge))?$/u)
+      if (boomerangAction && ['PATCH', 'DELETE', 'POST'].includes(request.method ?? '')) {
+        if (!boomerangStore || url.search) { sendJson(response, 404, { error: 'not_found' }); return }
+        const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
+        if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let originHost
+          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          if (originHost !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        const scope = requireAccess ? accountScope(access.claims) : 'wizard-account-local'
+        const id = decodeURIComponent(boomerangAction[1]); const current = boomerangStore.get(scope, id)
+        if (!current || hiddenSession(request, current.session_id)) { sendJson(response, 404, { error: 'not_found' }); return }
+        let reminder
+        if (request.method === 'DELETE' && !boomerangAction[2]) reminder = boomerangStore.cancel(scope, id)
+        else if (request.method === 'POST' && boomerangAction[2] === 'acknowledge') reminder = boomerangStore.acknowledge(scope, id)
+        else if (request.method === 'PATCH' && !boomerangAction[2]) {
+          if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
+          const body = parseJsonBody(await readBoundedBody(request, 2 * 1024))
+          reminder = boomerangStore.reschedule(scope, id, body.due_at, body.timezone)
+        } else { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        sendJson(response, 200, { reminder }); return
+      }
+
       if (url.pathname === '/wizard/thread-seen'  && ['GET', 'PUT'].includes(request.method ?? '')) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
@@ -5304,6 +5404,12 @@ function buildWizardServer(options, lifetime) {
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
     lifetime.own(() => watcher.stop(), () => watcher.stop())
+  }
+  if (boomerangStore) {
+    const timer = setInterval(() => { void deliverBoomerangs() }, Math.max(250, Number(options.boomerangPollIntervalMs || 15_000)))
+    timer.unref?.()
+    void deliverBoomerangs()
+    lifetime.own(() => { clearInterval(timer); boomerangStore.close() }, () => { clearInterval(timer); boomerangStore.close() })
   }
   return server
 }
