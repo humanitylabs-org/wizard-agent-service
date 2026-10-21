@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,7 +11,7 @@ import { createHeavyRpcServer } from '../server/heavy-rpc-server.mjs'
 const cleanup: (() => any)[] = []
 afterEach(async () => { for (const fn of cleanup.reverse()) await fn(); cleanup.length = 0 })
 const file = () => { const root = mkdtempSync(join(tmpdir(), 'heavy-contract-')); cleanup.push(() => rmSync(root, { recursive: true, force: true })); return join(root, 'queue.db') }
-const spec = { cwd: '/Volumes/ThalesMedia/qa', argv: ['true'], timeout_seconds: 10 }
+const spec = { cwd: join(heavyRoot, 'fixture'), argv: ['true'], timeout_seconds: 10 }
 const token = 'test-heavy-contract-token-00000000000'
 
 it('authenticates the loopback SSH bridge and refuses browser/cross-origin transport', async () => {

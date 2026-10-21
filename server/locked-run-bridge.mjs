@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { abortKeeperStream, keeperFetch, keeperUnavailable } from './run-stream-keeper.mjs'
 import { migrateJson, atomicStoreWrite } from './thread-reference.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
@@ -42,7 +43,12 @@ export function probeText(input) {
 }
 
 export class LockedRunBridge {
-  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000 }) {
+  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000, keeperSocket = '', log = (line) => console.warn(line) }) {
+    // Hermes interrupts a locked turn when its stream closes. The run stream keeper holds that
+    // stream in a separate process so an Agent Service restart no longer cuts replies.
+    this.keeperSocket = keeperSocket
+    this.keeperState = ''
+    this.log = log
     this.rawFetch = fetchImpl
     // deliveryProbe(sessionId, sinceMs) -> true (Hermes has a user turn since then), false (it does not), null (unknown).
     // Lets an uncertain send (connection lost mid-request, e.g. a gateway restart) be replayed once Hermes
@@ -134,6 +140,22 @@ export class LockedRunBridge {
       status: 202, headers: { 'Content-Type': 'application/json', ...(replay ? { 'Idempotency-Replayed': 'true' } : {}) },
     })
   }
+  async openStream(path, init) {
+    if (this.keeperSocket) {
+      try {
+        const response = await keeperFetch(this.keeperSocket, { path, headers: init.headers, body: init.body })
+        if (this.keeperState !== 'on') { this.keeperState = 'on'; this.log('[locked-run] reply streams held by the run stream keeper') }
+        return response
+      } catch (error) {
+        if (!keeperUnavailable(error)) throw error
+        if (this.keeperState !== 'off') {
+          this.keeperState = 'off'
+          this.log(`[locked-run] run stream keeper unavailable (${error.code}); streaming directly, so a restart would interrupt replies`)
+        }
+      }
+    }
+    return this.rawFetch(this.origin + path, init)
+  }
   async launch(value, route, headers, entry) {
     // This native endpoint passes confirmed_runtime_lock to _create_agent, disables fallbacks and overrides /model.
     // Its run id uses the same native registry: status, steer, stop and approvals keep their existing URLs.
@@ -146,10 +168,9 @@ export class LockedRunBridge {
     headers.set('Content-Type', 'application/json')
     let upstream
     try {
-      upstream = await this.rawFetch(this.origin + '/api/sessions/' + encodeURIComponent(value.session_id) + '/chat/stream', {
-        method: 'POST', headers, body: JSON.stringify(body), redirect: 'manual',
-        // The stream belongs to the durable send, not the browser connection which may close on acknowledgement.
-      })
+      // The stream belongs to the durable send, not the browser connection which may close on acknowledgement.
+      upstream = await this.openStream('/api/sessions/' + encodeURIComponent(value.session_id) + '/chat/stream',
+        { method: 'POST', headers, body: JSON.stringify(body), redirect: 'manual' })
       if (!upstream.ok) {
         const key = [...this.entries].find(([, e]) => e === entry)?.[0]
         if (key) this.entries.delete(key)
@@ -212,6 +233,8 @@ export class LockedRunBridge {
       } catch (error) {
         entry.state = accepted ? 'stream_disconnected' : 'uncertain'; this.save()
         if (!accepted) reject(error)
+        // A deliberate stop must still reach Hermes when the keeper holds the stream.
+        if (upstream.keeperStream) await abortKeeperStream(this.keeperSocket, upstream.keeperStream)
         await reader.cancel().catch(() => {})
       } finally { reader.releaseLock() }
     }

@@ -29,7 +29,7 @@ export function createHeavyRpcServer({ token, transport }) {
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const server = createHeavyRpcServer({ token: process.env.WIZARD_HEAVY_TOKEN,
-    transport: heavySshTransport({ host: process.env.WIZARD_HEAVY_SSH_HOST,
+    transport: heavySshTransport({ host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
       script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT, root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
       lock: process.env.WIZARD_HEAVY_REMOTE_LOCK, python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3' }) })
   server.listen(Number(process.env.WIZARD_HEAVY_RPC_PORT || 18788), '127.0.0.1', () => console.log('Heavy SSH bridge listening on loopback'))

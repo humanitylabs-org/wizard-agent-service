@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { withSqliteMigration } from './thread-reference.mjs'
@@ -14,7 +14,9 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
 export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3' }) {
   if (!host || !script || !root || !lock) throw new Error('heavy worker configuration incomplete')
   return payload => new Promise((resolve, reject) => {
-    const command = [python, script, '--root', root, '--lock', lock].map(quote).join(' ')
+    const heavyRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    if (!heavyRoot || !posix.isAbsolute(heavyRoot)) return reject(fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503))
+    const command = ['env', `WIZARD_HEAVY_ROOT=${heavyRoot}`, python, script, '--root', root, '--lock', lock].map(quote).join(' ')
     const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1', host, command],
       { timeout: 12_000, maxBuffer: 128 * 1024 }, (error, stdout) => {
         if (error) return reject(fail('worker_unavailable', 503))
@@ -81,7 +83,11 @@ export class DurableHeavyQueue {
   submit({ sessionId, origin, key, spec, route = {}, watermark, agent_id = 'hermes' }) {
     if (agent_id !== 'hermes') throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
-    if (!spec || typeof spec.cwd !== 'string' || !spec.cwd.startsWith('/Volumes/ThalesMedia/')
+    const configuredRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    if (!configuredRoot || !posix.isAbsolute(configuredRoot)) throw fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503)
+    const root = posix.resolve(configuredRoot)
+    const cwd = typeof spec?.cwd === 'string' && posix.isAbsolute(spec.cwd) ? posix.resolve(spec.cwd) : ''
+    if (!spec || !cwd || !(cwd === root || cwd.startsWith(root === '/' ? root : root + '/'))
       || !Array.isArray(spec.argv) || spec.argv.length < 1 || spec.argv.length > 100
       || spec.argv.some(s => typeof s !== 'string' || !s || s.length > 8192 || s.includes('\0'))
       || !Number.isInteger(spec.timeout_seconds) || spec.timeout_seconds < 1 || spec.timeout_seconds > 86400) throw fail('invalid heavy command')

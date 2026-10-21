@@ -384,7 +384,7 @@ describe('Wizard thread history marker projection', () => {
   })
 
   it('projects background wakeups into safe Workline metadata without shipping raw process output', async () => {
-    const completion = '[Workspace::v1: /home/telos]\n[IMPORTANT: Background process proc_build completed (exit_code=1).\nCommand: ./gradlew assembleDebug --secret private-value\nOutput:\nPRIVATE BUILD OUTPUT\n]'
+    const completion = '[Workspace::v1: /home/owner]\n[IMPORTANT: Background process proc_build completed (exit_code=1).\nCommand: ./gradlew assembleDebug --secret private-value\nOutput:\nPRIVATE BUILD OUTPUT\n]'
     const upstream = createServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ data: [
@@ -509,7 +509,7 @@ describe('Wizard thread history marker projection', () => {
     expect(wire).not.toContain('object-secret')
     expect(wire).not.toContain('PRIVATE ARRAY OUTPUT')
     expect(wire).not.toContain('PRIVATE OBJECT OUTPUT')
-    expect(wire).not.toContain('/home/telos')
+    expect(wire).not.toContain('/home/owner')
     expect(wire).not.toContain('/private/array')
   })
 

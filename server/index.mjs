@@ -1,3 +1,4 @@
+import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
@@ -116,6 +117,7 @@ server = createWizardServer({
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
+  runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
@@ -124,7 +126,7 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
   heavyWorker: {
-    host: process.env.WIZARD_HEAVY_SSH_HOST,
+    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
     script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
     root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
     lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
