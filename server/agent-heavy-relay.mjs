@@ -75,19 +75,20 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
       if (cancel) for (const job of queue().rows()) if (job.agent_id === id && job.sessionId === session && !terminal.has(job.state)) queue().cancel(job.job_id, session, id)
     },
     async handle(req, path, value) {
-      if (!enabled()) throw fail('not found', 404)
+      const principal = principalOf(req)
+      const owner = !isAgentIngress(req) && principal.kind === 'owner'
+      if (!enabled() && !owner) throw fail('not found', 404)
       const action = AGENT_HEAVY_ROUTE.exec(path)?.[1]
       if (!action) throw fail('not found', 404)
-      const principal = principalOf(req)
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('invalid request', 400)
       const supplied = String(req.headers.authorization || '').replace(/^Bearer /iu, '')
       if (sameSecret(supplied, options.heavyToken) || req.headers.origin || req.headers['sec-fetch-site']) throw fail('agent heavy access denied', 403)
-      const owner = !isAgentIngress(req) && principal.kind === 'owner'
       if (owner && action !== 'submit') {
         const job = queue().get(value.job_id)
         if (!job) throw fail('job not found', 404)
         return view(action === 'cancel' ? queue().cancel(job.job_id, job.sessionId, job.agent_id) : job)
       }
+      if (!enabled()) throw fail('not found', 404)
       if (!isAgentIngress(req) || principal.kind !== 'agent') throw fail('agent heavy access denied', 403)
       const id = principal.agentId
       requireGrant(id)

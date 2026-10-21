@@ -977,9 +977,19 @@ export function createAgentRegistry(options = {}) {
     for (const [id, rows] of Object.entries(value.runs)) {
       if (!Array.isArray(rows) || rows.some(row => !row || row.run_id !== id || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id)) throw new Error('Invalid run pair rows')
     }
+    if (value.latest_runs !== undefined) {
+      if (!value.latest_runs || typeof value.latest_runs !== 'object' || Array.isArray(value.latest_runs)) throw new Error('Invalid latest run index')
+      for (const [key, id] of Object.entries(value.latest_runs)) {
+        let pair
+        try { pair = JSON.parse(key) } catch { throw new Error('Invalid latest run pair') }
+        if (!Array.isArray(pair) || pair.length !== 2 || !validAgentId(pair[0]) || typeof pair[1] !== 'string' || !pair[1]
+          || typeof id !== 'string' || !value.runs[id]?.some(row => row.agent_id === pair[0] && row.session_id === pair[1] && !row.heavy_origin)) throw new Error('Invalid latest run authority')
+      }
+    }
     return value
   })
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
+  const latestRuns = new Map(Object.entries(readJson(runsPath)?.latest_runs ?? {}))
   function noteRun(runId, agentId, sessionId = '', { heavyOrigin } = {}) {
     if (typeof runId !== 'string' || !runId) return
     const rows = runs.get(runId) ?? []
@@ -987,15 +997,22 @@ export function createAgentRegistry(options = {}) {
     if (!sessionId || !readRaw(agentId)) return
     const next = new Map(runs)
     next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
+    const nextLatest = new Map(latestRuns)
+    if (!heavyOrigin) nextLatest.set(JSON.stringify([agentId, sessionId]), runId)
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next) })
+    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next), latest_runs: Object.fromEntries(nextLatest) })
     runs.set(runId, next.get(runId))
+    if (!heavyOrigin) latestRuns.set(JSON.stringify([agentId, sessionId]), runId)
   }
   const runAgents = runId => (runs.get(runId) ?? []).map(row => row.agent_id)
 
   return {
     runThread: (agentId, runId) => (runs.get(runId) ?? []).find(row => row.agent_id === agentId) ?? null,
-    latestRunForSession: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId && !row.heavy_origin).at(-1) ?? null,
+    latestRunForSession: (agentId, sessionId) => {
+      const latest = latestRuns.get(JSON.stringify([agentId, sessionId]))
+      const rows = latest ? (runs.get(latest) ?? []) : [...runs.values()].flat()
+      return rows.filter(row => row.agent_id === agentId && row.session_id === sessionId && !row.heavy_origin).at(-1) ?? null
+    },
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,

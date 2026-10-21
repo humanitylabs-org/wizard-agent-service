@@ -4113,7 +4113,7 @@ function buildWizardServer(options, lifetime) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
-      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
