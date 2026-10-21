@@ -13,13 +13,17 @@ export function privateChatMatches(agentsDir, agentId, query) {
     // Intersection by session permits words in separate messages, matching Chats semantics.
     let matches = null
     for (const word of words) {
-      const literal = '"' + word.replaceAll('"','""') + '"'
-      const rows = db.prepare(`SELECT m.session_id, substr(m.content,1,1600) AS excerpt FROM messages_fts
-        JOIN messages m ON m.id=messages_fts.rowid JOIN sessions s ON s.id=m.session_id
-        WHERE messages_fts MATCH ? AND COALESCE(s.hidden,0)=0 AND m.role IN ('user','assistant')
-        GROUP BY m.session_id LIMIT 10001`).all(literal)
-      if (rows.length > 10000) throw new AgentError(422,'search_too_broad','agent.search')
-      const current = new Map(rows.map(r => [r.session_id,String(r.excerpt || '')]))
+      const trigram = word.length >= 3 && db.prepare("SELECT 1 FROM sqlite_master WHERE name='messages_fts_trigram'").get()
+      const table = trigram ? 'messages_fts_trigram' : 'messages_fts'
+      const literal = '"' + word.replaceAll('"','""') + '"' + (trigram ? '' : '*')
+      const rows = db.prepare(`SELECT m.session_id, snippet(${table},0,'','','…',48) AS excerpt FROM ${table}
+        JOIN messages m ON m.id=${table}.rowid JOIN sessions s ON s.id=m.session_id
+        WHERE ${table} MATCH ? AND COALESCE(s.hidden,0)=0 AND m.role IN ('user','assistant')
+        LIMIT 10001`).all(literal)
+      const titles = db.prepare(`SELECT id AS session_id, title AS excerpt FROM sessions
+        WHERE COALESCE(hidden,0)=0 AND instr(lower(COALESCE(title,'')),lower(?))>0 LIMIT 10001`).all(word)
+      if (rows.length > 10000 || titles.length > 10000) throw new AgentError(422,'search_too_broad','agent.search')
+      const current = new Map([...titles,...rows].map(r => [r.session_id,String(r.excerpt || '').slice(0,1600)]))
       matches = matches === null ? current : new Map([...matches].filter(([id]) => current.has(id)))
     }
     return matches

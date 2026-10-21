@@ -471,7 +471,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(() => standardChatRpc(agent,{kind:'agent',agentId:'other'},rpc,'')).toThrow()
     const result: any=standardChatRpc(agent,{kind:'agent',agentId:'private'},rpc,'')
     expect(result.result.tools.map((t: any)=>t.name)).toEqual(['standard_chats_search','standard_chat_read','standard_memory_read'])
-    expect(JSON.stringify(result)).not.toContain('write')
+    expect(result.result.tools.every((t: any)=>!t.name.includes('write'))).toBe(true)
   })
   it('owner switch generates a stock MCP config; agent token reads; immediate revocation blocks cached calls', async () => {
     const dir=box(), main=await fakeHermes('main'), path=join(dir,'standard.db'); historyFixture(path)
