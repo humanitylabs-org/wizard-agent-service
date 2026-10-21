@@ -43,6 +43,10 @@ Status: implemented for S2c, after "private agents are owner-only" (PR #48). It 
 4. Recovery agent: owner opens and runs it; anonymous, agent keys and model routing never reach it; it never starts on its own.
 5. Migration of existing stores is idempotent and reversible from its backup.
 
+## Related opt-in relay (S2d slice 1)
+
+Restricted non-private agents can be owner-granted a **separate**, agent-bound heavy-work relay. It is disabled by default and never available to the recovery role. See [Agent-bound heavy-work relay](agent-heavy-relay.md) for the listener, grant, staging-root and credential boundaries. It does not rebind the existing external-runtime heavy executor or insert secondary runs into the external-runtime run queue.
+
 ## Implementation details and conservative boundaries
 
 - Routing accepts both `agent` and `agent_id`, but refuses conflicting aliases. List/detail rows expose `agent_id` and `session_id`; the existing `agent` decoration remains compatible. Successful pinning stores JSON-tuple keys, so a colon in a session id cannot collide with another pair.
