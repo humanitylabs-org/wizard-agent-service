@@ -2327,7 +2327,7 @@ function buildWizardServer(options, lifetime) {
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
-    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainKey: hermesKey,
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
@@ -2370,6 +2370,7 @@ function buildWizardServer(options, lifetime) {
     accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
+      if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
       try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
     },
