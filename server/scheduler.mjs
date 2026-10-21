@@ -200,13 +200,24 @@ export class Scheduler {
     const occurrence = this.transaction(() => this.reserve(this.get(jobId), this.now()))
     // The durable receipt is returned immediately; admission retries on the loop or the
     // next explicit run request. A paused job stays paused, but its manual outbox drains.
-    void this.tick(false).then(() => this.tick(false)).catch(() => { console.error('[scheduler] manual admission failed') })
+    void this.tick(false).catch(() => { console.error('[scheduler] manual admission failed') })
     return occurrence
   }
   async tick(schedule = true) {
     if (this.stopped) return
+    // Do not lose a scheduled tick or a newly added manual outbox entry when an
+    // earlier admission is awaiting HTTP. Concurrent ticks share the drain promise.
+    this.drainRequested = true
+    this.scheduleRequested ||= schedule
     if (this.inflight) return this.inflight
-    this.inflight = this.work(schedule).finally(() => { this.inflight = null })
+    this.inflight = (async () => {
+      while (this.drainRequested && !this.stopped) {
+        const due = this.scheduleRequested
+        this.drainRequested = false
+        this.scheduleRequested = false
+        await this.work(due)
+      }
+    })().finally(() => { this.inflight = null })
     return this.inflight
   }
   async work(schedule) {

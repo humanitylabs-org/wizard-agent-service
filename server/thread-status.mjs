@@ -75,7 +75,7 @@ export function stripStatus(text) {
 // Strip markers from any string inside a JSON-like value (message history rows).
 export function stripStatusDeep(value, depth = 0) {
   if (depth > 6) return value
-  if (typeof value === 'string') return isSilentResult(value) ? '' : stripStatus(value)
+  if (typeof value === 'string') return isSilentResult(value) || isScheduleInput(value) ? '' : stripStatus(value)
   if (Array.isArray(value)) return value.map((item) => stripStatusDeep(item, depth + 1))
   if (value && typeof value === 'object') {
     const role = value.role ?? value.author
