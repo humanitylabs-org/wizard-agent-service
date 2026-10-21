@@ -15,10 +15,11 @@
 // Shares group uploads and, once the last one completes, deliver exactly once through
 // options.deliverShare(share, uploads). File names and contents are never logged.
 import { createHash, randomBytes } from 'node:crypto'
-import { createReadStream, mkdirSync, statfsSync, unlinkSync, chmodSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, statfsSync, unlinkSync, chmodSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { withSqliteMigration } from './thread-reference.mjs'
 
 export const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 export const UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024
@@ -85,9 +86,12 @@ async function sha256File(path) {
 export function createUploadStore(options) {
   const statePath = String(options.statePath)
   mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
+  const hadState = existsSync(statePath)
   const db = new DatabaseSync(statePath)
+  try {
   try { chmodSync(statePath, 0o600) } catch { /* best effort */ }
-  db.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
+  withSqliteMigration(db, statePath, hadState, () => {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS uploads (
       id TEXT PRIMARY KEY, client_upload_id TEXT NOT NULL UNIQUE, share_id TEXT, share_index INTEGER,
       target TEXT NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -101,6 +105,15 @@ export function createUploadStore(options) {
       thread_id TEXT NOT NULL, thread_new INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', target TEXT NOT NULL,
       status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, delivered_at INTEGER);`)
+  if (!db.prepare('PRAGMA table_info(shares)').all().some(row => row.name === 'agent_id')) {
+    db.exec("ALTER TABLE shares ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'; ALTER TABLE shares ADD COLUMN session_id TEXT NOT NULL DEFAULT ''; ALTER TABLE shares ADD COLUMN request_default INTEGER NOT NULL DEFAULT 0; UPDATE shares SET agent_id=COALESCE(NULLIF(agent,''),'hermes'), session_id=thread_id;")
+  }
+  })
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+  } catch (error) {
+    try { db.close() } catch { /* preserve original */ }
+    throw error
+  }
   const now = options.now ?? (() => Date.now())
   const statfs = options.statfs ?? ((dir) => statfsSync(dir))
   const reserveBytes = Number.isFinite(options.reserveBytes) && options.reserveBytes >= 0 ? options.reserveBytes : UPLOAD_RESERVE_BYTES
@@ -112,7 +125,7 @@ export function createUploadStore(options) {
   const active = new Map()
   const delivering = new Map()
   const timers = new Set()
-  let closed = false
+  let closed = false, closePromise
 
   const row = (id) => db.prepare('SELECT * FROM uploads WHERE id = ?').get(id) ?? null
   const shareRow = (id) => db.prepare('SELECT * FROM shares WHERE id = ?').get(id) ?? null
@@ -164,7 +177,7 @@ export function createUploadStore(options) {
   const shareUploads = (shareId) => db.prepare('SELECT * FROM uploads WHERE share_id = ? ORDER BY share_index').all(shareId)
   const publicShare = (share, { withUploads = true } = {}) => ({
     share_id: share.id, agent: share.agent, ...(share.agent_label ? { agent_label: share.agent_label } : {}),
-    thread_id: share.thread_id, status: share.status,
+    thread_id: share.thread_id, agent_id: share.agent || 'hermes', session_id: share.thread_id, status: share.status,
     ...(share.run_id ? { run_id: share.run_id } : {}),
     ...(share.status === 'failed' ? { error: share.error || 'failed' } : {}),
     ...(withUploads ? { uploads: shareUploads(share.id).map((u) => {
@@ -411,7 +424,7 @@ export function createUploadStore(options) {
     const uploads = shareUploads(existing.id)
     // A retry cannot change its recipient (especially private ↔ main), thread, note or filenames.
     // Checking bytes alone could return a main-agent upload handle to a newly selected private share.
-    const requestedAgent = input.agent || 'hermes'
+    const requestedAgent = input.agent || (existing.request_default ? existing.agent : options.defaultAgentId?.() || 'hermes')
     const sameThread = input.thread ? input.thread === existing.thread_id && !existing.thread_new : Boolean(existing.thread_new)
     if (requestedAgent !== existing.agent || !sameThread || input.note !== existing.note
       || uploads.length !== specs.length
@@ -438,8 +451,8 @@ export function createUploadStore(options) {
     const at = now()
     db.exec('BEGIN IMMEDIATE')
     try {
-      db.prepare(`INSERT INTO shares (id, client_share_id, agent, agent_label, thread_id, thread_new, note, target, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)`).run(id, input.client_share_id, resolved.agent, resolved.agent_label ?? '', resolved.thread_id, resolved.thread_new ? 1 : 0, input.note, resolved.target, at, at)
+      db.prepare(`INSERT INTO shares (id, client_share_id, agent, agent_label, thread_id, thread_new, note, target, status, created_at, updated_at, agent_id, session_id, request_default)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?, ?, ?, ?)`).run(id, input.client_share_id, resolved.agent, resolved.agent_label ?? '', resolved.thread_id, resolved.thread_new ? 1 : 0, input.note, resolved.target, at, at, resolved.agent, resolved.thread_id, input.agent ? 0 : 1)
       prepared.forEach((item, index) => insertUpload(item, { shareId: id, shareIndex: index, clientUploadId: `#share:${id}:${index}` }))
       db.exec('COMMIT')
     } catch (error) {
@@ -545,12 +558,18 @@ export function createUploadStore(options) {
     maybeDeliver,
     sweep,
     upload: (id) => (UPLOAD_ID.test(String(id)) ? row(id) : null),
-    close() {
+    quiesce() {
       closed = true
       clearInterval(sweeper)
       for (const timer of timers) clearTimeout(timer)
       timers.clear()
-      try { db.close() } catch { /* closed */ }
+    },
+    close() {
+      if (closePromise) return closePromise
+      this.quiesce()
+      const finish = () => { db.close() }
+      if (!locks.size && !delivering.size) { finish(); return closePromise = Promise.resolve() }
+      return closePromise = Promise.allSettled([...locks.values(), ...delivering.values()]).then(finish)
     },
   }
 }

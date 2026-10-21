@@ -45,7 +45,7 @@ export function createHermesFixture(options = {}) {
       {
         id: 'm-helm-media',
         role: 'user',
-        content: `[Workspace::v1: /home/telos]\nHere are the reference files.\n\n<helm_attachments>${JSON.stringify({ instruction: 'private attachment handling', items: [
+        content: `[Workspace::v1: /home/owner]\nHere are the reference files.\n\n<helm_attachments>${JSON.stringify({ instruction: 'private attachment handling', items: [
           { id: '1'.repeat(32), name: 'weekend.png', mime: 'image/png', path: '/private/weekend.png' },
           { id: '2'.repeat(32), name: 'weekend-voice.webm', mime: 'audio/webm', transcript: 'Keep Saturday quiet.', path: '/private/weekend-voice.webm' },
           { id: '3'.repeat(32), name: 'weekend.mp4', mime: 'video/mp4', kind: 'video', path: '/private/weekend.mp4' },
@@ -114,7 +114,7 @@ export function createHermesFixture(options = {}) {
       later(() => {
         emit(run, 'tool.completed', { summary: 'Checked the selected backup' })
         run.status = 'waiting_for_approval'
-        run.approval = { request_id: 'approval-1', redacted_action: 'restore snapshot 2026-09-04 →\n/home/james/restore-test/…', choices: ['allow_once', 'deny'] }
+        run.approval = { request_id: 'approval-1', redacted_action: 'restore snapshot 2026-09-04 →\n/home/owner/restore-test/…', choices: ['allow_once', 'deny'] }
         emit(run, 'approval.request', run.approval)
       }, 90)
       return

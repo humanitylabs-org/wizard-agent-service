@@ -13,6 +13,11 @@ export function photoAuthorityId({ database, runtimeHome, registryPath, upstream
   if (!singleOwner || !hermesKey || !ownerId || !runtimeHome || !database || !registryPath || !upstreamOrigin) throw new Error('authenticated single-owner main runtime required')
   return digest(JSON.stringify(['wizard-main-photos-v2', realpathSync(database), realpathSync(runtimeHome), realpathSync(registryPath), upstreamOrigin, digest(hermesKey), ownerId]))
 }
+const mainPhotoAgent = id => !id || id === 'main' || id === 'hermes'
+const photoPin = (registry, id) => {
+  const ids = registry.pinnedAgents?.(id)
+  return ids ? (ids.some(agent => agent !== 'hermes') ? 'non-main' : ids[0] || '') : registry.pinnedAgent(id)
+}
 export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstreamOrigin, hermesKey, fetchImpl = fetch }) {
   let verifiedUntil = 0
   return async () => {
@@ -21,7 +26,7 @@ export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstre
     let session
     try {
       const rows = db.prepare("SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,parent_session_id,title,model_config,origin_json,created_source,transport_profile FROM sessions WHERE hidden=0 AND parent_session_id IS NULL ORDER BY rowid DESC LIMIT 200").all()
-      session = rows.find(s => eligiblePhotoSession(s, ownerId, registry.pinnedAgent(s.id)))
+      session = rows.find(s => eligiblePhotoSession(s, ownerId, photoPin(registry, s.id)))
     } finally { db.close() }
     if (!session) throw new Error('no canonical owner session to authenticate')
     const response = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(session.id)}`, { headers: { Authorization: `Bearer ${hermesKey}` }, redirect: 'manual', signal: AbortSignal.timeout(5000) })
@@ -34,7 +39,7 @@ export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstre
   }
 }
 export function eligiblePhotoSession(s, ownerId, pinnedAgent) {
-  if (!s || pinnedAgent && pinnedAgent !== 'main' || s.hidden || s.parent_session_id || ![null, '', 'default'].includes(s.profile_name)) return false
+  if (!s || !mainPhotoAgent(pinnedAgent) || s.hidden || s.parent_session_id || ![null, '', 'default'].includes(s.profile_name)) return false
   if (s.user_id && s.user_id !== ownerId) return false
   let config, origin
   try { config = JSON.parse(s.model_config || '{}'); origin = JSON.parse(s.origin_json || '{}') } catch { return false }
@@ -53,8 +58,8 @@ export function createCanonicalChatPhotoResolver({ database, ownerId, authorityI
   return async candidate => {
     const denied = reason => ({ photos: [], unavailable: Array(Math.max(1, candidate.refs?.length || 0)).fill(reason) })
     // Registry check precedes even the main history read. A private pin never routes to its store.
-    const pin = registry.pinnedAgent(candidate.thread_id)
-    if (pin && pin !== 'main') return denied('non_main_agent')
+    const pin = photoPin(registry, candidate.thread_id)
+    if (!mainPhotoAgent(pin)) return denied('non_main_agent')
     const db = new DatabaseSync(databasePath, { readOnly: true })
     let s, m
     try {

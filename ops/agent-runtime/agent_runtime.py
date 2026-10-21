@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -560,6 +561,134 @@ class RuntipiDriver:
         return {"ok": status == "stopped", "status": status}
 
 
+# ---------------------------------------------------------------- stopped runtime history authority
+
+def runtime_home(driver, agent: dict) -> Path:
+    """Configured home only: never derive authority paths from agent-controlled mounts."""
+    home = driver.agents.home(agent['id'])
+    # Stock Runtipi uses the same configured agent root, which must be the
+    # app-data/wizard-os/agents root. Alongside mode explicitly overrides the bind.
+    # Reject escaped/symlinked agent home directories before any host/sidecar read.
+    try:
+        root = driver.agents.root.resolve(strict=True)
+        if home.is_symlink() or not home.resolve(strict=True).is_relative_to(root):
+            raise ValueError()
+    except (OSError, ValueError):
+        raise RuntimeFailure("offline_census_unavailable", 503) from None
+    return home
+
+
+def read_index(driver, agent: dict, *, ids: bool = False) -> dict:
+    home = runtime_home(driver, agent)
+    try:
+        if not restricted(agent):
+            return index_snapshot(home, ids)
+        # Restricted homes belong to 10000:10000 and are 0700. Never chmod them
+        # or read as the helper owner/root. Reuse the home-sync sidecar image,
+        # but no privileges, network, writable mount, or agent code/config.
+        name = f"{driver.project(agent['id'])}-census-{secrets.token_hex(4)}"
+        script = Path(__file__).with_name('offline_index.py').read_text()
+        try:
+            run = docker(["run", "--rm", "--name", name, "--network", "none", "--read-only",
+                          "--user", f"{AGENT_UID}:{AGENT_UID}", "--cap-drop", "ALL",
+                          "--security-opt", "no-new-privileges:true", "--pids-limit", "32", "--memory", "128m",
+                          "--mount", f"type=bind,src={home},dst=/opt/data,readonly",
+                          "--entrypoint", "python3", SIDECAR_IMAGE, "-c", script,
+                          "/opt/data", "ids" if ids else "stat"], timeout=30)
+        except subprocess.TimeoutExpired:
+            docker(["rm", "-f", name], timeout=10, check=False)
+            raise RuntimeFailure("offline_census_timeout", 504) from None
+        value = json.loads(run.stdout)
+        if not isinstance(value, dict) or not isinstance(value.get('files'), dict):
+            raise ValueError()
+        for key in ('state.db', 'state.db-wal', 'state.db-shm', 'state.db-journal'):
+            item = value['files'][key]
+            if item != 'absent' and (not isinstance(item, list) or len(item) != 5
+                                    or any(type(n) is not int or n < 0 for n in item)):
+                raise ValueError()
+        if ids and (not isinstance(value.get('ids'), list) or len(value['ids']) > 100000
+                    or any(not isinstance(s, str) or not s or len(s) > 200 for s in value['ids'])):
+            raise ValueError()
+        return value
+    except RuntimeFailure:
+        raise
+    except Exception:
+        raise RuntimeFailure("offline_census_unavailable", 503) from None
+
+
+def runtime_down_state(driver, agent: dict) -> dict:
+    """Only driver-owned status/lifecycle metadata; no container env or content."""
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    app_status = None
+    if isinstance(driver, RuntipiDriver):
+        try:
+            rt = driver.cli.Config().runtipi()
+            app_status = ((rt.app(driver.urn(agent)) or {}).get('app') or {}).get('status')
+        except Exception:
+            raise RuntimeFailure("runtime_generation_unavailable", 503) from None
+        if app_status != 'stopped':
+            raise RuntimeFailure("runtime_not_stopped", 503)
+    found = docker(["ps", "-aq", "--filter", f"label=com.docker.compose.project={driver.project(agent['id'])}",
+                    "--filter", f"label=com.docker.compose.service={service}"], timeout=10).stdout.split()
+    if not found:
+        return {'app': app_status, 'container': 'absent'}
+    if len(found) != 1:
+        raise RuntimeFailure("runtime_generation_unavailable", 503)
+    run = docker(["inspect", "--format", '{{json .Id}}\n{{json .State}}\n{{json .RestartCount}}', found[0]], timeout=10)
+    try:
+        cid, state, restarts = [json.loads(line) for line in run.stdout.splitlines()]
+        started, finished = state['StartedAt'], state['FinishedAt']
+        if (not isinstance(cid, str) or not cid or state['Status'] != 'exited' or state['Running']
+                or state.get('Restarting') or type(restarts) is not int or restarts < 0
+                or any(not isinstance(t, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T.+Z', t)
+                       or t.startswith('0001-') for t in (started, finished))):
+            raise ValueError()
+        # Runtipi stop is compose down, not stop. A surviving container is not
+        # its stable down state, even if exited (could be an out-of-band start).
+        if isinstance(driver, RuntipiDriver):
+            raise ValueError()
+        return {'app': app_status, 'container': [cid, started, finished, restarts]}
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeFailure("runtime_generation_unavailable", 503) from None
+
+
+def inspect_runtime(driver, agent: dict) -> tuple[dict, dict]:
+    """Stopped identity survives compose down and binds DB/WAL/SHM stat identity."""
+    down = runtime_down_state(driver, agent)
+    index = read_index(driver, agent)
+    if runtime_down_state(driver, agent) != down:
+        raise RuntimeFailure("runtime_generation_changed", 503)
+    generation = hashlib.sha256(json.dumps([down, index['files']], sort_keys=True).encode()).hexdigest()
+    return {"status": "stopped", "generation": generation}, {}
+
+
+def offline_census(driver, agent: dict) -> dict:
+    """Ids-only stopped census. Caller holds the same lock as stop/start/apply."""
+    before, _ = inspect_runtime(driver, agent)
+    index = read_index(driver, agent, ids=True)
+    after, _ = inspect_runtime(driver, agent)
+    if before != after:
+        raise RuntimeFailure("runtime_generation_changed", 503)
+    return {**after, "ids": index['ids']}
+
+
+def lifecycle_action(driver, agent: dict, action: str) -> dict:
+    """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if action == 'inspect':
+        return inspect_runtime(driver, agent)[0]
+    if action == 'census':
+        return offline_census(driver, agent)
+    result = getattr(driver, action)(agent)
+    if action == 'stop' and result.get('ok') is not False:
+        try:
+            result = {**result, 'census': offline_census(driver, agent)}
+        except RuntimeFailure as error:
+            # Stopping succeeded even if no authority can be sealed. Explicitly
+            # report that fact; neither helper nor service may trust an empty set.
+            result = {**result, 'census': None, 'census_error': error.code}
+    return result
+
+
 # ---------------------------------------------------------------- delivery (runs inside the agent container)
 
 DELIVER_SCRIPT = r'''
@@ -662,7 +791,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -689,7 +818,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     self._json(200, deliver(chosen, agent, payload))
                     return
                 with lifecycle_lock(chosen, restricted_driver, agent_id):
-                    result = getattr(chosen, action)(agent)
+                    result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})

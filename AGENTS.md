@@ -2,6 +2,14 @@
 
 The Wizard Agent Service is the back end that every Wizard front end talks to. It sits in front of a stock Hermes Agent and owns threads, runs and steers, files, read state, voice recovery and AI usage. It reaches Hermes only through Hermes's API server and a read-only `state.db`. Read the team rules below before you start.
 
+## Machine-specific configuration
+
+Machine-specific paths and hosts come from env vars: `WIZARD_WORK_ROOT`,
+`WIZARD_HEAVY_ROOT`, `WIZARD_BUILD_HOST`, `WIZARD_ORIGIN`, `QA_PLAYWRIGHT`,
+`HERMES_HOME`, `ANDROID_HOME` / `ANDROID_SDK_ROOT`. Never commit personal paths
+or tailnet hostnames; `tests/portable-paths.test.ts` in `npm test` enforces this.
+Historical evidence/receipt paths are explicitly exempt, not executable examples.
+
 ## This repo
 
 - **Setup:** requires Node 22.5 or later (the service uses the built-in `node:sqlite`). Run `npm ci` first.

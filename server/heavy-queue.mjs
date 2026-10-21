@@ -1,8 +1,9 @@
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { chmodSync, existsSync, mkdirSync } from 'node:fs'
+import { dirname, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { withSqliteMigration } from './thread-reference.mjs'
 
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -13,7 +14,9 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
 export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3' }) {
   if (!host || !script || !root || !lock) throw new Error('heavy worker configuration incomplete')
   return payload => new Promise((resolve, reject) => {
-    const command = [python, script, '--root', root, '--lock', lock].map(quote).join(' ')
+    const heavyRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    if (!heavyRoot || !posix.isAbsolute(heavyRoot)) return reject(fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503))
+    const command = ['env', `WIZARD_HEAVY_ROOT=${heavyRoot}`, python, script, '--root', root, '--lock', lock].map(quote).join(' ')
     const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1', host, command],
       { timeout: 12_000, maxBuffer: 128 * 1024 }, (error, stdout) => {
         if (error) return reject(fail('worker_unavailable', 503))
@@ -44,12 +47,30 @@ export function heavyRpcTransport({ origin, token }) {
 export class DurableHeavyQueue {
   constructor({ statePath, transport, continuation, current, intervalMs = 1500 }) {
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
+    const hadState = existsSync(statePath)
     this.db = new DatabaseSync(statePath)
+    try {
     chmodSync(statePath, 0o600)
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    withSqliteMigration(this.db, statePath, hadState, () => {
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS heavy_jobs(id TEXT PRIMARY KEY, session TEXT NOT NULL,
         origin TEXT NOT NULL, key TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL,
         UNIQUE(session,origin,key));`)
+    if (!this.db.prepare('PRAGMA table_info(heavy_jobs)').all().some(row => row.name === 'agent_id')) {
+
+        this.db.exec("ALTER TABLE heavy_jobs ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'")
+        for (const row of this.db.prepare('SELECT id,session,data FROM heavy_jobs').all()) {
+          const job = JSON.parse(row.data)
+          this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify({ ...job, agent_id: 'hermes', session_id: row.session }), row.id)
+        }
+
+    }
+    })
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+    } catch (error) {
+      try { this.db.close() } catch { /* preserve original */ }
+      throw error
+    }
     Object.assign(this, { transport, continuation, current, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {
@@ -59,9 +80,14 @@ export class DurableHeavyQueue {
   rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
   save(job) { this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id); return job }
   // Synchronous durable receipt: no SSH, history, or model request on this path.
-  submit({ sessionId, origin, key, spec, route = {}, watermark }) {
+  submit({ sessionId, origin, key, spec, route = {}, watermark, agent_id = 'hermes' }) {
+    if (agent_id !== 'hermes') throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
-    if (!spec || typeof spec.cwd !== 'string' || !spec.cwd.startsWith('/Volumes/ThalesMedia/')
+    const configuredRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    if (!configuredRoot || !posix.isAbsolute(configuredRoot)) throw fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503)
+    const root = posix.resolve(configuredRoot)
+    const cwd = typeof spec?.cwd === 'string' && posix.isAbsolute(spec.cwd) ? posix.resolve(spec.cwd) : ''
+    if (!spec || !cwd || !(cwd === root || cwd.startsWith(root === '/' ? root : root + '/'))
       || !Array.isArray(spec.argv) || spec.argv.length < 1 || spec.argv.length > 100
       || spec.argv.some(s => typeof s !== 'string' || !s || s.length > 8192 || s.includes('\0'))
       || !Number.isInteger(spec.timeout_seconds) || spec.timeout_seconds < 1 || spec.timeout_seconds > 86400) throw fail('invalid heavy command')
@@ -71,10 +97,10 @@ export class DurableHeavyQueue {
       if (existing.hash !== requestHash) throw fail('heavy idempotency conflict', 409)
       return JSON.parse(existing.data)
     }
-    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, origin, spec, route, watermark,
+    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id: 'hermes', session_id: sessionId, origin, spec, route, watermark,
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
       remote_ack: false, resume: '', continuation_invalidated: false, receipt: null }
-    this.db.prepare('INSERT INTO heavy_jobs VALUES(?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job))
+    this.db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job), 'hermes')
     return job
   }
   cancel(id, sessionId) {
@@ -107,15 +133,16 @@ export class DurableHeavyQueue {
       cancellation_pending: rows.filter(r => r.cancel_requested && !terminal.has(r.state)).length }
   }
   start() {
+    if (this.closed) return this
     this.timer = setInterval(() => void this.tick().catch(() => {}), this.intervalMs)
     this.timer.unref?.()
     return this
   }
-  async close() {
-    this.closed = true
-    clearInterval(this.timer)
-    await this.busy
-    this.db.close()
+  quiesce() { this.closed = true; clearInterval(this.timer) }
+  close() {
+    if (this.closePromise) return this.closePromise
+    this.quiesce()
+    return this.closePromise = Promise.resolve(this.busy).catch(() => undefined).then(() => this.db.close())
   }
   tick() {
     if (this.closed) return Promise.resolve()

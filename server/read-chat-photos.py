@@ -100,6 +100,26 @@ def photo_refs(content, role):
     return list({json.dumps(ref, sort_keys=True): ref for ref in out}.values())
 
 
+def registry_pins(value):
+    if not isinstance(value, dict) or not isinstance(value.get('threads'), dict):
+        raise ValueError('invalid registry metadata')
+    if value.get('schema') == 1:
+        if not all(isinstance(sid, str) and isinstance(agent, str) for sid, agent in value['threads'].items()):
+            raise ValueError('invalid legacy registry metadata')
+        return value['threads']
+    if value.get('schema') != 2:
+        raise ValueError('unknown registry schema')
+    pairs = {}
+    for key, row in value['threads'].items():
+        pair = json.loads(key)
+        if (not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(item, str) and item for item in pair)
+                or not isinstance(row, dict) or row.get('agent_id') != pair[0] or row.get('session_id') != pair[1]):
+            raise ValueError('invalid qualified registry pair')
+        pairs.setdefault(pair[1], set()).add(pair[0])
+    # A private/secondary duplicate stays excluded before any message-content read.
+    return {sid: 'hermes' if agents == {'hermes'} else 'non-main' for sid, agents in pairs.items()}
+
+
 def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
     c = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=2)
     c.row_factory = sqlite3.Row
@@ -115,10 +135,8 @@ def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
             with os.fdopen(fd) as stream:
                 if os.fstat(stream.fileno()).st_size > 8 * 1024 * 1024:
                     raise ValueError('registry metadata too large')
-                pins = json.load(stream)['threads']
-                if not isinstance(pins, dict):
-                    raise ValueError('invalid registry metadata')
-    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id) and pins.get(sid, '') in ('', 'main')]
+                pins = registry_pins(json.load(stream))
+    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id) and pins.get(sid, '') in ('', 'main', 'hermes')]
     ceiling = ceiling or c.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0]
     # Fetch metadata first; do not read tool content or excluded/private messages.
     # Force the integer primary-key range walk: repeated session-index scans sort

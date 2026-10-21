@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
+import { withSqliteMigration, qualifyContinuation } from './thread-reference.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
 import { annotateProviderSignOut } from './provider-reconnect.mjs'
@@ -142,12 +143,12 @@ export class DurableRunQueue {
     this.tickPromise = null
     this.closed = false
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
+    const hadState = existsSync(this.statePath)
     this.database = new DatabaseSync(this.statePath)
+    try {
     chmodSync(this.statePath, 0o600)
+    withSqliteMigration(this.database, this.statePath, hadState, () => {
     this.database.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
-      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS wizard_provider_backoff (
         scope TEXT PRIMARY KEY, retry_after REAL NOT NULL, failures INTEGER NOT NULL
       );
@@ -182,18 +183,34 @@ export class DurableRunQueue {
         recovery_run_id TEXT NOT NULL DEFAULT '', at REAL NOT NULL
       );
     `)
+    if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'agent_id')) {
+
+        this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'hermes'; ALTER TABLE wizard_run_queue ADD COLUMN recovery_authorized INTEGER NOT NULL DEFAULT 0;")
+        if (this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
+          for (const row of this.database.prepare('SELECT public_run_id,session_id,continuation_json FROM wizard_run_queue').all()) {
+            this.database.prepare('UPDATE wizard_run_queue SET continuation_json=? WHERE public_run_id=?').run(JSON.stringify(qualifyContinuation(JSON.parse(row.continuation_json), row.session_id)), row.public_run_id)
+          }
+        }
+
+    }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN continuation_json TEXT NOT NULL DEFAULT 'null'")
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_attempted')) {
       // Existing rows have unknown dispatch history. Never mutate their saved request.
-      this.database.exec("BEGIN IMMEDIATE; ALTER TABLE wizard_run_queue ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 0; UPDATE wizard_run_queue SET dispatch_attempted=1; COMMIT;")
+      this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 0; UPDATE wizard_run_queue SET dispatch_attempted=1;")
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'dispatch_body')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN dispatch_body TEXT")
     }
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'worker_dispatch_body')) {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN worker_dispatch_body TEXT")
+    }
+    })
+    this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+    } catch (error) {
+      try { this.database.close() } catch { /* preserve original */ }
+      throw error
     }
   }
 
@@ -205,19 +222,24 @@ export class DurableRunQueue {
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
     await this.tick(true)
-    if (this.pollIntervalMs > 0 && !this.timer) {
+    if (!this.closed && this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
       this.timer.unref?.()
     }
     return this
   }
 
-  close() {
-    if (this.closed) return
+  quiesce() {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
     this.timer = null
-    this.database.close()
+  }
+  close() {
+    if (this.closePromise) return this.closePromise
+    this.quiesce()
+    // With no in-flight tick preserve synchronous close for existing callers.
+    if (!this.tickPromise) { this.database.close(); return this.closePromise = Promise.resolve() }
+    return this.closePromise = this.tickPromise.catch(() => undefined).then(() => this.database.close())
   }
 
   _record(row) {
@@ -226,6 +248,8 @@ export class DurableRunQueue {
       publicRunId: row.public_run_id,
       runtime: row.runtime,
       sessionId: row.session_id,
+      agent_id: row.agent_id ?? 'hermes',
+      recoveryAuthorized: Boolean(row.recovery_authorized),
       idempotencyKey: row.idempotency_key,
       requestHash: row.request_hash,
       body: row.body,
@@ -340,6 +364,7 @@ export class DurableRunQueue {
         object: 'run',
         run_id: current.publicRunId,
         session_id: current.sessionId,
+        agent_id: current.agent_id,
         status: 'queued',
         queue_position: this._position(current.publicRunId),
         queue_reason: current.waitingReason || 'capacity',
@@ -350,6 +375,7 @@ export class DurableRunQueue {
     const payload = current.payload && typeof current.payload === 'object' && !Array.isArray(current.payload) ? { ...current.payload } : {}
     payload.run_id = current.publicRunId
     payload.session_id = current.sessionId
+    payload.agent_id = current.agent_id
     if (!payload.status) payload.status = current.status
     payload.updated_at ??= current.updatedAt
     return payload
@@ -498,7 +524,9 @@ export class DurableRunQueue {
     return result.replayed ? result : { record: this.get(result.record.publicRunId), replayed: false }
   }
 
-  _admitRow({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null }) {
+  _admitRow({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null, agent_id = 'hermes', recoveryAuthorized = false }) {
+    // Secondary runtime runs are admitted by that runtime, not this external-Hermes queue.
+    if (agent_id !== 'hermes') throw requestError('invalid queue agent', 400)
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
@@ -521,9 +549,9 @@ export class DurableRunQueue {
       this.database.prepare(`
         INSERT INTO wizard_run_queue (
           public_run_id, runtime, session_id, idempotency_key, request_hash, body,
-          trusted_paths_json, status, created_at, updated_at, continuation_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt, JSON.stringify(continuation))
+          trusted_paths_json, status, created_at, updated_at, continuation_json, agent_id, recovery_authorized
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+      `).run(publicRunId, runtime, sessionId, idempotencyKey, requestHash, body, JSON.stringify(trustedPaths), createdAt, createdAt, JSON.stringify(qualifyContinuation(continuation, sessionId)), agent_id, recoveryAuthorized ? 1 : 0)
       this.database.exec('COMMIT')
     } catch (error) {
       try { this.database.exec('ROLLBACK') } catch { /* already rolled back */ }
