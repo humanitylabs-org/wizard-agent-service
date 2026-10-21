@@ -114,6 +114,10 @@ server = createWizardServer({
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
   runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
+  schedulerStatePath: process.env.WIZARD_SCHEDULER_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'schedules.sqlite3'),
+  schedulerHermesHome: process.env.HERMES_HOME || '',
+  schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
+  schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || 'Asia/Bangkok',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.

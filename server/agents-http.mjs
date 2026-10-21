@@ -569,7 +569,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
   if (contentType.includes('text/event-stream') && upstream.body) {
     response.writeHead(upstream.status, { ...responseHeaders, Connection: 'keep-alive' })
-    void pipeline(Readable.fromWeb(upstream.body), ctx.secretGuard(secrets), response).catch(() => { if (!response.destroyed) response.destroy() })
+    const runId = upstreamPath.match(/^\/v1\/runs\/([^/]+)\/events$/)?.[1]
+    const scheduled = runId ? ctx.scheduleRunEventFilter?.(agent.id, runId) : null
+    void pipeline(Readable.fromWeb(upstream.body), ...(scheduled ? [scheduled] : []), ctx.secretGuard(secrets), response).catch(() => { if (!response.destroyed) response.destroy() })
     return
   }
   let result = Buffer.from(await upstream.arrayBuffer())
