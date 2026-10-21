@@ -1,8 +1,9 @@
 // Agents (wizard-os spec/AGENTS.md): more than one agent on a box.
 //
 // The registry is the folder `<agentsDir>/<id>/agent.json` (schema 1). The main agent is the host Hermes the
-// Service already talks to and is always listed as `hermes`. Every other agent runs in its own container with its
-// own Hermes home (`<id>/home`, its HERMES_HOME), its own API key (`<id>/runtime.key`) and its own model route.
+// Service already talks to and is always listed as `hermes`. Container agents have their own Hermes home and
+// runtime driver; file-provisioned profile agents share the host gateway under /p/<profile> with their own key.
+// Each non-main agent's API key is stored at `<id>/runtime.key`.
 // The Service never touches Docker: a runtime driver (agent-runtime helper on the host, see ops/agent-runtime)
 // installs, starts and stops the container.
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -211,7 +212,9 @@ export function parseAgentFile(value, id) {
   const permissions = value.permissions
   if (!permissions || typeof permissions !== 'object') return null
   const runtime = value.runtime
-  if (!runtime || runtime.kind !== 'container' || typeof runtime.app_id !== 'string' || !Number.isInteger(runtime.port)) return null
+  if (!runtime || !['container', 'profile'].includes(runtime.kind)) return null
+  if (runtime.kind === 'container' && (typeof runtime.app_id !== 'string' || !Number.isInteger(runtime.port))) return null
+  if (runtime.kind === 'profile' && (typeof runtime.profile !== 'string' || !ID_RE.test(runtime.profile))) return null
   try {
     const { preset, ...fields } = permissions
     return {
@@ -327,6 +330,8 @@ export function createAgentRegistry(options = {}) {
   const runtime = options.runtime ?? null
   const upstreamMode = options.upstreamMode === 'network' ? 'network' : 'host'
   const upstreamHost = options.upstreamHost || '127.0.0.1'
+  // Host profiles share the main gateway, not the container transport/port allocator.
+  const mainUpstreamOrigin = options.mainUpstreamOrigin || ''
   const basePort = Number.isInteger(options.basePort) ? options.basePort : 18650
   const mainLabel = cleanLabel(options.mainLabel, 'Hermes')
   const mainProviders = options.mainProviders ?? (async () => [])
@@ -406,7 +411,7 @@ export function createAgentRegistry(options = {}) {
       if (fresh.length) {
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard') continue
+          if (!agent || agent.privacy !== 'standard' || agent.runtime.kind === 'profile') continue
           const next = structuredClone(agent)
           for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
@@ -541,6 +546,10 @@ export function createAgentRegistry(options = {}) {
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
+    if (agent.runtime.kind === 'profile') {
+      if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
+      return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
+    }
     // A restricted agent is reached only through its edge relay, published on host loopback at its port.
     if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
     if (upstreamMode === 'network') {
@@ -556,11 +565,12 @@ export function createAgentRegistry(options = {}) {
   async function probe(agent, { fresh = false } = {}) {
     const cached = statusCache.get(agent.id)
     if (!fresh && cached && now() - cached.at < 3000) return cached.value
-    const state = serviceState(agent.id)
+    const state = agent.runtime.kind === 'profile' ? {} : serviceState(agent.id)
     let value
     let healthy = false
     try {
-      const response = await fetchImpl(`${upstream(agent)}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+      const headers = agent.runtime.kind === 'profile' ? { Authorization: `Bearer ${apiKey(agent.id)}` } : {}
+      const response = await fetchImpl(`${upstream(agent)}/health`, { headers, redirect: 'error', signal: AbortSignal.timeout(1500) })
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
@@ -661,6 +671,7 @@ export function createAgentRegistry(options = {}) {
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
     const dir = folder(agent.id)
     // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
@@ -688,6 +699,7 @@ export function createAgentRegistry(options = {}) {
 
   async function create(body, { idempotencyKey = '' } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (body.runtime !== undefined && body.runtime?.kind !== 'container') fail(400, 'invalid_runtime', 'agent.runtime', 'only container agents may be created through the API')
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
     if (idempotencyKey) {
       if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(idempotencyKey)) fail(400, 'invalid_idempotency_key', 'agent.idempotency_key')
@@ -745,6 +757,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are provisioned from files and configured in Hermes')
     if (id === MAIN_AGENT_ID) {
       // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
       const keys = Object.keys(body)
@@ -803,6 +816,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are always on with the main gateway')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
     try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
