@@ -1,5 +1,9 @@
 Vendored unchanged from humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
-Conformance: Thales heavy_e904f591b9814db1ab6546946978539f PASS; review round 3 SHIP. Do not edit here; change upstream and re-vendor.
+Base conformance: heavy_e904f591b9814db1ab6546946978539f PASS; review round 3 SHIP.
+sidecars/edge.py and conformance/test_edge_heavy.py: wizard-app-store branch feature/restricted-edge-agent-heavy @ 657f1c327cbbbd5742471636aff55990b4895161.
+Edge receipt: python3 runtimes/restricted-agent/conformance/test_edge_heavy.py: 3 tests pass. Full container conformance not rerun for this allowlist addition.
+conformance/inspect_check.py retains the Service main portable-path revision (fbad41c).
+Do not edit here; change upstream and re-vendor.
 
 dfe5b6c8ed91b63d6f168585bc81edfb5f59bbff1b523649553aff18ee8478e8  ./README.md
 7f1c6136830373078ace647c9bbf424dc49e09d1a986cb26a24362a422ab9c52  ./compose.yml
@@ -13,6 +17,7 @@ a482bf79608dcdbd45b3d7a36bd19d7430a0593a098271612b674ed8629c5be4  ./conformance/
 f6b6e244ef30a62dd85b550ecd5c5972629ef4077c0ee8e185c329550f9c3b24  ./conformance/run.sh
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
 07c3281f07daf116aa5e687d44ca228dd226fa29496c00b94be65809b8d95b58  ./sidecars/Dockerfile
-ed11571981db3e4f0a9ba5fccb6fde56b71bf6717ec38fd38a9eb871c0e654b7  ./sidecars/edge.py
+7f7561c1b6c2be5baa9a32c75da154d1327e88a9ae5129dfe39041508180193d  ./sidecars/edge.py
 32aa5f8126b842566d8afd82bce591256bc97b68f52c8c424ec8321ae37e89a6  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh
+ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
