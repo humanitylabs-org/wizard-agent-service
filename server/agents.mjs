@@ -400,7 +400,15 @@ export function createAgentRegistry(options = {}) {
     const { wizardApps, agentApps } = installedApps()
     return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
   }
-  const mainAgent = () => ({
+  // Resolved for every thread in a Chats list: rebuild only when .main-agent.json or apps.json changes.
+  let mainMemo = { key: null, value: null }
+  const fileStamp = (path) => { try { const st = statSync(path); return `${st.ino}:${st.size}:${st.mtimeMs}` } catch { return '-' } }
+  const mainAgent = () => {
+    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${mainLabel}`
+    if (mainMemo.key !== key) mainMemo = { key, value: buildMainAgent() }
+    return structuredClone(mainMemo.value)
+  }
+  const buildMainAgent = () => ({
     schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
