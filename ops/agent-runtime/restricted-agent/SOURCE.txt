@@ -1,4 +1,4 @@
-Vendored unchanged from humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
+Base vendored from humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
 Base conformance: heavy_e904f591b9814db1ab6546946978539f PASS; review round 3 SHIP.
 sidecars/edge.py and conformance/test_edge_heavy.py: wizard-app-store branch feature/restricted-edge-agent-heavy @ 657f1c327cbbbd5742471636aff55990b4895161.
 Edge receipt: python3 runtimes/restricted-agent/conformance/test_edge_heavy.py: 3 tests pass. Full container conformance not rerun for this allowlist addition.

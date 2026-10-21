@@ -10,6 +10,24 @@ export const AGENT_HEAVY_ROUTE = /^\/wizard\/v1\/agent-heavy\/(submit|status|can
 
 export function createAgentHeavyRelay({ options, registry, queue }) {
   const enabled = () => options.agentHeavy === 'on'
+  const sandbox = () => process.env.WIZARD_AGENT_HEAVY_SANDBOX === 'on'
+  const buckets = new Map()
+  const rateLimit = id => {
+    const now = Date.now(), previous = buckets.get(id) ?? { tokens: 30, at: now }
+    const tokens = Math.min(30, previous.tokens + Math.max(0, now - previous.at) / 2000)
+    buckets.set(id, { tokens: tokens >= 1 ? tokens - 1 : tokens, at: now })
+    if (tokens < 1) throw fail('agent heavy rate exceeded', 429)
+  }
+  const originCurrent = job => {
+    let run = registry.latestRunForSession(job.agent_id, job.sessionId, { includeHeavy: true })
+    const seen = new Set()
+    while (run && run.session_id === job.sessionId && !seen.has(run.run_id)) {
+      if (run.run_id === job.origin) return true
+      seen.add(run.run_id)
+      run = run.heavy_origin ? registry.runThread(job.agent_id, run.heavy_origin) : null
+    }
+    return false
+  }
   const allowed = id => {
     const agent = registry?.read(id)
     return enabled() && id !== 'hermes' && agent?.privacy === 'standard' && agent.role !== 'recovery'
@@ -39,12 +57,12 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
     if (!allowed(job.agent_id)) return false
     const fresh = queue().get(job.job_id)
     if (!fresh || fresh.cancel_requested || fresh.continuation_invalidated) return false
-    if (registry.latestRunForSession(job.agent_id, job.sessionId)?.run_id !== job.origin) return false
+    if (!originCurrent(job)) return false
     await sessionExists(job.agent_id, job.sessionId)
     if (JSON.stringify(await watermark(job.agent_id, job.sessionId)) !== JSON.stringify(job.watermark)) return false
     const after = queue().get(job.job_id)
     return allowed(job.agent_id) && !after.cancel_requested && !after.continuation_invalidated
-      && registry.latestRunForSession(job.agent_id, job.sessionId)?.run_id === job.origin
+      && originCurrent(job)
   }
   const view = job => ({ job_id: job.job_id, agent_id: job.agent_id, session_id: job.sessionId,
     state: job.state, reason: job.reason, cancel_requested: job.cancel_requested,
@@ -96,10 +114,12 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
       const session = value.session_id
       if (typeof session !== 'string' || !session || session.length > 200) throw fail('session required', 400)
       if (action !== 'submit') {
+        rateLimit(id)
         const job = queue().get(value.job_id)
         if (!job || job.agent_id !== id || job.sessionId !== session) throw fail('job not found', 404)
         return view(action === 'cancel' ? queue().cancel(job.job_id, session, id) : job)
       }
+      if (!sandbox()) throw fail('agent_sandbox_unavailable', 503)
       await sessionExists(id, session) // Authenticated read from THIS runtime only; never global pins.
       const root = process.env.WIZARD_HEAVY_ROOT
       if (!root || !posix.isAbsolute(root)) throw fail('agent heavy root not configured', 503)
@@ -112,7 +132,7 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
         || !(cwd === staging || cwd.startsWith(staging + '/'))
         || !['heavy', 'light'].includes(lane) || (lane === 'light' && spec.timeout_seconds > 900)
         || Object.keys(spec).some(key => !['cwd', 'argv', 'timeout_seconds', 'lane'].includes(key))) throw fail('invalid agent heavy command', 400)
-      const origin = registry.latestRunForSession(id, session)
+      const origin = registry.latestRunForSession(id, session, { includeHeavy: true })
       if (!origin) throw fail('no mutation-owning agent run', 409)
       const observed = await request(id, `/v1/runs/${encodeURIComponent(origin.run_id)}`)
       if (!['running', 'launching', 'started'].includes(observed.status)) throw fail('no mutation-owning agent run', 409)
@@ -120,9 +140,9 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
       if (!runtime?.model || !runtime?.provider || runtime.provider === 'custom') throw fail('origin model route unavailable', 503)
       const mark = await watermark(id, session)
       requireGrant(id)
-      if (registry.latestRunForSession(id, session)?.run_id !== origin.run_id) throw fail('origin changed', 409)
+      if (registry.latestRunForSession(id, session, { includeHeavy: true })?.run_id !== origin.run_id) throw fail('origin changed', 409)
       return view(queue().submit({ sessionId: session, agent_id: id, origin: origin.run_id,
-        key: value.key, spec, route: { model: runtime.model, provider: runtime.provider, require_model_lock: true },
+        key: value.key, spec: { ...spec, agent_id: id }, route: { model: runtime.model, provider: runtime.provider, require_model_lock: true },
         watermark: mark, activeLimit: 2 }))
     },
   }

@@ -5453,9 +5453,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 409, { error: { code: error.code, message: error.message } })
         return
       }
-      if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
-        const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
-        sendJson(response, error.status, { error: names[error.status] })
+      if (error instanceof SyntaxError && request.url?.startsWith('/wizard/v1/agent-heavy/')) error.status = 400
+      if ([400, 403, 404, 409, 410, 413, 415, 429, 503].includes(error?.status) && !response.headersSent) {
+        const names = { 400: 'invalid_request', 403: 'forbidden', 404: 'not_found', 409: 'conflict', 410: 'gone', 413: 'body_too_large', 415: 'unsupported_media_type', 429: 'rate_limited', 503: 'service_unavailable' }
+        sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
     } finally { requestDone() }

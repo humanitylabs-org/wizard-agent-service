@@ -143,13 +143,15 @@ class SandboxTest(unittest.TestCase):
             if cancel:
                 db.execute('UPDATE jobs SET cancel=1 WHERE id=?', (JOB,))
             return Mock()
+        def cleanup(_):
+            self.assertIsNone(db.execute('SELECT execution_result FROM jobs WHERE id=?', (JOB,)).fetchone()[0])
         with (self.root / 'lease').open('a') as lease, \
              patch.object(worker.os, 'getpgrp', return_value=os.getpid()), \
              patch.object(worker.os, 'getsid', return_value=os.getpid()), \
              patch.object(worker.os, 'killpg') as killpg, \
              patch.object(worker.time, 'monotonic', side_effect=[0, 0, 2]), \
              patch.object(worker, 'launch_command', side_effect=launch), \
-             patch.object(worker, 'kill_agent_container') as kill:
+             patch.object(worker, 'kill_agent_container', side_effect=cleanup) as kill:
             worker.execute(spool, JOB, lease.fileno(), lease.fileno())
         kill.assert_called_once_with(JOB)
         killpg.assert_called_once()
@@ -163,6 +165,34 @@ class SandboxTest(unittest.TestCase):
 
     def test_cancel_kills_container_before_recording_result(self):
         self.execute_fixture(cancel=True)
+
+    def test_orphan_recovery_cleans_agent_container_before_finalizing(self):
+        spool = self.root / 'orphan-spool'
+        db = worker.connect(spool)
+        now = time.time()
+        db.execute('INSERT INTO jobs(id,spec,state,created,updated) VALUES(?,?,?,?,?)',
+                   (JOB, json.dumps(self.spec), 'running', now, now))
+        def cleanup(_):
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (JOB,)).fetchone()[0], 'running')
+        with patch.object(worker, 'connect', return_value=db), \
+             patch.object(worker, 'kill_agent_container', side_effect=cleanup) as kill:
+            worker.dispatch(spool, self.root / 'lock')
+        kill.assert_called_once_with(JOB)
+        self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (JOB,)).fetchone()[0], 'interrupted')
+        db.close()
+
+    def test_orphan_with_unconfirmed_cleanup_remains_nonterminal(self):
+        spool = self.root / 'orphan-spool'
+        db = worker.connect(spool)
+        now = time.time()
+        db.execute('INSERT INTO jobs(id,spec,state,created,updated) VALUES(?,?,?,?,?)',
+                   (JOB, json.dumps(self.spec), 'running', now, now))
+        with patch.object(worker, 'connect', return_value=db), \
+             patch.object(worker, 'kill_agent_container', side_effect=RuntimeError('cleanup unconfirmed')):
+            with self.assertRaises(RuntimeError):
+                worker.dispatch(spool, self.root / 'lock')
+        self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (JOB,)).fetchone()[0], 'running')
+        db.close()
 
     @unittest.skipUnless(os.environ.get('WIZARD_HEAVY_TEST_IMAGE'), 'local-image proof is opt-in')
     def test_real_local_image_cannot_read_host_key_env_or_other_agent(self):

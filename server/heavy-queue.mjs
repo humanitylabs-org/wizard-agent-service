@@ -175,7 +175,8 @@ export class DurableHeavyQueue {
             else remote = { job_id: job.job_id, state: 'cancelled', reason: '', receipt: null }
           } else remote = await this.transport(job.remote_ack
             ? { action: 'status', job_id: job.job_id }
-            : { action: 'submit', job_id: job.job_id, spec: job.spec })
+            : { action: 'submit', job_id: job.job_id, spec: job.agent_id && job.agent_id !== 'hermes'
+              ? { ...job.spec, agent_id: job.agent_id } : job.spec })
           if (!remote || remote.job_id !== job.job_id || !['queued', 'running', ...terminal].includes(remote.state)) throw fail('bad remote receipt', 503)
           job = this.get(job.job_id) // cancellation/steering may have arrived during RPC
           this.save({ ...job, remote_ack: true, state: remote.state, reason: remote.reason || '', receipt: remote.receipt })

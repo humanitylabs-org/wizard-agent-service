@@ -20,6 +20,7 @@ function home() {
   const root = mkdtempSync(join(tmpdir(), 'agent-heavy-'))
   clean.push(() => rmSync(root, { recursive: true, force: true }))
   vi.stubEnv('WIZARD_HEAVY_ROOT', join(root, 'staging'))
+  vi.stubEnv('WIZARD_AGENT_HEAVY_SANDBOX', 'on')
   return root
 }
 function records(root: string) {
@@ -91,6 +92,95 @@ async function scene(enabled: string | undefined = 'on') {
   return { root, registry, heavy, hostQueue, options, req, spec, submit, change, ...runtime }
 }
 
+it('refuses agent submits without an explicit sandbox operator assertion', async () => {
+  const s = await scene()
+  for (const value of ['', 'off', 'true']) {
+    vi.stubEnv('WIZARD_AGENT_HEAVY_SANDBOX', value)
+    await expect(s.submit()).rejects.toMatchObject({ status: 503, message: 'agent_sandbox_unavailable' })
+  }
+  expect(s.remote).toEqual([])
+})
+it('adds only server-derived agent identity to worker specs, including old pending rows', async () => {
+  const s = await scene(), agent = await s.submit()
+  const job = s.heavy.queue.get(agent.job_id)
+  expect(job.spec.agent_id).toBe('alpha')
+  // A persisted pre-confinement row must never fall back to the host execution path.
+  delete job.spec.agent_id
+  s.heavy.queue.save(job)
+  const host = { session_id: 'shared', key: 'host-spec', spec: { ...s.spec(), cwd: join(s.root, 'staging', 'host-project') } }
+  await s.heavy.handle(await s.req('', false, token), '/wizard/internal/heavy/submit', host)
+  await s.heavy.queue.tick()
+  const sent = s.remote.filter(row => row.action === 'submit')
+  expect(sent.find(row => row.job_id === agent.job_id).spec).toEqual({ ...s.spec(), agent_id: 'alpha' })
+  const hermes = sent.find(row => row.job_id !== agent.job_id).spec
+  expect(JSON.stringify(hermes)).toBe(JSON.stringify(host.spec))
+  expect(hermes).not.toHaveProperty('agent_id')
+})
+it('binds a follow-up job to the running heavy continuation and persists its authority', async () => {
+  const s = await scene(), first = await s.submit()
+  s.states.workerDone = true; s.states.originDone = true
+  await s.heavy.queue.tick()
+  const continuation = s.heavy.queue.get(first.job_id).resume
+  expect(continuation).toBe('alpha-run-1')
+  const reopened = createAgentRegistry({ agentsDir: join(s.root, 'agents'), appsJsonPath: join(s.root, 'apps.json'), fetchImpl: s.fetchImpl })
+  expect(reopened.latestRunForSession('alpha', 'shared', { includeHeavy: true }).run_id).toBe(continuation)
+  expect(reopened.latestRunForSession('alpha', 'shared').run_id).toBe('origin')
+  // Old stores already contain heavy rows, but not the new latest-all index.
+  const indexPath = join(s.root, 'agents', '.run-threads.json')
+  const legacy = JSON.parse(readFileSync(indexPath, 'utf8'))
+  delete legacy.latest_all_runs
+  writeFileSync(indexPath, JSON.stringify(legacy))
+  const oldStore = createAgentRegistry({ agentsDir: join(s.root, 'agents'), appsJsonPath: join(s.root, 'apps.json'), fetchImpl: s.fetchImpl })
+  expect(oldStore.latestRunForSession('alpha', 'shared', { includeHeavy: true }).run_id).toBe(continuation)
+  s.states.workerDone = false; s.states.originDone = false
+  const second = await s.submit('alpha', { key: 'followup' })
+  expect(s.heavy.queue.get(second.job_id).origin).toBe(continuation)
+  s.states.workerDone = true; s.states.originDone = true
+  await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(second.job_id).resume).toBe('alpha-run-2')
+  expect(s.posts).toHaveLength(2)
+  // A new non-heavy run still fences every older continuation chain.
+  s.registry.noteRun('new-human-turn', 'alpha', 'shared')
+  s.heavy.queue.save({ ...s.heavy.queue.get(second.job_id), resume: '' })
+  await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(second.job_id).resume).toBe('superseded')
+})
+it('keeps latest continuation indexes agent-qualified across colliding run ids and restart', async () => {
+  const s = await scene()
+  s.registry.noteRun('collision', 'alpha', 'shared', { heavyOrigin: 'origin' })
+  s.registry.noteRun('alpha-next', 'alpha', 'shared', { heavyOrigin: 'collision' })
+  s.registry.noteRun('collision', 'beta', 'shared', { heavyOrigin: 'origin' })
+  const options = { agentsDir: join(s.root, 'agents'), appsJsonPath: join(s.root, 'apps.json'), fetchImpl: s.fetchImpl }
+  const reopened = createAgentRegistry(options)
+  expect(reopened.latestRunForSession('alpha', 'shared', { includeHeavy: true }).run_id).toBe('alpha-next')
+  expect(reopened.latestRunForSession('beta', 'shared', { includeHeavy: true }).run_id).toBe('collision')
+  expect(reopened.latestRunForSession('alpha', 'shared').run_id).toBe('origin')
+  // A pre-index store with sibling continuations has no reliable chronology:
+  // conservatively retain the non-heavy authority rather than inventing order.
+  const indexPath = join(s.root, 'agents', '.run-threads.json')
+  const legacy = JSON.parse(readFileSync(indexPath, 'utf8'))
+  delete legacy.latest_all_runs
+  legacy.runs.sibling = [{ run_id: 'sibling', agent_id: 'alpha', session_id: 'shared', heavy_origin: 'origin' }]
+  writeFileSync(indexPath, JSON.stringify(legacy))
+  expect(createAgentRegistry(options).latestRunForSession('alpha', 'shared', { includeHeavy: true }).run_id).toBe('origin')
+})
+it('shares a 30/min status/cancel/artifacts bucket per agent, with refill and independent agents', async () => {
+  const s = await scene(), a = await s.submit(), b = await s.submit('beta')
+  let now = Date.now()
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    for (let i = 0; i < 30; i++) {
+      await s.heavy.handleAgent(await s.req(), path(i % 2 ? 'cancel' : 'status'), { session_id: 'shared', job_id: a.job_id })
+    }
+    for (const action of ['status', 'cancel', 'artifacts']) {
+      await expect(s.heavy.handleAgent(await s.req(), path(action), { session_id: 'shared', job_id: a.job_id })).rejects.toMatchObject({ status: 429 })
+    }
+    expect((await s.heavy.handleAgent(await s.req('beta'), path('status'), { session_id: 'shared', job_id: b.job_id })).state).toBe('queued')
+    now += 2000
+    expect((await s.heavy.handleAgent(await s.req(), path('status'), { session_id: 'shared', job_id: a.job_id })).job_id).toBe(a.job_id)
+    await expect(s.heavy.handleAgent(await s.req(), path('status'), { session_id: 'shared', job_id: a.job_id })).rejects.toMatchObject({ status: 429 })
+  } finally { clock.mockRestore() }
+})
 it('is off by default, even with an owner-provisioned grant', async () => {
   const s = await scene('off')
   delete s.options.agentHeavy
@@ -306,6 +396,24 @@ it.each(['on', undefined])('wires the real Service agent-only listener and crede
   const submitted = await post(agent, path('submit'), gateway('alpha'), body)
   if (flag !== 'on') { expect(submitted.status).toBe(404); expect(fake.remote).toEqual([]); return }
   expect(submitted.status).toBe(200)
+  const spoof = await post(agent, path('submit'), gateway('alpha'), { ...body, agent_id: 'beta' })
+  expect(spoof.status).toBe(403)
+  expect(await spoof.json()).toEqual({ error: 'forbidden' })
+  const malformed = await fetch(agent + path('submit'), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gateway('alpha')}` }, body: '{' })
+  expect(malformed.status).toBe(400)
+  expect(await malformed.json()).toEqual({ error: 'invalid_request' })
+  vi.stubEnv('WIZARD_AGENT_HEAVY_SANDBOX', '')
+  const unavailable = await post(agent, path('submit'), gateway('alpha'), { ...body, key: 'no-sandbox' })
+  expect(unavailable.status).toBe(503)
+  expect(await unavailable.json()).toEqual({ error: 'agent_sandbox_unavailable' })
+  vi.stubEnv('WIZARD_AGENT_HEAVY_SANDBOX', 'on')
+  const second = await post(agent, path('submit'), gateway('alpha'), { ...body, key: 'second' })
+  expect(second.status).toBe(200)
+  const secondJob = await second.json()
+  const capacity = await post(agent, path('submit'), gateway('alpha'), { ...body, key: 'over-capacity' })
+  expect(capacity.status).toBe(429)
+  expect(await capacity.json()).toEqual({ error: 'rate_limited' })
+  expect((await post(base, path('cancel'), '', { job_id: secondJob.job_id }, true)).status).toBe(200)
   const job = await submitted.json()
   expect(job.agent_id).toBe('alpha')
   expect((await post(base, path('status'), '', { job_id: job.job_id }, true)).status).toBe(200)
