@@ -226,7 +226,7 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     if uses_claude_login(agent):
         # The box's one Claude sign-in (the Claude app's volume). Only a standard agent on Claude gets it: a private
         # agent never sees a public provider's login.
-        hermes["volumes"].append(f"{CLAUDE_LOGIN_VOLUME}:/claude")
+        hermes["volumes"].append("claude-login:/claude")   # the top-level key below, named after the real volume
         hermes["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"] = "/claude"
         doc_volumes["claude-login"] = {"name": CLAUDE_LOGIN_VOLUME, "external": True}
     if (agent.get("model") or {}).get("provider") == "tinfoil":
