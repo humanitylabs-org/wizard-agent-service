@@ -10,7 +10,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 from urllib.parse import urlsplit
 
 PATH = '/wizard/standard-chats/mcp'
@@ -29,6 +29,7 @@ def make_handler(upstream='http://127.0.0.1:8923'):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = 'WizardReadOnlyRelay'
+        timeout = 15
 
         def log_message(self, format, *args):
             pass  # Do not log queries, credentials or RPC content.
@@ -70,7 +71,7 @@ def make_handler(upstream='http://127.0.0.1:8923'):
                 return self.deny(400, 'invalid_request')
             request = Request(upstream.rstrip('/') + PATH, data=body, method='POST', headers={'Authorization': auth, 'Content-Type': 'application/json'})
             try:
-                response = build_opener(NoRedirect()).open(request, timeout=20)
+                response = build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=20)
             except HTTPError as error:
                 response = error
             except (URLError, TimeoutError, OSError):

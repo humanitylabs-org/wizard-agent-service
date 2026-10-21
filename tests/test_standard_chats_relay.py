@@ -8,7 +8,9 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler
+from unittest.mock import patch
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('standard_relay', ROOT/'ops/standard-chats-relay.py')
@@ -68,7 +70,7 @@ class RelayTests(unittest.TestCase):
         h = {'Authorization':'Bearer '+PRIVATE, 'Content-Type':'application/json', **(headers or {})}
         request = Request(self.base+path, data=data if method=='POST' else None, method=method, headers=h)
         try:
-            response = urlopen(request, timeout=3)
+            response = build_opener(ProxyHandler({})).open(request, timeout=3)
         except HTTPError as error:
             response = error
         with response:
@@ -105,6 +107,11 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(status,302)
         self.assertNotIn('Location',headers)
         self.assertFalse(any(c[0]=='GET' for c in self.calls))
+
+    def test_process_proxy_environment_cannot_redirect_the_agent_bearer(self):
+        with patch.dict(os.environ,{'HTTP_PROXY':'http://127.0.0.1:1','http_proxy':'http://127.0.0.1:1','NO_PROXY':'','no_proxy':''}):
+            self.assertEqual(self.call()[0],200)
+        self.assertEqual(len(self.calls),1)
 
     def test_upstream_cannot_target_owner_remote_or_arbitrary_path(self):
         for value in ['https://example.org','http://example.org','http://127.0.0.1/owner','http://user:key@127.0.0.1','http://127.0.0.1?owner=1']:

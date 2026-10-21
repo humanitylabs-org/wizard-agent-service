@@ -32,6 +32,7 @@ function history(path,rows){const db=new DatabaseSync(path);db.exec(`CREATE TABL
 history(dbpath,mainRows)
 const service=createWizardServer({upstreamOrigin:main.origin,hermesKey:'fixture-key',requireAccess:false,agentBridge:false,
  uxDir:process.env.QA_UX_DIR,uxPrefix:'wizard-os-home',wizardOsHome:root,
+ standardChatsUrl:'http://127.0.0.1:9743/wizard/standard-chats/mcp',
  appsJsonPath:join(root,'apps.json'),settingsPath:join(root,'settings.json'),threadSeenStatePath:join(root,'seen.json'),followThrough:false,
  agentRuntime:{apply:async()=>({ok:true}),start:async()=>({ok:true}),stop:async()=>({ok:true})},agentBasePort:47650})
 const addr=await listen(service,'127.0.0.1',9743),base=`http://127.0.0.1:${addr.port}`
