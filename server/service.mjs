@@ -3765,6 +3765,34 @@ export function createWizardServer(options = {}) {
     }
     return settings
   }
+  // The qualified pins journal is also the durable positive pair index. Seed it from the
+  // migrated, explicitly configured service stores; never crawl agent homes for history.
+  if (agents) {
+    const indexRows = value => {
+      if (!value || typeof value !== 'object') return
+      if (typeof value.agent_id === 'string' && typeof value.session_id === 'string') agents.pin(value.session_id, value.agent_id)
+      for (const child of Object.values(value)) indexRows(child)
+    }
+    const jsonPaths = [options.threadTitleStatePath, options.threadStatusBackfillPath, options.subjectsPath,
+      options.threadSeenStatePath, options.threadDispositionStatePath, options.dismissedFailureStatePath,
+      operatorWorkerStatePath, options.voiceRecoveryManifestPath, join(agents.agentsDir, '.run-threads.json'),
+      ...(runQueueStatePath ? [join(dirname(runQueueStatePath), 'model-locked-admissions.json')] : [])]
+    for (const path of jsonPaths.filter(Boolean)) {
+      if (!existsSync(path)) continue
+      try { indexRows(JSON.parse(readFileSync(path, 'utf8'))) }
+      catch { console.warn('[agent-pairs] pair-index projection unavailable; no negative history claim made') }
+    }
+    for (const path of [runQueueStatePath, uploadStatePath, options.heavyStatePath].filter(Boolean)) {
+      if (!existsSync(path)) continue
+      const db = new DatabaseSync(path, { readOnly: true })
+      try {
+        for (const [table, sessionColumn] of [['wizard_run_queue', 'session_id'], ['heavy_jobs', 'session'], ['shares', 'session_id']]) {
+          if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue
+          indexRows(db.prepare(`SELECT agent_id, ${sessionColumn} AS session_id FROM ${table}`).all())
+        }
+      } finally { db.close() }
+    }
+  }
   const qualifySeenInput = (request, state) => {
     if (!state?.threads || typeof state.threads !== 'object') return state
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
@@ -4904,6 +4932,10 @@ export function createWizardServer(options = {}) {
           void refreshCanonicalSessions().catch(() => undefined)
         }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
+          if (agents && !operator) {
+            const rows = parseJsonBody(result)
+            for (const row of rows.data ?? rows.sessions ?? []) if (typeof row?.id === 'string') agents.pin(row.id, MAIN_AGENT_ID)
+          }
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }
         if (upstream.ok && !operator && request.method === 'GET' && url.searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {

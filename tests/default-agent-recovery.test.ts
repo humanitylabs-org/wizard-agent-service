@@ -71,6 +71,21 @@ async function scene({ queued = false, manifest = null as any } = {}) {
 }
 
 describe('persisted default and recovery contract', () => {
+  it('a stopped unrelated agent does not couple server-minted new chats to its availability', async () => {
+    const s = await scene(), offline = await s.create('Offline')
+    s.status.set(offline.id, 'stopped')
+    const offset = s.calls.length
+    const response = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })
+    const body = await response.json()
+    expect(response.status).toBe(201)
+    expect(body.session.id).toMatch(/^wizard_[a-f0-9]{32}$/)
+    expect(s.calls.slice(offset).some(row => row.agent === offline.id)).toBe(false)
+    expect(createAgentRegistry({ agentsDir: s.agentsDir }).pinnedAgent(body.session.id)).toBe('hermes')
+    // A named id is NOT proved fresh. Fail closed if the offline agent could genuinely own it.
+    expect((await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_fresh', source: 'wizard-mobile' })).status).toBe(503)
+    // A known indexed pair can continue without querying unrelated agents.
+    expect((await s.call('/wizard/hermes/api/sessions/' + body.session.id + '?agent=hermes', 'PATCH', { title: 'Changed' })).status).toBe(200)
+  })
   it('main-only actions authorize recovery and reject explicit secondary pairs before touching main', async () => {
     const s = await scene(), managed = await s.create('Managed')
     s.histories.get(managed.id)!.add('wizard_old')

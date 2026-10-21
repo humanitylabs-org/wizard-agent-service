@@ -6,6 +6,7 @@
 //   /wizard/v1/agent-grants           (agent-data grants; a private source is refused, #59)
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
+import { randomUUID } from 'node:crypto'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
@@ -384,6 +385,14 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   }
   if (explicitQuery && explicitBody && explicitQuery !== explicitBody) throw new AgentError(400, 'agent_mismatch', 'request.agent')
   const explicit = explicitQuery || explicitBody
+  // Only ids minted inside this request have a provably fresh namespace. A client assertion of
+  // randomness is not evidence: it might be the exact id of a never-pinned private thread.
+  let serverMinted = false
+  if (!operator && method === 'POST' && upstreamPath === '/api/sessions' && bodyValue && !bodyValue.id && !bodyValue.session_id) {
+    serverMinted = true
+    bodyValue = { ...bodyValue, id: `wizard_${randomUUID().replaceAll('-', '')}` }
+    body = Buffer.from(JSON.stringify(bodyValue))
+  }
   if (explicit && !registry.read(explicit)) throw new AgentError(404, 'agent_not_found', 'agent.id')
   if (operator && explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'agent_not_found', 'agent.id')
   const sessionId = sessionIdFromPath(upstreamPath)
@@ -402,7 +411,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   assertAgentTargets(registry, request, [explicit])
   // A read by id alone of a thread or run the caller may not open goes where an unknown id goes (the main
   // agent, which does not have it): the answer is the same as for an id that does not exist.
-  if (!explicit && sessionId) {
+  if (!explicit && sessionId && !serverMinted) {
     let matches = knownPins.filter(id => visibleAgent(registry, request, id))
     // A stored single pin decides old-client routing. Otherwise discover visible histories, never private content.
     if (!knownPins.length && ctx.sessionExists) {
@@ -428,7 +437,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     }
   }
   // A thread already on the main agent cannot be continued under another agent.
-  if (explicit && sessionId && method !== 'GET' && !knownPins.includes(explicit)) {
+  if (explicit && sessionId && !serverMinted && method !== 'GET' && !knownPins.includes(explicit)) {
     const targetExists = ctx.sessionExists ? await ctx.sessionExists(explicit, sessionId, { strict: true }) : false
     if (!targetExists) {
       const others = [...knownPins]
@@ -453,7 +462,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   const newChat = method === 'POST' && ['/v1/runs', '/api/sessions'].includes(upstreamPath)
   const agentId = explicit || pinned || routed || (newChat ? registry.defaultAgentId?.() : '') || MAIN_AGENT_ID
   assertAgentTargets(registry, request, [agentId])
-  if (newChat && sessionId && !explicit && !knownPins.includes(agentId) && ctx.sessionExists && !await ctx.sessionExists(agentId, sessionId, { strict: true })) {
+  if (newChat && sessionId && !serverMinted && !explicit && !knownPins.includes(agentId) && ctx.sessionExists && !await ctx.sessionExists(agentId, sessionId, { strict: true })) {
     const others = []
     for (const agent of registry.list()) if (agent.id !== agentId && agent.role !== 'recovery' && await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
     assertAgentTargets(registry, request, others)
