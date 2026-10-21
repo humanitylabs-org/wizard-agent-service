@@ -2249,7 +2249,7 @@ function buildWizardServer(options, lifetime) {
     inputSchema: { type: 'object', additionalProperties: false, required: ['session_id', 'due_at', 'timezone'], properties: {
       session_id: { type: 'string', description: 'Exact Wizard session id' }, due_at: { type: 'string', description: 'ISO 8601 instant with offset, e.g. 2026-10-22T09:00:00+07:00' },
       timezone: { type: 'string', description: 'Displayed IANA timezone, e.g. Asia/Bangkok' }, target_kind: { type: 'string', enum: ['thread', 'message'], default: 'thread' },
-      anchor_at: { type: 'integer', description: 'Exact message timestamp in milliseconds for a message reminder' }, context: { type: 'string', maxLength: 500 }, note: { type: 'string', maxLength: 500 },
+      anchor_at: { type: 'number', exclusiveMinimum: 0, description: 'Exact message timestamp in milliseconds for a message reminder' }, context: { type: 'string', maxLength: 500 }, note: { type: 'string', maxLength: 500 },
       idempotency_key: { type: 'string', description: 'Stable retry key; reuse it when retrying the same request' },
     } },
     run: (args, { agentId }) => boomerangStore.create({ scope: 'wizard-account-local', sessionId: args.session_id, runtime: 'direct', agentId: agentId || 'hermes',

@@ -72,14 +72,14 @@ export class BoomerangStore {
     const targetKind = input.targetKind, timezone = zone(input.timezone)
     const dueAt = iso(input.dueAt)
     if (!scope || !ID.test(sessionId) || !['direct', 'operator'].includes(runtime) || !ID.test(agentId) || !['thread', 'message'].includes(targetKind)
-      || (targetKind === 'message' && (!Number.isSafeInteger(input.anchorAt) || input.anchorAt <= 0))
+      || (targetKind === 'message' && (!Number.isFinite(input.anchorAt) || input.anchorAt <= 0))
       || (targetKind === 'thread' && input.anchorAt != null)) throw Object.assign(new Error('Invalid boomerang reminder'), { status: 400 })
     if (!allowPast && Date.parse(dueAt) <= this.now()) throw Object.assign(new Error('due_at must be in the future'), { status: 400 })
     const at = new Date(this.now()).toISOString(), id = `boom_${randomUUID().replaceAll('-', '')}`
     this.db.prepare(`INSERT INTO boomerang_reminders
       (id,scope,client_request_id,session_id,runtime,agent_id,target_kind,anchor_at,context,note,due_at,timezone,status,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, scope, clientRequestId, sessionId, runtime, agentId, targetKind,
-        Number.isFinite(input.anchorAt) ? Math.trunc(input.anchorAt) : null, clean(input.context, 500), clean(input.note, 500), dueAt, timezone, 'scheduled', at, at)
+        Number.isFinite(input.anchorAt) ? input.anchorAt : null, clean(input.context, 500), clean(input.note, 500), dueAt, timezone, 'scheduled', at, at)
     return this.get(scope, id)
   }
 
