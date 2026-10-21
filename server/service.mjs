@@ -3222,7 +3222,18 @@ function buildWizardServer(options, lifetime) {
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
-      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) return refreshCanonicalSessions()
+      // A new assistant reply refreshes the listing, but a busy Hermes can take seconds to answer
+      // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
+      // short moment, then serve the last listing; the refresh bumps the generation and the list
+      // snapshot rebuilds as soon as it lands.
+      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) {
+        const fresh = refreshCanonicalSessions()
+        const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
+        let timer
+        const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
+        const sessions = await Promise.race([fresh.catch(() => null), late]).finally(() => clearTimeout(timer))
+        return Array.isArray(sessions) ? sessions : canonicalSessionCache.sessions
+      }
       if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
       return canonicalSessionCache.sessions
     }
@@ -3552,7 +3563,7 @@ function buildWizardServer(options, lifetime) {
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
       last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
-    const snapshot = createSharedSnapshot()
+    const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
       const entry = { at: new Date().toISOString(), kind, ...detail }
       console.log(`[list-cache] ${kind} ${JSON.stringify(detail).slice(0, 4000)}`)
