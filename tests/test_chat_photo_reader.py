@@ -33,11 +33,11 @@ class Photos(unittest.TestCase):
    path=str(pathlib.Path(root)/'history.db')
    c=sqlite3.connect(path)
    c.executescript('CREATE TABLE sessions(id TEXT,source TEXT,user_id TEXT,chat_id TEXT,chat_type TEXT,profile_name TEXT,hidden INTEGER,archived INTEGER,parent_session_id TEXT,title TEXT,model_config TEXT,origin_json TEXT,created_source TEXT,transport_profile TEXT); CREATE TABLE messages(id INTEGER,session_id TEXT,role TEXT,timestamp REAL,display_kind TEXT,_compressed_summary INTEGER,tool_calls TEXT,platform_message_id TEXT,content TEXT);')
-   for i, (sid, uid) in enumerate([('wrong','other'),('legacy',None),('pinned',None)],1):
+   for i, (sid, uid) in enumerate([('wrong','other'),('legacy',None),('pinned',None),('duplicate',None)],1):
     c.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(sid,'webui',uid,None,None,'default',0,1,None,'Owner chat','{}',None,'human',None))
     c.execute('INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)',(i,sid,'user',10,None,0,None,None,'[Image attached at: /image.png]'))
    c.commit();c.close()
-   (pathlib.Path(root)/'.threads.json').write_text(json.dumps({'schema':1,'threads':{'pinned':'private-agent'}}))
+
    original=sqlite3.connect; content_ids=[]
    class Traced:
     def __init__(self, conn): self.conn=conn
@@ -50,9 +50,21 @@ class Photos(unittest.TestCase):
       content_ids.append(parameters[0]); assert parameters[0]==2
      return self.conn.execute(sql,parameters)
     def close(self): self.conn.close()
-   with patch.object(m.sqlite3,'connect',side_effect=lambda *a,**kw: Traced(original(*a,**kw))):
-    result=m.scan(path,0,0,'123',250,root)
-   self.assertEqual(content_ids,[2]);self.assertEqual([e['thread_id'] for e in result['evidence']],['legacy'])
+   legacy={'schema':1,'threads':{'pinned':'private-agent','duplicate':'private-agent'}}
+   pairs=[('hermes','legacy'),('private-agent','pinned'),('hermes','duplicate'),('private-agent','duplicate')]
+   qualified={'schema':2,'threads':{json.dumps([agent,sid]):{'agent_id':agent,'session_id':sid} for agent,sid in pairs}}
+   for value in (legacy,qualified):
+    (pathlib.Path(root)/'.threads.json').write_text(json.dumps(value));content_ids.clear()
+    with patch.object(m.sqlite3,'connect',side_effect=lambda *a,**kw: Traced(original(*a,**kw))):
+     result=m.scan(path,0,0,'123',250,root)
+    self.assertEqual(content_ids,[2]);self.assertEqual([e['thread_id'] for e in result['evidence']],['legacy'])
+ def test_qualified_registry_keeps_literal_prefixes_and_rejects_malformed_pairs(self):
+  for sid in ('direct:x','operator:x'):
+   value={'schema':2,'threads':{json.dumps(['hermes',sid]):{'agent_id':'hermes','session_id':sid}}}
+   self.assertEqual(m.registry_pins(value),{sid:'hermes'})
+   value['threads'][json.dumps(['hermes',sid])]['session_id']='wrong'
+   with self.assertRaises(ValueError): m.registry_pins(value)
+  with self.assertRaises(ValueError): m.registry_pins({'schema':999,'threads':{}})
  def test_assistant_inline_image_candidate(self):
   self.assertEqual(m.photo_refs(json.dumps([{'type':'image_url','image_url':{'url':'data:image/png;base64,fixture'}}]),'assistant'),[{'kind':'inline'}])
 if __name__=='__main__': unittest.main()

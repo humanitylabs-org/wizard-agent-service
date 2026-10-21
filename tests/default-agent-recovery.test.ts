@@ -87,7 +87,7 @@ describe('persisted default and recovery contract', () => {
     const response = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })
     const body = await response.json()
     expect(response.status).toBe(201)
-    expect(body.session.id).toMatch(/^wizard_[a-f0-9]{32}$/)
+    expect(body.session.id).toMatch(/^wizard_\d+_[a-f0-9]{32}$/)
     expect(s.calls.slice(offset).some(row => row.agent === offline.id)).toBe(false)
     expect(createAgentRegistry({ agentsDir: s.agentsDir }).pinnedAgent(body.session.id)).toBe('hermes')
     // A named id is NOT proved fresh. Fail closed if the offline agent could genuinely own it.

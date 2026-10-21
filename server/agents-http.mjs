@@ -390,7 +390,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   let serverMinted = false
   if (!operator && method === 'POST' && upstreamPath === '/api/sessions' && bodyValue && !bodyValue.id && !bodyValue.session_id) {
     serverMinted = true
-    bodyValue = { ...bodyValue, id: `wizard_${randomUUID().replaceAll('-', '')}` }
+    bodyValue = { ...bodyValue, id: `wizard_${Date.now()}_${randomUUID().replaceAll('-', '')}` }
     body = Buffer.from(JSON.stringify(bodyValue))
   }
   if (explicit && !registry.read(explicit)) throw new AgentError(404, 'agent_not_found', 'agent.id')

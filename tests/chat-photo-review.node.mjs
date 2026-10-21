@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createPhotoProjection, createChatPhotoReconciler, atomicPhotoJson } from '../server/chat-photo-projection.mjs'
-import { photoAuthorityId, createPhotoRuntimeVerifier } from '../server/chat-photo-authority.mjs'
+import { photoAuthorityId, createPhotoRuntimeVerifier, createCanonicalChatPhotoResolver } from '../server/chat-photo-authority.mjs'
 const PNG = Buffer.from('89504e470d0a1a0a0000000049454e44ae426082','hex')
 function setup(t) {
  const root = mkdtempSync(join(tmpdir(),'photo-review-')); t.after(()=>rmSync(root,{recursive:true,force:true}))
@@ -29,6 +29,17 @@ test('actual registry path and owner are sealed; runtime verifies authenticated 
  await good();await good();assert.equal(requests,1)
  await assert.rejects(createPhotoRuntimeVerifier({...config,registry,fetchImpl:async()=>new Response('{}',{status:401})})(),/authentication/)
  await assert.rejects(createPhotoRuntimeVerifier({...config,registry,fetchImpl:async()=>new Response('{"id":"wrong"}')})(),/identity/)
+})
+test('qualified Hermes pins stay main; secondary duplicate pins cannot authorize photo reads',async t=>{
+ const {config,options}=setup(t)
+ let ids=['hermes'],fetches=0
+ const registry={pinnedAgents:()=>ids,pinnedAgent:()=>{throw new Error('unqualified pin read')}}
+ const verifier=()=>createPhotoRuntimeVerifier({...config,registry,fetchImpl:async()=>{fetches++;return Response.json({id:'wizard_123_abc'})}})
+ await verifier()();assert.equal(fetches,1)
+ ids=['hermes','private-agent']
+ await assert.rejects(verifier()(),/no canonical owner session/);assert.equal(fetches,1)
+ const resolver=createCanonicalChatPhotoResolver({...options,registry})
+ assert.deepEqual(await resolver({thread_id:'wizard_123_abc',refs:[{}]}),{photos:[],unavailable:['non_main_agent']})
 })
 test('private permissions and accounting survive publication before checkpoint',async t=>{
  const {root,options,provenance}=setup(t), p=createPhotoProjection({root:join(root,'media'),...options})
