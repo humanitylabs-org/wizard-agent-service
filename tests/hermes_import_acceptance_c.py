@@ -95,11 +95,22 @@ def copy_portable(source, home, manifest):
          per_root_bytes={root: sum(n for _, rel, n in rows if rel.parts[0] == root) for root in sorted({r.parts[0] for _, r, _ in rows})})
     # Complete path disposition stays private; evidence records only aggregate counts.
     m.dump(manifest, {'included': [str(rel) for _, rel, _ in rows], 'omitted': omitted})
+    copied = vanished = 0
     for src, rel, _ in rows:
         dest = home / rel
         dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(src, dest)
-    emit(non_database_copy_complete=True, copied_files=len(rows), omitted_paths=len(omitted),
+        try:
+            # The live home stays running. Runtime output may disappear between
+            # inventory and copy; never follow a replacement symlink or fail the
+            # complete portable copy because an ephemeral output was reaped.
+            if not stat.S_ISREG(src.lstat().st_mode):
+                vanished += 1
+                continue
+            shutil.copy2(src, dest, follow_symlinks=False)
+            copied += 1
+        except FileNotFoundError:
+            vanished += 1
+    emit(non_database_copy_complete=True, copied_files=copied, vanished_runtime_files=vanished, omitted_paths=len(omitted),
          skill_files=sum(str(r).startswith('skills/') for _, r, _ in rows),
          plugin_files=sum(str(r).startswith('plugins/') for _, r, _ in rows))
 
@@ -396,5 +407,8 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        emit(error=str(exc) if isinstance(exc, m.ImportFailure) else type(exc).__name__)
+        import traceback
+        emit(error=str(exc) if isinstance(exc, m.ImportFailure) else type(exc).__name__,
+             error_filename=getattr(exc, 'filename', None),
+             error_locations=[{'file': Path(f.filename).name, 'line': f.lineno} for f in traceback.extract_tb(exc.__traceback__)])
         sys.exit(1)
