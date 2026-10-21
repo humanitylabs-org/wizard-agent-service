@@ -5447,6 +5447,11 @@ function buildWizardServer(options, lifetime) {
           'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
+        // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
+        if (decoded.includes('/') && decoded.endsWith('.html')) {
+          headers['X-Frame-Options'] = 'SAMEORIGIN'
+          headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+        }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
         response.writeHead(200, headers)
         if (request.method === 'HEAD') response.end()

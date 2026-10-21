@@ -451,6 +451,20 @@ function historyFixture(path: string) {
   db.close()
 }
 
+describe('same-origin hosted Agents app',()=>{
+  it('permits only the nested app document to be framed; the shell stays DENY',async()=>{
+    const ux=mkdtempSync(join(tmpdir(),'was-ux-frame-'));mkdirSync(join(ux,'agents'))
+    writeFileSync(join(ux,'index.html'),'<!doctype html>shell');writeFileSync(join(ux,'agents','index.html'),'<!doctype html>agents')
+      const main=await fakeHermes('main'),{base}=await start(box(),main,{uxDir:ux})
+      const outer=await fetch(base+'/wizard-os-home/'),inner=await fetch(base+'/wizard-os-home/agents/index.html')
+      expect(outer.status).toBe(200);expect(outer.headers.get('x-frame-options')).toBe('DENY')
+      expect(outer.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+      expect(inner.status).toBe(200);expect(inner.headers.get('x-frame-options')).toBe('SAMEORIGIN')
+      expect(inner.headers.get('content-security-policy')).toContain("frame-ancestors 'self'")
+
+  })
+})
+
 describe('private round 2: read-only standard retrieval, private search and deletion', () => {
   it('FTS excludes hidden and cron noise by default; hidden opt-in supports probes; read is bounded', () => {
     const path = join(box(),'standard.db'); historyFixture(path)
