@@ -49,7 +49,7 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request }) {
+export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -63,6 +63,7 @@ export function createHeavyIntegration({ options, queue, request }) {
   const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
+    if ((job.agent_id ?? 'hermes') !== 'hermes' || !isAutomaticAgentAllowed('hermes')) return false
     const fresh = heavy.get(job.job_id)
     if (!fresh || fresh.cancel_requested || fresh.continuation_invalidated || ['suppressed', 'superseded'].includes(fresh.resume)) return false
     const latest = queue.latestForSession(job.sessionId)
@@ -93,11 +94,11 @@ export function createHeavyIntegration({ options, queue, request }) {
       const body = JSON.stringify({ session_id: job.sessionId, input, ...job.route })
       const result = await queue.admit({ runtime: 'direct', sessionId: job.sessionId,
         idempotencyKey: `wizard-heavy-${job.job_id}`, requestHash: queueRequestHash('direct', body), body,
-        continuation: { kind: HEAVY_KIND, job_id: job.job_id, sessionId: job.sessionId } })
+        agent_id: job.agent_id ?? 'hermes', continuation: { kind: HEAVY_KIND, job_id: job.job_id, agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, sessionId: job.sessionId } })
       return result.record
     },
   })
-  const view = job => ({ job_id: job.job_id, state: job.state, reason: job.reason,
+  const view = job => ({ job_id: job.job_id, agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, state: job.state, reason: job.reason,
     cancel_requested: job.cancel_requested, continuation: job.resume || 'pending',
     continuation_invalidated: Boolean(job.continuation_invalidated), receipt: job.receipt,
     instruction: terminal.has(job.state) ? 'Use the receipt as evidence; do not repeat the job.' :
@@ -127,6 +128,7 @@ export function createHeavyIntegration({ options, queue, request }) {
       const sessionId = value.session_id
       if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw fail('session required', 400)
       if (path === '/wizard/internal/heavy/submit') {
+        if (!isAutomaticAgentAllowed('hermes')) throw fail('recovery agent is not automatic', 409)
         const origin = queue.latestForSession(sessionId)
         // Do not infer a private/operator route or let callers substitute a model.
         if (!origin || origin.runtime !== 'direct' || !['running', 'launching'].includes(origin.status)) throw fail('no mutation-owning direct run', 409)

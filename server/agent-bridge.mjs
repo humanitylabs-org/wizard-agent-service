@@ -26,7 +26,7 @@ function clean(value, max) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, max) : ''
 }
 
-/** `defleur-video` -> `defleur_video`: the gateway prefix of an app's tools. */
+/** `photo-tools` -> `photo_tools`: the gateway prefix of an app's tools. */
 export function toolPrefix(appId) {
   return String(appId || '').replace(/[^A-Za-z0-9_]/gu, '_')
 }

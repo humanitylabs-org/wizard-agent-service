@@ -90,13 +90,13 @@ def selftest():
     cases = {
         "good named volume": (good, None, True),
         "good dedicated dir": ([home_bind("/srv/wizard/agents/npa/home"), skills], "/srv/wizard/agents/npa/home", True),
-        "whole host home, no expected source": ([home_bind("/home/telos"), skills], None, False),
-        "whole host home declared as expected": ([home_bind("/home/telos"), skills], "/home/telos", False),
-        "mac home declared as expected": ([home_bind("/Users/thales"), skills], "/Users/thales", False),
+        "whole host home, no expected source": ([home_bind("/home/owner"), skills], None, False),
+        "whole host home declared as expected": ([home_bind("/home/owner"), skills], "/home/owner", False),
+        "mac home declared as expected": ([home_bind("/Users/owner"), skills], "/Users/owner", False),
         "root bind": ([home_bind("/"), skills], "/", False),
         "bind differs from expected": ([home_bind("/srv/wizard/agents/other/home"), skills], "/srv/wizard/agents/npa/home", False),
         "foreign volume as home": ([dict(good[0], src="other_agent-home"), skills], None, False),
-        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/telos/.ssh"}], None, False),
+        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/owner/.ssh"}], None, False),
         "docker socket": (good + [{"type": "bind", "dest": "/var/run/docker.sock", "rw": True, "src": "/var/run/docker.sock"}], None, False),
         "skills writable": ([good[0], dict(skills, rw=True)], None, False),
         "home missing": ([skills], None, False),
@@ -109,11 +109,11 @@ def selftest():
     init_cases = {
         "init: same home volume": ([dict(home)], home, True),
         "init: same dedicated dir": ([home_bind("/srv/wizard/agents/npa/home")], home_bind("/srv/wizard/agents/npa/home"), True),
-        "init: host home bind": ([home_bind("/home/telos")], home, False),
+        "init: host home bind": ([home_bind("/home/owner")], home, False),
         "init: root bind": ([home_bind("/")], home, False),
         "init: foreign volume": ([dict(home, src="other_agent-home")], home, False),
         "init: different dedicated dir": ([home_bind("/srv/wizard/agents/other/home")], home_bind("/srv/wizard/agents/npa/home"), False),
-        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/telos"}], home, False),
+        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/owner"}], home, False),
         "init: read-only home": ([dict(home, rw=False)], home, False),
     }
     for name, (mounts, agent_home, expect_ok) in init_cases.items():

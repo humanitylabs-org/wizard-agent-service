@@ -42,4 +42,24 @@ print(json.dumps(result, sort_keys=True))
     })
     expect(JSON.parse(output)).toEqual({ 'thread-preserved': 100 })
   })
+
+  it('hides recovery requests in the neutral and the legacy wording', () => {
+    const script = String.raw`
+import importlib.util, json, sqlite3, sys
+spec = importlib.util.spec_from_file_location("read_human_sessions", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+database = sqlite3.connect(":memory:")
+database.row_factory = sqlite3.Row
+database.executescript("""
+CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL, active INTEGER DEFAULT 1, display_kind TEXT DEFAULT '');
+INSERT INTO messages VALUES ('s', 'user', 'Real request', 100, 1, '');
+INSERT INTO messages VALUES ('s', 'user', '[Owner requested recovery of this interrupted Helm card.] Continue.', 200, 1, '');
+INSERT INTO messages VALUES ('s', 'user', '[James requested recovery of this interrupted Helm card.] Continue.', 300, 1, '');
+""")
+print(json.dumps(module.latest_visible_users(database, {"s": "thread-s"}), sort_keys=True))
+`
+    const output = execFileSync('python3', ['-c', script, readerPath], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } })
+    expect(JSON.parse(output)).toEqual({ 'thread-s': 100 })
+  })
 })

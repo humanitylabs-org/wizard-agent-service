@@ -28,8 +28,11 @@ const lightweight = process.env.CANARY_LIGHTWEIGHT === '1'
 const busyOnly = process.env.CANARY_BUSY_ONLY === '1'
 const results = { kind: 'real-model-real-worker-isolated-service', session, questionSession,
   handler: 'registered plugin handler invoked by canary harness, not yet installed in live Hermes', events: [] }
-const worker = { host: process.env.CANARY_SSH_HOST || 'thales', script: `${remote}/scripts/heavy-worker.py`,
-  root: remoteSpool, lock: lightweight ? `${remoteSpool}/test-only.lock` : '/Volumes/ThalesMedia/AndroidBuilds/worker.lock' }
+const heavyRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+if (!heavyRoot) throw new Error('heavy lane not configured: set WIZARD_HEAVY_ROOT')
+if (!process.env.WIZARD_BUILD_HOST) throw new Error('set WIZARD_BUILD_HOST for the remote worker')
+const worker = { host: process.env.WIZARD_BUILD_HOST, script: `${remote}/scripts/heavy-worker.py`,
+  root: remoteSpool, lock: lightweight ? `${remoteSpool}/test-only.lock` : `${heavyRoot}/AndroidBuilds/worker.lock` }
 const bridge = process.env.CANARY_RPC_BRIDGE === '1' ? createHeavyRpcServer({ token, transport: heavySshTransport(worker) }) : null
 if (bridge) await listen(bridge, '127.0.0.1', 0)
 const rpcOrigin = bridge ? `http://127.0.0.1:${bridge.address().port}` : ''
@@ -124,7 +127,7 @@ try {
     results.scope = 'real shared-worker contention, interactive answer, and cancellation; no build executed'
     results.passed = true
   } else {
-  await exec('ssh', ['thales', `/usr/bin/touch '${gate}'`])
+  await exec('ssh', [worker.host, `/usr/bin/touch '${gate}'`])
   for (const receipt of [first, second]) {
     const result = await wait('worker completion and originating continuation', async () => {
       const value = await tool('status', { job_id: receipt.job_id })

@@ -78,7 +78,7 @@ export function createAppBindings({ osHome, registry, appsJsonPath, launcherPath
 
   function agentFor(appId) {
     const entry = stored()[appId]
-    return typeof entry?.agent === 'string' && entry.agent ? entry.agent : MAIN_AGENT_ID
+    return !entry || entry.is_default === true || entry.agent === 'default' ? (registry.defaultAgentId?.() ?? MAIN_AGENT_ID) : typeof entry.agent === 'string' && entry.agent ? entry.agent : (registry.defaultAgentId?.() ?? MAIN_AGENT_ID)
   }
 
   function declared(appId) {
@@ -96,7 +96,7 @@ export function createAppBindings({ osHome, registry, appsJsonPath, launcherPath
     const agent = registry.read(agentId)
     return {
       app_id: app.id, label: app.label, required: app.required, purpose: app.purpose,
-      agent: agentId, is_default: !stored()[app.id],
+      agent: agentId, is_default: !stored()[app.id] || stored()[app.id].is_default === true || stored()[app.id].agent === 'default',
       agent_info: agent ? registry.threadAgent(agent) : null,
       ...(agent ? {} : { problem: 'agent_missing' }),
     }
@@ -110,11 +110,12 @@ export function createAppBindings({ osHome, registry, appsJsonPath, launcherPath
 
   function set(appId, body) {
     const app = declared(appId)
-    const agentId = body?.agent
+    const agentId = body?.agent === 'default' || body?.is_default === true ? (registry.defaultAgentId?.() ?? MAIN_AGENT_ID) : body?.agent
     if (typeof agentId !== 'string' || !agentId) fail(400, 'agent_required', 'app.binding.agent')
     if (!registry.read(agentId)) fail(404, 'agent_not_found', 'agent.id')
+    if (registry.read(agentId)?.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
     const apps = { ...stored() }
-    if (agentId === MAIN_AGENT_ID) delete apps[app.id]   // the default needs no entry
+    if ((body?.is_default !== false && agentId === (registry.defaultAgentId?.() ?? MAIN_AGENT_ID)) || body?.agent === 'default') delete apps[app.id]
     else apps[app.id] = { agent: agentId, set_at: Math.floor(now() / 1000) }
     mkdirSync(home, { recursive: true, mode: 0o700 })
     writeAtomic(bindingsPath, `${JSON.stringify({ schema: 1, apps }, null, 2)}\n`)

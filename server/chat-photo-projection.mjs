@@ -131,13 +131,18 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
   if (typeof resolveMessage !== 'function' || !ownerId || !SHA.test(authorityId || '')) throw new Error('canonical owner history adapter required')
   if (typeof verifyAuthority !== 'function') throw new Error('authenticated runtime verification required')
   if (!scanBatch && !registryPath) throw new Error('canonical registry path required')
-  let busy = false, stopped = false, timer
+  let busy = false, stopped = false, timer, pending
   const pendingEvents = {}
   const scan = scanBatch || (async state => {
     const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250', registryPath], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
     return JSON.parse(stdout)
   })
-  async function step() {
+  function step() {
+    if (stopped) return Promise.resolve(null)
+    if (!pending) pending = runStep().finally(() => { pending = null })
+    return pending
+  }
+  async function runStep() {
     if (busy || stopped) return null
     busy = true
     let release
@@ -203,5 +208,5 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
     } finally { if (release) await release(); busy = false }
   }
   return { step, kick(reason = 'repair') { if (!stopped) { pendingEvents[reason] = (pendingEvents[reason] || 0) + 1; void step().catch(e => log(`[chat-photos] ${e.code || e.message}`)) } },
-    start() { timer = setInterval(() => this.kick('repair'), 3000); timer.unref(); this.kick('startup') }, stop() { stopped = true; clearInterval(timer) } }
+    start() { timer = setInterval(() => this.kick('repair'), 3000); timer.unref(); this.kick('startup') }, stop() { stopped = true; clearInterval(timer); return pending } }
 }
