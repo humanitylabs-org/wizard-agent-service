@@ -53,6 +53,15 @@ describe('transactional pair migration and restoration', () => {
     expect(readFileSync(path, 'utf8')).toBe('{bad')
   })
 
+  it('malformed qualified pin and run-index authority is not treated as missing/empty', () => {
+    for (const [name, value] of [['.threads.json', { schema: 2, threads: null }], ['.threads.json', { schema: 2, threads: { wrong: { agent_id: 'hermes', session_id: 'x' } } }], ['.run-threads.json', { schema: 1, runs: { id: [{}] } }]] as const) {
+      const dir = directory(), path = join(dir, name), bytes = JSON.stringify(value)
+      writeFileSync(path, bytes)
+      expect(() => createAgentRegistry({ agentsDir: dir })).toThrow(/authority store migration could not be validated/)
+      expect(readFileSync(path, 'utf8')).toBe(bytes)
+    }
+  })
+
   it('retries a concurrent legacy writer generation without losing its row or rollback bytes', () => {
     const path = join(directory(), 'state.json')
     writeFileSync(path, JSON.stringify({ threads: { before: {} } }))

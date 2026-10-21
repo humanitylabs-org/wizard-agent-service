@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readSettings } from './wizard-os-settings.mjs'
-import { migrateJson, atomicStoreWrite, threadKey, threadReference } from './thread-reference.mjs'
+import { migrateJson, atomicStoreWrite, threadKey, threadReference, validAgentId } from './thread-reference.mjs'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -835,10 +835,16 @@ export function createAgentRegistry(options = {}) {
 
   // Qualified pins. A legacy id->agent entry already contains an explicit agent: preserve it, not today's default.
   migrateJson(threadsPath, value => {
-    if (value.schema === 2) return value
-    if (value.schema !== 1 || !value.threads || typeof value.threads !== 'object') throw new Error('Invalid thread pins')
+    if (![1, 2].includes(value?.schema) || !value.threads || typeof value.threads !== 'object' || Array.isArray(value.threads)) throw new Error('Invalid thread pins')
+    if (value.schema === 2) {
+      for (const [key, row] of Object.entries(value.threads)) {
+        if (!row || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id || row.session_id.length > 200 || key !== threadKey(row.agent_id, row.session_id)) throw new Error('Invalid qualified thread pin')
+      }
+      return value
+    }
     return { schema: 2, threads: Object.fromEntries(Object.entries(value.threads).map(([id, agent]) => {
-      const pair = threadReference(id, typeof agent === 'string' && agent ? agent : MAIN_AGENT_ID)
+      if (!id || id.length > 200 || !validAgentId(agent)) throw new Error('Invalid legacy thread pin')
+      const pair = threadReference(id, agent)
       return [threadKey(pair.agent_id, id), pair]
     })) }
   })
@@ -867,7 +873,13 @@ export function createAgentRegistry(options = {}) {
     pinsCache = next
   }
   const runsPath = join(agentsDir, '.run-threads.json')
-  migrateJson(runsPath, value => value)
+  migrateJson(runsPath, value => {
+    if (value?.schema !== 1 || !value.runs || typeof value.runs !== 'object' || Array.isArray(value.runs)) throw new Error('Invalid run pair index')
+    for (const [id, rows] of Object.entries(value.runs)) {
+      if (!Array.isArray(rows) || rows.some(row => !row || row.run_id !== id || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id)) throw new Error('Invalid run pair rows')
+    }
+    return value
+  })
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
   function noteRun(runId, agentId, sessionId = '') {
     if (typeof runId !== 'string' || !runId) return
