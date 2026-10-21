@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createWizardServer } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
 import { archivedMainDir } from './support/archived-main'
@@ -66,7 +66,7 @@ async function scene({ queued = false, factory = createWizardServer, driver = ''
   }
   const serverOptions: any = {
     upstreamOrigin: 'http://127.0.0.1:1', hermesKey: 'fixture', fetchImpl, agentsDir, agentRuntime: runtime,
-    agentUpstreamMode: 'localhost', agentTinfoilUrl: 'http://127.0.0.1:9/v1', settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
+    agentUpstreamMode: 'localhost', agentTinfoilUrl: 'http://127.0.0.1:9/v1', settingsPath: join(dir, 'settings.json'), appsJsonPath: join(dir, 'apps.json'), wizardOsHome: dir,
     requireAccess: false, ownerProof: proof, joinedDelegation: 'off', agentBridge: false, followThrough: false, voiceRouting: false, mySkin: false,
     ...(queued ? { runQueueStatePath: join(dir, 'queue.sqlite'), runQueuePollIntervalMs: 0, dispatchHealthReader: () => false, activeSessionReader: () => [] } : {}),
     threadSeenStatePath: join(dir, 'seen.json'), threadDispositionStatePath: join(dir, 'dispositions.json'),

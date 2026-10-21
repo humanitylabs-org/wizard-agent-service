@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createWizardServer } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 
 import { threadKey } from '../server/thread-reference.mjs'
