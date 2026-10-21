@@ -25,7 +25,7 @@ jobs:
       - name: Importer test dependency (isolated interpreter)
         run: |
           python3 -m venv .import-venv
-          .import-venv/bin/pip install 'PyYAML>=6.0.2,<7'
+          .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
           printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - run: npm test
         env:
