@@ -105,6 +105,11 @@ describe('read-only voice recovery receipt', () => {
     expect(resolveVoiceRecoveryReceipt(f.args)).toEqual(f.receipt)
     setRunBody(f, { input: originalInput + '\n\n[archimedes recovery context: wrong case]' })
     expect(resolveVoiceRecoveryReceipt(f.args)).toBeNull()
+    // The neutral marker works the same way; the legacy marker above stays recognized for existing runs.
+    setRunBody(f, { input: originalInput + '\n\n[Recovery context\nOperator notes.]' })
+    expect(resolveVoiceRecoveryReceipt(f.args)).toEqual(f.receipt)
+    setRunBody(f, { input: originalInput + '\n\n[recovery context: wrong case]' })
+    expect(resolveVoiceRecoveryReceipt(f.args)).toBeNull()
   })
 
   it.each(['sessionId', 'sourceFileId', 'audioSha256'] as const)(

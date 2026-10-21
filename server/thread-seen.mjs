@@ -162,7 +162,7 @@ export class ThreadSeenStore {
   }
 }
 
-// Durable record of thread failures James explicitly dismissed from the app.
+// Durable record of thread failures the owner explicitly dismissed from the app.
 // A dismissal suppresses the "Needs retry" projection for one bound failure
 // identity; a newer request or run supersedes it automatically.
 const MAX_DISMISSED_FAILURES = 500

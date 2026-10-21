@@ -8,7 +8,8 @@ This candidate includes exact PR15 `d8a1e29c5ebc93e5163a1e775612ba4131278fbd` an
 - `WIZARD_AUTH_MODE=none` explicitly disables Access, preserving the existing private/local installation route. This is not a remedy for a failed Tailscale test.
 - `WIZARD_AUTH_MODE=cloudflare` explicitly selects Cloudflare, even if the legacy disable variable is `0` or a tailnet origin is present.
 - `WIZARD_AUTH_MODE=tailscale` selects the request-based Serve verifier. Setting `WIZARD_TAILNET_ORIGIN` with auth mode unset also opts in. Do not prepopulate that origin in production as harmless documentation.
-- Invalid modes, missing authorized logins, or invalid tailnet origin fail startup rather than silently disabling authentication.
+- Invalid modes, a partial env pair (origin without login or login without origin), or an invalid tailnet origin fail startup rather than silently disabling authentication.
+- `WIZARD_AUTH_MODE=tailscale` (or `WIZARD_TAILNET_PORT`) with neither env value reads origin/logins from settings `access.tailscale` per request and refuses every request until "Connect your phone" writes them. See [phone-setup.md](phone-setup.md) for the separate Serve listener the phone path uses.
 
 An activation-only example, **not installed by this change**:
 

@@ -1,6 +1,6 @@
 import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { searchHermesSessionText, readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, searchHermesSessionText, readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -55,8 +55,12 @@ import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAge
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
+import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
 
 export const BODY_LIMIT = 12 * 1024 * 1024
+// Marks a request that arrived on the dedicated Tailscale Serve listener (createTailnetIngress). A symbol
+// property on the request object: no header or client input can set it.
+export const TAILNET_INGRESS = Symbol('wizard.tailnetIngress')
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
 export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
 // Eight composer files plus the retained microphone recording.
@@ -595,7 +599,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
                 if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
               }
             }
-            // A failure James explicitly dismissed stops demanding attention
+            // A failure the owner explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
               const failureKey = external?.runId || helm?.activityId || latestDirect?.publicRunId || String(projected.updatedAt ?? '')
@@ -1212,7 +1216,8 @@ function legacyInternalHistoryMessage(message) {
     '[PRIOR CONTEXT — for reference only; not a new message]',
     '[Your active task list was preserved across context compression]',
     '[Your previous agent loop was paused',
-    '[James requested recovery of this interrupted Helm card.]',
+    RECOVERY_REQUEST_MARKER,
+    LEGACY_RECOVERY_REQUEST_MARKER,
     '[STILL IN PROGRESS',
     '[IMPORTANT: Background process ',
     'Workline browser QA found a concrete regression in ',
@@ -1853,6 +1858,94 @@ export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, lega
   }
 }
 
+// Setup writes start or remove the box's Tailscale enrollment: JSON only (a cross-origin page cannot send it
+// without a preflight this service never grants), never cross-site or same-site (sibling *.ts.net or
+// localhost app origins), and an Origin, when present, must be this host.
+// On the box-local listener a trusted local proxy may forward the browser-facing Host as X-Forwarded-Host (as
+// for /wizard/thread-dispositions); requests through Serve are judged on their own Host only.
+function setupWriteRefusal(request, tailnetIngress) {
+  if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return 415
+  const site = request.headers['sec-fetch-site']
+  if (site !== undefined && !['same-origin', 'none'].includes(site)) return 403
+  if (request.headers.origin !== undefined) {
+    let originHost
+    try { originHost = new URL(request.headers.origin).host } catch { return 403 }
+    const publicHost = tailnetIngress ? request.headers.host : (request.headers['x-forwarded-host'] || request.headers.host)
+    if (!originHost || originHost !== publicHost) return 403
+  }
+  return 0
+}
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+function setupHostAllowed(request, settings) {
+  const allowed = new Set(LOOPBACK_HOSTS)
+  for (const origin of [settings.network.base_url, settings.access.tailscale.origin]) {
+    try { if (origin) allowed.add(new URL(origin).hostname) } catch { /* normalised already */ }
+  }
+  for (const alias of settings.network.aliases) allowed.add(alias)
+  const hostname = (value) => {
+    if (typeof value !== 'string' || !value) return ''
+    try { return new URL(`http://${value}`).hostname.toLowerCase() } catch { return '' }
+  }
+  // DNS rebinding needs a name the attacker's DNS answers. IP literals, single-label names and *.localhost
+  // (browsers pin it to loopback) cannot be rebound; mDNS (.local) names can be answered by a LAN neighbour,
+  // so they count only when the box lists them in network.aliases. Local proxies must pass the browser's
+  // Host through (or set X-Forwarded-Host themselves), as the same-origin write rule already requires.
+  const ok = (name) => Boolean(name) && (allowed.has(name) || /^[0-9.]+$/u.test(name) || name.startsWith('[') || !name.includes('.') || name.endsWith('.localhost'))
+  const forwarded = request.headers['x-forwarded-host']
+  return ok(hostname(request.headers.host)) && (forwarded === undefined || ok(hostname(forwarded)))
+}
+
+// The shell's static entry points, served to a verified phone through the Serve listener. Its API paths
+// (<prefix>api/...) are this service's own routes and never go to the shell.
+export function shellStaticPath(pathname, uxPrefix = '/wizard-os-home/') {
+  if (['/', '/wizard', '/wizard/', '/wizard-os-home', '/wizard-ux', uxPrefix.slice(0, -1)].includes(pathname)) return true
+  for (const prefix of new Set([uxPrefix, '/wizard-os-home/', '/wizard-ux/'])) {
+    if (pathname.startsWith(prefix)) return !pathname.startsWith(`${prefix}api/`) && !/(?:^|\/)\.|\/\/|%2e|%2f|%5c|\\/iu.test(pathname.slice(prefix.length)) && !pathname.includes('//')
+  }
+  return false
+}
+
+const SHELL_REQUEST_HEADERS = ['accept', 'accept-encoding', 'accept-language', 'if-none-match', 'if-modified-since', 'range', 'user-agent']
+const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encoding', 'cache-control', 'etag', 'last-modified', 'location',
+  'content-security-policy', 'service-worker-allowed', 'x-content-type-options', 'accept-ranges', 'content-range', 'vary', 'referrer-policy']
+
+// Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
+// cookies or credentials), and only content headers come back; redirects must stay on this origin.
+function proxyShellStatic(request, response, shellOrigin, url) {
+  return new Promise((resolvePromise) => {
+    // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
+    const target = new URL(shellOrigin)
+    target.pathname = url.pathname
+    target.search = url.search
+    const headers = { host: target.host }
+    for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
+      const out = {}
+      for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
+      if (out.location && !/^\/(?![\/\\])/u.test(String(out.location))) { reply.resume(); sendJson(response, 502, { error: 'upstream_unavailable' }); resolvePromise(); return }
+      response.writeHead(reply.statusCode || 502, out)
+      reply.pipe(response)
+      reply.on('end', resolvePromise)
+      reply.on('error', () => { response.destroy(); resolvePromise() })
+    })
+    upstream.setTimeout(30000, () => upstream.destroy(new Error('timeout')))
+    upstream.on('error', () => { if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' }); else response.destroy(); resolvePromise() })
+    upstream.end()
+  })
+}
+
+/**
+ * The listener Tailscale Serve points at. Every request it accepts is handled by `server` as tailnet
+ * traffic (owner verification always on); it never shares the box-local listener's trust.
+ */
+export function createTailnetIngress(server) {
+  return createServer((request, response) => {
+    request[TAILNET_INGRESS] = true
+    server.emit('request', request, response)
+  })
+}
+
 function sendJson(response, status, value, headers = {}) {
   const body = Buffer.from(JSON.stringify(value))
   response.writeHead(status, {
@@ -2059,7 +2152,7 @@ function replacePrivateControlIdentities(result, replacements) {
 
 // wizard-stt answers 422 {detail:'No speech detected'} for a take with no words in it (an accidental tap,
 // a pocket recording). That is a result, not an outage: report it as an empty transcript so every client
-// takes its "No speech detected" path instead of retrying a permanent 502 forever (James, 12 Oct 2026).
+// takes its "No speech detected" path instead of retrying a permanent 502 forever (owner report, 12 Oct 2026).
 // FastAPI also uses 422 for malformed forms, so only the exact no-speech detail counts.
 function sttNoSpeech(status, raw) {
   if (status !== 422) return false
@@ -2104,9 +2197,14 @@ function buildWizardServer(options, lifetime) {
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
-  const requireAccess = options.requireAccess ?? true
-  const accessVerifier = options.accessVerifier
-  if (requireAccess && typeof accessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
+  const baseRequireAccess = options.requireAccess ?? true
+  const baseAccessVerifier = options.accessVerifier
+  if (baseRequireAccess && typeof baseAccessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
+  // Requests from the Tailscale Serve listener are always verified as the owner's tailnet identity, whatever
+  // the main listener's mode (a box-local "none" listener included). No verifier: that listener refuses all.
+  const tailnetVerifier = typeof options.tailnetVerifier === 'function' && options.tailnetVerifier.fromRequest ? options.tailnetVerifier : null
+  // Wizard shell (wizard-ux) static files for phones on the tailnet listener: GET/HEAD only, after verification.
+  const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -2228,7 +2326,7 @@ function buildWizardServer(options, lifetime) {
     },
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
-    accessOk: async (request) => !requireAccess || await accessVerified(request, accessVerifier),
+    accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
@@ -2259,6 +2357,10 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
+  // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
+  const phoneSetup = options.phoneSetup ?? (settingsPath ? createPhoneSetup({
+    settingsPath, socketPath: options.privateAccessSocket || DEFAULT_PRIVATE_ACCESS_SOCKET, accessPinned: Boolean(options.tailnetAccessPinned),
+  }) : null)
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
   // (<prefix>api/transcribe, <prefix>api/route): native builds post multipart audio there, through the shell.
@@ -3089,9 +3191,11 @@ function buildWizardServer(options, lifetime) {
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
+      const requireAccess = request[TAILNET_INGRESS] || baseRequireAccess
+      const accessVerifier = request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
       if (!access) throw Object.assign(new Error('access required'), {status:403})
-      const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
@@ -3165,14 +3269,14 @@ function buildWizardServer(options, lifetime) {
     } catch { return result }
   }
   // ---- Thread titles (thread-titles.mjs): the agent's status-line title renames a thread once per
-  // final reply, only when it names a different project or feature; James's own renames lock it.
+  // final reply, only when it names a different project or feature; the owner's own renames lock it.
   // Title authority (title_source) is not on stock /api/sessions/<id>, so this read stays on the
   // WIZARD_HERMES_STATE_PATH fallback; without it agent titling is off (spec/AGENT_BRIDGE.md).
   const titleDbPath = () => hermesStatePath
   const titleLocked = (current, record) => {
     if (record?.locked) return true
     if (!current?.title) return false
-    // Hermes's user-authority titles (named in a client, a CLI or by code) are James's unless the
+    // Hermes's user-authority titles (named in a client, a CLI or by code) are the owner's unless the
     // last rename on record was the agent's and still stands.
     const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
     return (current.source === 'user' || current.source === null) && !agentOwned
@@ -3747,14 +3851,17 @@ function buildWizardServer(options, lifetime) {
   // Owner vs agent authentication: one principal per request, resolved before any route.
   const principals = createPrincipalResolver({
     ownerProof: options.ownerProof ?? '',
-    requireAccess,
-    accessVerified: (request) => accessVerified(request, accessVerifier),
+    requireAccess: baseRequireAccess,
+    accessVerified: (request) => accessVerified(request, baseAccessVerifier),
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
     agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
     agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
-  })  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
+  })
+  // Only the dedicated Serve listener may use the enrolled owner identity without proxy proof.
+  const tailnetPrincipals = createPrincipalResolver({ requireAccess: true, accessVerified: (request) => accessVerified(request, tailnetVerifier) })
+  // A private agent on a box that is not in strict mode is reachable by every local caller: say so at start.
   try {
     if (!principals.strict && agents?.list().some((agent) => agent?.privacy === 'private')) {
       process.stderr.write('Warning: a private agent exists but no owner proof is configured (WIZARD_OWNER_PROOF_FILE); every local caller counts as the owner.\n')
@@ -3825,9 +3932,15 @@ function buildWizardServer(options, lifetime) {
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
     const requestDone = lifetime.request()
+    const tailnetIngress = request[TAILNET_INGRESS] === true
+    const requireAccess = tailnetIngress || baseRequireAccess
+    const accessVerifier = tailnetIngress ? tailnetVerifier : baseAccessVerifier
+    // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
+    // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
+    const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
-      const principal = await principals.attach(request)
+      const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
@@ -3838,6 +3951,45 @@ function buildWizardServer(options, lifetime) {
       }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname) && !(url.pathname === '/wizard/v1/settings' && request.method === 'PUT')) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      if (tailnetIngress) {
+        // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
+        // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
+        if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
+        if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
+          await proxyShellStatic(request, response, tailnetShellOrigin, url)
+          return
+        }
+      }
+      if (url.pathname === '/wizard/v1/setup' || url.pathname.startsWith('/wizard/v1/setup/')) {
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!phoneSetup) { sendJson(response, 404, { error: 'not_found' }); return }
+        // Enrollment decides who owns this box on the tailnet: a DNS-rebound page must not reach it through an
+        // unauthenticated box-local listener, so there the Host must be loopback or one of this box's own
+        // configured addresses. (Verified listeners already pin the Host: Serve origin or Access.)
+        if (!requireAccess && !setupHostAllowed(request, readSettings(settingsPath).settings)) { sendJson(response, 403, { error: 'host_not_allowed' }); return }
+        if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Reads can advance enrollment (turn Serve on after sign-in) and carry the sign-in link: same-origin only.
+        if (request.headers['sec-fetch-site'] !== undefined && !['same-origin', 'none'].includes(request.headers['sec-fetch-site'])) {
+          sendJson(response, 403, { error: 'cross_origin_request' }); return
+        }
+        const route = `${request.method} ${url.pathname}`
+        const writes = {
+          'POST /wizard/v1/setup/seen': () => phoneSetup.markSeen(),
+          'POST /wizard/v1/setup/phone/start': () => phoneSetup.start(),
+          'POST /wizard/v1/setup/phone/reset': () => phoneSetup.reset(),
+        }
+        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, phoneSetup.overview()); return }
+        if (route === 'GET /wizard/v1/setup/phone') { sendJson(response, 200, await phoneSetup.phone()); return }
+        if (!writes[route]) { sendJson(response, 404, { error: 'not_found' }); return }
+        const refusal = setupWriteRefusal(request, tailnetIngress)
+        if (refusal) { sendJson(response, refusal === 415 ? 415 : 403, { error: refusal === 415 ? 'json_required' : 'cross_origin_request' }); return }
+        const body = await readBoundedBody(request, 1024)
+        if (body.length && body.toString('utf8').trim() !== '{}') parseJsonBody(body)
+        sendJson(response, 200, await writes[route]())
+        return
+      }
       if (url.pathname === '/wizard/helper-continue' && request.method === 'POST') {
         const authenticated = requireAccess && await accessVerified(request, accessVerifier)
         if (requireAccess && !authenticated) { sendJson(response,403,{error:'access_required'}); return }
@@ -4497,7 +4649,7 @@ function buildWizardServer(options, lifetime) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
-        const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+        const scope = requireAccess ? accountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
           sendJson(response, 200, { state: withoutHiddenSessions(request, threadDispositionStore.get(scope)) }); return
         }
@@ -4525,7 +4677,7 @@ function buildWizardServer(options, lifetime) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
         if (!access) { sendJson(response, 403, { error: 'access_required' }); return }
-        const scope = requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+        const scope = requireAccess ? accountScope(access.claims) : 'wizard-account-local'
         if (request.method === 'GET') {
           sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
           return
@@ -5059,7 +5211,7 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !access) { sendJson(response, 403, { error: 'access_required' }); return }
         const source = await readFile(resolve(distDir, 'index.html'))
         const index = access
-          ? Buffer.from(source.toString('utf8').replace('wizard-account-local', wizardAccountScope(access.claims)))
+          ? Buffer.from(source.toString('utf8').replace('wizard-account-local', accountScope(access.claims)))
           : source
         response.writeHead(200, { ...staticHeaders('index.html'), 'Content-Length': index.length })
         response.end(index)
@@ -5093,6 +5245,7 @@ function buildWizardServer(options, lifetime) {
       else response.destroy()
     } finally { requestDone() }
   })
+  server.phoneSetup = phoneSetup
   if (chatPhotos) {
     server.once('listening', () => chatPhotos.start())
     lifetime.own(() => chatPhotos.stop(), () => chatPhotos.stop())

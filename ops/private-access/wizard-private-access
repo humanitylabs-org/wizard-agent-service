@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+"""wizard-private-access: the only piece of Wizard OS that may drive Tailscale on the box.
+
+Runs as root (systemd unit wizard-private-access.service) and answers HTTP/JSON on a unix socket
+(default /run/wizard-private-access/sock, directory 0750 and socket 0660, group `wizard`). The Agent
+Service mounts that socket; no app gets Tailscale privileges. It exposes exactly four endpoints:
+
+  GET  /v1/status   what tailscaled reports, reduced to what the phone setup needs
+  POST /v1/start    start tailscaled if needed and begin the owner's interactive sign-in
+  POST /v1/serve    publish the Service's tailnet upstream on https://<this node>/ with Tailscale Serve
+  POST /v1/reset    `tailscale serve reset` + `tailscale logout` (tailscaled stays installed)
+
+Anything else is 404. Requests are handled one at a time. It never uses auth keys, Funnel, Tailscale
+SSH, subnet routes or exit nodes, and never prints sign-in links to its log.
+
+Python 3.9+ standard library only. Configuration: /etc/wizard-private-access.conf (key = value), or
+the file named by $WIZARD_PRIVATE_ACCESS_CONF. See README.md beside this file.
+"""
+import grp
+import hashlib
+import http.server
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import socketserver
+import stat
+import subprocess
+import sys
+import threading
+import time
+
+VERSION = "1"
+DEFAULT_CONF = "/etc/wizard-private-access.conf"
+DEFAULTS = {
+    "socket": "/run/wizard-private-access/sock",
+    "socket_group": "wizard",
+    "serve_upstream": "",
+    "hostname": "wizard",
+    "tailscale": "tailscale",
+    "systemctl": "systemctl",
+    "tailscaled_unit": "tailscaled",
+    "start_wait_seconds": "5",
+    "serve_wait_seconds": "6",
+    "login_child_seconds": "900",
+}
+BACKEND_STATES = {"NoState", "NeedsLogin", "NeedsMachineAuth", "Starting", "Running", "Stopped"}
+HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+URL = re.compile(r"https://[^\s\"'<>]+")
+ZERO_TIME = "0001-01-01T00:00:00Z"
+MAX_BODY = 4096
+
+
+class HelperError(Exception):
+    def __init__(self, status, code, detail=""):
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.detail = detail[:200]
+
+
+def load_config(path=None):
+    path = path or os.environ.get("WIZARD_PRIVATE_ACCESS_CONF") or DEFAULT_CONF
+    conf = dict(DEFAULTS)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key in DEFAULTS:
+                    conf[key] = value
+    except FileNotFoundError:
+        pass
+    return conf
+
+
+def serve_port(conf):
+    value = str(conf.get("serve_upstream") or "").strip()
+    if not value:
+        return None
+    if not value.isdigit() or not 1 <= int(value) <= 65535:
+        raise HelperError(500, "bad_config", "serve_upstream must be a TCP port")
+    return int(value)
+
+
+def first_url(text):
+    for match in URL.finditer(text or ""):
+        return match.group(0).rstrip(".,;)")
+    return None
+
+
+def enable_link(url):
+    """The link `tailscale serve` prints for the owner to enable HTTPS/Serve on the tailnet (a control-server
+    page on login.tailscale.com), or None for anything else it prints (this node's address, docs links)."""
+    if not url or not url.startswith("https://login.tailscale.com/"):
+        return None
+    return url
+
+
+def executable(name):
+    if not name:
+        return None
+    if os.sep in name:
+        return name if os.path.isfile(name) and os.access(name, os.X_OK) else None
+    return shutil.which(name)
+
+
+def iso_or_none(value):
+    if not isinstance(value, str) or not value or value.startswith("0001-01-01"):
+        return None
+    return value
+
+
+class Tailscale:
+    """Thin wrapper around the tailscale CLI (and systemctl for the daemon)."""
+
+    def __init__(self, conf, lock=None):
+        self.conf = conf
+        self.lock = lock or threading.Lock()
+        self.login_child = None
+        self.login_output = []
+        self.login_url = None
+        self.https_enable_url = None
+
+    # -- processes -------------------------------------------------------------------------------
+    def binary(self):
+        return executable(self.conf["tailscale"])
+
+    def run(self, *args, timeout=10):
+        binary = self.binary()
+        if not binary:
+            raise HelperError(409, "tailscale_not_installed", "the tailscale command is not installed")
+        try:
+            return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            raise HelperError(504, "tailscale_timeout", f"tailscale {args[0]} did not answer")
+
+    def systemctl(self, *args, timeout=20):
+        binary = executable(self.conf["systemctl"])
+        if not binary:
+            return None
+        try:
+            return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def unit_present(self):
+        result = self.systemctl("show", "-p", "LoadState", "--value", self.conf["tailscaled_unit"])
+        if result is None:
+            return shutil.which("tailscaled") is not None
+        return result.returncode == 0 and result.stdout.strip() not in ("", "not-found")
+
+    def login_alive(self):
+        return self.login_child is not None and self.login_child.poll() is None
+
+    def stop_login(self):
+        child, self.login_child = self.login_child, None
+        self.login_url = None
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+    # -- status ----------------------------------------------------------------------------------
+    def raw_status(self):
+        result = self.run("status", "--json", timeout=10)
+        if result.returncode != 0:
+            return None
+        try:
+            value = json.loads(result.stdout or "{}")
+        except ValueError:
+            raise HelperError(502, "bad_status", "tailscale status --json was not JSON")
+        return value if isinstance(value, dict) else {}
+
+    def serve_config(self):
+        result = self.run("serve", "status", "--json", timeout=10)
+        if result.returncode != 0:
+            return {}
+        try:
+            value = json.loads(result.stdout or "{}")
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def status(self):
+        out = {
+            "installed": False, "daemon": "missing", "backend_state": "NoState", "auth_url": None,
+            "dns_name": None, "tailnet": None, "https_enabled": False, "https_enable_url": None,
+            "serve": {"on": False, "target": None}, "owner_login": None, "peers": [],
+        }
+        if not self.binary():
+            return out
+        out["installed"] = True
+        raw = self.raw_status()
+        if raw is None:
+            out["daemon"] = "stopped" if self.unit_present() else "missing"
+            return out
+        out["daemon"] = "running"
+        backend = raw.get("BackendState")
+        out["backend_state"] = backend if backend in BACKEND_STATES else "NoState"
+        me = raw.get("Self") or {}
+        dns = str(me.get("DNSName") or "").rstrip(".").lower()
+        tailnet = (raw.get("CurrentTailnet") or {}).get("MagicDNSSuffix") or raw.get("MagicDNSSuffix") or ""
+        out["tailnet"] = str(tailnet).strip(".").lower() or None
+        out["https_enabled"] = bool(raw.get("CertDomains"))
+        users = raw.get("User") or {}
+        owner_id = me.get("UserID")
+        owner = users.get(str(owner_id)) if owner_id is not None else None
+        if out["backend_state"] == "Running":
+            out["dns_name"] = dns or None
+            out["owner_login"] = str((owner or {}).get("LoginName") or "").strip().lower() or None
+            out["peers"] = self.owner_peers(raw, owner_id)
+        auth = raw.get("AuthURL") or ""
+        if out["backend_state"] in ("NeedsLogin", "NeedsMachineAuth", "NoState", "Starting"):
+            out["auth_url"] = auth or (self.login_url if self.login_alive() else None)
+        else:
+            self.login_url = None
+        if out["backend_state"] == "Running" and out["dns_name"]:
+            target = self.expected_target()
+            web = (self.serve_config().get("Web") or {})
+            handler = ((web.get(f"{out['dns_name']}:443") or {}).get("Handlers") or {}).get("/") or {}
+            proxy = handler.get("Proxy") if isinstance(handler, dict) else None
+            out["serve"] = {"on": bool(target and proxy and proxy.rstrip("/") == target), "target": proxy or None}
+        if out["https_enabled"] and out["serve"]["on"]:
+            self.https_enable_url = None
+        out["https_enable_url"] = None if out["serve"]["on"] else self.https_enable_url
+        return out
+
+    @staticmethod
+    def owner_peers(raw, owner_id):
+        peers = []
+        for peer in (raw.get("Peer") or {}).values():
+            if not isinstance(peer, dict) or owner_id is None or peer.get("UserID") != owner_id:
+                continue
+            stable = str(peer.get("ID") or peer.get("PublicKey") or peer.get("HostName") or "")
+            name = str(peer.get("HostName") or str(peer.get("DNSName") or "").split(".")[0] or "device")[:64]
+            peers.append({
+                "id": hashlib.sha256(("wizard-peer:" + stable).encode()).hexdigest()[:16],
+                "name": name,
+                "os": str(peer.get("OS") or "")[:32],
+                "online": peer.get("Online") is True,
+                "last_seen": iso_or_none(peer.get("LastSeen")),
+            })
+        peers.sort(key=lambda p: (not p["online"], p["name"]))
+        return peers[:32]
+
+    def expected_target(self):
+        port = serve_port(self.conf)
+        return f"http://127.0.0.1:{port}" if port else None
+
+    # -- actions ---------------------------------------------------------------------------------
+    def ensure_daemon(self, enable=True):
+        if self.raw_status() is not None:
+            return
+        if not self.unit_present():
+            raise HelperError(409, "tailscaled_missing", "tailscaled is not installed on this box")
+        verb = ("enable", "--now") if enable else ("start",)
+        result = self.systemctl(*verb, self.conf["tailscaled_unit"], timeout=30)
+        if result is None or result.returncode != 0:
+            raise HelperError(502, "tailscaled_start_failed", "could not start tailscaled")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self.raw_status() is not None:
+                return
+            time.sleep(0.25)
+        raise HelperError(504, "tailscaled_start_timeout", "tailscaled did not come up")
+
+    def start(self, hostname):
+        if not self.binary():
+            raise HelperError(409, "tailscale_not_installed", "the tailscale command is not installed")
+        self.ensure_daemon()
+        current = self.status()
+        if current["backend_state"] == "Running":
+            return current
+        if self.login_alive() and current["auth_url"]:
+            return current
+        self.stop_login()
+        # --reset: every preference not named here goes back to its default (no exit node, no advertised
+        # routes, no Tailscale SSH). --accept-dns=false leaves the box's own resolver alone.
+        args = [self.binary(), "up", "--reset", f"--hostname={hostname}", "--accept-dns=false"]
+        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, start_new_session=True)
+        self.login_child, self.login_output = child, []
+        reader = threading.Thread(target=self._read_login, args=(child,), daemon=True)
+        reader.start()
+        expiry = threading.Timer(float(self.conf["login_child_seconds"]), self._expire_login, args=(child,))
+        expiry.daemon = True  # never keeps the helper alive on shutdown
+        expiry.start()
+        deadline = time.monotonic() + float(self.conf["start_wait_seconds"])
+        while time.monotonic() < deadline:
+            if self.login_url or child.poll() is not None:
+                break
+            time.sleep(0.1)
+        current = self.status()
+        if not current["auth_url"] and child.poll() not in (None, 0) and current["backend_state"] != "Running":
+            raise HelperError(502, "login_failed", (self.login_output[-1] if self.login_output else "tailscale up failed"))
+        return current
+
+    def _read_login(self, child):
+        for line in child.stdout:
+            self.login_output.append(line.strip()[:200])
+            del self.login_output[:-20]
+            url = first_url(line)
+            if url and self.login_child is child:
+                self.login_url = url
+
+    def _expire_login(self, child):
+        with self.lock:  # same lock as requests: never change login state under a running request
+            if self.login_child is child and child.poll() is None:
+                self.stop_login()
+
+    def serve(self):
+        current = self.status()
+        if current["daemon"] != "running" or current["backend_state"] != "Running":
+            raise HelperError(409, "not_signed_in", "sign in to Tailscale first")
+        target = self.expected_target()
+        if not target:
+            raise HelperError(409, "serve_upstream_not_configured", "serve_upstream is not set in the helper config")
+        if current["serve"]["on"]:
+            return current
+        binary = self.binary()
+        child = subprocess.Popen([binary, "serve", "--bg", "--https=443", target], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        lines = []
+        found = {"url": None}
+
+        def read():
+            for line in child.stdout:
+                lines.append(line.strip()[:200])
+                found["url"] = found["url"] or enable_link(first_url(line))
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + float(self.conf["serve_wait_seconds"])
+        while time.monotonic() < deadline and child.poll() is None and not found["url"]:
+            time.sleep(0.1)  # a printed enable link means the CLI now waits for the owner: stop waiting too
+        if child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        reader.join(timeout=1)
+        after = self.status()
+        if after["serve"]["on"]:
+            self.https_enable_url = None
+            return self.status()
+        enable = found["url"] or next((u for u in (enable_link(first_url(l)) for l in lines) if u), None)
+        if enable:
+            self.https_enable_url = enable
+            return self.status()
+        raise HelperError(502, "serve_failed", next((l for l in reversed(lines) if l), "tailscale serve failed"))
+
+    def reset(self):
+        self.stop_login()
+        self.https_enable_url = None
+        if not self.binary():
+            return self.status()
+        was_stopped = self.raw_status() is None and self.unit_present()
+        if was_stopped:
+            # A stopped daemon may still hold a signed-in node and a saved Serve config that would come back
+            # later: start it (without enabling it at boot) so the sign-out is real, then stop it again.
+            self.ensure_daemon(enable=False)
+        if self.raw_status() is not None:
+            served = self.run("serve", "reset", timeout=15)
+            logged_out = self.run("logout", timeout=20)
+            after = self.status()
+            # Success is the state, not the exit codes: Serve off and the node no longer signed in.
+            if after["serve"]["on"] or after["backend_state"] == "Running":
+                failed = served if served.returncode != 0 else logged_out
+                detail = (failed.stderr or failed.stdout or "").strip().splitlines()
+                raise HelperError(502, "reset_failed", detail[-1] if detail else "tailscale is still signed in")
+            if was_stopped:
+                self.systemctl("stop", self.conf["tailscaled_unit"], timeout=30)
+                return self.status()
+            return after
+        return self.status()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "wizard-private-access/" + VERSION
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+    timeout = 10
+
+    def log_message(self, fmt, *args):  # one short line per request, never bodies or links
+        sys.stderr.write("%s %s\n" % (self.command, self.path.split("?")[0][:40]))
+
+    def address_string(self):
+        return "unix"
+
+    def reply(self, status, value):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
+    def body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise HelperError(400, "bad_request", "bad Content-Length")
+        if length < 0 or length > MAX_BODY:
+            raise HelperError(413, "too_large", "request body too large")
+        raw = self.rfile.read(length) if length else b""
+        if not raw.strip():
+            return {}
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            raise HelperError(400, "bad_request", "body must be JSON")
+        if not isinstance(value, dict):
+            raise HelperError(400, "bad_request", "body must be a JSON object")
+        return value
+
+    def dispatch(self):
+        ts = self.server.tailscale
+        route = (self.command, self.path)
+        if route == ("GET", "/v1/status"):
+            return ts.status()
+        if route == ("POST", "/v1/start"):
+            body = self.body()
+            hostname = body.get("hostname", self.server.conf["hostname"])
+            if not isinstance(hostname, str) or not HOSTNAME.match(hostname):
+                raise HelperError(400, "bad_hostname", "hostname must be a short DNS label")
+            return ts.start(hostname)
+        if route == ("POST", "/v1/serve"):
+            self.body()
+            return ts.serve()
+        if route == ("POST", "/v1/reset"):
+            self.body()
+            return ts.reset()
+        raise HelperError(404, "not_found", "unknown endpoint")
+
+    def handle_any(self):
+        try:
+            with self.server.lock:  # requests are serialized even if the server class changes
+                self.reply(200, self.dispatch())
+        except HelperError as error:
+            self.reply(error.status, {"error": error.code, "detail": error.detail})
+        except Exception as error:  # never leak a traceback to the caller
+            sys.stderr.write("internal error: %s\n" % type(error).__name__)
+            self.reply(500, {"error": "internal", "detail": "helper error"})
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = handle_any
+
+
+class Server(socketserver.UnixStreamServer):
+    """One request at a time (no ThreadingMixIn): every Tailscale change is serialized."""
+
+    allow_reuse_address = False
+
+    def __init__(self, conf):
+        self.conf = conf
+        self.lock = threading.Lock()
+        self.tailscale = Tailscale(conf, self.lock)
+        path = conf["socket"]
+        directory = os.path.dirname(path)
+        os.makedirs(directory, mode=0o750, exist_ok=True)
+        if os.path.lexists(path):
+            if not stat.S_ISSOCK(os.lstat(path).st_mode):
+                raise SystemExit(f"{path} exists and is not a socket")
+            os.unlink(path)
+        old = os.umask(0o117)
+        try:
+            super().__init__(path, Handler)
+        finally:
+            os.umask(old)
+        os.chmod(path, 0o660)
+        group = conf.get("socket_group")
+        if group and os.geteuid() == 0:
+            try:
+                gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
+                os.chown(directory, 0, gid)
+                os.chmod(directory, 0o750)
+                os.chown(path, 0, gid)
+            except KeyError:
+                sys.stderr.write(f"group {group!r} not found; socket stays root-only\n")
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(Handler.timeout)
+        return request, address
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    conf = load_config(argv[1] if len(argv) > 1 and argv[0] == "--config" else None)
+    serve_port(conf)
+    server = Server(conf)
+    def stop(*_):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, stop)
+    sys.stderr.write("wizard-private-access listening on %s\n" % conf["socket"])
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.tailscale.stop_login()
+        server.server_close()
+        try:
+            os.unlink(conf["socket"])
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
