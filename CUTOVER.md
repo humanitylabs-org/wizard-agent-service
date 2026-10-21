@@ -105,3 +105,121 @@ Restore any separately recorded alternate-launcher and recovery-runtime changes 
 ## Aftercare
 
 Keep only the non-secret acceptance report/journal and the verified encrypted remote backup. Delete transport archives, reduced rehearsal homes and any temporary scoped credential copies. Report before/after disk space and the measured interruption. Quarantine is reversible original data; schedule its encrypted remote archival/purge only after the owner accepts the new agent and the rollback window ends. Never leave a second active messaging or cron copy.
+
+
+## Gate 5 — independent host recovery (proposed replacement/addition)
+
+Implementation and isolated proof are available on `feature/hermes-agent-import`
+(`c7bd959`, guide/link follow-up `4813fce`). See `docs/hermes-recovery.md` and
+`EVIDENCE-RECOVERY.md`. **The proof did not deploy recovery on the live VPS and is
+not approval to cut over.** Keep this gate open until the following production
+checks are completed during the separately approved window.
+
+### Why a separate HERMES_HOME, not a profile
+
+Use `~/.hermes-recovery` with stock `HERMES_HOME`. A profile under
+`~/.hermes/profiles` would move with the source. The recovery implementation also
+exports the exact clean Hermes code revision and creates a new dependency venv
+under `~/.local/share/wizard-recovery`; it never depends on the moved
+`~/.hermes/hermes-agent` tree or its editable-package mapping/shebang. Preserve
+the uv-managed base interpreter outside the source home.
+
+### Before the move (approved owner action)
+
+```sh
+ops/agent-runtime/wizard agent import hermes recovery-home prepare \
+  --source "$HOME/.hermes" \
+  --home "$HOME/.hermes-recovery" \
+  --runtime "$HOME/.local/share/wizard-recovery" \
+  --port 8867 --acknowledge-host-access
+```
+
+This creates files only. It refuses overlap, existing targets, missing skills,
+dirty source code and an occupied port. It installs/enables no unit, rewrites no
+Service environment, changes no routing and starts no runtime. Source provider
+and model are preserved; unsupported credential arrangements fail rather than
+changing provider. No daily DB/history, cron, messaging configuration/tokens,
+MCP or home plugins are copied. The recovery SOUL explicitly says James opens
+it on purpose; only `hermes-agent`, `wizard-live-updates` and
+`hermes-remote-operations` are included.
+
+For this VPS's observed Anthropic/borrowed-Claude-Code route, recovery retains
+the owner's actual HOME and uses the existing host Claude Code credential store
+outside `.hermes`, with stock shared refresh locking. Confirm that the everyday
+container has its own reviewed sign-in disposition. Never fork a writable
+single-use refresh grant into two independently refreshing copies; if necessary
+complete a separate login to **the same provider**, not a provider switch.
+
+Start recovery using the rendered API-only listener, first as a plain process or
+under a separately approved user unit. The rendered `recovery.service` is only a
+template: choosing/installing/enabling a production name requires explicit
+cutover approval. Do not use `hermes gateway` for this home.
+
+```sh
+R="$HOME/.local/share/wizard-recovery"
+"$R/venv/bin/python" "$R/listener.py" "$R/recovery.json"
+# Another owner shell:
+ops/agent-runtime/wizard agent import hermes recovery-home probe --runtime "$R"
+```
+
+Record authenticated `/api/sessions` success, unauthenticated 401, and **one
+owner-authorized same-provider model turn**. The fixture proof covered the HTTP
+API, not real OAuth inference/refresh. Verify local shell, read-only Docker info
+and user-systemd access; recovery has normal owner authority, not new root
+privileges. Verify no messaging or scheduler process and no cron responsibility.
+
+### Service route / registration (do not do this in rehearsal)
+
+The existing main id `hermes` is the recovery slot; it remains an external
+runtime. Do not create an ordinary container agent called recovery.
+
+1. Record the previous Service environment/settings/main metadata and the
+   chosen recovery unit's installed/enabled/active state in the window checklist.
+2. Merge the private recovery runtime `agent-service.env` into the host Service's
+   approved deployment configuration. It supplies the new loopback
+   `HERMES_ORIGIN` and matching generated `WIZARD_HERMES_API_KEY`. This is an
+   explicit upstream/key change; preserve the old values for rollback. Never
+   print this file, key or owner proof. Preserve trusted owner ingress and
+   `WIZARD_OWNER_PROOF_FILE` configuration. Do not replace the whole Service env.
+3. Preserve/migrate Service-owned queues/read models and explicit file paths out
+   of the moved home as a separate state-plane check. Merely repointing the
+   upstream does not move those files. A containerized Service needs a separately
+   reviewed route to the host; the recovery listener intentionally binds loopback.
+4. After imported Archimedes is ready, run the already-required owner
+   `route-default JOURNAL --acknowledge-cutover`. The importer now journals the
+   real main metadata path **`agents/.main-agent.json`**, sets its role to recovery
+   and selects the imported default. It does not apply the recovery Service env.
+   Alternatively use the existing owner APIs after removing bindings/grants and
+   changing the default; do not bypass the Service's promotion preconditions.
+5. Apply the Service restart/reload only through the approved cutover mechanism.
+   Read back the exact main recovery role, default and one authenticated recovery
+   request through Service with explicit `?agent=hermes` owner selection. Prove
+   anonymous/guest/agent-key callers cannot open it; recovery must not become a
+   default, app member/binding, data-grant participant, model route or automatic
+   queue/voice/background-work destination.
+
+### Rollback
+
+Importer undo restores the previous default and real main metadata, but does not
+reverse unrecorded operator environment/unit actions. Restore the saved Service
+upstream/key and any Service state-path changes, then restore the source
+services using the existing cutover journal. Stop/remove only the separately
+recorded recovery unit if the owner chooses; leaving recovery available is safe
+provided it retains no cron/messaging role. Verify both original source and
+recovery ownership explicitly rather than starting competing gateway copies.
+
+### Isolated evidence already completed
+
+Actual fake-home move into a throwaway Docker container preserved its directory
+inode; original source-code path disappeared. A separately installed host
+recovery runtime then answered authenticated sessions on its own port, rejected
+unauthenticated sessions with 401, accessed host Docker and the systemd user bus,
+and resolved only the maintenance toolsets/skills. The plain process, imported
+container, temporary network and all temporary homes/runtime were removed; the
+move was undone. No unit was installed/enabled and no live Service/gateway was
+contacted. Live `~/.hermes/config.yaml` SHA-256 stayed
+`f23e58e316a08a8965579ff00d70731f09779ff43ebfee9a95c5fdcaeef9be31`.
+
+The implementation closes the **design/isolated-runtime proof** portion of gate
+5, not production provisioning, real sign-in/model-turn proof or live Service
+route/readback. Do not infer that other cutover gates have passed.
