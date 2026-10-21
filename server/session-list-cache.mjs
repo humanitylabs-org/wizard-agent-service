@@ -4,8 +4,8 @@
 // synchronous work) for every visible client every 15 s. This module keeps one projected list
 // for all clients and re-projects only threads that can be changing:
 //   - the newest canonical batch (it carries enrichment and first-send rows),
-//   - every thread the caller marks hot (recent activity, queued/running work, helpers, Helm,
-//     background results, unresolved external runs),
+//   - every thread the caller marks hot (queued/running work, live turns, helpers, Helm,
+//     background results, unresolved external runs), and recently active threads once a minute,
 //   - any thread whose canonical row changed, that has no cached row yet, or whose cached row
 //     shows live state (Working, failed, waiting, helper, background result),
 //   - a rolling sweep of the oldest cached rows, so an unforeseen change is late, never permanent.
@@ -39,7 +39,10 @@ export function listCacheMode(value) {
  * The rolling sweep re-projects the oldest cached rows at `sweepPerMinute`, so every cached row is
  * rebuilt at least every `sweepMaxAgeMs` plus one cycle even if every signal missed it.
  */
-export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60_000, sweepPerMinute = 100, now = Date.now } = {}) {
+// warm: threads that were recently active but show no live signal now. They are re-projected at
+// most every `warmMaxAgeMs` instead of on every build: a new message, queue change, running turn or
+// live row still re-projects them at once through raw/stamps/hot/cacheableRow.
+export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60_000, sweepPerMinute = 100, warmMaxAgeMs = 60_000, now = Date.now } = {}) {
   let cache = new Map()
   let epoch = null
   let sweptAt = null
@@ -59,7 +62,7 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
   }
   // stamps: optional Map(thread id -> fingerprint of outside state the projection reads, e.g. its
   // queue rows). A cached row whose fingerprint changed (including disappeared) is re-projected.
-  const project = async ({ sessions, hot = new Set(), stamps = null, epoch: nextEpoch = '', projectBatch }) => {
+  const project = async ({ sessions, hot = new Set(), warm = new Set(), stamps = null, epoch: nextEpoch = '', projectBatch }) => {
     if (nextEpoch !== epoch) { cache = new Map(); epoch = nextEpoch; sweptAt = null }
     const at = now()
     const head = sessions.slice(0, batchSize)
@@ -78,6 +81,7 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
       const entry = cache.get(session.id)
       return hot.has(session.id) || sweep.has(session.id) || !entry || entry.raw !== raws.get(session.id) || !cacheableRow(entry.row)
         || (stamps !== null && entry.stamp !== (stamps.get(session.id) ?? ''))
+        || (warm.has(session.id) && at - entry.builtAt >= warmMaxAgeMs)
     })
     const fresh = new Map()
     await projectInBatches(need, projectBatch, fresh)

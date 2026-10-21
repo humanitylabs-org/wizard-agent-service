@@ -3413,23 +3413,27 @@ export function createWizardServer(options = {}) {
       const nowSeconds = Date.now() / 1000
       const recent = readRecentHermesRootIds(hermesStatePath, nowSeconds - hotWindowSeconds)
       if (!recent) throw new Error('recent hermes threads unavailable')
-      const hot = new Set([...recent, ...(delta.roots ?? [])])
+      // Recently active threads are "warm" (rebuilt once a minute); only threads with a live signal
+      // are rebuilt on every build. Before, ~300 recent threads were rebuilt on every message anywhere.
+      const warm = new Set(recent)
+      const hot = new Set(delta.roots ?? [])
+      try { for (const id of readActiveHumanSessionIds(hermesStatePath)) hot.add(id) } catch { for (const id of recent) hot.add(id) }
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
       const stamps = runQueue ? runQueue.sessionStamps() : null
-      return { hot, stamps, reset: delta.roots === null, mark: delta.maxId }
+      return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
       const started = performance.now()
       const all = await humanSessions()
-      const { hot, stamps, reset, mark } = await hotIds()
+      const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      const result = await projector.project({ sessions: all, hot, stamps, epoch: 'direct', projectBatch })
+      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
-        last_projected: result.projected, last_cached: result.cached, last_hot: hot.size })
+        last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
     // Compare the cache with a full rebuild. Only rows the cache served unchanged count as a cache
