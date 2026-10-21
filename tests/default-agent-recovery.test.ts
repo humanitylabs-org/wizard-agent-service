@@ -71,6 +71,58 @@ async function scene({ queued = false, manifest = null as any } = {}) {
 }
 
 describe('persisted default and recovery contract', () => {
+  it('main-only actions authorize recovery and reject explicit secondary pairs before touching main', async () => {
+    const s = await scene(), managed = await s.create('Managed')
+    s.histories.get(managed.id)!.add('wizard_old')
+    const actions: [string, string, any][] = [
+      ['/wizard/filings', 'POST', { session_id: 'wizard_old', client_command_id: 'review-file', runtime: 'direct' }],
+      ['/wizard/filings/wizard_old/status', 'POST', { runtime: 'direct' }],
+      ['/wizard/session-failure/wizard_old/dismiss', 'POST', {}],
+    ]
+    for (const [path, method, body] of actions) {
+      const offset = s.calls.length
+      const r = await s.call(path, method, { ...body, agent_id: managed.id })
+      expect([r.status, (await r.json()).check]).toEqual([409, 'agent.unsupported_action'])
+      expect(s.calls.slice(offset)).toEqual([])
+    }
+    await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } })
+    await s.call('/wizard/v1/agents/hermes', 'PATCH', { role: 'recovery' })
+    for (const [path, method, body] of actions) {
+      const offset = s.calls.length
+      const hidden = await s.call(path, method, { ...body, agent_id: 'hermes' }, {})
+      const missing = await s.call(path, method, { ...body, agent_id: 'missing' }, {})
+      expect(hidden.status).toBe(404); expect(await hidden.json()).toEqual(await missing.json())
+      expect(s.calls.slice(offset)).toEqual([])
+      expect((await s.call(path, method, body)).status).toBe(409)
+    }
+    for (const [path, method, body] of [
+      ['/wizard/hermes/api/sessions/wizard_old?agent=hermes', 'PATCH', { archived: true, title: 'changed' }],
+      ['/wizard/operator/api/sessions/operator:old?agent=hermes', 'PATCH', { archived: true }],
+    ] as [string, string, any][]) {
+      const offset = s.calls.length
+      expect((await s.call(path, method, body, {})).status).toBe(404)
+      expect(s.calls.slice(offset)).toEqual([])
+    }
+    for (const path of ['/wizard/attention', '/wizard/background-results', '/wizard/attachments/' + 'a'.repeat(32)]) expect((await s.call(path, 'GET', undefined, {})).status).toBe(404)
+  })
+
+  it('settings/bootstrap omit a hidden default and clients can boot and explicitly select a visible agent without it', async () => {
+    const s = await scene(), hidden = await s.create('Hidden Default', 'private')
+    await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: hidden.id } })
+    for (const path of ['/wizard/v1/settings', '/wizard/v1/bootstrap']) {
+      const r = await s.call(path, 'GET', undefined, {}), body = await r.json()
+      expect(r.status).toBe(200)
+      expect(body.settings.agents).not.toHaveProperty('default_agent_id')
+      expect(JSON.stringify(body)).not.toContain(hidden.id)
+      expect((await (await s.call(path)).json()).settings.agents.default_agent_id).toBe(hidden.id)
+    }
+    // A settings client roundtripping the redacted projection must preserve the stored default.
+    const redacted = (await (await s.call('/wizard/v1/settings', 'GET', undefined, {})).json()).settings
+    expect((await s.call('/wizard/v1/settings', 'PUT', redacted, {})).status).toBe(200)
+    expect(JSON.parse(readFileSync(s.settingsPath, 'utf8')).agents.default_agent_id).toBe(hidden.id)
+    expect((await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' }, {})).status).toBe(404)
+    expect((await s.call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id: 'wizard_visible', source: 'wizard-mobile' }, {})).status).toBe(201)
+  })
   it('fresh box snapshot: legacy agents and default binding stay identical; new chat still reaches Hermes', async () => {
     const s = await scene()
     const list = await (await s.call('/wizard/v1/agents')).json()

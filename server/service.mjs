@@ -3744,6 +3744,27 @@ export function createWizardServer(options = {}) {
     if (!visible.length && ids.length) throw new AgentError(404, 'not_found', 'agent.id')
     return sideAgent(request, sessionId, visible[0] || MAIN_AGENT_ID)
   }
+  // Main-only executors must never silently interpret an explicit secondary pair as Hermes.
+  const mainHistoryPair = (request, sessionId = '', input = {}) => {
+    if (input.agent && input.agent_id && input.agent !== input.agent_id) throw new AgentError(400, 'agent_mismatch', 'request.agent')
+    const explicit = input.agent_id || input.agent || ''
+    const id = sideAgent(request, sessionId, explicit)
+    if (id !== MAIN_AGENT_ID) throw new AgentError(409, 'unsupported_action', 'agent.unsupported_action')
+    if (agents?.read(id)?.role === 'recovery') {
+      if (principalOf(request).kind !== 'owner') throw new AgentError(404, 'not_found', 'agent.id')
+      if (!explicit) throw new AgentError(409, 'recovery_explicit_required', 'agent.explicit')
+    }
+    return id
+  }
+  const publicSettingsFor = (request, settings) => {
+    const id = settings.agents?.default_agent_id
+    const agent = agents?.read(id)
+    if (agent && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : isPrivateAgent(agents, id) && !mayOpenAgent(request, id))) {
+      const { default_agent_id: _hidden, ...rest } = settings.agents
+      return { ...settings, agents: rest }
+    }
+    return settings
+  }
   const qualifySeenInput = (request, state) => {
     if (!state?.threads || typeof state.threads !== 'object') return state
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
@@ -3761,7 +3782,7 @@ export function createWizardServer(options = {}) {
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
-      if (agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && /^(?:\/wizard\/(?:helper-continue|background-results|threads\/|voice\/recovery-receipt))/u.test(url.pathname)) {
+      if (agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && /^(?:\/wizard\/(?:helper-continue|background-results|threads\/|voice\/recovery-receipt|attention(?:\/|$)|attachments\/))/u.test(url.pathname)) {
         if (principal.kind !== 'owner') { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method === 'POST' && (url.pathname === '/wizard/helper-continue' || url.pathname.endsWith('/continue'))) { sendJson(response, 409, { error: 'recovery_explicit_required' }); return }
       }
@@ -3774,12 +3795,13 @@ export function createWizardServer(options = {}) {
         if (refusal) { sendJson(response,refusal,{error:refusal===415?'unsupported_media_type':'same_origin_required'}); return }
         const body = parseJsonBody(await readBoundedBody(request, 1024));
         if (typeof body.session_id !== 'string' || !/^wizard(?:_|-assistant-)[A-Za-z0-9._:-]+$/.test(body.session_id)) { sendJson(response,400,{error:'invalid_session'}); return }
-        if (sideAgent(request, body.session_id, body.agent_id) !== MAIN_AGENT_ID) throw new AgentError(409, 'agent_history_unsupported', 'agent.history')
+        mainHistoryPair(request, body.session_id, body)
         if (await helperSessionActive(body.session_id)) { sendJson(response,409,{error:'agent_already_active'}); return }
         const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:admitHelperContinuation});
         sendJson(response,outcome.status,outcome.body); return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
+        mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!backgroundResults) { sendJson(response, 200, { results: [], sessions: [], scan_complete: true }); return }
         sendJson(response, 200, await backgroundResults.list())
@@ -3797,7 +3819,7 @@ export function createWizardServer(options = {}) {
         if (!backgroundResults) throw Object.assign(new Error('durable admission unavailable'), { status: 503 })
         const input = parseJsonBody(await readBoundedBody(request, 1024))
         if (Object.keys(input).some(k => !['session_id', 'agent_id'].includes(k)) || typeof input.session_id !== 'string') throw Object.assign(new Error('invalid recovery request'), { status: 400 })
-        if (sideAgent(request, input.session_id, input.agent_id) !== MAIN_AGENT_ID) throw new AgentError(409, 'agent_history_unsupported', 'agent.history')
+        mainHistoryPair(request, input.session_id, input)
         const admission = await backgroundResults.continue(backgroundContinue[1], input.session_id)
         sendQueuedRun(response, 202, admission.record, { 'Idempotency-Replayed': String(admission.replayed) })
         return
@@ -3966,7 +3988,7 @@ export function createWizardServer(options = {}) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!['GET', 'PUT'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const current = readSettings(settingsPath, settingsOptions).settings
-        if (request.method === 'GET') { sendJson(response, 200, { settings: current }); return }
+        if (request.method === 'GET') { sendJson(response, 200, { settings: publicSettingsFor(request, current) }); return }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         const input = parseJsonBody(await readBoundedBody(request, 64 * 1024))
         if (!input || typeof input !== 'object' || Array.isArray(input)) { sendJson(response, 400, { error: 'invalid_request' }); return }
@@ -3983,7 +4005,7 @@ export function createWizardServer(options = {}) {
         const temporary = `${settingsPath}.${process.pid}.tmp`
         writeFileSync(temporary, `${JSON.stringify({ ...stored, ...settings, agents: { ...stored.agents, ...settings.agents } }, null, 2)}\n`, { mode: 0o600 })
         renameSync(temporary, settingsPath)
-        sendJson(response, 200, { settings }); return
+        sendJson(response, 200, { settings: publicSettingsFor(request, settings) }); return
       }
       if (url.pathname === '/wizard/v1/bootstrap' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -3991,7 +4013,7 @@ export function createWizardServer(options = {}) {
         let contract = { join: false, markdown: false }
         try { contract = await runContract() } catch { /* Hermes down: the UX still boots and shows it */ }
         // Front ends see which account and model route the orb, never where or with which key.
-        const publicSettings = { ...settings, fast_router: { account: settings.fast_router.account, model: settings.fast_router.model } }
+        const publicSettings = publicSettingsFor(request, { ...settings, fast_router: { account: settings.fast_router.account, model: settings.fast_router.model } })
         sendJson(response, 200, bootstrapPayload({
           settings: publicSettings, settingsSource: source,
           capabilities: {
@@ -4193,6 +4215,7 @@ export function createWizardServer(options = {}) {
 
       const helmAttachmentMatch = url.pathname.match(/^\/wizard\/attachments\/([0-9a-f]{32})$/)
       if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
+        mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir) || readLegacyHelmImage(helmAttachmentMatch[1], options.helmAttachmentsRoot)
         if (artifact) {
@@ -4402,6 +4425,7 @@ export function createWizardServer(options = {}) {
       }
 
       if (url.pathname === '/wizard/attention' && request.method === 'GET') {
+        mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const attention = (await readHelmActivities())
           .filter((activity) => activity.status === 'failed')
@@ -4479,9 +4503,11 @@ export function createWizardServer(options = {}) {
         let sessionId
         try { sessionId = decodeURIComponent(failureDismissal[1]) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        // Wizard UX posts '{}'; accept an empty body or an empty JSON object.
-        const dismissBody = (await readBoundedBody(request, 64)).toString('utf8').trim()
-        if (dismissBody && dismissBody !== '{}') { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Old clients post '{}'; paired clients can explicitly select main/recovery.
+        const dismissBytes = await readBoundedBody(request, 512)
+        const dismissBody = dismissBytes.toString('utf8').trim() ? parseJsonBody(dismissBytes) : {}
+        if (Object.keys(dismissBody).some(key => !['agent', 'agent_id'].includes(key))) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        mainHistoryPair(request, sessionId, { ...Object.fromEntries(url.searchParams), ...dismissBody })
         // Resolve the failure identity the way the session list projects it:
         // the newest bound external run, the newest Helm activity, else the
         // canonical session revision.
@@ -4513,6 +4539,7 @@ export function createWizardServer(options = {}) {
         if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId) || !/^[A-Za-z0-9-]{1,200}$/.test(commandId) || !['direct', 'operator'].includes(runtime)) {
           sendJson(response, 400, { error: 'invalid_request' }); return
         }
+        mainHistoryPair(request, sessionId, body)
         registerFilingCommand(commandId, sessionId)
         const result = await withFilingAdmissionLock(sessionId, runtime, () => canonicalFileSession(sessionId, runtime, true))
         sendJson(response, result.status, { ok: true, ...result.receipt })
@@ -4530,6 +4557,7 @@ export function createWizardServer(options = {}) {
         if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId) || !['direct', 'operator'].includes(runtime)) {
           sendJson(response, 400, { error: 'invalid_request' }); return
         }
+        mainHistoryPair(request, sessionId, body)
         const result = await canonicalFileSession(sessionId, runtime, false)
         sendJson(response, result.status, { ok: true, ...result.receipt })
         return
@@ -4537,6 +4565,7 @@ export function createWizardServer(options = {}) {
 
       const attentionAction = url.pathname.match(/^\/wizard\/attention\/([^/]+)\/(retry|dismiss)$/)
       if (attentionAction && request.method === 'POST') {
+        mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (url.search || !HELM_ACTIVITY_ID.test(attentionAction[1])) { sendJson(response, 400, { error: 'invalid_request' }); return }
         if ((await readBoundedBody(request, 2)).length) { sendJson(response, 400, { error: 'invalid_request' }); return }
