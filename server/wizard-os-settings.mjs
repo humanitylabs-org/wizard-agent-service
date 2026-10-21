@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import { appView } from './app-views.mjs'
 
 export const BOOTSTRAP_VERSION = 1
 export const DEFAULT_AGENT_NAME = 'Wizard'
@@ -154,7 +155,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
-      url: view, status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
+      url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
     })
   }
@@ -165,7 +166,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
     if (!id || !url || seen.has(id)) continue
     seen.add(id)
     out.push({
-      id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url,
+      id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url, view: { mode: 'original', url },
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
       receives_voice_input: link.receives_voice_input === true,
