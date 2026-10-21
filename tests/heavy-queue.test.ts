@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,7 +12,7 @@ const paths: string[] = []
 const queues: any[] = []
 afterEach(async () => { for (const q of queues.splice(0)) await q.close(); for (const p of paths.splice(0)) rmSync(p, { recursive: true, force: true }) })
 const file = () => { const p = mkdtempSync(join(tmpdir(), 'heavy-')); paths.push(p); return join(p, 'queue.db') }
-const spec = { cwd: '/Volumes/ThalesMedia/qa', argv: ['/usr/bin/true'], timeout_seconds: 10 }
+const spec = { cwd: join(heavyRoot, 'fixture'), argv: ['/usr/bin/true'], timeout_seconds: 10 }
 function heavy(options: any = {}) {
   const q = new DurableHeavyQueue({ statePath: file(), transport: async (p: any) => ({ job_id: p.job_id, state: 'queued' }), current: async () => true,
     continuation: async () => ({ publicRunId: 'resumed' }), ...options }); queues.push(q); return q

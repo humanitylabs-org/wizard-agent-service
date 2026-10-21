@@ -3,7 +3,7 @@
 // On a box running the Wizard App Manager, the user-files root is Runtipi's shared `media/` folder
 // (wizard-os docs/SYSTEM_APPS.md, "one files root"). The Files app shows it and every app that works
 // on user files mounts it. This store keeps Wizard attachments there, under `Inbox/<date>/<name>`, so
-// a video sent in a chat is visible in the Files app and usable by DeFleur by name.
+// a video sent in a chat is visible in the Files app and usable by the agent by name.
 //
 // It replaces the separate Wizard Inbox service when WIZARD_MEDIA_ROOT is set and no inbox token is
 // configured. Records live in one small JSON index next to the Agent Service's state.

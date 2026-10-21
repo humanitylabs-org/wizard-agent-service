@@ -141,6 +141,10 @@ function privateProbes(privateId: string) {
     ['run approval', 'POST', '/wizard/hermes/v1/runs/private-run-1/approval', { approved: true }],
     ['model options', 'GET', `/wizard/hermes/api/model/options?agent=${privateId}`, undefined],
     ['share into it', 'POST', '/wizard/v1/shares', { agent: privateId, text: 'x', files: [] }],
+    ['phone setup summary', 'GET', '/wizard/v1/setup', undefined],
+    ['phone setup status', 'GET', '/wizard/v1/setup/phone', undefined],
+    ['phone enrollment', 'POST', '/wizard/v1/setup/phone/start', {}],
+    ['phone reset', 'POST', '/wizard/v1/setup/phone/reset', {}],
     ['agent detail', 'GET', `/wizard/v1/agents/${privateId}`, undefined],
     ['agent edit', 'PATCH', `/wizard/v1/agents/${privateId}`, { label: 'Not private' }],
     ['agent stop', 'POST', `/wizard/v1/agents/${privateId}/stop`, {}],
@@ -303,7 +307,7 @@ describe('owner vs agent authentication', () => {
     expect((await put(CANARY)).status).toBe(200)
     expect((await put('wizard_main_1')).status).toBe(200)
     const owner = await (await fetch(`${s.base}/wizard/thread-dispositions`, { headers: OWNER })).json()
-    expect(Object.keys(owner.state)).toEqual(expect.arrayContaining([`direct:${CANARY}`, 'direct:wizard_main_1']))
+    expect(Object.keys(owner.state)).toEqual(expect.arrayContaining([`agent/${s.privateId}/direct:${CANARY}`, 'direct:wizard_main_1']))
     const other = await (await fetch(`${s.base}/wizard/thread-dispositions`)).json()
     expect(Object.keys(other.state)).toEqual(['direct:wizard_main_1'])
   })
@@ -434,17 +438,18 @@ describe('review regressions', () => {
     expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 1000, threads: { [`direct:${CANARY}`]: record(1_000_000) } }, OWNER))).status).toBe(200)
     expect(await count()).toBe(before)
     const own = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
-    expect(Object.keys(own.threads)).toContain(`direct:${CANARY}`)
+    expect(Object.keys(own.threads)).toContain(`agent/${s.privateId}/direct:${CANARY}`)
     // A caller still cannot send more than 500 marks at once.
     const tooMany = { initializedAt: 0, threads: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`direct:wizard_many_${i}`, record(i + 1)])) }
     expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', tooMany))).status).toBe(400)
   })
 
-  it('second review: a thread another caller claimed does not break the owner\'s private list', async () => {
+  it('S2c: an unlisted private thread cannot be claimed by another caller, and its owner can still list it', async () => {
     const s = await scene()
     s.priv.known.add('wizard_private_unlisted')
     const claimed = await fetch(`${s.base}/wizard/hermes/v1/runs`, send('POST', { input: 'x', session_id: 'wizard_private_unlisted', agent: s.helperId }))
-    expect(claimed.status).toBe(202)
+    expect(claimed.status).toBe(404)
+    expect(s.helper.seen.filter(row => row.method === 'POST' && row.path === '/v1/runs')).toEqual([])
     const list = await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${s.privateId}`, { headers: OWNER })
     expect(list.status).toBe(200)
     expect(await list.text()).toContain(CANARY)
@@ -459,9 +464,9 @@ describe('review regressions', () => {
     expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 0, threads: flood }))).status).toBe(200)
     const state = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
     expect(state.initializedAt).toBe(1000)
-    expect(Object.keys(state.threads)).toContain(`direct:${CANARY}`)
+    expect(Object.keys(state.threads)).toContain(`agent/${s.privateId}/direct:${CANARY}`)
     // Visible marks keep their cap of 500; the owner's hidden marks sit beside them.
-    expect(Object.keys(state.threads).filter((key) => key !== `direct:${CANARY}`).length).toBeLessThanOrEqual(500)
+    expect(Object.keys(state.threads).filter((key) => key !== `agent/${s.privateId}/direct:${CANARY}`).length).toBeLessThanOrEqual(500)
   })
 
   it('the agent-only listener needs an agent credential on every request and never honours the owner proof', async () => {

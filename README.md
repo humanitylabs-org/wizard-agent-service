@@ -42,6 +42,28 @@ npm run start:local
 
 Requires Node 22.5 or later, because it uses the built-in `node:sqlite` module.
 
+### Portable work and remote builds
+
+Heavy execution is opt-in. Set `WIZARD_HEAVY_ROOT` (fallback `WIZARD_WORK_ROOT`)
+to the absolute **remote** allowed cwd/storage root on the service and SSH sidecar;
+set `WIZARD_BUILD_HOST` to your worker SSH target. No root means
+`heavy lane not configured: set WIZARD_HEAVY_ROOT`; no host is guessed. See
+[resource lanes](ops/resource-lanes.md) for spool/lock configuration.
+
+```sh
+export WIZARD_WORK_ROOT="${TMPDIR:-/tmp}/wizard-work"
+mkdir -p "$WIZARD_WORK_ROOT"
+# For real remote work, explicitly select the worker storage and SSH host:
+# export WIZARD_HEAVY_ROOT=<absolute-remote-work-root>
+# export WIZARD_BUILD_HOST=<your-ssh-target>
+python3 tests/heavy-worker.remote.py  # isolated temporary roots, no Android builds
+```
+
+Fixtures set their own temporary heavy root; they do not require an owner volume.
+`HERMES_HOME` defaults to `~/.hermes`. Android SDK overrides use `ANDROID_HOME`
+or `ANDROID_SDK_ROOT`. The Android build helper retains its macOS-only execution
+guard; Python worker/queue fixtures also run on Linux.
+
 ### Configuration
 
 Tailscale source inclusion is not activation. Read [the activation and immutable-release gates](docs/tailscale-activation.md) before setting auth environment variables; the current Serve → nginx → Service identity provenance remains unproven.
@@ -52,7 +74,10 @@ Tailscale source inclusion is not activation. Read [the activation and immutable
 | `HERMES_ORIGIN` | `http://127.0.0.1:8642` | Hermes API server |
 | `WIZARD_HOST` / `WIZARD_PORT` | `127.0.0.1` / `8787` | Listener (loopback only) |
 | `WIZARD_AUTH_MODE` | see right | `tailscale` (Tailscale Serve identity, the Wizard OS default), `cloudflare` (Access JWTs) or `none` (box-only, behind a gateway that checks identity). Unset: `tailscale` when `WIZARD_TAILNET_ORIGIN` is set, else from `WIZARD_REQUIRE_CF_ACCESS` |
-| `WIZARD_TAILNET_ORIGIN` / `WIZARD_TAILNET_LOGIN` | — | Tailscale mode: the exact `https://<box>.<tailnet>.ts.net[:port]` origin Serve publishes, and the owner's Tailscale login (comma list allowed). Only requests from the Serve proxy (loopback, or the container gateway in a Wizard OS container) are trusted; never use Funnel |
+| `WIZARD_TAILNET_ORIGIN` / `WIZARD_TAILNET_LOGIN` | — | Tailscale mode: the exact `https://<box>.<tailnet>.ts.net[:port]` origin Serve publishes, and the owner's Tailscale login (comma list allowed). Set both or neither: with neither, they come from settings `access.tailscale`, written by "Connect your phone" and read per request. Only requests from the Serve proxy (loopback, or the container gateway in a Wizard OS container) are trusted; never use Funnel |
+| `WIZARD_TAILNET_PORT` | — | A second listener for Tailscale Serve only: every request on it must be the enrolled owner through Serve, whatever `WIZARD_AUTH_MODE` says about the main port. See [docs/phone-setup.md](docs/phone-setup.md) |
+| `WIZARD_PRIVATE_ACCESS_SOCKET` | `/run/wizard-private-access/sock` | Unix socket of the box's `wizard-private-access` helper (`ops/private-access/`); missing means the phone setup step is `unavailable` |
+| `WIZARD_TAILNET_SHELL_ORIGIN` | — | Loopback/container origin of the Wizard shell's static files, served to verified phones on the tailnet listener (GET/HEAD only, no identity forwarded). Alternative: `WIZARD_UX_DIR` |
 | `WIZARD_REQUIRE_CF_ACCESS` | `1` | Older switch: `0` means no access check (same as `WIZARD_AUTH_MODE=none`) |
 | `WIZARD_STATIC_DIR` | `.ui-live` | Optional static front end to serve at `/wizard/` |
 | `WIZARD_HERMES_STATE_PATH` | unset | Optional explicit Hermes session database (read-only); never inferred from the host home |

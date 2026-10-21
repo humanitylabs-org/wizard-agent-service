@@ -70,10 +70,17 @@ def public(row):
             'receipt': json.loads(row['receipt']) if row['receipt'] else None}
 
 
+def heavy_root():
+    value = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if not value or not Path(value).is_absolute():
+        raise ValueError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
+    return Path(value).resolve()
+
+
 def validate(spec):
     cwd = Path(spec['cwd']).resolve(strict=True)
-    if not cwd.is_relative_to('/Volumes/ThalesMedia') or not cwd.is_dir():
-        raise ValueError('work directory must be on the external volume')
+    if not cwd.is_relative_to(heavy_root()) or not cwd.is_dir():
+        raise ValueError('work directory must be under the configured heavy root')
     argv = spec['argv']
     if not isinstance(argv, list) or not 1 <= len(argv) <= 100 or any(
             not isinstance(x, str) or not x or '\0' in x or len(x) > 8192 for x in argv):
@@ -157,6 +164,14 @@ def resource_wait(root):
     if shutil.disk_usage(root).free < 20 * 1024**3:
         return 'disk_pressure'
     try:
+        if sys.platform.startswith('linux'):
+            # Same conservative Linux floor as interactive admission; unknown
+            # health still fails closed. macOS keeps its existing sysctl policy.
+            memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+            available_kib = int(memory['MemAvailable'].split()[0])
+            pressure_line = next(line for line in Path('/proc/pressure/memory').read_text().splitlines() if line.startswith('full '))
+            full = dict(field.split('=', 1) for field in pressure_line.split()[1:])
+            return 'memory_pressure' if available_kib < 512 * 1024 or float(full['avg10']) >= 20 else ''
         pressure = int(subprocess.check_output(['/usr/sbin/sysctl', '-n',
             'kern.memorystatus_vm_pressure_level'], text=True, timeout=2).strip())
         return 'memory_pressure' if pressure >= 4 else ''
@@ -319,8 +334,12 @@ if __name__ == '__main__':
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
     args = parser.parse_args()
-    if not args.root.resolve().is_relative_to('/Volumes/ThalesMedia') or not args.lock.resolve().is_relative_to('/Volumes/ThalesMedia'):
-        raise SystemExit('worker storage must be on external volume')
+    try:
+        allowed_root = heavy_root()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if not args.root.resolve().is_relative_to(allowed_root) or not args.lock.resolve().is_relative_to(allowed_root):
+        raise SystemExit('worker storage must be under the configured heavy root')
     if args.execute:
         if not re.fullmatch(r'heavy_[0-9a-f]{32}', args.execute):
             raise SystemExit('invalid job identity')
