@@ -1,0 +1,25 @@
+# Holds model-locked Wizard reply streams so an Agent Service restart (deploy, crash) no longer
+# interrupts replies in flight. Hermes stops a turn when its stream closes; this small process
+# owns that stream and outlives Agent Service restarts. Deploys do not restart it.
+# Socket: ~/.hermes/state/wizard-mobile/run-stream-keeper.sock (0600). No secrets: it forwards
+# the caller's own Authorization header to Hermes and accepts only session chat streams.
+# Stopping it waits for the held replies to finish (second SIGTERM / timeout forces it).
+# Install: cp to ~/.config/systemd/user/, systemctl --user daemon-reload,
+#          systemctl --user enable --now wizard-run-keeper.service
+# Undo: systemctl --user disable --now wizard-run-keeper.service (Agent Service streams directly).
+[Unit]
+Description=Wizard run stream keeper (holds reply streams across Agent Service restarts)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_ORIGIN=http://127.0.0.1:8642
+ExecStart=%h/.local/bin/node %h/.local/share/wizard-mobile-server/current/server/run-stream-keeper.mjs
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=1800
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

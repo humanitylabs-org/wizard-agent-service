@@ -2105,6 +2105,8 @@ export function createWizardServer(options = {}) {
       } catch { return null } finally { db.close() }
     },
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
+    // Separate process that holds locked reply streams across Agent Service restarts ('' = off).
+    keeperSocket: options.runKeeperSocket ?? '',
     sessionRoute: sessionId => {
       // Never infer a host state.db path on portable installs. Explicit client locks still work
       // without this optional read-only persisted-selector fallback.
