@@ -118,7 +118,7 @@ describe('shares with an agents registry', () => {
     // the thread is pinned to the private agent
     const pins = JSON.parse(readFileSync(join(dir, 'agents', '.threads.json'), 'utf8'))
     expect(pins.schema).toBe(2)
-    expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id })
+    expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id, provenance: 'service_admission' })
     // staging is outside the agent's home and empty
     expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path

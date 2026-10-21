@@ -9,5 +9,5 @@ if (args[0] !== '--service-stopped' || args.length < 2) {
   try {
     const paths = restoreStoreSet(args.slice(1), { serviceStopped: true })
     console.log(JSON.stringify({ restored_stores: paths.length }))
-  } catch (error) { console.error(error.message); process.exitCode = 1 }
+  } catch (error) { console.error(error.message); process.exitCode = 2 }
 }

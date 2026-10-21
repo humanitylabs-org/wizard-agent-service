@@ -88,7 +88,7 @@ function readJson(path) {
 }
 
 function writeJsonAtomic(path, value, mode = 0o600) {
-  atomicStoreWrite(path, `${JSON.stringify(value, null, 2)}\n`, { inventory: /\.(?:threads|run-threads)\.json$/u.test(path) })
+  atomicStoreWrite(path, `${JSON.stringify(value, null, 2)}\n`, { inventory: /\.(?:threads|run-threads|session-catalog)\.json$/u.test(path) })
 }
 
 function writeTextAtomic(path, text, mode = 0o600) {
@@ -749,6 +749,7 @@ export function createAgentRegistry(options = {}) {
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
     try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
 
@@ -817,8 +818,10 @@ export function createAgentRegistry(options = {}) {
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
+      invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
       try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
   }
@@ -828,8 +831,12 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
+    invalidateCatalog(id)
+    if (!running) await refreshCatalog(id).catch(() => undefined)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
     try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    if (running) await refreshCatalog(id).catch(() => undefined)
     return agent
   }
 
@@ -840,12 +847,14 @@ export function createAgentRegistry(options = {}) {
       for (const [key, row] of Object.entries(value.threads)) {
         if (!row || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id || row.session_id.length > 200 || key !== threadKey(row.agent_id, row.session_id)) throw new Error('Invalid qualified thread pin')
       }
-      return value
+      // Pre-provenance schema-2 entries could have been seeded from side metadata. Reverify them;
+      // only schema-1 legacy pins have an unambiguous trusted migration origin.
+      return { ...value, threads: Object.fromEntries(Object.entries(value.threads).map(([key, row]) => [key, { ...row, provenance: row.provenance ?? 'legacy_unverified' }])) }
     }
     return { schema: 2, threads: Object.fromEntries(Object.entries(value.threads).map(([id, agent]) => {
       if (!id || id.length > 200 || !validAgentId(agent)) throw new Error('Invalid legacy thread pin')
       const pair = threadReference(id, agent)
-      return [threadKey(pair.agent_id, id), pair]
+      return [threadKey(pair.agent_id, id), { ...pair, provenance: 'migrated_pin' }]
     })) }
   })
   let pinsCache = null
@@ -854,7 +863,7 @@ export function createAgentRegistry(options = {}) {
     return pinsCache
   }
   function pinnedAgents(sessionId) {
-    return Object.values(pins()).filter(row => row.session_id === sessionId).map(row => row.agent_id)
+    return Object.values(pins()).filter(row => row.session_id === sessionId && ['runtime_verified', 'service_admission', 'migrated_pin'].includes(row.provenance)).map(row => row.agent_id)
   }
   function pinnedAgent(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return ''
@@ -862,15 +871,76 @@ export function createAgentRegistry(options = {}) {
     if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread')
     return ids[0] ?? ''
   }
-  function pin(sessionId, agentId) {
+  function pin(sessionId, agentId, provenance = 'service_admission') {
+    if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(provenance)) return
     if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || !readRaw(agentId)) return
     const current = pins()
     const key = threadKey(agentId, sessionId)
-    if (current[key]) return
+    if (['runtime_verified', 'service_admission', 'migrated_pin'].includes(current[key]?.provenance)) return
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-    const next = { ...current, [key]: threadReference(sessionId, agentId) }
+    const next = { ...current, [key]: { ...threadReference(sessionId, agentId), provenance } }
     writeJsonAtomic(threadsPath, { schema: 2, threads: next })
     pinsCache = next
+  }
+  // This authority store is never seeded from client-authored metadata. Only runtime-authenticated
+  // history reads can establish a complete negative catalog; partial observations are positive only.
+  const catalogPath = join(agentsDir, '.session-catalog.json')
+  migrateJson(catalogPath, value => {
+    if (value?.schema !== 1 || !value.agents || typeof value.agents !== 'object' || Array.isArray(value.agents)) throw new Error('Invalid session catalog')
+    for (const [id, row] of Object.entries(value.agents)) {
+      if (!validAgentId(id) || !row || !Number.isFinite(row.at) || typeof row.complete !== 'boolean' || !Array.isArray(row.ids) || row.ids.some(id => typeof id !== 'string' || !id || id.length > 200)) throw new Error('Invalid session catalog row')
+    }
+    return value
+  })
+  let catalogs = readJson(catalogPath)?.agents ?? {}
+  const catalogEpochs = new Map()
+  function catalogContains(agentId, sessionId) {
+    const row = catalogs[agentId]
+    return row?.ids.includes(sessionId) ? true : row?.complete ? false : undefined
+  }
+  function saveCatalog(agentId, row) {
+    const next = { ...catalogs, [agentId]: row }
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(catalogPath, { schema: 1, agents: next }); catalogs = next
+  }
+  function invalidateCatalog(agentId) {
+    catalogEpochs.set(agentId, (catalogEpochs.get(agentId) ?? 0) + 1)
+    if (catalogs[agentId]) saveCatalog(agentId, { ...catalogs[agentId], complete: false })
+  }
+  function observeSessions(agentId, ids, { complete = false, index = true } = {}) {
+    ids = ids.filter(id => typeof id === 'string' && id && id.length <= 200)
+    if (!readRaw(agentId)) return
+    const previous = catalogs[agentId]
+    // Retain positive sightings even if a concurrent paginated census misses a newly created row.
+    saveCatalog(agentId, { at: now(), complete: complete || previous?.complete === true, ids: [...new Set([...(previous?.ids ?? []), ...ids])] })
+    if (index) for (const id of ids) pin(id, agentId, 'runtime_verified')
+  }
+  async function refreshCatalog(agentId) {
+    const agent = readRaw(agentId)
+    if (!agent) throw new Error('Unknown catalog agent')
+    const origin = agentId === MAIN_AGENT_ID ? options.mainOrigin : upstream(agent)
+    const key = agentId === MAIN_AGENT_ID ? options.mainKey : apiKey(agentId)
+    if (!origin || !key) throw new Error('Catalog runtime credentials unavailable')
+    const ids = [], seen = new Set(), epoch = catalogEpochs.get(agentId) ?? 0
+    for (let offset = 0; offset <= 100000;) {
+      const response = await fetchImpl(`${origin}/api/sessions?limit=100&offset=${offset}&include_children=true`, { headers: { Authorization: `Bearer ${key}` }, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      if (!response.ok) throw new Error('Catalog runtime unavailable')
+      const value = await response.json(), rows = value.data ?? value.sessions ?? value.items
+      const hasMore = value.has_more ?? value.pagination?.has_more
+      if (!Array.isArray(rows) || rows.some(row => typeof row?.id !== 'string' || !row.id || row.id.length > 200 || seen.has(row.id))
+        || (hasMore !== undefined && typeof hasMore !== 'boolean')
+        || (value.pagination?.offset !== undefined && value.pagination.offset !== offset)) throw new Error('Invalid catalog listing')
+      for (const row of rows) { if (seen.has(row.id)) throw new Error('Repeated catalog row'); seen.add(row.id); ids.push(row.id) }
+      // A short page may just be a clamped limit. Without an explicit final-page flag,
+      // keep paging until an empty page; repeated/ignored cursors never prove absence.
+      if (hasMore === false || (!rows.length && hasMore !== true)) {
+        if ((catalogEpochs.get(agentId) ?? 0) !== epoch) throw new Error('Catalog lifecycle changed during census')
+        observeSessions(agentId, ids, { complete: true }); return
+      }
+      if (!rows.length) break
+      offset += rows.length
+    }
+    throw new Error('Incomplete catalog listing')
   }
   const runsPath = join(agentsDir, '.run-threads.json')
   migrateJson(runsPath, value => {
@@ -896,6 +966,7 @@ export function createAgentRegistry(options = {}) {
 
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
+    catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,

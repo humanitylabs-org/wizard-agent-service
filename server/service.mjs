@@ -49,6 +49,7 @@ import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { acquireServiceLeases } from './store-migration.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -2078,6 +2079,22 @@ export function speechText(value) {
 }
 
 export function createWizardServer(options = {}) {
+  // Acquire before migrations/writers are constructed; release on failed construction or server close.
+  const paths = ['runQueueStatePath', 'uploadStatePath', 'heavyStatePath', 'threadTitleStatePath',
+    'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
+    'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
+  const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
+  const dirs = paths.map(path => dirname(resolve(String(path))))
+  if (home) dirs.push(resolve(home))
+  if (options.agents !== false && (options.agentsDir || home)) dirs.push(resolve(options.agentsDir || join(home, 'agents')))
+  const release = acquireServiceLeases(dirs, { shared: true })
+  try {
+    const server = buildWizardServer(options)
+    server.once('close', release)
+    return server
+  } catch (error) { release(); throw error }
+}
+function buildWizardServer(options = {}) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
   const sttOrigin = confinedUpstream(options.sttOrigin ?? 'http://127.0.0.1:8864')
@@ -2167,7 +2184,7 @@ export function createWizardServer(options = {}) {
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
-    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath,
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
@@ -2221,9 +2238,18 @@ export function createWizardServer(options = {}) {
       try {
         const result = await fetchImpl(`${origin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
         await result.body?.cancel().catch(() => undefined)
-        if (strict && !result.ok && result.status !== 404) throw new AgentError(503, 'agent_unavailable', 'agent.history')
+        if (result.ok) agents.observeSessions(agentId, [sessionId], { index: false })
+        if (!result.ok && result.status !== 404) {
+          const known = agents.catalogContains(agentId, sessionId)
+          if (known !== undefined) return known
+          if (strict) throw new AgentError(503, 'agent_unavailable', 'agent.history')
+        }
         return result.ok
-      } catch (error) { if (strict) throw new AgentError(503, 'agent_unavailable', 'agent.history'); return false }
+      } catch (error) {
+        const known = agents.catalogContains(agentId, sessionId)
+        if (known !== undefined) return known
+        if (strict) throw new AgentError(503, 'agent_unavailable', 'agent.history'); return false
+      }
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
@@ -2424,8 +2450,16 @@ export function createWizardServer(options = {}) {
     const result = await fetchImpl(`${upstreamOrigin}${path}`, { ...init, headers, redirect: 'manual' })
     const raw = Buffer.from(await result.arrayBuffer())
     if (!result.ok) throw upstreamError(preserveStatus ? result.status : 502, raw, result.headers.get('retry-after'))
-    try { return JSON.parse(raw.toString('utf8')) }
+    let value
+    try { value = JSON.parse(raw.toString('utf8')) }
     catch { throw Object.assign(new Error('Hermes worker returned invalid JSON'), { status: 502 }) }
+    if (agents && (init.method ?? 'GET') === 'GET') {
+      const pathname = new URL(path, upstreamOrigin).pathname
+      if (pathname === '/api/sessions') agents.observeSessions(MAIN_AGENT_ID, (value.data ?? value.sessions ?? []).map(row => row?.id))
+      const history = /^\/api\/sessions\/([^/]+)(?:\/messages)?$/u.exec(pathname)
+      if (history) agents.observeSessions(MAIN_AGENT_ID, [decodeURIComponent(history[1])])
+    }
+    return value
   }
 
   // What this Hermes supports, read from /v1/capabilities and cached for 30 s.
@@ -3312,7 +3346,11 @@ export function createWizardServer(options = {}) {
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
           result = decorateSessionTitles(result, operator)
-          if (agents && !operator) result = decorateThreadAgent(result, row => { agents.pin(row.id, MAIN_AGENT_ID); return agents.threadAgent(MAIN_AGENT_ID) })
+          if (agents && !operator) {
+            const ids = []
+            result = decorateThreadAgent(result, row => { ids.push(row.id); return agents.threadAgent(MAIN_AGENT_ID) })
+            agents.observeSessions(MAIN_AGENT_ID, ids)
+          }
     return result
   }
 
@@ -3763,39 +3801,7 @@ export function createWizardServer(options = {}) {
     }
     return settings
   }
-  // The qualified pins journal is also the durable positive pair index. Seed it from the
-  // migrated, explicitly configured service stores; never crawl agent homes for history.
-  if (agents) {
-    const indexRows = value => {
-      if (!value || typeof value !== 'object') return
-      if (typeof value.agent_id === 'string' && typeof value.session_id === 'string') agents.pin(value.session_id, value.agent_id)
-      for (const child of Object.values(value)) indexRows(child)
-    }
-    const jsonPaths = [...(threadTitleStore.migrationReady ? [options.threadTitleStatePath] : []),
-      ...(statusBackfill.migrationReady ? [options.threadStatusBackfillPath] : []), ...(subjectCatalog.migrationReady ? [options.subjectsPath] : []),
-      options.threadSeenStatePath, options.threadDispositionStatePath, options.dismissedFailureStatePath,
-      operatorWorkerStatePath, options.voiceRecoveryManifestPath, join(agents.agentsDir, '.run-threads.json'),
-      ...(runQueueStatePath ? [join(dirname(runQueueStatePath), 'model-locked-admissions.json')] : [])]
-    for (const path of jsonPaths.filter(Boolean)) {
-      if (!existsSync(path)) continue
-      try { indexRows(JSON.parse(readFileSync(path, 'utf8'))) }
-      catch { console.warn('[agent-pairs] pair-index projection unavailable; no negative history claim made') }
-    }
-
-    for (const path of [runQueueStatePath, uploadStatePath, options.heavyStatePath].filter(Boolean)) {
-      if (!existsSync(path)) continue
-      const db = new DatabaseSync(path, { readOnly: true })
-      try {
-        for (const [table, sessionColumn] of [['wizard_run_queue', 'session_id'], ['heavy_jobs', 'session'], ['shares', 'session_id']]) {
-          if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue
-          const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name)
-          const agentColumn = columns.includes('agent_id') ? 'agent_id' : table === 'shares' ? "COALESCE(NULLIF(agent,''),'hermes')" : "'hermes'"
-          const session = columns.includes(sessionColumn) ? sessionColumn : 'thread_id'
-          indexRows(db.prepare(`SELECT ${agentColumn} AS agent_id, ${session} AS session_id FROM ${table}`).all())
-        }
-      } finally { db.close() }
-    }
-  }
+  // Client-authored side stores are projections, never pair-ownership evidence.
   const qualifySeenInput = (request, state) => {
     if (!state?.threads || typeof state.threads !== 'object') return state
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
@@ -4023,9 +4029,8 @@ export function createWizardServer(options = {}) {
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         const input = parseJsonBody(await readBoundedBody(request, 64 * 1024))
         if (!input || typeof input !== 'object' || Array.isArray(input)) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        if (Object.hasOwn(input.agents ?? {}, 'default_agent_id') && input.agents.default_agent_id !== current.agents.default_agent_id && principal.kind !== 'owner') {
-          sendJson(response, 403, { error: 'owner_required', check: 'agents.default_owner' }); return
-        }
+        // Never compare a non-owner guess with the hidden saved identity, even on safe round-trips.
+        if (principal.kind !== 'owner' && input.agents && typeof input.agents === 'object') delete input.agents.default_agent_id
         if (principal.kind === 'agent') { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
         if (!settingsPath) { sendJson(response, 503, { error: 'settings_unavailable' }); return }
         const settings = normalizeSettings({ ...current, ...input, agents: { ...current.agents, ...input.agents } }, settingsOptions)
@@ -4747,7 +4752,8 @@ export function createWizardServer(options = {}) {
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
-          agents?.pin(queuedAdmission.sessionId, MAIN_AGENT_ID)
+          // A durable queue receipt is not proof that Hermes has materialized this session.
+          if (agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
           return
@@ -4937,7 +4943,8 @@ export function createWizardServer(options = {}) {
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions') {
           if (agents && !operator) {
             const rows = parseJsonBody(result)
-            for (const row of rows.data ?? rows.sessions ?? []) if (typeof row?.id === 'string') agents.pin(row.id, MAIN_AGENT_ID)
+            agents.observeSessions(MAIN_AGENT_ID, (rows.data ?? rows.sessions ?? []).map(row => row?.id))
+            await agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined)
           }
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }
@@ -4964,9 +4971,9 @@ export function createWizardServer(options = {}) {
           agents.noteRun(admission.run_id ?? admission.id, MAIN_AGENT_ID, parseJsonBody(body).session_id)
           result = Buffer.from(JSON.stringify({ ...admission, agent_id: MAIN_AGENT_ID }))
         }
-        if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
-          agents.pin(decodeURIComponent(upstreamPath.split('/')[3]), MAIN_AGENT_ID)
-          result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
+        if (agents && !operator && upstream.ok && request.method === 'GET' && /^\/api\/sessions\/[^/]+(?:\/messages)?$/.test(upstreamPath)) {
+          agents.observeSessions(MAIN_AGENT_ID, [decodeURIComponent(upstreamPath.split('/')[3])])
+          if (!upstreamPath.endsWith('/messages')) result = decorateThreadAgent(result, agents.threadAgent(MAIN_AGENT_ID))
         }
         if (upstream.ok && operator && request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)) {
           const operatorSessionId = upstreamPath.split('/')[3]

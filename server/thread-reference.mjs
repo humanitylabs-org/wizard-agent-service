@@ -44,7 +44,10 @@ export function qualifyRawThreadRecords(records) {
 // Optional projections must preserve corrupt bytes, including on later writes.
 export function migrateOptionalJson(path, transform) {
   try { migrateJson(path, transform); return true }
-  catch { console.warn('[agent-pairs] optional metadata unavailable; original bytes preserved'); return false }
+  catch (error) {
+    console.warn(error?.message?.includes('keep source, keep backup; operator chooses') ? error.message : '[agent-pairs] optional metadata unavailable; original bytes preserved')
+    return false
+  }
 }
 export function migrateJson(path, transform) {
   try { return migrateText(path, text => {

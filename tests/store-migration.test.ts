@@ -37,14 +37,14 @@ describe('transactional pair migration and restoration', () => {
     expect(readFileSync(path)).toEqual(before)
   })
 
-  it('resumes interruption after source replacement without replacing the original backup', () => {
+  it('refuses changed source after backup without replacing the original baseline', () => {
     const dir = directory(), path = join(dir, 'state.json'), old = '{"threads":{"x":{}}}'
     writeFileSync(path, old); migrateJson(path, qualify)
     const manifest = join(dir, INVENTORY_NAME), value = JSON.parse(readFileSync(manifest, 'utf8'))
     value.stores['state.json'].phase = 'backed_up'; writeFileSync(manifest, JSON.stringify(value))
-    expect(migrateJson(path, qualify)).toBe(false)
+    expect(() => migrateJson(path, qualify)).toThrow(/keep source, keep backup; operator chooses/)
     expect(readFileSync(validateBackup(path), 'utf8')).toBe(old)
-    expect(migrationEntry(path).phase).toBe('complete')
+    expect(migrationEntry(path).phase).toBe('backed_up')
   })
 
   it('authority corruption is explicit and never replaced with an empty store', () => {
@@ -113,11 +113,21 @@ describe('transactional pair migration and restoration', () => {
     expect(existsSync(fresh)).toBe(true)
   })
 
-  it('migrate -> restore -> actual archived 859c548 modules preserve pins, seen and heavy submissions', () => {
-    const dir = directory(), old = join(dir, 'old'), stores = join(dir, 'stores'), agentsDir = join(stores, 'agents')
-    mkdirSync(old); mkdirSync(stores)
-    const archive = execFileSync('git', ['archive', '859c548', 'server'], { maxBuffer: 16 * 1024 * 1024 })
-    execFileSync('tar', ['-xf', '-', '-C', old], { input: archive })
+  it('migrate -> restore -> actual archived 859c548 modules preserve pins, seen and heavy submissions', context => {
+    const dir = directory(), old = process.env.WAS_ROLLBACK_BASE_DIR || join(dir, 'old'), stores = join(dir, 'stores'), agentsDir = join(stores, 'agents')
+    mkdirSync(stores)
+    if (!process.env.WAS_ROLLBACK_BASE_DIR) {
+      let available = false
+      try { execFileSync('git', ['cat-file', '-e', '859c548^{commit}'], { stdio: 'pipe' }); available = true } catch { /* archive/shallow checkout */ }
+      if (!available) {
+        const reason = 'Rollback rehearsal needs WAS_ROLLBACK_BASE_DIR or git object 859c548 (archive/shallow checkout has neither)'
+        if (process.env.REQUIRE_ROLLBACK_REHEARSAL === '1') throw new Error(reason)
+        console.warn(reason); context.skip(reason); return
+      }
+      mkdirSync(old)
+      const archive = execFileSync('git', ['archive', '859c548', 'server'], { maxBuffer: 16 * 1024 * 1024 })
+      execFileSync('tar', ['-xf', '-', '-C', old], { input: archive })
+    }
     const driver = `
       import { createAgentRegistry } from ${JSON.stringify(join(old, 'server/agents.mjs'))};
       import { ThreadSeenStore } from ${JSON.stringify(join(old, 'server/thread-seen.mjs'))};

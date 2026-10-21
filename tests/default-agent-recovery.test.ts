@@ -90,8 +90,8 @@ describe('persisted default and recovery contract', () => {
     expect(body.session.id).toMatch(/^wizard_\d+_[a-f0-9]{32}$/)
     expect(s.calls.slice(offset).some(row => row.agent === offline.id)).toBe(false)
     expect(createAgentRegistry({ agentsDir: s.agentsDir }).pinnedAgent(body.session.id)).toBe('hermes')
-    // A named id is NOT proved fresh. Fail closed if the offline agent could genuinely own it.
-    expect((await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_fresh', source: 'wizard-mobile' })).status).toBe(503)
+    // Successful creation captured an authenticated empty runtime catalog before it stopped.
+    expect((await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_fresh', source: 'wizard-mobile' })).status).toBe(201)
     // A known indexed pair can continue without querying unrelated agents.
     expect((await s.call('/wizard/hermes/api/sessions/' + body.session.id + '?agent=hermes', 'PATCH', { title: 'Changed' })).status).toBe(200)
   })
@@ -235,7 +235,8 @@ describe('persisted default and recovery contract', () => {
     expect(normalizeSettings({ agents: { default_agent_id: 'unknown' } }).agents.default_agent_id).toBe('hermes')
     for (const id of [managed.id, 'unknown']) {
       const denied = await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: id } }, {})
-      expect([denied.status, await denied.json()]).toEqual([403, { error: 'owner_required', check: 'agents.default_owner' }])
+      expect(denied.status).toBe(200)
+      expect((await denied.json()).settings.agents.default_agent_id).toBe('hermes')
     }
     expect((await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } })).status).toBe(200)
     expect(JSON.parse(readFileSync(s.settingsPath, 'utf8')).agents.default_agent_id).toBe(managed.id)
@@ -362,7 +363,7 @@ describe('persisted default and recovery contract', () => {
     writeFileSync(join(s.agentsDir, managed.id, 'gateway.key'), 'fixture-agent-credential')
     const bearer = { Authorization: 'Bearer fixture-agent-credential' }
     const denied = await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } }, bearer)
-    expect([denied.status, await denied.json()]).toEqual([403, { error: 'owner_required', check: 'agents.default_owner' }])
+    expect([denied.status, await denied.json()]).toEqual([403, { error: 'agent_scope', check: 'principal.agent_scope' }])
     await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } })
     await s.call('/wizard/v1/agents/hermes', 'PATCH', { role: 'recovery' })
     for (const path of ['/wizard/v1/agents/hermes', '/wizard/hermes/api/sessions?agent=hermes']) {
@@ -419,7 +420,7 @@ describe('persisted default and recovery contract', () => {
     const load = () => { createAgentRegistry({ agentsDir }); new ThreadSeenStore(seenPath); new ThreadDispositionStore(dispositionPath) }
     load()
     const first = Object.fromEntries(Object.keys(originals).map(path => [path, readFileSync(path, 'utf8')]))
-    expect(JSON.parse(first[pinPath]).threads[threadKey('hermes', 'wizard_old')]).toEqual({ agent_id: 'hermes', session_id: 'wizard_old' })
+    expect(JSON.parse(first[pinPath]).threads[threadKey('hermes', 'wizard_old')]).toEqual({ agent_id: 'hermes', session_id: 'wizard_old', provenance: 'migrated_pin' })
     load()
     for (const [path, original] of Object.entries(originals)) {
       expect(readFileSync(path, 'utf8')).toBe(first[path])

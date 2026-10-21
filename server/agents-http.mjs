@@ -591,9 +591,12 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
     // A thread read through its agent is that agent's from now on, even if it never appeared in a list.
     const readSession = method === 'GET' ? sessionIdFromPath(upstreamPath) : ''
-    if (readSession) registry.pin(readSession, agent.id)
+    if (readSession) registry.observeSessions?.(agent.id, [readSession])
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
+      const listing = JSON.parse(result.toString('utf8'))
+      registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))
+      await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
         const payload = await listWindows.get(ctx)({ params: searchParams, scope: agent.id, load: async () => {
@@ -635,7 +638,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
       // One thread already claimed by another agent must not break this agent's whole list.
-      for (const id of sessionIdsIn(result)) registry.pin(id, agent.id)
+      for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
       if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))
