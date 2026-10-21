@@ -103,8 +103,20 @@ function cleanLabel(value, fallback = '') {
   return text || fallback
 }
 
+// Agent/app files are read for every thread in a Chats list (several reads per row). Parse each
+// file once per on-disk version (inode, size, mtime) and hand out copies, so callers that edit the
+// result never touch the cache.
+const jsonCache = new Map()
 function readJson(path) {
-  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+  let stamp
+  try { const st = statSync(path); stamp = `${st.ino}:${st.size}:${st.mtimeMs}` } catch { jsonCache.delete(path); return null }
+  const hit = jsonCache.get(path)
+  if (hit && hit.stamp === stamp) return hit.value === null ? null : structuredClone(hit.value)
+  let value = null
+  try { value = JSON.parse(readFileSync(path, 'utf8')) } catch { value = null }
+  if (jsonCache.size > 512) jsonCache.delete(jsonCache.keys().next().value)
+  jsonCache.set(path, { stamp, value })
+  return value === null ? null : structuredClone(value)
 }
 
 function writeJsonAtomic(path, value, mode = 0o600) {
