@@ -8,6 +8,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { appView } from './app-views.mjs'
+import { chatsView, CHATS_DEFAULT } from './chats-views.mjs'
 
 export const BOOTSTRAP_VERSION = 1
 export const DEFAULT_AGENT_NAME = 'Wizard'
@@ -157,6 +158,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
+      provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
   const launcher = readJsonFile(launcherPath, 256 * 1024)
@@ -172,7 +175,11 @@ export function readApps({ appsJsonPath, launcherPath }) {
       receives_voice_input: link.receives_voice_input === true,
     })
   }
-  return { schema: 1, apps: out }
+  const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
+  const requested = installed?.slots?.chats?.default
+  const active = candidates.includes(requested) ? requested : CHATS_DEFAULT
+  return { schema: 1, apps: out, slots: { chats: { default: active, candidates } },
+    parking: [{ slot: 'chats', name: 'Chats', required: false, default_app: CHATS_DEFAULT, active, state: 'filled' }] }
 }
 
 /**
