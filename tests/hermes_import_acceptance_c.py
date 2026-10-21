@@ -29,6 +29,7 @@ import hermes_import_canary as canary
 m = rehearsal.m
 PREFIX = 'WIZARD_IMPORT_REHEARSAL_'
 COMMENT = 'wizard-import-archimedes-rehearsal'
+PROBE_FAILURES = []
 
 
 def emit(**value):
@@ -185,7 +186,10 @@ def probe(container, argv, *, expect=0):
     # gh masks its token but do not preserve even the masked token line.
     text = '\n'.join(x for x in (result.stdout + result.stderr).splitlines() if not re.search(r'token\s*:', x, re.I))
     emit(command=shlex.join(argv), exit_code=result.returncode, output=text[:4000])
-    m.require(result.returncode == expect if expect is not None else result.returncode != 0, 'probe_exit_mismatch_' + argv[0])
+    good = result.returncode == expect if expect is not None else result.returncode != 0
+    if not good:
+        PROBE_FAILURES.append(argv[0])
+        emit(probe_expectation_mismatch=argv[0], expected_exit_code=expect)
     return result
 
 
@@ -334,7 +338,7 @@ def main():
                  '--mount', f'type=bind,src={ghdir},dst=/config',
                  '--entrypoint', 'gh', image, 'auth', 'status'])
         emit(gh_private_copy_migrated_with_import_image=True, gh_migration_exit_code=0)
-        creds = [(owner / '.ssh', scoped), (owner / '.config/gh/hosts.yml', ghdir / 'hosts.yml')]
+        creds = [(owner / '.ssh', scoped), (owner / '.config/gh', ghdir)]
         # Borrow only the current Anthropic access grant, never the refresh token.
         claude = root / 'claude-access.json'
         m.dump(claude, without_refresh(json.loads((owner / '.claude/.credentials.json').read_text())))
@@ -392,6 +396,7 @@ def main():
         vps = probe(container, ['ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'ConnectTimeout=10', '-i', str(owner / '.ssh/id_ed25519'), str(owner.name) + '@' + get('VPS_ADDRESS'), 'true'], expect=255)
         m.require('Permission denied (publickey' in vps.stderr, 'vps_not_proven_auth_refused')
         model_exercise(service, agent, target, model)
+        m.require(not PROBE_FAILURES, 'direct_probe_failures_' + '_'.join(PROBE_FAILURES))
         emit(acceptance_C=True)
     finally:
         journal = wizard / 'agents' / agent / 'import-journal.json'
