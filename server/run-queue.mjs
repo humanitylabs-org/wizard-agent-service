@@ -138,6 +138,7 @@ export class DurableRunQueue {
     this.onInterruptRecovery = onInterruptRecovery
     this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
     this.leaselessSince = new Map()
+    this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.timer = null
     this.tickPromise = null
     this.closed = false
@@ -172,6 +173,8 @@ export class DurableRunQueue {
       );
       CREATE INDEX IF NOT EXISTS wizard_run_queue_fifo
         ON wizard_run_queue(status, created_at, public_run_id);
+      CREATE INDEX IF NOT EXISTS wizard_run_queue_terminal
+        ON wizard_run_queue(terminal_at, public_run_id) WHERE terminal_at IS NOT NULL;
       CREATE TABLE IF NOT EXISTS wizard_owner_stops (
         run_id TEXT PRIMARY KEY, at REAL NOT NULL
       );
@@ -403,6 +406,32 @@ export class DurableRunQueue {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     }))
+  }
+
+  /** Cheap revision of the queue's unfinished rows (covering index only): changes on every admission or status move. */
+  listRevision() {
+    const rows = this.database.prepare(`
+      SELECT status, public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+       WHERE status NOT IN ('completed','failed','cancelled','interrupted')
+    `).all()
+    const newest = this.database.prepare('SELECT MAX(rowid) AS id, COUNT(*) AS n FROM wizard_run_queue').get()
+    return `${newest?.id ?? 0}:${newest?.n ?? 0}:${rows.map((row) => `${row.public_run_id}=${row.status}`).sort().join(',')}`
+  }
+
+  // Per-thread fingerprint of every queue row (id=status), for the Chats list cache: a thread
+  // whose rows were added, changed or pruned by retention must be re-projected. Reads status
+  // from the index and session_id from the row head, never the body (~10 ms for ~1,800 rows).
+  sessionStamps() {
+    const rows = this.database.prepare(`
+      SELECT session_id, public_run_id, status FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+    `).all()
+    const parts = new Map()
+    for (const row of rows) {
+      const id = String(row.session_id)
+      if (!parts.has(id)) parts.set(id, [])
+      parts.get(id).push(`${row.public_run_id}=${row.status}`)
+    }
+    return new Map([...parts].map(([id, list]) => [id, list.sort().join(',')]))
   }
 
   // Sessions whose newest queued send is recent and never produced a finished answer here.
@@ -674,7 +703,9 @@ export class DurableRunQueue {
 
   async _refresh(record, force) {
     if (!record.upstreamRunId || TERMINAL.has(record.status)) return record
-    if (!force && nowSeconds() - record.updatedAt < 0.7) return record
+    if (!force && nowSeconds() - (this.refreshedAt.get(record.publicRunId) ?? record.updatedAt) < 0.7) return record
+    this.refreshedAt.set(record.publicRunId, nowSeconds())
+    if (this.refreshedAt.size > 256) this.refreshedAt.delete(this.refreshedAt.keys().next().value)
     try {
       const result = await this.lookup(record)
       const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
@@ -688,10 +719,17 @@ export class DurableRunQueue {
         this.database.prepare("INSERT OR IGNORE INTO wizard_interrupt_recovery(public_run_id, state, at) VALUES(?, 'pending', ?)")
           .run(record.publicRunId, nowSeconds())
       }
+      const workerRunId = result?.workerRunId ?? record.workerRunId
+      // An UPDATE rewrites the whole row, saved request body included (up to ~6 MB with
+      // attachments): ~30-70 ms and MBs of journal per running reply every 1.5 s. Write only
+      // when something changed, plus a 30 s heartbeat so updated_at stays fresh.
+      if (capacityStatus === record.status && !TERMINAL.has(capacityStatus) && workerRunId === record.workerRunId
+          && !record.waitingReason && record.terminalAt === null && nowSeconds() - record.updatedAt < 30
+          && JSON.stringify(nextPayload ?? null) === JSON.stringify(record.payload ?? null)) return record
       return this._update(record.publicRunId, {
         status: capacityStatus,
         payload: nextPayload,
-        workerRunId: result?.workerRunId ?? record.workerRunId,
+        workerRunId,
         waitingReason: '',
         terminalAt: TERMINAL.has(capacityStatus) ? nowSeconds() : null,
       })
@@ -772,7 +810,9 @@ export class DurableRunQueue {
   }
 
   async _tick(force) {
-    let activeRows = this._rows("status NOT IN ('queued','completed','failed','cancelled','interrupted')")
+    // The status is stored after the request body, so a plain scan follows every saved body's
+    // overflow pages each 1.5 s. Select the identities through the (status, …) index instead.
+    let activeRows = this._rows("public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo WHERE status NOT IN ('queued','completed','failed','cancelled','interrupted'))")
     for (const record of activeRows) {
       if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
       else await this._refresh(record, force)
@@ -834,10 +874,20 @@ export class DurableRunQueue {
       if (!record.waitingReason) this._update(record.publicRunId, { waitingReason: 'capacity' })
     }
 
+    this._pruneTerminal()
+  }
+
+  // Retention: finished runs older than 7 days go, keeping the newest 128 of those. terminal_at
+  // sits after the request body, so without wizard_run_queue_terminal this scanned every saved
+  // body under a write lock each 1.5 s tick (~70 ms, ~20% of a core). Once a minute is plenty.
+  _pruneTerminal(force = false) {
+    const now = nowSeconds()
+    if (!force && now - (this.lastPruneAt ?? 0) < 60) return
+    this.lastPruneAt = now
     this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (
-      SELECT public_run_id FROM wizard_run_queue
+      SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
        WHERE terminal_at IS NOT NULL AND terminal_at < ?
        ORDER BY terminal_at DESC LIMIT -1 OFFSET 128
-    )`).run(nowSeconds() - 7 * 24 * 60 * 60)
+    )`).run(now - 7 * 24 * 60 * 60)
   }
 }

@@ -11,7 +11,8 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, searchHermesSessionText, readHelmActivitySessionIds, readHermesSessionTruth, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, searchHermesSessionText, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -1418,11 +1419,47 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
     return projected
   }
+  // Compaction can re-emit an older message as a new row (byte-exact role and timestamp) with
+  // the alerts that followed it merged onto its end. Hermes' content-keyed display dedupe keeps
+  // both, and the merged copy lands after the owner's newest question, reading as extra replies
+  // to it. Drop that copy when it is the earlier message plus only text other rows on this page
+  // already paint; anything else stays, so no text can disappear.
+  const replayKey = (item) => {
+    const role = item?.role ?? item?.author
+    const at = item?.timestamp
+    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${role}\u0000${at}` : ''
+  }
+  const mergedReplay = (earlier, later, pageTexts) => {
+    if (later === earlier) return true
+    if (!earlier || !later.startsWith(earlier)) return false
+    let rest = later.slice(earlier.length)
+    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest.trim()
+  }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
       const seen = new Set()
+      const sourceOf = (item, index) => source?.[index] ?? item
+      const firstByKey = new Map()
+      value.forEach((item, index) => {
+        const key = replayKey(sourceOf(item, index))
+        if (key && !firstByKey.has(key)) firstByKey.set(key, index)
+      })
+      const repeated = new Set(value.flatMap((item, index) => {
+        const key = replayKey(sourceOf(item, index))
+        return key && firstByKey.get(key) !== index ? [index] : []
+      }))
+      const pageTexts = repeated.size
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+            .sort((a, b) => b.length - a.length)
+        : []
       return value.flatMap((item, index) => {
-        const sourceItem = source?.[index] ?? item
+        const sourceItem = sourceOf(item, index)
+        if (repeated.has(index)) {
+          const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
+          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+        }
         if (legacyInternalHistoryMessage(item) && !historyRunContext(sourceItem)) return []
         const projected = visit(item, sourceItem)
         if (projected?.display_kind === 'run_context') {
@@ -2224,6 +2261,8 @@ function buildWizardServer(options, lifetime) {
       } catch { return null } finally { db.close() }
     },
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
+    // Separate process that holds locked reply streams across Agent Service restarts ('' = off).
+    keeperSocket: options.runKeeperSocket ?? '',
     sessionRoute: sessionId => {
       // Never infer a host state.db path on portable installs. Explicit client locks still work
       // without this optional read-only persisted-selector fallback.
@@ -3171,7 +3210,7 @@ function buildWizardServer(options, lifetime) {
         .then(() => canonicalSessionReader())
         .then((sessions) => {
           if (!Array.isArray(sessions)) throw new Error('canonical session listing unavailable')
-          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS), assistantRevision }
+          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS), assistantRevision, generation: (canonicalSessionCache.generation ?? 0) + 1 }
           return sessions
         })
         .finally(() => { canonicalSessionInFlight = null })
@@ -3199,6 +3238,23 @@ function buildWizardServer(options, lifetime) {
       if (!access) throw Object.assign(new Error('access required'), {status:403})
       const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
+        if (!searchParams.get('q') && listCache.mode() === 'on') {
+          try { return await listCache.served() }
+          catch (error) { listCache.fellBack(error) }
+        }
+        const q = searchParams.get('q')
+        if (q && listCache.mode() === 'on') {
+          // Search reuses the shared list snapshot; only the message-text lookup is per query.
+          // Rows are shared with other clients, so matches get a copy, never a mutation.
+          try {
+            const cached = await listCache.served()
+            const hits = new Map()
+            for (let i=0; i<cached.length; i+=200) {
+              for (const [id, text] of searchHermesSessionText(hermesStatePath, cached.slice(i,i+200).map(s=>s.id), q)) hits.set(id, text)
+            }
+            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
+          } catch (error) { listCache.fellBack(error) }
+        }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
         // Truth/helper readers cap at 200 IDs. Keep batches at the existing page size.
@@ -3413,7 +3469,9 @@ function buildWizardServer(options, lifetime) {
   }
 
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
-  const projectSessionList = async (result, operator, canonicalPage, firstPage) => {
+  // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
+  // reads only in-memory stores and runs on every served list, cached rows included.
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage) => {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
@@ -3437,13 +3495,15 @@ function buildWizardServer(options, lifetime) {
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          // One queue read per batch: both consumers below need the same newest-run projection.
+          const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           result = filterSessionList(
             result,
             operator,
             [...operatorWorkers.values()],
-            [...(runQueue?.latestProjections(listedSessionIds) ?? []), ...directRuns.values()],
+            [...queueProjections, ...directRuns.values()],
             externalRuns,
             sessionTruth,
             helmActivities,
@@ -3457,6 +3517,9 @@ function buildWizardServer(options, lifetime) {
           }
           result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
+    return result
+  }
+  const decorateSessionList = (result, operator) => {
           result = decorateSessionTitles(result, operator)
           if (agents && !operator) {
             const ids = []
@@ -3465,6 +3528,112 @@ function buildWizardServer(options, lifetime) {
           }
     return result
   }
+  const projectSessionList = async (result, operator, canonicalPage, firstPage) =>
+    decorateSessionList(await projectSessionListCore(result, operator, canonicalPage, firstPage), operator)
+
+  // ---- Shared Chats list cache (session-list-cache.mjs). One projected list for every client,
+  // re-projecting only threads that can be changing. WIZARD_LIST_CACHE=off restores the full
+  // rebuild per poll; =shadow serves the full rebuild and only compares. In "on" mode a self-check
+  // compares against the full rebuild every 10 minutes and switches the cache off on a difference.
+  const listCacheAlarmPath = runQueueStatePath ? resolve(dirname(runQueueStatePath), 'list-cache-alarms.jsonl') : ''
+  const listCache = (() => {
+    const configured = listCacheMode(options.listCacheMode ?? process.env.WIZARD_LIST_CACHE)
+    const hotWindowSeconds = Number(options.listCacheHotSeconds ?? 7 * 86400)
+    let disabled = ''
+    let localRevision = 0
+    let messageMark = Number.NaN
+    let lastFallbackLogAt = 0
+    const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
+      last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+    const projector = createHybridProjector()
+    const snapshot = createSharedSnapshot()
+    const alarm = (kind, detail) => {
+      const entry = { at: new Date().toISOString(), kind, ...detail }
+      console.log(`[list-cache] ${kind} ${JSON.stringify(detail).slice(0, 4000)}`)
+      if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+    }
+    const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
+    const projectBatch = async (sessions, firstPage) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
+    const fullCore = async (all) => {
+      const rows = []
+      for (let index = 0; index < all.length; index += 100) rows.push(...await projectBatch(all.slice(index, index + 100), index === 0))
+      return rows
+    }
+    const gate = () => {
+      const hermes = readHermesListRevision(hermesStatePath)
+      if (hermes === null) return null
+      // The session listing is refreshed in the background after it expires; a snapshot built from
+      // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}` } catch { return null }
+    }
+    // Threads that must be re-projected on this build. reset=true: the change set is unknown.
+    const hotIds = async () => {
+      const delta = readHermesMessageDelta(hermesStatePath, messageMark)
+      if (!delta) throw new Error('hermes message delta unavailable')
+      const nowSeconds = Date.now() / 1000
+      const recent = readRecentHermesRootIds(hermesStatePath, nowSeconds - hotWindowSeconds)
+      if (!recent) throw new Error('recent hermes threads unavailable')
+      const hot = new Set([...recent, ...(delta.roots ?? [])])
+      for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
+      for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
+      for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
+      // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
+      const stamps = runQueue ? runQueue.sessionStamps() : null
+      return { hot, stamps, reset: delta.roots === null, mark: delta.maxId }
+    }
+    const buildHybrid = async () => {
+      const started = performance.now()
+      const all = await humanSessions()
+      const { hot, stamps, reset, mark } = await hotIds()
+      if (reset) { projector.clear(); stats.resets++ }
+      const result = await projector.project({ sessions: all, hot, stamps, epoch: 'direct', projectBatch })
+      messageMark = mark
+      Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
+        last_projected: result.projected, last_cached: result.cached, last_hot: hot.size })
+      return result
+    }
+    // Compare the cache with a full rebuild. Only rows the cache served unchanged count as a cache
+    // fault; freshly projected rows may differ only because a turn moved between the two builds.
+    const check = async () => {
+      if (!canonicalSessionReader || disabled || configured === 'off') return null
+      const started = performance.now()
+      const all = await humanSessions()
+      const expected = await fullCore(all)
+      const hybrid = await buildHybrid()
+      const cached = new Set(hybrid.cachedIds)
+      const differences = diffProjectedRows(expected, hybrid.rows)
+      const faults = differences.filter((difference) => cached.has(difference.id))
+      Object.assign(stats, { checks: stats.checks + 1, check_differences: stats.check_differences + faults.length,
+        check_live_differences: stats.check_live_differences + differences.length - faults.length,
+        last_check_ms: Math.round(performance.now() - started), last_check_at: new Date().toISOString() })
+      if (faults.length) {
+        alarm('mismatch', { mode: configured, faults: faults.slice(0, 20), fault_count: faults.length, live_differences: differences.length - faults.length })
+        if (configured === 'on') { disabled = 'mismatch'; stats.disabled = disabled; snapshot.clear(); alarm('disabled', { reason: 'self-check mismatch; serving the full rebuild' }) }
+      } else if (differences.length) {
+        console.log(`[list-cache] check ok; ${differences.length} live rows moved during the check ${JSON.stringify(differences.slice(0, 5))}`)
+      }
+      return { faults, differences }
+    }
+    return {
+      mode: () => (disabled ? 'off' : configured),
+      touch: () => { localRevision++ },
+      stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
+      check,
+      served: async () => {
+        const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+        return rows.map((row) => ({ ...row }))
+      },
+      fellBack: (error) => {
+        stats.fallbacks++
+        projector.clear()
+        messageMark = Number.NaN
+        if (Date.now() - lastFallbackLogAt > 60_000) { lastFallbackLogAt = Date.now(); console.log(`[list-cache] fell back to the full rebuild: ${error?.message ?? error}`) }
+      },
+      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 10 * 60_000),
+    }
+  })()
 
   const safeQueueValue = (value, record) => {
     let result = Buffer.from(JSON.stringify(value))
@@ -3940,6 +4109,7 @@ function buildWizardServer(options, lifetime) {
     // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
     // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
+    if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
@@ -4003,6 +4173,11 @@ function buildWizardServer(options, lifetime) {
         if (await helperSessionActive(body.session_id)) { sendJson(response,409,{error:'agent_already_active'}); return }
         const outcome = await resumeHelper({sessionDbPath:hermesStatePath,sessionId:body.session_id,admit:admitHelperContinuation});
         sendJson(response,outcome.status,outcome.body); return
+      }
+      if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        sendJson(response, 200, listCache.stats())
+        return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
         mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
@@ -5314,6 +5489,11 @@ function buildWizardServer(options, lifetime) {
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
     lifetime.own(() => watcher.stop(), () => watcher.stop())
+  }
+  if (canonicalSessionReader && listCache.mode() !== 'off') {
+    const listCacheTimer = setInterval(() => { void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
+    listCacheTimer.unref?.()
+    server.on('close', () => clearInterval(listCacheTimer))
   }
   return server
 }
