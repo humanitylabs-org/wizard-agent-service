@@ -66,7 +66,7 @@ class PrivateProviders:
 
     def origin(self, app):
         # Same host-network route as Agent Service aiConnectionUrl; never follow a redirect.
-        for value in (app.get('view', {}).get('local'), app.get('health')):
+        for value in ((app.get('view') or {}).get('local'), app.get('health')):
             try:
                 url = urllib.parse.urlsplit(value or '')
                 if (url.scheme in ('http', 'https') and url.hostname in ('localhost', '127.0.0.1', '::1')
