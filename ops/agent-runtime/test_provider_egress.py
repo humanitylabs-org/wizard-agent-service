@@ -101,6 +101,22 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(key=key), patch.object(manager, 'inspect', return_value=changed), self.assertRaises(Failure):
                 manager.network({'id':'example'})
 
+    def test_second_agent_preserves_both_relay_attachments(self):
+        import subprocess
+        calls = []
+        manager = ProviderEgress(lambda args, **kw: (calls.append(args) or subprocess.CompletedProcess(args,0,'','')), Failure)
+        value = self.fixture(); value['Config']['Env'] = []
+        value['NetworkSettings'] = {'Networks': {'wzpr-a':{}, 'wzpr-b':{}, 'wizard-egress-example':{}}}
+        def inspect(kind, name):
+            if kind == 'network': return {'Containers':{'cid':{'IPv4Address':'10.253.0.2/24'}}}
+            if name == 'cid': return copy.deepcopy(value)
+            return None
+        manager.inspect = inspect
+        manager.network = lambda app: 'wizard-egress-example'
+        self.assertEqual(manager.reconcile({'id':'example','private_inference':{'kind':'local','egress':[]}},'cid',['wzpr-a','wzpr-b']), '10.253.0.2')
+        self.assertFalse(any(c[:2] == ['network','disconnect'] for c in calls))
+        self.assertIn(['start','cid'], calls)
+
     def test_failure_stops_before_validation_and_never_starts(self):
         calls=[]
         manager = ProviderEgress(lambda args, **kw: calls.append(args), Failure)

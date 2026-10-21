@@ -226,7 +226,7 @@ def private_compose_doc(agent, *, image, client_image, home_source, link, listen
     uid, gid = (AGENT_UID, AGENT_UID) if restricted(agent) or os.getuid() == 0 else (os.getuid(), os.getgid())
     client = service_names(agent)[1]
     edge = f"agent-{agent['id']}-edge"
-    # No auto-start after Docker/host restart: volatile firewall policy must be rebuilt before any client starts.
+    # No auto-start after Docker/host restart: private topology must be reconciled before any client starts.
     hardening = {'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no'}
     services = {
         main: {**hardening, 'image': image or DEFAULT_IMAGE, 'user': f'{uid}:{gid}',
@@ -411,10 +411,8 @@ class RestrictedDriver:
         self.agents.add_provider_keys(agent)
         if self.agents.providers.is_private(agent):
             docker(['build', '-t', SIDECAR_IMAGE, str(self.runtime_dir / 'sidecars')], timeout=1800)
-            docker(['build', '-t', 'wizard-private-firewall:local', str(Path(__file__).parent / 'private-firewall')], timeout=300)
             self._compose(agent, 'down', '--remove-orphans', timeout=300)
             link = self.agents.providers.prepare(agent)
-            self.agents.providers.firewall(agent, link)
             path = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
             path.write_text(compose_doc(agent, image=self.image or DEFAULT_IMAGE,
                                        proxy_image=self.agents.providers.client_image,
@@ -446,7 +444,6 @@ class RestrictedDriver:
     def delete(self, agent: dict) -> dict:
         self._compose(agent, 'down', '--remove-orphans', timeout=300)
         self.agents.providers.revoke(agent)
-        self.agents.providers.firewall(agent)
         (self.agents.root / agent['id'] / 'runtime' / 'private-compose.json').unlink(missing_ok=True)
         return {'ok': True}
 

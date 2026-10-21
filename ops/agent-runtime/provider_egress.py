@@ -94,7 +94,8 @@ class ProviderEgress:
                      '--memory', '64m', *args], timeout=60)
         return name
 
-    def reconcile(self, app, cid, relay):
+    def reconcile(self, app, cid, relays):
+        relays = set(relays)
         hosts = declared_hosts(app['private_inference'])
         info = self.inspect('container', cid)
         if not info:
@@ -118,7 +119,7 @@ class ProviderEgress:
                     raise self.failure('provider_helper_name_conflict', 409)
                 self.docker(['rm', '-f', name], check=False, timeout=60)
             for old in info.get('NetworkSettings', {}).get('Networks', {}):
-                if old not in (net, relay):
+                if old not in relays | {net}:
                     self.docker(['network', 'disconnect', '-f', old, cid], timeout=60)
             subnet = ipaddress.ip_network(self.inspect('network', net)['IPAM']['Config'][0]['Subnet'])
             address, proxy_ip = (str(subnet.network_address + n) for n in (2, 3))
@@ -157,7 +158,7 @@ class ProviderEgress:
                 self.docker(['start', helper], timeout=60)
             self.docker(['start', cid], timeout=60)
             final = self.inspect('container', cid)
-            if set(final['NetworkSettings']['Networks']) != {net, relay}:
+            if set(final['NetworkSettings']['Networks']) != relays | {net}:
                 raise self.failure('provider_network_verification_failed', 503)
             return {'network': net, 'hosts': hosts}
         except Exception:

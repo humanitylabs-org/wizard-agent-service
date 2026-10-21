@@ -118,8 +118,46 @@ class PrivateProviders:
                 raise self.failure('private_provider_unavailable', 503)
             time.sleep(0.25)
 
-    def network(self, app):
-        name = 'wizard-relay-' + app['id']
+    @staticmethod
+    def network_name(agent):
+        return 'wzpr-' + hashlib.sha256(agent['id'].encode()).hexdigest()[:24]
+
+    def validate_network(self, value, app, agent):
+        ranges = value.get('IPAM', {}).get('Config') or []
+        try:
+            block = ipaddress.ip_network(ranges[0]['Subnet'])
+            valid = len(ranges) == 1 and block.version == 4 and block.prefixlen == 24 and block.subnet_of(RELAY_POOL)
+        except (ValueError, KeyError, IndexError):
+            valid = False
+        if (not valid or not value.get('Internal') or value.get('EnableIPv6') or value.get('Driver') != 'bridge' or
+                value.get('Labels', {}).get('wizard.private-provider') != app['id'] or
+                value.get('Labels', {}).get('wizard.private-agent') != agent['id'] or
+                value.get('Name') != self.network_name(agent) or
+                value.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true'):
+            raise self.failure('relay_network_unsafe', 409)
+        for cid in value.get('Containers', {}):
+            peer = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
+            labels = peer.get('Config', {}).get('Labels') or {}
+            provider = labels.get('com.docker.compose.service') == app['id']
+            client = (labels.get('com.docker.compose.service') == 'agent-' + agent['id'] + '-client' and
+                      labels.get('com.docker.compose.project') == 'agent-' + agent['id'])
+            if not (provider or client):
+                raise self.failure('relay_network_unexpected_peer', 409)
+        if len(value.get('Containers', {})) > 2:
+            raise self.failure('relay_network_unexpected_peer', 409)
+
+    def relays(self, app):
+        ids = self.docker(['network', 'ls', '-q', '--filter', 'label=wizard.private-provider=' + app['id']], timeout=60).stdout.split()
+        values = json.loads(self.docker(['network', 'inspect', *ids], timeout=60).stdout) if ids else []
+        result = []
+        for value in values:
+            agent = {'id': value.get('Labels', {}).get('wizard.private-agent', '')}
+            self.validate_network(value, app, agent)
+            result.append(value['Name'])
+        return result
+
+    def network(self, app, agent):
+        name = self.network_name(agent)
         with NETWORK_LOCK:
             found = self.docker(['network', 'inspect', name], check=False, timeout=60)
             if found.returncode:
@@ -131,15 +169,11 @@ class PrivateProviders:
                     raise self.failure('relay_network_pool_exhausted', 503)
                 self.docker(['network', 'create', '--internal', '--subnet', str(subnet),
                              '--opt', 'com.docker.network.bridge.inhibit_ipv4=true',
-                             '--label', 'wizard.private-provider=' + app['id'], name], timeout=60)
+                             '--label', 'wizard.private-provider=' + app['id'],
+                             '--label', 'wizard.private-agent=' + agent['id'], name], timeout=60)
                 found = self.docker(['network', 'inspect', name], timeout=60)
             value = json.loads(found.stdout)[0]
-            ranges = value.get('IPAM', {}).get('Config') or []
-            if (not value.get('Internal') or value.get('EnableIPv6') or value.get('Labels', {}).get('wizard.private-provider') != app['id'] or
-                    len(ranges) != 1 or ipaddress.ip_network(ranges[0]['Subnet']).prefixlen != 24 or
-                    not ipaddress.ip_network(ranges[0]['Subnet']).subnet_of(RELAY_POOL) or
-                    value.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true'):
-                raise self.failure('relay_network_unsafe', 409)
+            self.validate_network(value, app, agent)
             # Service labels work for both Runtipi and plain Compose; ambiguous installations fail closed.
             ids = self.docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
             if len(ids) != 1:
@@ -157,22 +191,55 @@ class PrivateProviders:
                 info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
                 if alias not in (info['NetworkSettings']['Networks'][name].get('Aliases') or []):
                     raise self.failure('relay_network_attach_failed', 503)
-            ProviderEgress(self.docker, self.failure).reconcile(app, cid, name)
+            ProviderEgress(self.docker, self.failure).reconcile(app, cid, self.relays(app))
         return name
 
+    def remove_network(self, name, agent_id, app_id):
+        found = self.docker(['network', 'inspect', name], check=False, timeout=60)
+        if found.returncode:
+            return
+        value = json.loads(found.stdout)[0]
+        self.validate_network(value, {'id': app_id}, {'id': agent_id})
+        for cid in value.get('Containers', {}):
+            peer = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
+            if peer.get('Config', {}).get('Labels', {}).get('com.docker.compose.service') == app_id:
+                self.docker(['network', 'disconnect', '-f', name, cid], timeout=60)
+            else:
+                self.docker(['rm', '-f', cid], timeout=60)
+        self.docker(['network', 'rm', name], timeout=60)
+
     def reconcile_installed(self):
-        """Boot reconciliation before accepting links; failures remain visibly stopped."""
+        """Rebuild linked per-agent networks and seal installed providers before admission."""
         try:
             apps = json.loads(self.apps_path.read_text()).get('apps', [])
         except (OSError, ValueError):
             return []
-        failures = []
+        failures, desired = [], {}
+        for path in self.agents.root.glob('*/agent.json'):
+            agent = json.loads(path.read_text())
+            if self.is_private(agent):
+                desired[agent['id']] = agent
+        ids = self.docker(['network', 'ls', '-q', '--filter', 'label=wizard.private-agent'], timeout=60).stdout.split()
+        for value in (json.loads(self.docker(['network', 'inspect', *ids], timeout=60).stdout) if ids else []):
+            labels = value.get('Labels') or {}
+            aid, appid = labels.get('wizard.private-agent'), labels.get('wizard.private-provider')
+            agent = desired.get(aid)
+            if not agent or migrate_provider(agent.get('model', {}).get('provider')) != appid:
+                self.remove_network(value['Name'], aid, appid)
         for entry in apps:
             if not isinstance(entry.get('private_inference'), dict):
                 continue
             try:
-                # Running registry status denotes desired state, not container liveness.
-                self.network(self.app(entry['id']))
+                app = self.app(entry['id'])
+                linked = [a for a in desired.values() if migrate_provider(a.get('model', {}).get('provider')) == app['id']]
+                for agent in linked:
+                    self.network(app, agent)
+                if not linked:
+                    cids = self.docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + app['id']], timeout=60).stdout.split()
+                    if len(cids) != 1:
+                        raise self.failure('private_provider_container_ambiguous', 503)
+                    self.require_weights(app, cids[0])
+                    ProviderEgress(self.docker, self.failure).reconcile(app, cids[0], [])
             except self.failure as error:
                 failures.append({'app': entry.get('id'), 'error': error.code})
         return failures
@@ -185,6 +252,7 @@ class PrivateProviders:
         saved = json.loads(state.read_text())
         # Keep the original app origin for revocation if its registry row was removed.
         self.request(saved['app'], 'DELETE', '/api/private-clients/' + agent['id'])
+        self.remove_network(saved.get('link', {}).get('network', self.network_name(agent)), agent['id'], saved['app']['id'])
         state.unlink()
         (runtime / 'relay-token').unlink(missing_ok=True)
 
@@ -225,16 +293,6 @@ class PrivateProviders:
             os.chmod(state, 0o600)
             return link
 
-    def firewall(self, agent, link=None):
-        script = Path(__file__).parent / 'private-client-firewall.sh'
-        image = 'wizard-private-firewall:local'
-        identity = hashlib.sha256(agent['id'].encode()).hexdigest()[:16]
-        args = ['apply', identity, link['sandbox_ip'], link['relay_ip'], link['provider_ip'], str(link['relay_port']),
-                str(ipaddress.ip_address(link['sandbox_ip']) - 1)] if link else ['remove', identity]
-        self.docker(['run', '--rm', '--network', 'host', '--read-only', '--user', '0:0',
-                     '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--security-opt', 'no-new-privileges:true',
-                     '-v', f'{script}:/firewall.sh:ro', image, 'sh', '/firewall.sh', *args], timeout=60)
-
     def prepare(self, agent):
         app = self.app(agent.get('model', {}).get('provider'))
         runtime = self.agents.root / agent['id'] / 'runtime'
@@ -242,7 +300,7 @@ class PrivateProviders:
         state = runtime / 'private-provider.json'
         if state.exists() and json.loads(state.read_text())['app']['id'] != app['id']:
             self.revoke(agent)
-        network = self.network(app)
+        network = self.network(app, agent)
         self.wait_ready(app)
         addresses = self.addresses(agent, app, network)
         value = self.request(app, 'POST', '/api/private-clients', {'agent': agent['id']})
@@ -275,7 +333,7 @@ def client_service(link, image):
         'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no',
         'environment': {'PROFILE': 'tinfoil' if link['kind'] == 'attested-relay' else 'passthrough',
                         'RELAY_URL': link['relay_url'], 'RELAY_TOKEN_FILE': '/run/wizard/relay-token',
-                        'LISTEN_PORT': '3301', 'MODELS': ','.join(link['models'])},
+                        'LISTEN_PORT': '3301', 'LISTEN_HOST': link['sandbox_ip'], 'MODELS': ','.join(link['models'])},
         'volumes': [link['token_file'] + ':/run/wizard/relay-token:ro'],
         'networks': {'sandbox': {'ipv4_address': link['sandbox_ip']}, 'relay': {'ipv4_address': link['relay_ip']}},
         'dns': ['127.0.0.1'], 'pids_limit': 128, 'mem_limit': '256m',

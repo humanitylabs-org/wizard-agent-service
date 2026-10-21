@@ -1,18 +1,21 @@
 # Provider-app declared-host egress
 
-This is a separate security boundary from the in-seal client's stateful firewall.
+Isolation is enforced by network topology and address-bound listeners, not bridged host filtering.
 The Agent Service runtime owns both provider relay and egress networks, plus one
 small system edge per provider app. The main agent can live in its own container;
 neither it nor the provider process needs host networking or firewall privileges.
 
 ## Topology and enforcement
 
-- `wizard-relay-<app>`: existing internal/no-host-address relay network, /24 from
-  `10.252.0.0/16`. Clients and the selected provider only. Client policy remains
-  enforced by the separate stateful client firewall, not by network membership.
+- `wzpr-<agent-hash>`: one internal/no-host-address IPv4 /24 per private agent, from
+  `10.252.0.0/16`. Exactly that agent's client and its selected provider. Networks
+  carry both provider and agent ownership labels; unknown peers fail closed.
+  The client API binds only its sandbox IP (`LISTEN_HOST`), never its relay IP.
+  Tinfoil management binds only its egress IP, never a relay IP; spoofed HTTP
+  Host/Origin headers cannot expose token minting or other non-relay ports.
 - `wizard-egress-<app>`: runtime-owned internal bridge, IPv4-only /24 from
   `10.253.0.0/16`, `inhibit_ipv4=true`. Provider `.2`, system edge `.3`. No other peers.
-- Provider: **only these two internal networks**, read-only, cap-drop ALL,
+- Provider: **only its per-agent relay networks plus its one internal egress network**, read-only, cap-drop ALL,
   no-new-privileges, external DNS directed to its own loopback (`dns: [127.0.0.1]`).
   Docker service-name DNS still works. No external interface, default internet
   route, host bridge address, IPv6, raw-socket capability or alternate DNS server.
@@ -46,17 +49,19 @@ validated host/port decisions, never headers, URLs, tokens, bodies or errors.
 ## Runtime lifecycle / installer prerequisites
 
 `PrivateProviders.network()` calls `ProviderEgress.reconcile()` before minting a
-client token. Runtime startup also reconciles installed private providers before
+client token. It preserves all validated per-agent relay attachments when a second
+agent links. Unlink/revoke removes only that agent's network; startup removes
+orphaned owned networks and reconciles installed private providers before
 accepting API calls; stopped Docker containers are discoverable by their unique
 Compose service label. Registry `running` status is desired state; owner-stopped
 registry rows are not automatically restarted. No automatic private-agent client
-restart is added here: that still requires the separate client-firewall boot gate.
+restart is added here: topology is reconciled before explicit client restart.
 
 Reconciliation sets `restart: no` and **stops the provider first**, validates DNS,
 proxy and hardening prerequisites, validates/creates the owned egress network,
 refuses unknown network peers/name conflicts, replaces the small helper, removes
 **every other provider interface**, pins endpoints, and starts the provider last.
-Network read-back must equal exactly the two internal networks. Any failure leaves
+Network read-back must equal exactly the validated per-agent relay set plus egress. Any failure leaves
 the provider stopped, never falling back to ordinary app networking. Changing hosts
 replaces the helper while the provider is stopped, closing existing tunnels. Docker
 restarts cannot bring an unguarded provider/helper back before reconciliation.
@@ -167,6 +172,17 @@ proxy logs. It saves the key only through the app's route into isolated **tmpfs*
 no host secret copy, Docker env/argv key, provider key in client, or emitted key.
 All containers/networks are removed in `finally`; image cleanup is explicit.
 
-Full fresh-final-box/Hermes/installer and client firewall/ciphertext capture proofs
+Full fresh-final-box/Hermes/installer and cross-agent/ciphertext capture proofs
 remain distinct acceptance gates. This provider egress proof does not substitute
 for those other security boundaries.
+
+## No-sudo boundary
+
+There is no private-client host firewall helper, bridge sysctl or kernel-module
+prerequisite. Owners never type sudo or load modules. Docker's routed inter-bridge
+isolation and internal/no-gateway topology prevent cross-agent reachability;
+address-bound listeners isolate the two services sharing a bridge. The existing
+`agent-firewall.sh` is unchanged: its INPUT hooks cover traffic addressed to the
+host, not same-bridge FORWARD traffic, and work with br_netfilter absent.
+The no-sudo rig acceptance must prove this with the module unloaded and the
+bridge sysctl absent, two real agents, all six checks each and cross-agent probes.
