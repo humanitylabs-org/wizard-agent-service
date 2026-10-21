@@ -446,6 +446,20 @@ class DockerRuntime:
         p = self.plan
         h = logical_home(p)
         native_home = p['owner_home'] if p['path_preserving'] else '/opt/data/native-home'
+        # Numeric --user alone has no NSS row in images whose built-in UID differs.
+        # OpenSSH needs getpwuid(); expose a synthetic identity, not host passwd.
+        require(not any(c in native_home for c in ':\r\n'), 'runtime_identity_home')
+        identity = self.directory / 'runtime-identity'
+        require(not identity.is_symlink(), 'runtime_identity_symlink')
+        identity.mkdir(mode=0o700, exist_ok=True)
+        uid, gid = os.getuid(), os.getgid()
+        passwd = ('' if uid == 0 else 'root:x:0:0:root:/root:/bin/sh\n') + f'wizard-agent:x:{uid}:{gid}:Imported agent:{native_home}:/bin/sh\n'
+        group = ('' if gid == 0 else 'root:x:0:\n') + f'wizard-agent:x:{gid}:\n'
+        for name, text in [('passwd', passwd), ('group', group)]:
+            path = identity / name
+            require(not path.is_symlink(), 'runtime_identity_symlink')
+            path.write_text(text)
+            path.chmod(0o600)
         args = ['docker', 'run', '-d', '--name', self.name, '--label', 'wizard.import.id=' + self.id,
                 '--label', 'wizard.import.journal=' + str(self.directory), '--network', p['network'],
                 '--network-alias', self.name, '--restart', 'no', '--read-only', '--cap-drop', 'ALL',
@@ -453,6 +467,8 @@ class DockerRuntime:
                 '--user', f'{os.getuid()}:{os.getgid()}', '--tmpfs', '/tmp:rw,mode=1777',
                 '-p', f'127.0.0.1:{p["port"]}:8642', '-e', 'HOME=' + native_home,
                 '-e', 'HERMES_HOME=' + h, '-e', 'PYTHONDONTWRITEBYTECODE=1',
+                '--mount', f'type=bind,src={identity / "passwd"},dst=/etc/passwd,readonly',
+                '--mount', f'type=bind,src={identity / "group"},dst=/etc/group,readonly',
                 '--mount', f'type=bind,src={self.directory / "home"},dst={h}',
                 '--entrypoint', '/opt/hermes/.venv/bin/python']
         if h != '/opt/data':
@@ -942,7 +958,7 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
     for unit in journal.get('services_active', []):
         run(['systemctl', '--user', 'start', unit])
     # No archive, credentials, old record or imported home retained in the registered agent directory.
-    for name in ['home', 'credentials', 'originals', 'quarantine']:
+    for name in ['home', 'credentials', 'originals', 'quarantine', 'runtime-identity']:
         p = directory / name
         if p.exists():
             shutil.rmtree(p)

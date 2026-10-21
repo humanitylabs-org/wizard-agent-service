@@ -82,6 +82,23 @@ class ImportTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN', p['summary']['credential_names'])
         self.assertTrue(any(i['path'] == '/work/project' and i['references'] == ['skills/sample/SKILL.md:1'] for i in p['dependencies']))
         self.assertTrue(any(i['kind'] == 'host-service' for i in p['dependencies']))
+    def test_runtime_mounts_synthetic_identity_and_undo_removes_it(self):
+        p = self.plan()
+        result = self.apply(p)
+        directory = self.wizard / 'agents/fixture-agent'
+        runtime = m.DockerRuntime(p, directory, 'fixture-agent')
+        with patch.object(m, 'run', return_value='') as called:
+            runtime.start()
+        argv = called.call_args.args[0]
+        mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == '--mount']
+        self.assertTrue(any('dst=/etc/passwd,readonly' in x for x in mounts))
+        self.assertTrue(any('dst=/etc/group,readonly' in x for x in mounts))
+        rows = (directory / 'runtime-identity/passwd').read_text().splitlines()
+        self.assertTrue(any(row.split(':')[2] == str(os.getuid()) and row.split(':')[5] == str(self.owner) for row in rows))
+        self.assertTrue(all(row.split(':')[1] == 'x' for row in rows))
+        self.undo(result)
+        self.assertFalse(directory.exists())
+
     def test_scan_closes_sqlite_reader_before_writer_census(self):
         import sqlite3
         with contextlib.closing(sqlite3.connect(self.home / 'state.db')) as db:
