@@ -124,7 +124,7 @@ export function diffProjectedRows(expected, actual) {
  * (up to `ceilingMs`), and for at most `debounceMs` while it changes. A changed local revision
  * (an owner action on this service) always rebuilds. Concurrent callers share one rebuild.
  */
-export function createSharedSnapshot({ debounceMs = 3_000, ceilingMs = 30_000, now = Date.now } = {}) {
+export function createSharedSnapshot({ debounceMs = 3_000, ceilingMs = 30_000, staleMs = 0, now = Date.now } = {}) {
   let current = null
   let inFlight = null
   return {
@@ -136,7 +136,7 @@ export function createSharedSnapshot({ debounceMs = 3_000, ceilingMs = 30_000, n
       }
       // A rebuild that started before an owner action cannot answer for it: wait, then rebuild.
       if (inFlight && inFlight.local !== local) await inFlight.promise.catch(() => undefined)
-      if (!inFlight) {
+      const start = () => {
         const promise = (async () => {
           const startedAt = now()
           const value = await build()
@@ -145,6 +145,14 @@ export function createSharedSnapshot({ debounceMs = 3_000, ceilingMs = 30_000, n
         })().finally(() => { if (inFlight?.promise === promise) inFlight = null })
         inFlight = { promise, local }
       }
+      // Stale-while-revalidate: with agents always replying the gate moves on almost every request,
+      // and waiting for each rebuild made every Chats load take seconds. Serve the current snapshot
+      // (younger than the ceiling, same owner revision) and rebuild in the background.
+      if (current && current.local === local && at - current.at < staleMs) {
+        if (!inFlight) { start(); inFlight.promise.catch(() => undefined) }
+        return current.value
+      }
+      if (!inFlight) start()
       return inFlight.promise
     },
     clear() { current = null },

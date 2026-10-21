@@ -3562,7 +3562,7 @@ function buildWizardServer(options, lifetime) {
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
       last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
-    const snapshot = createSharedSnapshot()
+    const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
       const entry = { at: new Date().toISOString(), kind, ...detail }
       console.log(`[list-cache] ${kind} ${JSON.stringify(detail).slice(0, 4000)}`)
