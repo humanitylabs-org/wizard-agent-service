@@ -2336,6 +2336,7 @@ function buildWizardServer(options, lifetime) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    standardChatsUrl: options.standardChatsUrl || '',
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     mainProviders: async () => {

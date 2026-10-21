@@ -203,6 +203,8 @@ server = createWizardServer({
   ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
   // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
+  // A dedicated read-only transport can be configured without enabling the app gateway.
+  standardChatsUrl: process.env.WIZARD_STANDARD_CHATS_URL || '',
   // New container agents run in the restricted runtime (their own networks, edge sidecar to WIZARD_AGENT_PORT).
   agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
 })

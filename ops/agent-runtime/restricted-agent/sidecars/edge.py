@@ -43,6 +43,7 @@ IDLE_TIMEOUT = 600
 # (method set, compiled full-path regex). Paths are matched after strict validation (see clean_path).
 ALLOW = [
     ({"GET", "POST", "DELETE"}, re.compile(r"/wizard/mcp/?")),
+    ({"POST"}, re.compile(r"/wizard/standard-chats/mcp")),
     ({"GET"}, re.compile(r"/wizard/v1/agent-context")),
 ]
 PASS_HEADERS = {"content-type", "content-length", "accept", "authorization", "mcp-session-id",

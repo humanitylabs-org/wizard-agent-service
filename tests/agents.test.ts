@@ -542,6 +542,23 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
     expect((await malformed.json()).error.code).toBe(-32600)
   })
+  it('dedicated read-only transport works with app gateway entirely unset',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main,{standardChatsUrl:'http://readonly-relay:18986/wizard/standard-chats/mcp'})
+    const created=await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private',read_standard_chats:true}}))
+    expect(created.status).toBe(201)
+    const config=readFileSync(join(dir,'agents','private','home','config.yaml'),'utf8')
+    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
+    expect(readFileSync(join(dir,'agents','private','home','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
+    const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
+    expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')
+    expect(readFileSync(join(dir,'agents',standard.agent.id,'home','config.yaml'),'utf8')).not.toContain('readonly-relay')
+  })
+  it('refuses a nonfunctional grant before persisting when no retrieval transport is configured',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main);await withPrivate(dir,base)
+    const result=await fetch(base+'/wizard/v1/agents/private',{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
+    expect(result.status).toBe(409);expect((await result.json()).error).toBe('standard_chats_unconfigured')
+    expect(JSON.parse(readFileSync(join(dir,'agents','private','agent.json'),'utf8')).permissions.read_standard_chats).toBe(false)
+  })
   it('never enables the permission for a standard agent', async () => {
     const main=await fakeHermes('main'),{base}=await start(box(),main)
     const r=await fetch(base+'/wizard/v1/agents',json({label:'Standard',model:{provider:'anthropic',model:'claude-opus-5-5'},permissions:{preset:'standard',read_standard_chats:true}}))
