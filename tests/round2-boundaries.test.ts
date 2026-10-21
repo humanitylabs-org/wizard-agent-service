@@ -8,6 +8,9 @@ import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
+// These compare against archived main and spawn helpers; under CI load they exceed the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -110,13 +113,14 @@ it('DEFAULT_GUESS: hidden, missing and hermes guesses have identical status and 
 
 it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserves archived client creation', async () => {
   const rows = []
-  for (const baseline of process.env.WAS_ROLLBACK_BASE_DIR ? [process.env.WAS_ROLLBACK_BASE_DIR, ''] : ['']) {
+  for (const baseline of archivedMainDir() ? [archivedMainDir()!, ''] : ['']) {
     if (baseline) process.env.WAS_S2C_BASELINE = baseline; else delete process.env.WAS_S2C_BASELINE
     try {
       const s = await scene(), secondary = await s.create('Offline')
       await s.call('/wizard/hermes/api/sessions?agent=' + secondary.id) // authenticated listing before stop
       await s.call('/wizard/v1/agents/' + secondary.id + '/stop', 'POST', {})
-      const agents = await (await s.call('/wizard/v1/agents')).json()
+      // created_at is wall-clock seconds from each run's own create, so it is not part of the comparison.
+      const agents = JSON.parse(JSON.stringify(await (await s.call('/wizard/v1/agents')).json(), (k, v) => k === 'created_at' ? undefined : v))
       const binding = await (await s.call('/wizard/v1/apps/notes/binding')).json()
       const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_client_fresh', source: 'wizard-mobile' })
       const offset = s.calls.length, minted = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })

@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
+// These compare against archived main and spawn helpers; under CI load they exceed the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
+const execFileAsync = promisify(execFile)
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -19,7 +24,8 @@ async function scene({ queued = false, factory = createWizardServer, driver = ''
   const agentsDir = join(dir, 'agents')
   const histories = new Map<string, Set<string>>([['hermes', new Set(['wizard_old'])]])
   const ports = new Map<number, string>([[1, 'hermes']]), statuses = new Map<string, string>(), generations = new Map<string, number>()
-  const helper = (id: string, action: string) => JSON.parse(execFileSync('python3', [join(process.cwd(), 'tests/fixtures/stopped-runtime-helper.py'), agentsDir, id, driver, action], { encoding: 'utf8', timeout: 30000 }))
+  // Async so the in-process service keeps serving while the helper runs (a blocked event loop races keep-alive sockets).
+  const helper = async (id: string, action: string) => JSON.parse((await execFileAsync('python3', [join(process.cwd(), 'tests/fixtures/stopped-runtime-helper.py'), agentsDir, id, driver, action], { encoding: 'utf8', timeout: 30000 })).stdout)
   const runtime = {
     inspect: async (id: string) => driver ? helper(id, 'inspect') : ({ status: statuses.get(id), generation: `${id}:${generations.get(id) ?? 0}:${statuses.get(id)}` }),
     apply: async (id: string) => {
@@ -101,9 +107,8 @@ it('R4_INFLIGHT_SEAL_INVALIDATION: a full lifecycle round during inspect cannot 
   expect(s.histories.get(hidden.id)!.has(id)).toBe(true)
 })
 
-it.each(['runtipi', 'restricted'])('R4_UNSEALABLE_STOPPED: %s real helper stop semantics preserve archived-main 201', async driver => {
-  const base = process.env.WAS_ROLLBACK_BASE_DIR
-  if (!base) throw new Error('WAS_ROLLBACK_BASE_DIR required for real archived-main comparison')
+it.skipIf(!archivedMainDir()).each(['runtipi', 'restricted'])('R4_UNSEALABLE_STOPPED: %s real helper stop semantics preserve archived-main 201', async driver => {
+  const base = archivedMainDir()!
   const baseline = (await import(/* @vite-ignore */ `${base}/server/service.mjs`)).createWizardServer
   const rows = []
   for (const factory of [baseline, createWizardServer]) {

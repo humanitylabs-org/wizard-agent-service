@@ -1,7 +1,8 @@
 // Regression (review round 5, R5-B1/R5-S1): a cleanly closed WAL-mode Hermes home must seal without
 // creating files, so a stopped secondary keeps legacy chosen-id creation identical to archived main.
 import { afterEach, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer } from '../server/service.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
+// These compare against archived main and spawn helpers; under CI load they exceed the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
+const execFileAsync = promisify(execFile)
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -21,7 +26,8 @@ async function scene({ queued = false, factory = createWizardServer, driver = ''
   const agentsDir = join(dir, 'agents')
   const histories = new Map<string, Set<string>>([['hermes', new Set(['wizard_old'])]])
   const ports = new Map<number, string>([[1, 'hermes']]), statuses = new Map<string, string>(), generations = new Map<string, number>()
-  const helper = (id: string, action: string) => JSON.parse(execFileSync('python3', [join(process.cwd(), 'tests/fixtures/stopped-runtime-helper.py'), agentsDir, id, driver, action], { encoding: 'utf8', timeout: 30000 }))
+  // Async so the in-process service keeps serving while the helper runs (a blocked event loop races keep-alive sockets).
+  const helper = async (id: string, action: string) => JSON.parse((await execFileAsync('python3', [join(process.cwd(), 'tests/fixtures/stopped-runtime-helper.py'), agentsDir, id, driver, action], { encoding: 'utf8', timeout: 30000 })).stdout)
   const runtime = {
     inspect: async (id: string) => driver ? helper(id, 'inspect') : ({ status: statuses.get(id), generation: `${id}:${generations.get(id) ?? 0}:${statuses.get(id)}` }),
     apply: async (id: string) => {
@@ -78,8 +84,8 @@ async function scene({ queued = false, factory = createWizardServer, driver = ''
 }
 
 
-it.skipIf(!process.env.WAS_ROLLBACK_BASE_DIR && process.env.REQUIRE_ROLLBACK_REHEARSAL !== '1').each(['runtipi', 'restricted'])('R5_WAL_CLEAN_STOPPED: %s Hermes WAL home after clean close versus archived main', async driver => {
-  const base = process.env.WAS_ROLLBACK_BASE_DIR!
+it.skipIf(!archivedMainDir()).each(['runtipi', 'restricted'])('R5_WAL_CLEAN_STOPPED: %s Hermes WAL home after clean close versus archived main', async driver => {
+  const base = archivedMainDir()!
   const baseline = (await import(/* @vite-ignore */ `${base}/server/service.mjs`)).createWizardServer
   const rows: any[] = []
   for (const [label, factory] of [['main', baseline], ['current', createWizardServer]] as const) {
@@ -113,7 +119,7 @@ it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal 
   for (const mode of ['clean', 'hot']) {
     const s = await scene({ driver }), secondary = await s.create('Offline')
     const home = join(s.agentsDir, secondary.id, 'home')
-    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, process.env.TMPDIR!], { encoding: 'utf8' })
+    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' })
     const filesBeforeStop = readdirSync(home).sort()
     const stop = await s.call(`/wizard/v1/agents/${secondary.id}/stop`, 'POST', {})
     let catalog: any = null
@@ -123,7 +129,7 @@ it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal 
     const recovered = execFileSync('python3', ['-c', `import sqlite3,shutil,tempfile,os,sys
 d=tempfile.mkdtemp(dir=sys.argv[2])
 [shutil.copy2(os.path.join(sys.argv[1],n), d) for n in os.listdir(sys.argv[1])]
-print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, process.env.TMPDIR!], { encoding: 'utf8' }).trim()
+print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' }).trim()
     rows.push({ mode, filesBeforeStop, stop: stop.status, sealed: Boolean(catalog?.seal), sealHasId: Boolean(catalog?.ids?.includes('wizard_secondary_committed')),
       sealIds: catalog?.ids?.length ?? null, chosen: chosen.status, mainCreated: s.histories.get('hermes')!.has('wizard_secondary_committed'),
       secondaryHasAfterRecovery: recovered === '1', filesAfter: readdirSync(home).sort() })

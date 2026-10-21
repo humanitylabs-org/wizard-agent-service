@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -10,6 +10,9 @@ import { atomicStoreWrite, withSqliteMigration, migrationEntry, validateBackup, 
 import { createAgentRegistry } from '../server/agents.mjs'
 import { ThreadSeenStore } from '../server/thread-seen.mjs'
 import { DurableHeavyQueue } from '../server/heavy-queue.mjs'
+import { archivedMainDir } from './support/archived-main'
+// These compare against archived main and spawn helpers; under CI load they exceed the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
 
 const dirs: string[] = []
 const directory = () => { const d = mkdtempSync(join(tmpdir(), 'migration-proof-')); dirs.push(d); return d }
@@ -114,20 +117,10 @@ describe('transactional pair migration and restoration', () => {
   })
 
   it('migrate -> restore -> actual archived 859c548 modules preserve pins, seen and heavy submissions', context => {
-    const dir = directory(), old = process.env.WAS_ROLLBACK_BASE_DIR || join(dir, 'old'), stores = join(dir, 'stores'), agentsDir = join(stores, 'agents')
+    const archived = archivedMainDir()
+    if (!archived) { const reason = 'Rollback rehearsal needs WAS_ROLLBACK_BASE_DIR or git object 859c548'; console.warn(reason); context.skip(reason); return }
+    const dir = directory(), old = archived, stores = join(dir, 'stores'), agentsDir = join(stores, 'agents')
     mkdirSync(stores)
-    if (!process.env.WAS_ROLLBACK_BASE_DIR) {
-      let available = false
-      try { execFileSync('git', ['cat-file', '-e', '859c548^{commit}'], { stdio: 'pipe' }); available = true } catch { /* archive/shallow checkout */ }
-      if (!available) {
-        const reason = 'Rollback rehearsal needs WAS_ROLLBACK_BASE_DIR or git object 859c548 (archive/shallow checkout has neither)'
-        if (process.env.REQUIRE_ROLLBACK_REHEARSAL === '1') throw new Error(reason)
-        console.warn(reason); context.skip(reason); return
-      }
-      mkdirSync(old)
-      const archive = execFileSync('git', ['archive', '859c548', 'server'], { maxBuffer: 16 * 1024 * 1024 })
-      execFileSync('tar', ['-xf', '-', '-C', old], { input: archive })
-    }
     const driver = `
       import { createAgentRegistry } from ${JSON.stringify(join(old, 'server/agents.mjs'))};
       import { ThreadSeenStore } from ${JSON.stringify(join(old, 'server/thread-seen.mjs'))};

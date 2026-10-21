@@ -11,6 +11,9 @@ import { ThreadSeenStore } from '../server/thread-seen.mjs'
 import { ThreadDispositionStore } from '../server/thread-dispositions.mjs'
 import { DurableRunQueue } from '../server/run-queue.mjs'
 import { threadKey } from '../server/thread-reference.mjs'
+import { archivedMainDir } from './support/archived-main'
+// These compare against archived main and spawn helpers; under CI load they exceed the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
 
 const proof = 'fixture-owner-proof-not-a-real-secret'
 const owner = { 'X-Wizard-Owner-Proof': proof }
@@ -213,7 +216,7 @@ it('alias restore sets use one identity and refuse a live alias without mutation
 
 it('R3_ALIAS_STARTUP: valid configured directory aliases share the same filesystem lease',async()=>{
  const {symlinkSync}=await import('node:fs');const rows=[]
- for(const baseline of [process.env.WAS_ROLLBACK_BASE_DIR,'']){
+ for(const baseline of [archivedMainDir(),'']){
   if(baseline)process.env.WAS_S2C_BASELINE=baseline;else delete process.env.WAS_S2C_BASELINE
   try{
    const s=await scene();await new Promise<void>(resolve=>{s.service.close(()=>resolve());s.service.closeAllConnections()})
