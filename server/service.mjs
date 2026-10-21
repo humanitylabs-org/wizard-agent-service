@@ -2342,7 +2342,9 @@ function buildWizardServer(options, lifetime) {
       const origin = agentId === MAIN_AGENT_ID ? upstreamOrigin : agents.upstream(agent)
       const key = agentId === MAIN_AGENT_ID ? hermesKey : agents.apiKey(agentId)
       try {
-        const result = await fetchImpl(`${origin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        const path = `/api/sessions/${encodeURIComponent(sessionId)}`
+        const init = { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) }
+        const result = await (agentId === MAIN_AGENT_ID ? fetchImpl(`${origin}${path}`, init) : agents.fetchAgent(agent, path, init))
         await result.body?.cancel().catch(() => undefined)
         if (result.ok) agents.observeSessions(agentId, [sessionId], { index: false })
         if (!result.ok && result.status !== 404) {

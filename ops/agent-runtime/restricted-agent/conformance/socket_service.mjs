@@ -11,6 +11,7 @@ for (const id of ['one', 'two']) {
     permissions: { preset: 'standard', wizard_apps: [`${id}-app`] },
     runtime: { kind: 'container', app_id: `agent-${id}`, port: id === 'one' ? 19001 : 19002, isolation: 'restricted' },
   }))
+  writeFileSync(`${dir}/runtime.key`, 'socket-fixture-api-key', { mode: 0o600 })
   writeFileSync(`${dir}/gateway.key`, `socket-fixture-token-${id}-0123456789abcdef`, { mode: 0o600 })
 }
 writeFileSync('/state/apps.json', JSON.stringify({ schema: 1, apps: ['one', 'two'].map(id => ({

@@ -104,10 +104,9 @@ services:
     command: ["python3", "-u", "/srv/edge.py"]
     environment:
       EDGE_UPSTREAM_SOCKET: /run/agent-gateway/gateway.sock
+      EDGE_INGRESS_SOCKET: /run/agent-gateway/ingress.sock
       # sha256 of this agent's gateway token, written by the trusted side. The edge never sees the token.
       EDGE_TOKEN_SHA256: ${EDGE_TOKEN_SHA256:?set EDGE_TOKEN_SHA256}
-    ports:
-      - ${AGENT_INGRESS_BIND:-127.0.0.1:18642}:8642
     volumes:
       - type: bind
         source: ${AGENT_GATEWAY_DIR:?set AGENT_GATEWAY_DIR}

@@ -2,7 +2,7 @@
 """Outside-in checks of what Docker actually applied to the restricted agent's containers.
 
 Usage:
-  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source]
+  inspect_check.py <compose-project> <ingress socket inside fake-service> <agent api key> [expected home bind source]
   inspect_check.py --selftest     # proves the mount and environment rules reject bad layouts
 
 Without a home bind source the home must be the project's own named volume `<project>_agent-home`.
@@ -12,8 +12,7 @@ import json
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
+from pathlib import Path
 
 FORBIDDEN_HOME_SOURCES = {"/", "/home", "/Users", "/root", "/var", "/etc", "/opt", "/srv", "/Volumes", "/mnt",
                           "/var/lib/docker", "/run", "/var/run", "/tmp"}
@@ -223,13 +222,10 @@ for svc in ("egress", "edge"):
                    or (edge_mounts[0]["Type"] == "bind" and edge_mounts[0]["Source"] == expected_source)),
               {"networks": edge_nets, "mounts": edge_mounts, "extra_hosts": shc.get("ExtraHosts")})
     bindings = shc.get("PortBindings") or {}
-    host_ips = [b.get("HostIp") for v in bindings.values() for b in (v or [])]
     if svc == "egress":
         check("I18-egress", "egress publishes no ports", not bindings, bindings)
     else:
-        check("I18-edge", "edge publishes only the inbound relay, on host loopback only",
-              set(bindings) == {"8642/tcp"} and bool(host_ips) and all(ip in ("127.0.0.1", "::1") for ip in host_ips),
-              bindings)
+        check("I18-edge", "edge publishes no TCP ports", not bindings, bindings)
 
 init = inspect("home-init", all_states=True)
 ihc = init[0]["HostConfig"] if init else {}
@@ -248,21 +244,18 @@ check("I19", "exactly one home-init: exited 0, no network, only CHOWN/FOWNER/DAC
        "mounts": [m["Destination"] for m in init[0].get("Mounts", [])] if init else None})
 
 
-# The service side can still reach the agent's API (through the edge relay) and the key is enforced.
-def get(key):
-    req = urllib.request.Request(f"http://{ingress}/v1/models", headers={"Authorization": f"Bearer {key}"} if key else {})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception as e:
-        return repr(e)
-
-
-with_key, without_key = get(api_key), get(None)
-check("I16", "service reaches agent API with key (200) and is refused without it (401)",
-      with_key == 200 and without_key == 401, {"with_key": with_key, "without_key": without_key})
+# The probe runs in the Service namespace, not on the macOS host across a VM boundary.
+try:
+    service = inspect("fake-service")[0]["Id"]
+    probe = subprocess.run(["docker", "exec", "-i", "-e", f"CONF_API_KEY={api_key}", service,
+                            "python3", "-", ingress],
+                           input=Path(__file__).with_name("ingress_probe.py").read_text(),
+                           capture_output=True, text=True, timeout=30)
+    evidence = json.loads(probe.stdout)
+    ok = probe.returncode == 0
+except Exception as e:
+    ok, evidence = False, repr(e)
+check("I16", "Service socket: health 200, authenticated API 200, wrong/missing keys 401, private inode", ok, evidence)
 
 print(json.dumps({"summary": {"total": len(CHECKS), "passed": sum(c["pass"] for c in CHECKS),
                               "failed": [c["id"] for c in CHECKS if not c["pass"]]}, "checks": CHECKS}, indent=1))

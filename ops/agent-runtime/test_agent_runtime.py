@@ -60,7 +60,7 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertEqual(env["AGENT_API_KEY"], "api-key-0123456789")
         self.assertEqual(env["EDGE_TOKEN_SHA256"], hashlib.sha256(b"gateway-key-abcdef").hexdigest())
         self.assertEqual((env["AGENT_UPLINK_SUBNET"], env["AGENT_SANDBOX_SUBNET"]), ("10.250.0.16/28", "10.251.0.16/28"))
-        self.assertEqual(env["AGENT_INGRESS_BIND"], "127.0.0.1:18650")
+        self.assertNotIn("AGENT_INGRESS_BIND", env)
         self.assertEqual(env["AGENT_GATEWAY_DIR"], str(self.tmp / "agents" / "daily" / "gateway"))
         self.assertNotIn("EDGE_UPSTREAM_HOST", env)
         self.assertNotIn("EDGE_UPSTREAM_PORT", env)

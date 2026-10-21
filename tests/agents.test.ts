@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +19,7 @@ async function readBody(req: IncomingMessage) {
 }
 
 // A stock-shaped Hermes API: sessions, runs, model options, health. Records every request.
-async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[]) {
+async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[], socketPath?: string) {
   const seen: Seen[] = []
   const known = new Set(sessions)
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -44,6 +44,11 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
     json(404, { error: 'nope' })
   })
   servers.push(server)
+  if (socketPath) {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
+    chmodSync(socketPath, 0o600)
+    return { port: 0, origin: '', seen, known }
+  }
   const address = await listen(server) as import('node:net').AddressInfo
   return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known }
 }
@@ -133,6 +138,26 @@ describe('agents registry and API', () => {
     const moved = await fetch(`${base}/wizard/v1/agents/${first.id}`, { ...json({ model: { provider: 'tinfoil', model: 'glm-5-3' } }), method: 'PATCH' })
     expect(moved.status).toBe(409)
     expect(stored(first.id).model.provider).toBe('anthropic')
+  })
+
+  it('routes sealed-agent session reads and writes over ingress while preserving its own API key', async () => {
+    const dir = box(), main = await fakeHermes('main')
+    const { base } = await start(dir, main, { agentIsolation: 'restricted' })
+    const created = await fetch(`${base}/wizard/v1/agents`, json({ label: 'Sealed', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }))
+    expect(created.status).toBe(201)
+    const folder = join(dir, 'agents', 'sealed')
+    const stored = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(stored.runtime.ingress_socket).toBe(join(folder, 'gateway', 'ingress.sock'))
+    const sealed = await fakeHermes('sealed', ['wizard_socket_thread'], undefined, stored.runtime.ingress_socket)
+    const listing = await fetch(`${base}/wizard/hermes/api/sessions?agent=sealed`)
+    expect(listing.status).toBe(200)
+    expect((await listing.json()).data[0].id).toBe('wizard_socket_thread')
+    const made = await fetch(`${base}/wizard/hermes/api/sessions?agent=sealed`, json({ id: 'socket-created' }))
+    expect(made.status).toBe(201); await made.json()
+    const key = readFileSync(join(folder, 'runtime.key'), 'utf8').trim()
+    expect(sealed.seen.filter(r => r.path.startsWith('/api/sessions')).every(r => r.auth === `Bearer ${key}`)).toBe(true)
+    expect(sealed.known.has('socket-created')).toBe(true)
+    expect(main.seen.some(r => r.body?.id === 'socket-created')).toBe(false)
   })
 
   it('without isolation, new agents keep the existing runtime shape', async () => {

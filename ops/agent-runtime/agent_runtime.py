@@ -344,7 +344,6 @@ class RestrictedDriver:
             "EDGE_TOKEN_SHA256": hashlib.sha256(gateway_key.encode()).hexdigest(),
             "AGENT_UPLINK_SUBNET": str(uplink),
             "AGENT_SANDBOX_SUBNET": str(sandbox),
-            "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
             "AGENT_GATEWAY_DIR": str(self.agents.root / agent["id"] / "gateway"),
             "AGENT_EDGE_UID": str(os.getuid()),
             "AGENT_EDGE_GID": str(os.getgid()),

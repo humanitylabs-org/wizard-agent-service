@@ -21,8 +21,8 @@ requests never accept owner proof or anonymous/loopback ownership. Only `/wizard
 
 `WIZARD_AGENT_PORT` and `WIZARD_AGENT_HOST` are **removed**, not a compatibility flag. Setting either
 refuses startup before binding any port. There is no TCP agent-only listener, iptables call, sudo call,
-root installer or firewall prerequisite. The main owner-facing listener and the loopback inbound agent
-API relay are unchanged; keep the normal owner authentication/proxy configuration for those surfaces.
+root installer or firewall prerequisite. The main owner-facing listener is unchanged; keep normal
+owner authentication/proxy configuration. Restricted agents publish no host TCP port in either direction.
 
 The Service opens sockets for stored restricted agents before accepting owner HTTP traffic and opens
 new ones before asking the runtime helper to start Docker. The helper requires private, correctly owned
@@ -57,7 +57,16 @@ containers, so it works even when the host checkout is outside Colima's shares.
   no sockets, secrets, published ports or privileged host access. Like any ordinary app container on a
   bridge, egress itself may reach host addresses; the agent cannot use it to tunnel to private/host IPs.
   This is not a promise to isolate arbitrary code execution in the trusted egress sidecar from the host.
-- The inbound API relay stays published on host loopback, authenticated by the agent's API key.
+- Inbound is `agents/<id>/gateway/ingress.sock`: edge creates the second **0600** socket in its own
+  **0700** gateway directory, owned by the same uid as Service. The Service uses Node HTTP `socketPath`
+  (including streaming, catalogs and session checks); edge relays to `agent:8642` on the sandbox.
+  Health must return 200; authenticated calls still present this agent's API key. Wrong/missing keys
+  return 401. No TCP fallback exists. Socket paths are derived from agent identity; foreign stored paths
+  are rejected. `runtime.ingress_socket` records the canonical path on new records; older restricted
+  records without it derive the same path. `runtime.port` remains allocated/reserved for schema and
+  record compatibility only; it is unused by restricted runtimes. Standard agents still use their ports.
+- Docker does not publish ports for a container attached only to internal networks. A declared `ports:`
+  mapping is not evidence of working ingress. Probe both Unix directions from the same Linux kernel.
 
 ## Existing installations / legacy firewall
 
@@ -68,8 +77,11 @@ Migration is an explicit maintenance action, **not** something this source chang
    and the helper's retired `--agent-listener-port` argument from deployment configuration. Keep owner
    proof/proxy authentication. Arrange the shared Linux socket path and matching user as above.
 3. Start the Service, then recreate each restricted project with the new Compose (not just `restart`):
-   it must lose edge's uplink/host-gateway alias and gain only that agent's dedicated socket mount.
-4. Verify socket conformance, correct agent attribution and the absence of a TCP 8929 listener. Preserve
+   it must lose edge's uplink/host-gateway alias and **all published ports**, gain only that agent's
+   dedicated socket directory mount, and create the inbound `ingress.sock` there. Retire
+   `AGENT_INGRESS_BIND`; it is no longer read. No host TCP port is needed per restricted agent.
+4. Verify socket health/authenticated API, wrong-key refusal, foreign-socket denial, correct agent
+   attribution, no published edge/agent ports and no TCP 8929 listener. Preserve
    old receipts; do not treat them as proof for the new runtime.
 5. Only after **all** old restricted containers/listeners are gone, the administrator may optionally disable
    `wizard-agent-firewall.service` and run the legacy script's `remove` operation. Stopping that legacy

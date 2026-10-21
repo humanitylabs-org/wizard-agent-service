@@ -47,7 +47,7 @@ def main(mode):
         good = call(token=TOKEN("one"))
         check("agent reaches its own context via edge", good[0] == 200 and "ONE-ONLY" in good[1] and "TWO-ONLY" not in good[1], good[0])
         check("edge rejects another agent token", call(token=TOKEN("two"))[0] == 401)
-        check("agent has no Service socket mount", cannot_open("/run/agent-gateway/gateway.sock") and cannot_open("/state/agents/one/gateway/gateway.sock"))
+        check("agent has neither ingress nor gateway socket mount", all(cannot_open(p) for p in ("/run/agent-gateway/gateway.sock", "/run/agent-gateway/ingress.sock", "/state/agents/one/gateway/gateway.sock")))
         routes = [line.split() for line in open('/proc/net/route').read().splitlines()[1:]]
         check("sandbox has no default route (all off-subnet host ports unreachable)", bool(routes) and not any(r[1] == '00000000' for r in routes), routes)
         own = {str(a[4][0]) for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
@@ -93,7 +93,8 @@ def main(mode):
         check("Service binds socket identity in addition to token", wrong[0] == 403 and 'principal.agent_socket' in wrong[1], wrong[0])
         check("edge cannot open other agent socket", all(cannot_open(p) for p in (
             '/state/agents/two/gateway/gateway.sock', '/gate-two/gateway.sock', '/run/two/gateway.sock',
-            '/run/agent-gateway/../two/gateway.sock')))
+            '/run/agent-gateway/../two/gateway.sock', '/state/agents/two/gateway/ingress.sock',
+            '/gate-two/ingress.sock', '/run/two/ingress.sock')))
         check("edge sees no keys or parent agent directory", not os.path.exists('/state/agents') and not os.path.exists('/run/agent-gateway/gateway.key'))
     elif mode == "service":
         for agent in ('one', 'two'):

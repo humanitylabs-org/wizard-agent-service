@@ -554,7 +554,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   response.once('close', () => { if (!response.writableEnded) controller.abort() })
   let upstream
   try {
-    upstream = await ctx.fetchImpl(`${registry.upstream(agent)}${upstreamPath}${query.size ? `?${query}` : ''}`, {
+    upstream = await registry.fetchAgent(agent, `${upstreamPath}${query.size ? `?${query}` : ''}`, {
       method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal,
     })
   } catch (error) {
@@ -604,7 +604,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
           // Read only this already-authorized agent runtime. Gateway controls never reach it.
           while (true) {
             const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
-            const page=await ctx.fetchImpl(`${registry.upstream(agent)}/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
+            const page=await registry.fetchAgent(agent, `/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
             if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
             const raw=Buffer.from(await page.arrayBuffer())
             if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
@@ -622,7 +622,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
               while(index<pending.length) {
                 const row=pending[index++];
                 row.wizard_search_text=await searchMessageText(async offset=>{
-                  const page=await ctx.fetchImpl(`${registry.upstream(agent)}/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
+                  const page=await registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
                   if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
                   const raw=Buffer.from(await page.arrayBuffer());
                   if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
@@ -645,7 +645,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
       const payload=JSON.parse(result.toString('utf8')), row=payload.session||payload;
       row.wizard_retry_input=await fullRetryInput(async offset=> {
-        const page=await ctx.fetchImpl(`${registry.upstream(agent)}${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
+        const page=await registry.fetchAgent(agent, `${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
         if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
         const raw=Buffer.from(await page.arrayBuffer());
         if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');

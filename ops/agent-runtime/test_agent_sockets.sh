@@ -10,7 +10,6 @@ export SOCKET_HOST_PORT="${SOCKET_HOST_PORT:-28923}"
 export AGENT_API_KEY=socket-fixture-api-key
 export EDGE_TOKEN_SHA256
 EDGE_TOKEN_SHA256=$(printf %s socket-fixture-token-one-0123456789abcdef | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-export AGENT_INGRESS_BIND="${AGENT_INGRESS_BIND:-127.0.0.1:28642}"
 DC=(docker compose -p "$AGENT_PROJECT" -f "$HERE/compose.yml" -f "$HERE/conformance/compose.socket.yml")
 cleanup() { "${DC[@]}" logs --no-color > "$OUT/final-compose.log" 2>&1 || true; "${DC[@]}" down -v --remove-orphans > "$OUT/teardown.log" 2>&1; }
 trap cleanup EXIT
@@ -20,9 +19,10 @@ phase() {
   local phase="$1"
   for _ in $(seq 1 60); do
     if "${DC[@]}" exec -T socket-service test -S /state/agents/two/gateway/gateway.sock && \
-       python3 -c 'import urllib.request,sys; urllib.request.urlopen("http://"+sys.argv[1]+"/",timeout=2).read()' "$AGENT_INGRESS_BIND" 2>/dev/null; then break; fi
+       "${DC[@]}" exec -T socket-service node /app/ops/agent-runtime/restricted-agent/conformance/ingress_service_probe.mjs > "$OUT/$phase-inbound.json" 2>/dev/null; then break; fi
     sleep 1
   done
+  "${DC[@]}" exec -T socket-service node /app/ops/agent-runtime/restricted-agent/conformance/ingress_service_probe.mjs > "$OUT/$phase-inbound.json"
   for svc in agent edge socket-service; do
     mode="$svc"; [ "$svc" != socket-service ] || mode=service
     "${DC[@]}" exec -T -e CONF_HOST_PORT="$SOCKET_HOST_PORT" "$svc" python3 - "$mode" < "$HERE/conformance/socket_probe.py" > "$OUT/$phase-$svc.json"
@@ -43,6 +43,9 @@ rows=json.load(open(sys.argv[1])); by={r['Config']['Labels']['com.docker.compose
 e=by['edge']; a=by['agent']; g=by['egress']; svc=by['socket-service']
 assert len(e['NetworkSettings']['Networks']) == 1 and next(iter(e['NetworkSettings']['Networks'])).endswith('_sandbox')
 assert not e['HostConfig'].get('ExtraHosts')
+assert not e['HostConfig'].get('PortBindings')
+assert not a['HostConfig'].get('PortBindings')
+print('edge and agent published ports: none')
 assert len(e['Mounts']) == 1 and e['Mounts'][0]['Name'].endswith('_gateway-one') and e['Mounts'][0]['Destination']=='/run/agent-gateway'
 assert not g['Mounts'] and len(g['NetworkSettings']['Networks'])==2
 assert not any(m['Type']=='bind' or 'gateway' in m.get('Name','') for m in a['Mounts'])

@@ -13,7 +13,7 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 | Network | Only `sandbox` (Docker `internal: true`: no route out, no DNS for outside names). Two sidecars sit on it. |
 | Internet | Via `egress`: HTTPS CONNECT to port 443 of allowlisted hostnames only; no plain HTTP, IP literals, other ports, or names resolving to private/loopback/link-local/CGNAT addresses. |
 | Agent Service | Via `edge`: requests with this agent's bearer token (checked against a sha256 the edge holds) to `/wizard/mcp` and `GET /wizard/v1/agent-context` only. Owner/identity headers are dropped, paths are strict (no `..`, `%`, `//`), one request per connection. Everything else is answered 401/403/400 at the edge. |
-| Inbound | The service reaches the agent API through the edge relay published on host loopback (`AGENT_INGRESS_BIND`), with the agent's `API_SERVER_KEY`. |
+| Inbound | The Service reaches the agent API over private `/run/agent-gateway/ingress.sock` (0600, same uid); edge relays to `agent:8642` on sandbox with the agent's `API_SERVER_KEY`. No published TCP port. |
 | Limits | 4 GB memory (no swap), 2 CPUs, 512 pids, 8192 open files. Sidecars 128 MB / 0.5 CPU / 64 pids each. |
 
 ## Environment contract (set by the driver)
@@ -28,7 +28,7 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 | `AGENT_EDGE_UID` / `AGENT_EDGE_GID` | Numeric unprivileged Service owner; edge runs as this identity |
 | `AGENT_UPLINK_SUBNET` | Unique /28 per agent from 10.250.0.0/16 (outside Docker's default pools) (default `10.250.0.0/28`) |
 | `AGENT_SANDBOX_SUBNET` | Unique /28 per agent from 10.251.0.0/16 for the agent-only network; the host has no address on it (default `10.251.0.0/28`) |
-| `AGENT_INGRESS_BIND` | Host loopback address:port for inbound (default `127.0.0.1:18642`) |
+| `EDGE_INGRESS_SOCKET` | Private inbound Unix socket (Compose sets `/run/agent-gateway/ingress.sock`); `AGENT_INGRESS_BIND` is retired |
 | `EGRESS_ALLOWLIST_HOSTS` | Space-separated hostnames; `*.example.com` allows subdomains |
 | `AGENT_MEM_LIMIT`, `AGENT_CPUS`, `AGENT_PIDS_LIMIT` | Resource overrides |
 
@@ -61,4 +61,4 @@ synthetic values redacted. Exit 0 only on full pass.
 - See `docs/restricted-agent-runtime.md` in the Service repository for path/uid requirements, Colima/Lima
   same-kernel constraints and migration from the legacy optional firewall. Compose v2.24.4+ is needed for
   test overlays using `!override`. `test_agent_sockets.sh` runs socket/host-port conformance against the real
-  Service modules, including socket identity mismatch, missing foreign mount and no TCP agent listener.
+  Service modules, including socket identity mismatch, missing foreign mount, inbound socket health/authentication, wrong-key refusal and zero published agent/edge ports.

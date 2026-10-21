@@ -13,8 +13,8 @@ Two listeners:
   of request headers is passed on. Header names must be HTTP tokens and values may not contain CR,
   LF or other control characters. One request per connection (`Connection: close` both ways).
 
-* INGRESS (default :8642): a plain TCP relay so the host-side Agent Service can reach the agent's
-  API server. The agent is on an internal network and cannot publish ports itself.
+* INGRESS (/run/agent-gateway/ingress.sock, 0600): the Service connects over this private Unix
+  socket; edge relays to agent:8642 over the internal sandbox. No published TCP ports.
 
 The service still authorizes the token itself (agent principal, own threads only); this edge makes
 sure nothing the agent sends is ever seen by the service as anonymous or owner traffic.
@@ -26,6 +26,8 @@ import json
 import os
 import re
 import sys
+import socket
+import stat
 import time
 from urllib.parse import urlsplit
 
@@ -33,7 +35,7 @@ UPSTREAM_SOCKET = os.environ.get("EDGE_UPSTREAM_SOCKET", "/run/agent-gateway/gat
 AGENT_HOST = os.environ.get("EDGE_AGENT_HOST", "agent")
 AGENT_PORT = int(os.environ.get("EDGE_AGENT_PORT", "8642"))
 GATEWAY_PORT = int(os.environ.get("EDGE_GATEWAY_PORT", "8923"))
-INGRESS_PORT = int(os.environ.get("EDGE_INGRESS_PORT", "8642"))
+INGRESS_SOCKET = os.environ.get("EDGE_INGRESS_SOCKET", "/run/agent-gateway/ingress.sock")
 TOKEN_SHA256_FILE = os.environ.get("EDGE_TOKEN_SHA256_FILE", "/run/edge/token.sha256")
 MAX_HEAD = 16384
 MAX_BODY = 8 * 1024 * 1024
@@ -199,10 +201,45 @@ async def ingress(reader, writer):
     await asyncio.gather(relay(reader, up_writer), relay(up_reader, writer))
 
 
+def bind_ingress():
+    """Private inode from bind time; refuse unsafe files and live listeners on restart."""
+    directory = os.path.dirname(INGRESS_SOCKET)
+    st = os.lstat(directory)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
+        raise RuntimeError("unsafe ingress directory")
+    try:
+        st = os.lstat(INGRESS_SOCKET)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+            raise RuntimeError("unsafe ingress socket")
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(INGRESS_SOCKET)
+            except ConnectionRefusedError:
+                os.unlink(INGRESS_SOCKET)
+            else:
+                raise RuntimeError("ingress socket already listening")
+    sock = socket.socket(socket.AF_UNIX)
+    mask = os.umask(0o177)
+    try:
+        sock.bind(INGRESS_SOCKET)
+    except BaseException:
+        sock.close()
+        raise
+    finally:
+        os.umask(mask)
+    sock.listen(128)
+    sock.setblocking(False)
+    return sock
+
+
 async def main():
     gw = await asyncio.start_server(gateway, "0.0.0.0", GATEWAY_PORT, limit=MAX_HEAD * 2)
-    ing = await asyncio.start_server(ingress, "0.0.0.0", INGRESS_PORT)
-    log(event="listening", gateway=GATEWAY_PORT, ingress=INGRESS_PORT, upstream=UPSTREAM_SOCKET,
+    ing = await asyncio.start_unix_server(ingress, sock=bind_ingress())
+    log(event="listening", gateway=GATEWAY_PORT, ingress_socket=INGRESS_SOCKET, upstream=UPSTREAM_SOCKET,
         routes=[f"{sorted(m)} {rx.pattern}" for m, rx in ALLOW])
     async with gw, ing:
         await asyncio.gather(gw.serve_forever(), ing.serve_forever())
