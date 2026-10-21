@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import sqlite3
+import contextlib
 import shlex
 import subprocess
 import sys
