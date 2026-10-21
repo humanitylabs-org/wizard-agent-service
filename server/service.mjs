@@ -3053,7 +3053,7 @@ export function createWizardServer(options = {}) {
         .then(() => canonicalSessionReader())
         .then((sessions) => {
           if (!Array.isArray(sessions)) throw new Error('canonical session listing unavailable')
-          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS), assistantRevision }
+          canonicalSessionCache = { sessions, expiresAt: Date.now() + Number(options.canonicalSessionCacheMs ?? CANONICAL_SESSION_CACHE_MS), assistantRevision, generation: (canonicalSessionCache.generation ?? 0) + 1 }
           return sessions
         })
         .finally(() => { canonicalSessionInFlight = null })
@@ -3401,7 +3401,9 @@ export function createWizardServer(options = {}) {
     const gate = () => {
       const hermes = readHermesListRevision(hermesStatePath)
       if (hermes === null) return null
-      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}` } catch { return null }
+      // The session listing is refreshed in the background after it expires; a snapshot built from
+      // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}` } catch { return null }
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {
