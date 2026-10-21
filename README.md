@@ -42,6 +42,28 @@ npm run start:local
 
 Requires Node 22.5 or later, because it uses the built-in `node:sqlite` module.
 
+### Portable work and remote builds
+
+Heavy execution is opt-in. Set `WIZARD_HEAVY_ROOT` (fallback `WIZARD_WORK_ROOT`)
+to the absolute **remote** allowed cwd/storage root on the service and SSH sidecar;
+set `WIZARD_BUILD_HOST` to your worker SSH target. No root means
+`heavy lane not configured: set WIZARD_HEAVY_ROOT`; no host is guessed. See
+[resource lanes](ops/resource-lanes.md) for spool/lock configuration.
+
+```sh
+export WIZARD_WORK_ROOT="${TMPDIR:-/tmp}/wizard-work"
+mkdir -p "$WIZARD_WORK_ROOT"
+# For real remote work, explicitly select the worker storage and SSH host:
+# export WIZARD_HEAVY_ROOT=<absolute-remote-work-root>
+# export WIZARD_BUILD_HOST=<your-ssh-target>
+python3 tests/heavy-worker.remote.py  # isolated temporary roots, no Android builds
+```
+
+Fixtures set their own temporary heavy root; they do not require an owner volume.
+`HERMES_HOME` defaults to `~/.hermes`. Android SDK overrides use `ANDROID_HOME`
+or `ANDROID_SDK_ROOT`. The Android build helper retains its macOS-only execution
+guard; Python worker/queue fixtures also run on Linux.
+
 ### Configuration
 
 Tailscale source inclusion is not activation. Read [the activation and immutable-release gates](docs/tailscale-activation.md) before setting auth environment variables; the current Serve → nginx → Service identity provenance remains unproven.
