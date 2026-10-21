@@ -26,6 +26,11 @@ class ImageContract(unittest.TestCase):
         self.assertEqual(env['DOCKER_CONFIG'], '/isolated')
         self.assertFalse({'GHCR_TOKEN', 'GITHUB_TOKEN', 'DOCKER_AUTH_CONFIG'} & env.keys())
 
+    def test_clean_environment_keeps_runner_orphan_tracking(self):
+        with patch.dict(os.environ, {'RUNNER_TRACKING_ID': 'github_job_1'}, clear=False):
+            env = ci.clean_env('/isolated')
+        self.assertEqual(env['RUNNER_TRACKING_ID'], 'github_job_1')
+
     def test_missing_architecture_fails(self):
         registry = Mock()
         registry.manifest.return_value = (DIGEST, {'manifests': []})

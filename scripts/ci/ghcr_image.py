@@ -73,8 +73,11 @@ def docker(args, env, **kwargs):
 
 def clean_env(config):
     # No Docker credential helper, DOCKER_AUTH_CONFIG, cloud identity, or gh token.
+    # RUNNER_TRACKING_ID is not a credential: the self-hosted runner uses it to reap
+    # orphaned docker/buildx clients when a job is cancelled or times out.
+    passthrough = ("DOCKER_HOST", "RUNNER_TRACKING_ID")
     return {"PATH": os.environ["PATH"], "HOME": config, "DOCKER_CONFIG": config,
-            **({"DOCKER_HOST": os.environ["DOCKER_HOST"]} if "DOCKER_HOST" in os.environ else {})}
+            **{key: os.environ[key] for key in passthrough if key in os.environ}}
 
 
 def _volume_of(path):
