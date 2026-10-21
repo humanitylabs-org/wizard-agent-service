@@ -11,10 +11,51 @@ import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
+const profileRunCache = new WeakMap()
+
+// Profile gateways return raw sessions, not Wizard's run projection. Reconcile only
+// runs admitted to this exact agent/thread pair; never consult another profile.
+async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
+  if (agent.runtime.kind !== 'profile') return rows
+  if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
+  const cache = profileRunCache.get(ctx)
+  return Promise.all(rows.map(async row => {
+    const ref = ctx.registry.latestThreadRun?.(agent.id, row.id)
+    if (!ref) return row
+    const cacheKey = `${agent.id}:${ref.run_id}`
+    let run = cache.get(cacheKey)
+    try {
+      if (!run) {
+        const response = await ctx.fetchImpl(`${ctx.registry.upstream(agent)}/v1/runs/${encodeURIComponent(ref.run_id)}`, {
+          headers, redirect: 'manual', signal: AbortSignal.timeout(1500),
+        })
+        if (!response.ok) return row
+        const raw = Buffer.from(await response.arrayBuffer())
+        if (secrets.some(secret => raw.includes(Buffer.from(secret)))) return row
+        run = JSON.parse(raw.toString('utf8'))
+        if (run.session_id !== row.id || (run.run_id || run.id) !== ref.run_id) return row
+        if (['completed', 'failed', 'cancelled', 'interrupted', 'expired'].includes(run.status)) {
+          cache.set(cacheKey, run)
+          if (cache.size > 512) cache.delete(cache.keys().next().value)
+        }
+      }
+      const active = ['started','accepted','queued','running','stopping','waiting_for_approval'].includes(run.status)
+      return { ...row, status: run.status, wizard_run_id: ref.run_id,
+        wizard_last_run_id: ref.run_id, wizard_last_run_status: run.status,
+        wizard_last_run_idempotency_key: ref.idempotency_key || '',
+        wizard_assigned_at: run.created_at, wizard_last_user_at: run.created_at,
+        ...(run.runtime?.model ? { model: run.runtime.model, provider: run.runtime.provider || '' } : {}),
+        ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
+          wizard_attention: parseStatus(run.output),
+          latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
+      }
+    } catch { return row }
+  }))
+}
 import { pipeline } from 'node:stream/promises'
 import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
 import { ownerLike, principalOf } from './principals.mjs'
-import { STATUS_INSTRUCTIONS } from './thread-status.mjs'
+import { STATUS_INSTRUCTIONS, parseStatus, stripStatus } from './thread-status.mjs'
 
 export const AGENT_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party client for their own agents. This is a separate agent with its own private history, memory and files; nothing from other agents is available here. Answer with the same care you would anywhere else, scaled to the request. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help.
 
@@ -579,7 +620,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
         const admission = JSON.parse(result.toString('utf8'))
-        registry.noteRun(typeof admission.run_id === 'string' ? admission.run_id : admission.id, agent.id, admission.session_id ?? value?.session_id)
+        registry.noteRun(typeof admission.run_id === 'string' ? admission.run_id : admission.id, agent.id, admission.session_id ?? value?.session_id, request.headers['idempotency-key'] || '')
       } catch { /* the client validates the admission */ }
     }
     if (pinAfter) {
@@ -595,6 +636,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       const listing = JSON.parse(result.toString('utf8'))
+      for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, listing[key], headers, secrets)
+      result = Buffer.from(JSON.stringify(listing))
       registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
@@ -631,7 +674,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
               }
             }));
           }
-          return all
+          return projectProfileSessions(ctx, agent, all, headers, secrets)
         }})
         result=Buffer.from(JSON.stringify(payload))
       }
