@@ -2522,6 +2522,7 @@ function buildWizardServer(options, lifetime) {
         : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
+  let mainCatalogCensus = null, mainCatalogCensusAt = 0
   let canonicalSessionInFlight = null
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
@@ -5328,7 +5329,13 @@ function buildWizardServer(options, lifetime) {
           if (agents && !operator) {
             const rows = parseJsonBody(result)
             agents.observeSessions(MAIN_AGENT_ID, (rows.data ?? rows.sessions ?? []).map(row => row?.id))
-            await agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined)
+            // The catalog census pages through every Hermes thread (100 per call, ~3 s each when
+            // Hermes is busy). The list does not use its result, so it never waits for it: one
+            // census at a time, at most once a minute.
+            if (!mainCatalogCensus && Date.now() - mainCatalogCensusAt > 60_000) {
+              mainCatalogCensusAt = Date.now()
+              mainCatalogCensus = agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined).finally(() => { mainCatalogCensus = null })
+            }
           }
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }
