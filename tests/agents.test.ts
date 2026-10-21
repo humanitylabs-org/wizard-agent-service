@@ -1,3 +1,6 @@
+import { DatabaseSync } from 'node:sqlite'
+import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
+import { privateChatMatches } from '../server/private-chat-search.mjs'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -36,6 +39,7 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
     ] })
     if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+    if (req.method === 'DELETE' && sessionMatch) return known.delete(decodeURIComponent(sessionMatch[1])) ? json(200,{ok:true}) : json(404,{error:'not found'})
     if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
     if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: messages ?? [{ role: 'assistant', content: `${name} says hi` }] })
     if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
@@ -428,5 +432,91 @@ describe('agent folder parsing and harness config', () => {
     expect(apps).toContain('meditate')
     expect(apps).not.toContain('agent-old')
     expect(existsSync(join(dir, 'agents', 'claude-explore', 'notes.json'))).toBe(true)
+  })
+})
+
+function historyFixture(path: string) {
+  const db = new DatabaseSync(path)
+  db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,source TEXT,parent_session_id TEXT,hidden INTEGER);
+    CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL);
+    CREATE VIRTUAL TABLE messages_fts USING fts5(content,content='messages',content_rowid='id');`)
+  const add = (id: string, hidden: number, source: string, text: string) => {
+    db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(id,id,source,null,hidden)
+    db.prepare("INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,'user',?,1)").run(id,text)
+  }
+  add('standard',0,'wizard-mobile','roundtwo mango lighthouse')
+  add('hidden_probe',1,'wizard-mobile','roundtwo hidden mango')
+  add('cron_noise',0,'cron','roundtwo cron mango')
+  db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+  db.close()
+}
+
+describe('private round 2: read-only standard retrieval, private search and deletion', () => {
+  it('FTS excludes hidden and cron noise by default; hidden opt-in supports probes; read is bounded', () => {
+    const path = join(box(),'standard.db'); historyFixture(path)
+    expect(searchHistory(path,'roundtwo').map((r: any)=>r.session_id)).toEqual(['standard'])
+    expect(searchHistory(path,'roundtwo',{include_hidden:true}).map((r: any)=>r.session_id).sort()).toEqual(['hidden_probe','standard'])
+    expect(searchHistory(path,'" OR content:*')).toEqual([])
+    expect(() => searchHistory(path,'x'.repeat(301))).toThrow()
+    expect(readHistory(path,'standard',{limit:1}).messages[0].content).toContain('lighthouse')
+    expect(() => readHistory(path,'cron_noise')).toThrow()
+    expect(() => readHistory(path,'../../private')).toThrow()
+  })
+  it('rejects owner, standard agents, and private agents without the explicit permission', () => {
+    const rpc={jsonrpc:'2.0',id:1,method:'tools/list'}
+    const agent={id:'private',privacy:'private',permissions:{read_standard_chats:true}}
+    expect(() => standardChatRpc(agent,{kind:'owner'},rpc,'')).toThrow()
+    expect(() => standardChatRpc({...agent,privacy:'standard'},{kind:'agent',agentId:'private'},rpc,'')).toThrow()
+    expect(() => standardChatRpc({...agent,permissions:{}},{kind:'agent',agentId:'private'},rpc,'')).toThrow()
+    expect(() => standardChatRpc(agent,{kind:'agent',agentId:'other'},rpc,'')).toThrow()
+    const result: any=standardChatRpc(agent,{kind:'agent',agentId:'private'},rpc,'')
+    expect(result.result.tools.map((t: any)=>t.name)).toEqual(['standard_chats_search','standard_chat_read','standard_memory_read'])
+    expect(JSON.stringify(result)).not.toContain('write')
+  })
+  it('owner switch generates a stock MCP config; agent token reads; immediate revocation blocks cached calls', async () => {
+    const dir=box(), main=await fakeHermes('main'), path=join(dir,'standard.db'); historyFixture(path)
+    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {agent}=await withPrivate(dir,base)
+    const call=(headers: Record<string,string>={})=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'standard_chats_search',arguments:{query:'lighthouse'}}},headers))
+    expect((await call()).status).toBe(403)
+    const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
+    expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
+    const patchAccess=(enabled: unknown)=>fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:enabled}}),method:'PATCH'})
+    expect((await patchAccess('true')).status).toBe(400)
+    expect((await patchAccess(true)).status).toBe(200)
+    const config=readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')
+    expect(config).toContain('standard_chats:')
+    expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
+    expect(config).not.toContain(token)
+    const reply=await call({Authorization:`Bearer ${token}`})
+    expect(reply.status).toBe(200)
+    expect(JSON.stringify(await reply.json())).toContain('lighthouse')
+    expect((await patchAccess(false)).status).toBe(200)
+    expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
+    expect(readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')).not.toContain('standard_chats:')
+  })
+  it('never enables the permission for a standard agent', async () => {
+    const main=await fakeHermes('main'),{base}=await start(box(),main)
+    const r=await fetch(base+'/wizard/v1/agents',json({label:'Standard',model:{provider:'anthropic',model:'claude-opus-5-5'},permissions:{preset:'standard',read_standard_chats:true}}))
+    expect(r.status).toBe(409)
+    expect((await r.json()).check).toBe('agent.permissions.read_standard_chats')
+  })
+  it('owner deletes an explicitly named private thread without reading it; subsequent GET is 404', async () => {
+    const dir=box(),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_delete'])
+    const {base}=await start(dir,main);await withPrivate(dir,base,privateApi.port)
+    const path='/wizard/hermes/api/sessions/private_delete?agent=private'
+    expect((await fetch(base+path,{method:'DELETE'})).status).toBe(200)
+    expect((await fetch(base+path)).status).toBe(404)
+    expect(privateApi.seen.filter(r=>r.method==='DELETE')).toHaveLength(1)
+    expect(main.seen.filter(r=>r.method==='DELETE')).toHaveLength(0)
+    const token=readFileSync(join(dir,'agents','private','gateway.key'),'utf8').trim()
+    expect((await fetch(base+path,{method:'DELETE',headers:{Authorization:`Bearer ${token}`}})).status).toBe(403)
+  })
+  it('private FTS uses only its own database and excludes hidden probes', () => {
+    const dir=box(),home=join(dir,'agents','private','home');mkdirSync(home,{recursive:true});historyFixture(join(home,'state.db'))
+    const matches=privateChatMatches(join(dir,'agents'),'private','mango lighthouse')
+    expect([...matches.keys()]).toEqual(['standard'])
+    expect(matches.has('hidden_probe')).toBe(false)
+    expect(privateChatMatches(join(dir,'agents'),'missing','mango')).toBe(null)
   })
 })

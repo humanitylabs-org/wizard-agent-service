@@ -152,7 +152,11 @@ function idList(value, check) {
 /** Merge a permissions patch onto a base, validating every field. */
 export function normalizePermissions(base, patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) fail(400, 'invalid_permissions', 'agent.permissions')
-  const out = { ...base }
+  const out = { read_standard_chats: false, ...base }
+  if (patch.read_standard_chats !== undefined) {
+    if (typeof patch.read_standard_chats !== 'boolean') fail(400, 'invalid_permissions', 'agent.permissions.read_standard_chats')
+    out.read_standard_chats = patch.read_standard_chats
+  }
   const outside = idList(patch.outside_tools, 'agent.permissions.outside_tools')
   if (outside) {
     const unknown = outside.filter((id) => !OUTSIDE_IDS.has(id))
@@ -176,6 +180,7 @@ export function normalizePermissions(base, patch = {}) {
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
 function assertPrivateWalls(agent) {
+  if (agent.permissions.read_standard_chats && agent.privacy !== 'private') fail(409, 'private_permission_required', 'agent.permissions.read_standard_chats')
   if (agent.privacy !== 'private') return
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   if (agent.model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
@@ -290,7 +295,7 @@ export function assertIsolationSupports(agent) {
 
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
-  return agent.privacy === 'standard' || agentAppIds(agent).size > 0
+  return agent.privacy === 'standard' || agentAppIds(agent).size > 0 || agent.permissions.read_standard_chats === true
 }
 
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
@@ -328,7 +333,12 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
   // No gateway and no shared skills for an agent without one: nothing outside its own home is reachable.
   if (wantsGateway(agent, gatewayUrl)) {
-    lines.push('mcp_servers:', '  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    lines.push('mcp_servers:')
+    if (agent.privacy === 'standard' || agentAppIds(agent).size) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
+      const url = new URL(gatewayUrl); url.pathname = '/wizard/standard-chats/mcp'; url.search = ''; url.hash = ''
+      lines.push('  standard_chats:', `    url: ${yamlString(url.href)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    }
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
   if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)

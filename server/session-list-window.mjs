@@ -51,7 +51,7 @@ export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(
     const words=q.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const matches=entries.filter(({raw,s})=> {
       const hay=[s.title,s.preview,clean(raw.wizard_request_preview),clean(raw.last_user_message?.content),clean(raw.latest_message?.content),clean(raw.wizard_search_text)].join(' ').toLowerCase();
-      return words.every(w=>hay.includes(w));
+      return raw.wizard_search_match === true || words.every(w=>hay.includes(w));
     });
     return {rows:matches.map(x=>x.raw), archive_total:archived.length, search_total:matches.length};
   }

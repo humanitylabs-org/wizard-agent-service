@@ -51,6 +51,7 @@ import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest,
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
+import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
@@ -4153,6 +4154,17 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (url.pathname === '/wizard/standard-chats/mcp') {
+        if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response,415,{error:'json_required'}); return }
+        const agent = principal.kind === 'agent' ? agents?.read(principal.agentId) : null
+        if (!agent || agent.privacy !== 'private' || agent.permissions.read_standard_chats !== true) { sendJson(response,403,{error:'standard_chats_denied'}); return }
+        const rpc = parseJsonBody(await readBoundedBody(request,16384))
+        const result = standardChatRpc(agent,principal,rpc,hermesStatePath)
+        if (result === null) { response.writeHead(202); response.end() }
+        else sendJson(response,200,result,{'Cache-Control':'no-store'})
+        return
       }
       if (url.pathname === '/wizard/v1/setup' || url.pathname.startsWith('/wizard/v1/setup/')) {
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
