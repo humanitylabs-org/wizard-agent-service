@@ -144,6 +144,7 @@ export class DurableRunQueue {
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
     const hadState = existsSync(this.statePath)
     this.database = new DatabaseSync(this.statePath)
+    try {
     chmodSync(this.statePath, 0o600)
     withSqliteMigration(this.database, this.statePath, hadState, () => {
     this.database.exec(`
@@ -204,6 +205,10 @@ export class DurableRunQueue {
     }
     })
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+    } catch (error) {
+      try { this.database.close() } catch { /* preserve original */ }
+      throw error
+    }
   }
 
   async initialize() {
@@ -214,19 +219,24 @@ export class DurableRunQueue {
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
     await this.tick(true)
-    if (this.pollIntervalMs > 0 && !this.timer) {
+    if (!this.closed && this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
       this.timer.unref?.()
     }
     return this
   }
 
-  close() {
-    if (this.closed) return
+  quiesce() {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
     this.timer = null
-    this.database.close()
+  }
+  close() {
+    if (this.closePromise) return this.closePromise
+    this.quiesce()
+    // With no in-flight tick preserve synchronous close for existing callers.
+    if (!this.tickPromise) { this.database.close(); return this.closePromise = Promise.resolve() }
+    return this.closePromise = this.tickPromise.catch(() => undefined).then(() => this.database.close())
   }
 
   _record(row) {

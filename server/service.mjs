@@ -50,6 +50,7 @@ import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
+import { serviceLifetime } from './service-lifetime.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -2079,8 +2080,8 @@ export function speechText(value) {
 }
 
 export function createWizardServer(options = {}) {
-  // Acquire before migrations/writers are constructed; release on failed construction or server close.
-  const paths = ['runQueueStatePath', 'uploadStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  // Authority directories fail as before; the optional upload lease is acquired only when enabled.
+  const paths = ['runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
@@ -2088,13 +2089,14 @@ export function createWizardServer(options = {}) {
   if (home) dirs.push(resolve(home))
   if (options.agents !== false && (options.agentsDir || home)) dirs.push(resolve(options.agentsDir || join(home, 'agents')))
   const release = acquireServiceLeases(dirs, { shared: true })
+  const lifetime = serviceLifetime(release)
   try {
-    const server = buildWizardServer(options)
-    server.once('close', release)
+    const server = buildWizardServer(options, lifetime)
+    server.once('close', () => { server.drained = lifetime.drain() })
     return server
-  } catch (error) { release(); throw error }
+  } catch (error) { void lifetime.drain(); throw error }
 }
-function buildWizardServer(options = {}) {
+function buildWizardServer(options, lifetime) {
   const distDir = resolve(options.distDir ?? resolve(process.cwd(), 'dist'))
   const upstreamOrigin = confinedUpstream(options.upstreamOrigin ?? 'http://127.0.0.1:8642')
   const sttOrigin = confinedUpstream(options.sttOrigin ?? 'http://127.0.0.1:8864')
@@ -2139,6 +2141,7 @@ function buildWizardServer(options = {}) {
       } finally { db.close() }
     },
   })
+  lifetime.own(() => Promise.allSettled([...lockedBridge.streams]))
   const fetchImpl = (url, init) => lockedBridge.fetch(url, init)
 
   // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
@@ -2164,6 +2167,7 @@ function buildWizardServer(options = {}) {
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
     })
     : null
+  if (bridge) lifetime.own(() => bridge.close())
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   const osInstructions = (sessionId) => {
     if (!bridge) return ''
@@ -2240,13 +2244,13 @@ function buildWizardServer(options = {}) {
         await result.body?.cancel().catch(() => undefined)
         if (result.ok) agents.observeSessions(agentId, [sessionId], { index: false })
         if (!result.ok && result.status !== 404) {
-          const known = agents.catalogContains(agentId, sessionId)
+          const known = await agents.catalogContains(agentId, sessionId)
           if (known !== undefined) return known
           if (strict) throw new AgentError(503, 'agent_unavailable', 'agent.history')
         }
         return result.ok
       } catch (error) {
-        const known = agents.catalogContains(agentId, sessionId)
+        const known = await agents.catalogContains(agentId, sessionId)
         if (known !== undefined) return known
         if (strict) throw new AgentError(503, 'agent_unavailable', 'agent.history'); return false
       }
@@ -3035,6 +3039,7 @@ function buildWizardServer(options = {}) {
         try { const path = resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
     })
+    lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
   }
 
   if (runQueue) backgroundResults = createBackgroundResults({
@@ -3049,8 +3054,9 @@ function buildWizardServer(options = {}) {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
+  if (heavyWork) lifetime.own(() => heavyWork.close(), () => heavyWork.queue.quiesce())
   if (runQueue) runQueueReady = runQueue.initialize()
-  if (heavyWork) void runQueueReady.then(() => heavyWork.start())
+  if (heavyWork) void runQueueReady.then(() => { if (!lifetime.closing) heavyWork.start() }).catch(() => undefined)
 
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
@@ -3265,7 +3271,7 @@ function buildWizardServer(options = {}) {
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
           }
           const attention = !operator ? (messages.status ?? (messages.latest?.role === 'assistant' ? statusBackfill.lookup(session.id, messages.latestAssistantAt) : null)) : null
-          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null)
+          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null))
           return {
             ...session,
             ...(messages.latest ? { latest_message: messages.latest } : {}),
@@ -3669,7 +3675,9 @@ function buildWizardServer(options = {}) {
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
   let uploads = null
   if (uploadStatePath && uploadTarget('files')) {
+    let releaseUploadLease
     try {
+      releaseUploadLease = acquireServiceLeases([dirname(uploadStatePath)], { shared: true })
       mkdirSync(uploadStagingDir, { recursive: true, mode: 0o700 })
       uploads = createUploadStore({
         statePath: uploadStatePath,
@@ -3684,11 +3692,14 @@ function buildWizardServer(options = {}) {
         statfs: options.uploadStatfs,
         now: options.uploadNow,
       })
+      lifetime.lease(releaseUploadLease)
     } catch (error) {
+      releaseUploadLease?.()
       console.error(`[uploads] resumable uploads disabled: ${error?.code || error?.message || 'state unavailable'}`)
       uploads = null
     }
   }
+  if (uploads) lifetime.own(() => uploads.close(), () => uploads.quiesce())
   const sendUploadError = (response, error) => {
     if (response.headersSent) { response.destroy(); return }
     if (error instanceof UploadError) {
@@ -3812,6 +3823,8 @@ function buildWizardServer(options = {}) {
   }
 
   const server = createServer(async (request, response) => {
+    if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+    const requestDone = lifetime.request()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await principals.attach(request)
@@ -5078,16 +5091,11 @@ function buildWizardServer(options = {}) {
         sendJson(response, error.status, { error: names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    }
+    } finally { requestDone() }
   })
-  if (runQueue) server.once('close', () => {
-    if (heavyWork) void heavyWork.close().finally(() => runQueue.close())
-    else runQueue.close()
-  })
-  if (uploads) server.once('close', () => uploads.close())
   if (chatPhotos) {
     server.once('listening', () => chatPhotos.start())
-    server.once('close', () => chatPhotos.stop())
+    lifetime.own(() => chatPhotos.stop(), () => chatPhotos.stop())
   }
   server.on('listening', () => {
     const address = server.address()
@@ -5095,7 +5103,6 @@ function buildWizardServer(options = {}) {
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
   })
-  if (bridge) server.once('close', () => bridge.close())
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''
@@ -5129,7 +5136,7 @@ function buildWizardServer(options = {}) {
       admit: admitHelperContinuation,
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
-    server.on('close', () => watcher.stop())
+    lifetime.own(() => watcher.stop(), () => watcher.stop())
   }
   return server
 }

@@ -833,10 +833,11 @@ export function createAgentRegistry(options = {}) {
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)
-    if (!running) await refreshCatalog(id).catch(() => undefined)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
-    try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    let stopped = false
+    try { const result = await (running ? runtime.start(id) : runtime.stop(id)); stopped = !running && result?.ok !== false } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)
+    else if (stopped) await sealCatalog(id).catch(() => undefined)
     return agent
   }
 
@@ -883,7 +884,7 @@ export function createAgentRegistry(options = {}) {
     pinsCache = next
   }
   // This authority store is never seeded from client-authored metadata. Only runtime-authenticated
-  // history reads can establish a complete negative catalog; partial observations are positive only.
+  // history reads supply positive evidence only. Negative evidence needs an offline stopped-generation seal.
   const catalogPath = join(agentsDir, '.session-catalog.json')
   migrateJson(catalogPath, value => {
     if (value?.schema !== 1 || !value.agents || typeof value.agents !== 'object' || Array.isArray(value.agents)) throw new Error('Invalid session catalog')
@@ -894,9 +895,27 @@ export function createAgentRegistry(options = {}) {
   })
   let catalogs = readJson(catalogPath)?.agents ?? {}
   const catalogEpochs = new Map()
-  function catalogContains(agentId, sessionId) {
+  async function catalogContains(agentId, sessionId) {
     const row = catalogs[agentId]
-    return row?.ids.includes(sessionId) ? true : row?.complete ? false : undefined
+    if (row?.ids.includes(sessionId)) return true
+    if (!row?.complete || typeof row.seal !== 'string' || !row.seal || !runtime?.inspect) return undefined
+    try {
+      const current = await runtime.inspect(agentId)
+      // Disk-loaded seals are authority only when the driver still attests this stopped generation.
+      if (current.status === 'stopped' && current.generation === row.seal) return false
+    } catch { /* unknown lifecycle generation never proves absence */ }
+    return undefined
+  }
+  async function sealCatalog(agentId) {
+    if (!runtime?.census || !runtime?.inspect) return
+    const epoch = catalogEpochs.get(agentId) ?? 0
+    const census = await runtime.census(agentId)
+    const current = await runtime.inspect(agentId)
+    if (epoch !== (catalogEpochs.get(agentId) ?? 0) || census.status !== 'stopped' || current.status !== 'stopped'
+      || typeof census.generation !== 'string' || !census.generation || census.generation !== current.generation
+      || !Array.isArray(census.ids) || census.ids.some(id => typeof id !== 'string' || !id || id.length > 200)) return
+    observeSessions(agentId, census.ids)
+    saveCatalog(agentId, { ...catalogs[agentId], complete: true, seal: census.generation })
   }
   function saveCatalog(agentId, row) {
     const next = { ...catalogs, [agentId]: row }
@@ -905,14 +924,14 @@ export function createAgentRegistry(options = {}) {
   }
   function invalidateCatalog(agentId) {
     catalogEpochs.set(agentId, (catalogEpochs.get(agentId) ?? 0) + 1)
-    if (catalogs[agentId]) saveCatalog(agentId, { ...catalogs[agentId], complete: false })
+    if (catalogs[agentId]) saveCatalog(agentId, { ...catalogs[agentId], complete: false, seal: null })
   }
-  function observeSessions(agentId, ids, { complete = false, index = true } = {}) {
+  function observeSessions(agentId, ids, { index = true } = {}) {
     ids = ids.filter(id => typeof id === 'string' && id && id.length <= 200)
     if (!readRaw(agentId)) return
     const previous = catalogs[agentId]
     // Retain positive sightings even if a concurrent paginated census misses a newly created row.
-    saveCatalog(agentId, { at: now(), complete: complete || previous?.complete === true, ids: [...new Set([...(previous?.ids ?? []), ...ids])] })
+    saveCatalog(agentId, { at: now(), complete: previous?.complete === true && Boolean(previous?.seal), seal: previous?.seal ?? null, ids: [...new Set([...(previous?.ids ?? []), ...ids])] })
     if (index) for (const id of ids) pin(id, agentId, 'runtime_verified')
   }
   async function refreshCatalog(agentId) {
@@ -1011,6 +1030,8 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
+    inspect: (id) => call('POST', `/agents/${encodeURIComponent(id)}/inspect`),
+    census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
   }
 }

@@ -1,5 +1,5 @@
 // Service-owned stores only. Never apply this protocol to upstream Hermes databases.
-import { openSync, closeSync, fsyncSync, existsSync, readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, statSync, chmodSync } from 'node:fs'
+import { openSync, closeSync, fsyncSync, existsSync, readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, statSync, chmodSync, realpathSync } from 'node:fs'
 import { dirname, basename, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
@@ -20,11 +20,18 @@ export function acquireLease(path) {
   let released = false
   return () => { if (!released) { released = true; try { db.exec('ROLLBACK') } finally { db.close() } } }
 }
+// Resolve aliases only after safe directory creation; never unlink coordination inodes.
+function storeDirectories(directories) {
+  return [...new Set(directories.map(dir => {
+    mkdirSync(resolve(dir), { recursive: true, mode: 0o700 })
+    return realpathSync(resolve(dir))
+  }))].sort()
+}
 const serviceLeases = new Map()
 export function acquireServiceLeases(directories, { shared = false } = {}) {
   const releases = []
   try {
-    for (const dir of [...new Set(directories.map(dir => resolve(dir)))].sort()) {
+    for (const dir of storeDirectories(directories)) {
       if (!shared) { releases.push(acquireLease(join(dir, '.agent-pairs.service-lease.sqlite'))); continue }
       // Several listeners in one service process share the lifetime lease, not restore's
       // exclusive acquisition. Restore (even in this process) can never share this reference.
@@ -213,7 +220,7 @@ function restoreEntries(directories) {
 // Sorted per-directory restore locks fence overlapping sets, not just identical argv sets.
 export function restoreStoreSet(directories, { serviceStopped = false } = {}) {
   if (!serviceStopped) throw diagnostic('restore requires explicit stopped-service acknowledgement')
-  directories = [...new Set(directories.map(dir => resolve(dir)))].sort()
+  directories = storeDirectories(directories)
   const releases = []
   try {
     releases.push(acquireServiceLeases(directories))

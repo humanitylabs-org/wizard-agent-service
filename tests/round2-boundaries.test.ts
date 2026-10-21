@@ -29,6 +29,8 @@ async function scene({ queued = false, manifest = null as any } = {}) {
   const dispatch = { healthy: false }
   const ports = new Map<number, string>([[1, 'hermes']]), status = new Map<string, string>()
   const runtime = {
+    inspect: async (id: string) => ({status: status.get(id) ?? 'running', generation: `${id}:${status.get(id) ?? 'running'}`}),
+    census: async (id: string) => ({...await runtime.inspect(id), ids: [...histories.get(id)!]}),
     apply: async (id: string) => { const config = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8')); ports.set(config.runtime.port, id); histories.set(id, new Set()); status.set(id, 'running'); return {} },
     status: async (id: string) => ({ status: status.get(id) ?? 'running', status_detail: '' }),
     start: async (id: string) => { status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return {} },
@@ -113,7 +115,7 @@ it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserve
     try {
       const s = await scene(), secondary = await s.create('Offline')
       await s.call('/wizard/hermes/api/sessions?agent=' + secondary.id) // authenticated listing before stop
-      s.status.set(secondary.id, 'stopped')
+      await s.call('/wizard/v1/agents/' + secondary.id + '/stop', 'POST', {})
       const agents = await (await s.call('/wizard/v1/agents')).json()
       const binding = await (await s.call('/wizard/v1/apps/notes/binding')).json()
       const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_client_fresh', source: 'wizard-mobile' })
@@ -135,7 +137,7 @@ it('catalogued stopped private id is refused exactly like the online anti-claim 
   const call = await restart(s), after = await call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id })
   expect([after.status, await after.json()]).toEqual(expected); expect(after.status).toBe(404)
   const catalog = JSON.parse(readFileSync(join(s.agentsDir, '.session-catalog.json'), 'utf8'))
-  expect(catalog.agents[hidden.id]).toMatchObject({ complete: true, ids: [id] })
+  expect(catalog.agents[hidden.id]).toMatchObject({ complete: false, ids: [id] })
   expect(catalog.agents[hidden.id].at).toBeGreaterThan(0)
   expect(JSON.parse(readFileSync(join(s.agentsDir, INVENTORY_NAME), 'utf8')).stores['.session-catalog.json'].disposition).toBe('created')
   expect(JSON.stringify(await (await call('/wizard/v1/agents')).json())).not.toContain(id)
@@ -254,8 +256,8 @@ it('catalog census follows clamped short pages and validates every cursor', asyn
   } })
   await registry.refreshCatalog(secondary.id)
   expect(offsets).toEqual([0, 1, 2])
-  expect(registry.catalogContains(secondary.id, 'wizard_page_1')).toBe(true)
-  expect(registry.catalogContains(secondary.id, 'wizard_absent')).toBe(false)
+  expect(await registry.catalogContains(secondary.id, 'wizard_page_1')).toBe(true)
+  expect(await registry.catalogContains(secondary.id, 'wizard_absent')).toBeUndefined()
 })
 
 it('old in-flight census cannot restore negative authority across a start transition', async () => {
@@ -267,7 +269,7 @@ it('old in-flight census cannot restore negative authority across a start transi
   await registry.setRunning(secondary.id, true)
   finish(Response.json({ data: [], has_more: false }))
   await expect(old).rejects.toThrow(/lifecycle changed/)
-  expect(registry.catalogContains(secondary.id, 'wizard_absent')).toBeUndefined()
+  expect(await registry.catalogContains(secondary.id, 'wizard_absent')).toBeUndefined()
 })
 
 it('service lease stays exclusive to restore until the last same-process listener closes', async () => {
@@ -278,6 +280,7 @@ it('service lease stays exclusive to restore until the last same-process listene
   await new Promise<void>(resolve => { s.service.close(() => resolve()); s.service.closeAllConnections() })
   expect(() => restoreStoreSet([s.agentsDir], { serviceStopped: true })).toThrow(/exclusive writer ownership/)
   await new Promise<void>(resolve => second.close(() => resolve()))
+  await Promise.all([(s.service as any).drained, (second as any).drained])
   expect(() => restoreStoreSet([s.agentsDir], { serviceStopped: true })).not.toThrow()
 })
 
@@ -301,6 +304,7 @@ it('LIVE_FIXTURE_RESTORE: CLI refuses a listening service with exit 2 and zero s
   expect(status).toBe(2); expect(readFileSync(p)).toEqual(before)
   expect((await s.call('/wizard/v1/agents')).status).toBe(200)
   await new Promise<void>(resolve => { s.service.close(() => resolve()); s.service.closeAllConnections() })
+  await (s.service as any).drained
   const out = execFileSync(process.execPath, [join(process.cwd(), 'scripts/restore-agent-pairs.mjs'), '--service-stopped', s.agentsDir], { encoding: 'utf8' })
   expect(JSON.parse(out).restored_stores).toBeGreaterThan(0)
   expect(existsSync(p)).toBe(false)

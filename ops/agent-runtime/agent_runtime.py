@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import shlex
 import subprocess
 import sys
@@ -560,6 +561,55 @@ class RuntipiDriver:
         return {"ok": status == "stopped", "status": status}
 
 
+# ---------------------------------------------------------------- stopped runtime history authority
+
+def inspect_runtime(driver, agent: dict) -> tuple[dict, dict]:
+    """Lifecycle identity only; include stopped containers, never inspect environment/config secrets."""
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    ids = docker(["ps", "-aq", "--filter", f"label=com.docker.compose.project={driver.project(agent['id'])}",
+                  "--filter", f"label=com.docker.compose.service={service}"], timeout=60).stdout.split()
+    if len(ids) != 1:
+        raise RuntimeFailure("runtime_generation_unavailable", 503)
+    # Limit output to lifecycle metadata and the data mount, not credentials in Config.Env.
+    run = docker(["inspect", "--format", '{{json .Id}}\n{{json .State}}\n{{json .RestartCount}}\n{{json .Mounts}}', ids[0]], timeout=60)
+    try:
+        cid, state, restarts, mounts = [json.loads(line) for line in run.stdout.splitlines()]
+        started, finished = state["StartedAt"], state["FinishedAt"]
+        if (not isinstance(cid, str) or not cid or not isinstance(started, str)
+                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.+Z", started) or started.startswith("0001-")
+                or not isinstance(restarts, int) or isinstance(restarts, bool) or restarts < 0):
+            raise ValueError()
+        status = "stopped" if state["Status"] in {"exited", "dead"} and not state["Running"] and not state.get("Restarting") else "running"
+        if status == "stopped" and (not isinstance(finished, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.+Z", finished) or finished.startswith("0001-")):
+            raise ValueError()
+        generation = hashlib.sha256(json.dumps([cid, started, finished, restarts, status]).encode()).hexdigest()
+        mount = [m for m in mounts if m.get("Destination") == "/opt/data"]
+        return {"status": status, "generation": generation}, mount[0] if len(mount) == 1 else {}
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeFailure("runtime_generation_unavailable", 503) from None
+
+
+def offline_census(driver, agent: dict) -> dict:
+    """Read only ids from the stopped runtime's actual mounted index. No messages/transcripts."""
+    before, mount = inspect_runtime(driver, agent)
+    if before["status"] != "stopped" or not mount.get("Source"):
+        raise RuntimeFailure("offline_census_unavailable", 503)
+    path = Path(mount["Source"]) / "state.db"
+    try:
+        # mode=ro cannot create a missing database; normal SQLite reads include committed WAL pages.
+        with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            ids = [row[0] for row in conn.execute("SELECT id FROM sessions LIMIT 100001")]
+        if len(ids) > 100000 or any(not isinstance(sid, str) or not sid or len(sid) > 200 for sid in ids):
+            raise ValueError()
+    except (OSError, sqlite3.Error, ValueError):
+        raise RuntimeFailure("offline_census_unavailable", 503) from None
+    after, _ = inspect_runtime(driver, agent)
+    if before != after:
+        raise RuntimeFailure("runtime_generation_changed", 503)
+    return {**after, "ids": ids}
+
+
 # ---------------------------------------------------------------- delivery (runs inside the agent container)
 
 DELIVER_SCRIPT = r'''
@@ -662,7 +712,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -689,7 +739,12 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     self._json(200, deliver(chosen, agent, payload))
                     return
                 with lifecycle_lock(chosen, restricted_driver, agent_id):
-                    result = getattr(chosen, action)(agent)
+                    if action == "inspect":
+                        result, _ = inspect_runtime(chosen, agent)
+                    elif action == "census":
+                        result = offline_census(chosen, agent)
+                    else:
+                        result = getattr(chosen, action)(agent)
                 self._json(200, result)
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})

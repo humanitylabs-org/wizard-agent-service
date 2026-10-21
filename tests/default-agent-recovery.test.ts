@@ -32,6 +32,8 @@ async function scene({ queued = false, manifest = null as any, badOptional = fal
   const dispatch = { healthy: false }
   const ports = new Map<number, string>([[1, 'hermes']]), status = new Map<string, string>()
   const runtime = {
+    inspect: async (id: string) => ({status: status.get(id) ?? 'running', generation: `${id}:${status.get(id) ?? 'running'}`}),
+    census: async (id: string) => ({...await runtime.inspect(id), ids: [...histories.get(id)!]}),
     apply: async (id: string) => { const config = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8')); ports.set(config.runtime.port, id); histories.set(id, new Set()); status.set(id, 'running'); return {} },
     status: async (id: string) => ({ status: status.get(id) ?? 'running', status_detail: '' }),
     start: async (id: string) => { status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return {} },
@@ -82,7 +84,7 @@ describe('persisted default and recovery contract', () => {
   })
   it('a stopped unrelated agent does not couple server-minted new chats to its availability', async () => {
     const s = await scene(), offline = await s.create('Offline')
-    s.status.set(offline.id, 'stopped')
+    await s.call('/wizard/v1/agents/' + offline.id + '/stop', 'POST', {})
     const offset = s.calls.length
     const response = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })
     const body = await response.json()
@@ -90,7 +92,7 @@ describe('persisted default and recovery contract', () => {
     expect(body.session.id).toMatch(/^wizard_\d+_[a-f0-9]{32}$/)
     expect(s.calls.slice(offset).some(row => row.agent === offline.id)).toBe(false)
     expect(createAgentRegistry({ agentsDir: s.agentsDir }).pinnedAgent(body.session.id)).toBe('hermes')
-    // Successful creation captured an authenticated empty runtime catalog before it stopped.
+    // Service-driven stop sealed the offline index against the driver generation.
     expect((await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_fresh', source: 'wizard-mobile' })).status).toBe(201)
     // A known indexed pair can continue without querying unrelated agents.
     expect((await s.call('/wizard/hermes/api/sessions/' + body.session.id + '?agent=hermes', 'PATCH', { title: 'Changed' })).status).toBe(200)

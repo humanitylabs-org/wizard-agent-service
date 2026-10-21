@@ -88,6 +88,7 @@ export function createUploadStore(options) {
   mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
   const hadState = existsSync(statePath)
   const db = new DatabaseSync(statePath)
+  try {
   try { chmodSync(statePath, 0o600) } catch { /* best effort */ }
   withSqliteMigration(db, statePath, hadState, () => {
   db.exec(`
@@ -109,6 +110,10 @@ export function createUploadStore(options) {
   }
   })
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+  } catch (error) {
+    try { db.close() } catch { /* preserve original */ }
+    throw error
+  }
   const now = options.now ?? (() => Date.now())
   const statfs = options.statfs ?? ((dir) => statfsSync(dir))
   const reserveBytes = Number.isFinite(options.reserveBytes) && options.reserveBytes >= 0 ? options.reserveBytes : UPLOAD_RESERVE_BYTES
@@ -120,7 +125,7 @@ export function createUploadStore(options) {
   const active = new Map()
   const delivering = new Map()
   const timers = new Set()
-  let closed = false
+  let closed = false, closePromise
 
   const row = (id) => db.prepare('SELECT * FROM uploads WHERE id = ?').get(id) ?? null
   const shareRow = (id) => db.prepare('SELECT * FROM shares WHERE id = ?').get(id) ?? null
@@ -553,12 +558,18 @@ export function createUploadStore(options) {
     maybeDeliver,
     sweep,
     upload: (id) => (UPLOAD_ID.test(String(id)) ? row(id) : null),
-    close() {
+    quiesce() {
       closed = true
       clearInterval(sweeper)
       for (const timer of timers) clearTimeout(timer)
       timers.clear()
-      try { db.close() } catch { /* closed */ }
+    },
+    close() {
+      if (closePromise) return closePromise
+      this.quiesce()
+      const finish = () => { db.close() }
+      if (!locks.size && !delivering.size) { finish(); return closePromise = Promise.resolve() }
+      return closePromise = Promise.allSettled([...locks.values(), ...delivering.values()]).then(finish)
     },
   }
 }

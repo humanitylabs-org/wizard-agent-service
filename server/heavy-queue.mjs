@@ -47,6 +47,7 @@ export class DurableHeavyQueue {
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     const hadState = existsSync(statePath)
     this.db = new DatabaseSync(statePath)
+    try {
     chmodSync(statePath, 0o600)
     withSqliteMigration(this.db, statePath, hadState, () => {
     this.db.exec(`
@@ -64,6 +65,10 @@ export class DurableHeavyQueue {
     }
     })
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+    } catch (error) {
+      try { this.db.close() } catch { /* preserve original */ }
+      throw error
+    }
     Object.assign(this, { transport, continuation, current, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {
@@ -122,15 +127,16 @@ export class DurableHeavyQueue {
       cancellation_pending: rows.filter(r => r.cancel_requested && !terminal.has(r.state)).length }
   }
   start() {
+    if (this.closed) return this
     this.timer = setInterval(() => void this.tick().catch(() => {}), this.intervalMs)
     this.timer.unref?.()
     return this
   }
-  async close() {
-    this.closed = true
-    clearInterval(this.timer)
-    await this.busy
-    this.db.close()
+  quiesce() { this.closed = true; clearInterval(this.timer) }
+  close() {
+    if (this.closePromise) return this.closePromise
+    this.quiesce()
+    return this.closePromise = Promise.resolve(this.busy).catch(() => undefined).then(() => this.db.close())
   }
   tick() {
     if (this.closed) return Promise.resolve()
