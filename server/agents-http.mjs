@@ -12,7 +12,7 @@ import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
 import { pipeline } from 'node:stream/promises'
-import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
+import { AgentError, MAIN_AGENT_ID, migrateProvider } from './agents.mjs'
 import { ownerLike, principalOf } from './principals.mjs'
 import { STATUS_INSTRUCTIONS } from './thread-status.mjs'
 
@@ -210,6 +210,10 @@ export async function handleAgentsApi(ctx, url, request, response) {
       assertPrivacyChange(request, body)
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
+      return true
+    }
+    if (method === 'DELETE') {
+      sendJson(response, 200, await registry.remove(id))
       return true
     }
     throw new AgentError(405, 'method_not_allowed', 'agent.route')
@@ -476,12 +480,12 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
 function modelAllowed(agent, value) {
   const model = typeof value?.model === 'string' ? value.model.trim() : ''
   const provider = typeof value?.provider === 'string' ? value.provider.trim() : ''
-  if (provider && provider !== agent.model.provider && !(agent.model.provider === 'tinfoil' && provider === 'custom')) return false
+  if (provider && migrateProvider(provider) !== agent.model.provider && !(provider === 'custom' && (agent.privacy === 'private' || agent.runtime?.private_client))) return false
   if (!model) return true
   if (agent.model.allowed_models.includes(model)) return true
   // `custom/glm-5-3` or `tinfoil/glm-5-3` name the same model through this agent's own provider.
   const [prefix, bare, ...more] = model.split('/')
-  return !more.length && Boolean(bare) && [agent.model.provider, 'custom'].includes(prefix) && agent.model.allowed_models.includes(bare)
+  return !more.length && Boolean(bare) && [agent.model.provider, 'custom'].includes(migrateProvider(prefix)) && agent.model.allowed_models.includes(bare)
 }
 
 /**
@@ -491,6 +495,7 @@ function modelAllowed(agent, value) {
  */
 export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead }) {
   const { registry, sendJson } = ctx
+  if (method === 'POST' && ['/v1/runs', '/api/sessions'].includes(upstreamPath)) await registry.assertProviderAvailable?.(agent)
   if (!ctx.isAllowedProxyRequest(method, upstreamPath, searchParams)) { sendJson(response, 404, { error: 'not_found' }); return }
   const hasBody = method === 'PATCH' || (method === 'POST' && !upstreamPath.endsWith('/stop'))
   if (hasBody && !bodyRead) throw new AgentError(415, 'json_required', 'request.content_type')
@@ -503,7 +508,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (method === 'GET' && upstreamPath === '/api/model/options') {
     sendJson(response, 200, {
       provider: agent.model.provider, model: agent.model.model,
-      providers: [{ slug: agent.model.provider, name: agent.model.provider === 'tinfoil' ? 'Tinfoil (confidential)' : agent.model.provider, is_current: true, authenticated: true, models: [...agent.model.allowed_models] }],
+      providers: [{ slug: agent.model.provider, name: agent.model.provider, is_current: true, authenticated: true, models: [...agent.model.allowed_models] }],
       agent: registry.threadAgent(agent),
     })
     return

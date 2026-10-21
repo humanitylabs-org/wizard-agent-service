@@ -6,8 +6,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
-import { agentForModel, hermesConfigYaml, TINFOIL, TINFOIL_NO_REASONING } from '../server/agents.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
+import { agentForModel, hermesConfigYaml, TINFOIL_NO_REASONING } from '../server/agents.mjs'
+import { fixtureModels } from './helpers/private-provider-fixture.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) } })
@@ -141,7 +143,7 @@ describe('unified Chats: the picker routes a new chat to the agent owning the mo
     const bad = await fetch(`${base}/wizard/v1/agents/private`, json({ model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'claude-opus-5-5'] } }, 'PATCH'))
     expect(bad.status).toBe(400)
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
-    expect(options.providers.find((p: any) => p.id === 'tinfoil').models.map((m: any) => m.id)).toEqual(['glm-5-3', 'deepseek-v4-1-flash'])
+    expect(options.providers.find((p: any) => p.id === 'wizard-tinfoil').models.map((m: any) => m.id)).toEqual(['glm-5-3', 'deepseek-v4-1-flash'])
   })
 
   it('a private thread cannot switch to a public model (private → public never possible)', async () => {
@@ -161,6 +163,6 @@ describe('unified Chats: the picker routes a new chat to the agent owning the mo
     const glmOnly = hermesConfigYaml({ ...base, model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false } })
     expect(glmOnly).not.toContain('model_overrides')
     expect([...TINFOIL_NO_REASONING]).toEqual(['deepseek-v4-1-flash'])
-    expect(TINFOIL.models.map((m) => m.id)).toEqual(['glm-5-3', 'deepseek-v4-1-flash'])
+    expect(fixtureModels.map((m) => m.id)).toEqual(['glm-5-3', 'deepseek-v4-1-flash'])
   })
 })

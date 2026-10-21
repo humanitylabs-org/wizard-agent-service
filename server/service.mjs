@@ -2329,6 +2329,7 @@ function buildWizardServer(options, lifetime) {
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
+    aiConnectionAddress: options.aiConnectionAddress,
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,
