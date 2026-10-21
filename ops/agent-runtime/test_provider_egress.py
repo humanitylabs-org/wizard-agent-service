@@ -117,6 +117,22 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(any(c[:2] == ['network','disconnect'] and c[3] in {'wzpr-a','wzpr-b'} for c in calls))
         self.assertIn(['start','cid'], calls)
 
+    def test_null_view_uses_loopback_health_for_management(self):
+        import subprocess
+        calls = []
+        manager = ProviderEgress(lambda args, **kw: (calls.append(args) or subprocess.CompletedProcess(args,0,'','')), Failure)
+        value = self.fixture(); value['Name'] = '/provider'
+        value['HostConfig']['PortBindings'] = {'18804/tcp':[{'HostIp':'127.0.0.1','HostPort':'18804'}]}
+        value['NetworkSettings'] = {'Networks': {'wizard-egress-example':{}}}
+        def inspect(kind, name):
+            if kind == 'network': return {'IPAM':{'Config':[{'Subnet':'10.253.0.0/24'}]}, 'Containers':{'cid':{'Name':'provider'}}}
+            if name == 'cid': return copy.deepcopy(value)
+            return None
+        manager.inspect = inspect; manager.network = lambda app: 'wizard-egress-example'
+        app = {'id':'example','view':None,'health':'http://127.0.0.1:18804/healthz','private_inference':{'kind':'attested-relay','egress':['inference.tinfoil.sh']}}
+        self.assertEqual(manager.reconcile(app,'cid',[])['hosts'], ['inference.tinfoil.sh'])
+        self.assertIn(['start','cid'],calls)
+
     def test_failure_stops_before_validation_and_never_starts(self):
         calls=[]
         manager = ProviderEgress(lambda args, **kw: calls.append(args), Failure)

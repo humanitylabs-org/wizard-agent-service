@@ -133,7 +133,7 @@ class ProviderEgress:
             ports = info['HostConfig'].get('PortBindings') or {}
             mappings, routes = [], []
             if ports:
-                local = urlsplit(app.get('view', {}).get('local') or app.get('health') or '')
+                local = urlsplit((app.get('view') or {}).get('local') or app.get('health') or '')
                 if local.hostname not in ('localhost', '127.0.0.1'):
                     raise self.failure('provider_management_origin_invalid', 409)
                 for key, bindings in ports.items():
