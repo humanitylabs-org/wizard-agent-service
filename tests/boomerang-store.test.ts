@@ -25,6 +25,11 @@ describe('BoomerangStore', () => {
     expect(same.id).toBe(created.id); expect(reopened.list('wizard-account-local')).toHaveLength(1); reopened.close()
   })
 
+  it('preserves the exact fractional message timestamp used by Wizard history', () => {
+    const s=store(); const db=s.open(); const created=db.create({...reminder(),clientRequestId:'fractional-anchor',anchorAt:1792571400000.897})
+    expect(created.anchor_at).toBe(1792571400000.897); db.close()
+  })
+
   it('rejects invalid and past dates', () => {
     const s = store(); const db = s.open()
     expect(() => db.create(reminder('not-a-date'))).toThrow(/due_at/)
