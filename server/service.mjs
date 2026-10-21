@@ -3401,14 +3401,16 @@ export function createWizardServer(options = {}) {
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
-      return { hot, reset: delta.roots === null, mark: delta.maxId }
+      // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
+      const stamps = runQueue ? runQueue.sessionStamps() : null
+      return { hot, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
       const started = performance.now()
       const all = await humanSessions()
-      const { hot, reset, mark } = await hotIds()
+      const { hot, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      const result = await projector.project({ sessions: all, hot, epoch: 'direct', projectBatch })
+      const result = await projector.project({ sessions: all, hot, stamps, epoch: 'direct', projectBatch })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size })

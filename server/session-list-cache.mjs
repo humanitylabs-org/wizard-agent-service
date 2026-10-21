@@ -57,7 +57,9 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
       for (const session of batch) out.set(session.id, byId.get(session.id) ?? null)
     }
   }
-  const project = async ({ sessions, hot = new Set(), epoch: nextEpoch = '', projectBatch }) => {
+  // stamps: optional Map(thread id -> fingerprint of outside state the projection reads, e.g. its
+  // queue rows). A cached row whose fingerprint changed (including disappeared) is re-projected.
+  const project = async ({ sessions, hot = new Set(), stamps = null, epoch: nextEpoch = '', projectBatch }) => {
     if (nextEpoch !== epoch) { cache = new Map(); epoch = nextEpoch; sweptAt = null }
     const at = now()
     const head = sessions.slice(0, batchSize)
@@ -75,10 +77,11 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
     const need = rest.filter((session) => {
       const entry = cache.get(session.id)
       return hot.has(session.id) || sweep.has(session.id) || !entry || entry.raw !== raws.get(session.id) || !cacheableRow(entry.row)
+        || (stamps !== null && entry.stamp !== (stamps.get(session.id) ?? ''))
     })
     const fresh = new Map()
     await projectInBatches(need, projectBatch, fresh)
-    for (const [id, row] of fresh) cache.set(id, { raw: raws.get(id), row, builtAt: at })
+    for (const [id, row] of fresh) cache.set(id, { raw: raws.get(id), row, builtAt: at, stamp: stamps === null ? undefined : (stamps.get(id) ?? '') })
     for (const id of cache.keys()) if (!raws.has(id)) cache.delete(id)
     const rows = [...headRows]
     const cachedIds = []

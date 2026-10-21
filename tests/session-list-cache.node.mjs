@@ -83,6 +83,28 @@ test('a changed Hermes row (new message, rename, archive) is re-projected withou
   assert(w.projected.includes('s150'))
 })
 
+test('an archive thread whose old queue run is pruned (or changes) is re-projected without any hot signal', async () => {
+  const w = world()
+  const lastRun = new Map([['s200', 'wizardq_old']])
+  const projectBatch = async (batch, first) => (await w.projectBatch(batch, first))
+    .map((r) => (lastRun.has(r.id) ? { ...r, wizard_last_run_id: lastRun.get(r.id) } : r))
+  const stamps = () => new Map([...lastRun].map(([id, run]) => [id, `${run}=completed`]))
+  const p = createHybridProjector({ now: () => 0 })
+  await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  w.projected.length = 0
+  const quiet = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  assert.equal(row(quiet.rows, 's200').wizard_last_run_id, 'wizardq_old')
+  assert.equal(w.projected.length, 100, 'nothing changed: only the newest batch')
+  lastRun.delete('s200')  // 7-day retention deleted the row
+  w.projected.length = 0
+  const pruned = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  assert.equal(row(pruned.rows, 's200').wizard_last_run_id, undefined)
+  assert.deepEqual(w.projected.slice(100), ['s200'])
+  lastRun.set('s180', 'wizardq_new')
+  const added = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  assert.equal(row(added.rows, 's180').wizard_last_run_id, 'wizardq_new')
+})
+
 test('removed threads drop out; new threads appear', async () => {
   const w = world()
   const p = createHybridProjector({ now: () => 0 })
