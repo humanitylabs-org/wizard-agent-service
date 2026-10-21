@@ -40,6 +40,70 @@ const put = (base: string, body: string, headers: Record<string, string> = {}) =
   fetch(`${base}/wizard/v1/my-skin`, { method: 'PUT', headers: { 'Content-Type': 'text/css', ...headers }, body })
 
 describe('My skin route', () => {
+  it('keeps legacy CSS working without creating a folder template; folder CSS wins when added', async () => {
+    const dir = tmp('wizard-my-skin-legacy-'), files = join(dir, 'media'), folder = join(files, 'Skins', 'My skin')
+    mkdirSync(join(files, 'Skins'), { recursive: true })
+    const legacy = join(files, 'Skins', 'My skin.css')
+    writeFileSync(legacy, 'body { opacity: .9; }')
+    const b = await box(dir)
+    expect(existsSync(b.file)).toBe(false)
+    expect(await (await fetch(`${b.base}/wizard/v1/my-skin`)).text()).toContain('opacity: .9')
+    expect((await (await fetch(`${b.base}/wizard/v1/my-skin?format=json`)).json()).path).toBe('Skins/My skin.css')
+    await put(b.base, 'body { opacity: .8; }')
+    expect(readFileSync(legacy, 'utf8')).toContain('opacity: .8')
+    mkdirSync(folder)
+    writeFileSync(b.file, 'body { opacity: .7; }')
+    expect(await (await fetch(`${b.base}/wizard/v1/my-skin`)).text()).toContain('opacity: .7')
+    await fetch(`${b.base}/wizard/v1/my-skin`, { method: 'DELETE' })
+    expect(readFileSync(b.file, 'utf8')).toBe(MY_SKIN_TEMPLATE)
+    expect(readFileSync(legacy, 'utf8')).toContain('opacity: .8')
+    rmSync(b.file)
+    expect(await (await fetch(`${b.base}/wizard/v1/my-skin`)).text()).toContain('opacity: .8')
+  })
+
+  it('serves exact script bytes with SHA-256, ETag and HEAD; JSON tracks edits and absence', async () => {
+    const b = await box(), endpoint = `${b.base}/wizard/v1/my-skin/script`, script = join(b.files, 'Skins', 'My skin', 'skin.js')
+    expect((await fetch(endpoint)).status).toBe(404)
+    expect((await (await fetch(`${b.base}/wizard/v1/my-skin?format=json`)).json()).script).toEqual({ exists: false, sha256: null, bytes: 0 })
+    const { createHash } = await import('node:crypto')
+    for (const text of ['// café 🌙\r\nexport default api => () => {};\r\n', 'export default api => { api.toast("new"); };']) {
+      const bytes = Buffer.from(text), hash = createHash('sha256').update(bytes).digest('hex')
+      writeFileSync(script, bytes)
+      const r = await fetch(endpoint), tag = r.headers.get('etag')!
+      expect(r.status).toBe(200)
+      expect(r.headers.get('content-type')).toBe('application/javascript; charset=utf-8')
+      expect(r.headers.get('x-wizard-sha256')).toBe(hash)
+      expect(r.headers.get('x-content-type-options')).toBe('nosniff')
+      expect(Buffer.from(await r.arrayBuffer())).toEqual(bytes)
+      expect((await fetch(endpoint, { headers: { 'If-None-Match': tag } })).status).toBe(304)
+      const head = await fetch(endpoint, { method: 'HEAD' })
+      expect(head.headers.get('content-length')).toBe(String(bytes.length))
+      expect(await head.text()).toBe('')
+      expect((await (await fetch(`${b.base}/wizard/v1/my-skin?format=json`)).json()).script).toEqual({ exists: true, sha256: hash, bytes: bytes.length })
+    }
+    rmSync(script)
+    expect((await fetch(endpoint)).status).toBe(404)
+  })
+
+  it('script is read-only, bounded, confined and access-controlled, including JSON', async () => {
+    const b = await box(), endpoint = `${b.base}/wizard/v1/my-skin/script`, script = join(b.files, 'Skins', 'My skin', 'skin.js')
+    for (const method of ['PUT', 'POST', 'DELETE']) expect((await fetch(endpoint, { method, body: 'no' })).status).toBe(405)
+    expect(existsSync(script)).toBe(false)
+    writeFileSync(script, 'x'.repeat(MY_SKIN_MAX_BYTES + 1))
+    expect((await fetch(endpoint)).status).toBe(413)
+    expect((await (await fetch(`${b.base}/wizard/v1/my-skin?format=json`)).json()).script).toEqual({ exists: true, sha256: null, bytes: MY_SKIN_MAX_BYTES + 1 })
+    rmSync(script)
+    const outside = join(tmp('wizard-my-skin-outside-'), 'skin.js'); writeFileSync(outside, 'private')
+    symlinkSync(outside, script)
+    expect((await fetch(endpoint)).status).toBe(404)
+    rmSync(script)
+    rmSync(join(b.files, 'Skins', 'My skin'), { recursive: true })
+    symlinkSync(join(outside, '..'), join(b.files, 'Skins', 'My skin'))
+    expect((await fetch(endpoint)).status).toBe(404)
+    const locked = await box(undefined, { requireAccess: true, accessVerifier: async () => false })
+    for (const suffix of ['', '/script', '?format=json']) expect((await fetch(`${locked.base}/wizard/v1/my-skin${suffix}`)).status).toBe(403)
+  })
+
   it('starts as an empty, commented file in Files and serves an empty stylesheet', async () => {
     const b = await box()
     expect(readFileSync(b.file, 'utf8')).toBe(MY_SKIN_TEMPLATE)
@@ -50,7 +114,7 @@ describe('My skin route', () => {
     expect(r.headers.get('x-content-type-options')).toBe('nosniff')
     expect((await r.text()).trim()).toBe('')
     const info = await (await fetch(`${b.base}/wizard/v1/my-skin?format=json`)).json()
-    expect(info).toMatchObject({ path: 'Skins/My skin.css', exists: true, empty: true, too_large: false, max_bytes: MY_SKIN_MAX_BYTES })
+    expect(info).toMatchObject({ path: MY_SKIN_RELATIVE, exists: true, empty: true, too_large: false, max_bytes: MY_SKIN_MAX_BYTES })
   })
 
   it('serves what the owner (or their agent through Files) wrote, and persists it across a restart', async () => {
