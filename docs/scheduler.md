@@ -13,8 +13,9 @@ an ordinary run in the destination thread; Hermes writes the answer there.
   `<HERMES_HOME>/state/wizard-mobile/schedules.sqlite3` alongside the run queue
   (the existing home-resolution convention applies when HERMES_HOME is unset).
   The service's normal authority-directory lease also covers this store.
-- `WIZARD_SCHEDULER_TIMEZONE` sets the owner's default IANA timezone; otherwise
-  `Asia/Bangkok`. Each job can override it. UTC occurrence keys are independent
+- `WIZARD_SCHEDULER_TIMEZONE` overrides the owner's default IANA timezone;
+  otherwise new jobs/imports use the current owner `clock.timezone` setting
+  (default `Asia/Bangkok`). Each job can override it. UTC occurrence keys are independent
   of timezone/DST. `cron-parser` handles five-field cron and DST.
 - The loop checks every 15 seconds and drains on service shutdown. State uses
   WAL + `synchronous=FULL`; the directory/file are owner-only on creation.

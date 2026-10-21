@@ -367,6 +367,22 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(f.bodies).toHaveLength(0)
   })
 
+  it('defaults new jobs and paused imports to the current owner timezone without changing existing jobs', async () => {
+    const settingsPath = join(root, 'owner-settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ schema: 1, clock: { timezone: 'America/New_York' } }))
+    const f = await fixture({ settingsPath })
+    const first = await (await api(f.origin, '', 'POST', job())).json()
+    expect(first.timezone).toBe('America/New_York')
+    writeFileSync(settingsPath, JSON.stringify({ schema: 1, clock: { timezone: 'Europe/London' } }))
+    const second = await (await api(f.origin, '', 'POST', job())).json()
+    expect(second.timezone).toBe('Europe/London')
+    expect(f.server.scheduler.get(first.id).timezone).toBe('America/New_York')
+    const path = join(process.env.HERMES_HOME!, 'cron'); mkdirSync(path)
+    writeFileSync(join(path, 'jobs.json'), JSON.stringify({ jobs: [{ id: 'tz-import', name: 'Imported', prompt: 'report', schedule: { kind: 'cron', expr: '0 9 * * *' } }] }))
+    const imported = await (await api(f.origin, '/import-hermes', 'POST', { dryRun: false })).json()
+    expect(imported.results[0].schedule.timezone).toBe('Europe/London')
+  })
+
   it('never starts its timer by default, even if the option alone is true', async () => {
     const f = await fixture({ schedulerEnabled: true })
     expect(f.server.scheduler.timer).toBeUndefined()

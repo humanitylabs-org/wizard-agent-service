@@ -3937,7 +3937,7 @@ function buildWizardServer(options, lifetime) {
   const scheduler = options.schedulerStatePath ? new Scheduler({
     statePath: resolve(String(options.schedulerStatePath)),
     hermesHome: options.schedulerHermesHome ?? '',
-    timezone: options.schedulerTimezone ?? 'Asia/Bangkok',
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now,
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     deliver: async occurrence => {

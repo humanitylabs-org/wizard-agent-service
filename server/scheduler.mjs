@@ -143,7 +143,7 @@ export class Scheduler {
     const job = { ...(prior ?? {}), ...input }
     job.id = prior?.id ?? randomUUID()
     job.name = text(job.name, 160, 'name')
-    job.timezone = text(job.timezone ?? this.timezone, 100, 'timezone')
+    job.timezone = text(job.timezone ?? (typeof this.timezone === 'function' ? this.timezone() : this.timezone), 100, 'timezone')
     try { new Intl.DateTimeFormat('en', { timeZone: job.timezone }).format() } catch { throw fail('invalid timezone') }
     job.when = normalizeWhen(job.when, job.timezone, now)
     job.agent = job.agent ?? 'main'
@@ -277,7 +277,7 @@ export function importHermesSchedules(scheduler, { dryRun = true } = {}) {
     const when = s?.kind === 'cron' ? { cron: s.expr } : s?.kind === 'interval' ? { every: s.minutes } : s?.kind === 'once' ? { once: s.run_at } : null
     try {
       const skills = [...new Set([...(Array.isArray(row.skills) ? row.skills : []), row.skill].filter(Boolean))]
-      const input = { name: row.name || row.id, when, timezone: row.timezone || scheduler.timezone, agent: 'main',
+      const input = { name: row.name || row.id, when, ...(row.timezone ? { timezone: row.timezone } : {}), agent: 'main',
         prompt: [row.prompt || '', ...skills.slice(1).map(skill => `Also load and follow the skill ${JSON.stringify(skill)}.`)].filter(Boolean).join('\n'),
         skill: skills[0] || '', ...(row.model ? { model: row.model } : {}), enabled: false }
       const job = scheduler.normalize(input)
