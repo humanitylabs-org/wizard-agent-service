@@ -45,6 +45,7 @@ import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeV
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
 import { serveAppView } from './app-views.mjs'
+import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
@@ -4154,6 +4155,10 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveAppView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps.filter(a => a.source === 'apps.json') })) return
+      }
+      if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
       }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
