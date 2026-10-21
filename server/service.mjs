@@ -4122,6 +4122,7 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
     const requestDone = lifetime.request()
@@ -4149,7 +4150,7 @@ function buildWizardServer(options, lifetime) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
         if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
+        if (url.pathname === '/wizard/standard-chats/mcp' || url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
         if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
@@ -4160,8 +4161,18 @@ function buildWizardServer(options, lifetime) {
         if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response,415,{error:'json_required'}); return }
         const agent = principal.kind === 'agent' ? agents?.read(principal.agentId) : null
         if (!agent || agent.privacy !== 'private' || agent.permissions.read_standard_chats !== true) { sendJson(response,403,{error:'standard_chats_denied'}); return }
+        const now = Date.now()
+        for (const [id,rate] of standardRetrievalRate) if (now-rate.at>60000) standardRetrievalRate.delete(id)
+        const rate = standardRetrievalRate.get(agent.id) || {at:now,count:0}
+        if (++rate.count>30) { sendJson(response,429,{error:'standard_chats_rate_limited'},{'Retry-After':'60'}); return }
+        standardRetrievalRate.set(agent.id,rate)
         const rpc = parseJsonBody(await readBoundedBody(request,16384))
-        const result = standardChatRpc(agent,principal,rpc,hermesStatePath)
+        let result = standardChatRpc(agent,principal,rpc,hermesStatePath)
+        const serialized = JSON.stringify(result)
+        const secrets = [...(agentCtx?.mainSecrets || []),...(agents.credentialValues?.() || [])]
+        if (result && secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1,-1)))) {
+          result = {jsonrpc:'2.0',id:rpc?.id ?? null,result:{content:[{type:'text',text:'unsafe_content'}],isError:true}}
+        }
         if (result === null) { response.writeHead(202); response.end() }
         else sendJson(response,200,result,{'Cache-Control':'no-store'})
         return

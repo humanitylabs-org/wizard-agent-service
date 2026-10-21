@@ -15,7 +15,7 @@ const queryText = query => {
 export function withHistory(path, fn) {
   if (!path) throw new AgentError(503, 'history_unavailable', 'standard_chats.store')
   let db
-  try { db = new DatabaseSync(path, { readOnly: true }); db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=1000'); return fn(db) }
+  try { db = new DatabaseSync(path, { readOnly: true }); db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=100'); return fn(db) }
   finally { db?.close() }
 }
 export function searchHistory(path, query, { limit = 20, include_hidden = false } = {}) {
@@ -63,7 +63,7 @@ const tools = [
 ]
 export function standardChatRpc(agent, principal, rpc, statePath) {
   if (principal?.kind !== 'agent' || principal.agentId !== agent?.id || agent?.privacy !== 'private' || agent.permissions?.read_standard_chats !== true) throw new AgentError(403,'standard_chats_denied','agent.read_standard_chats')
-  if (!rpc || Array.isArray(rpc) || rpc.jsonrpc !== '2.0') return { jsonrpc:'2.0',id:null,error:{code:-32600,message:'Invalid Request'} }
+  if (!rpc || Array.isArray(rpc) || rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string') return { jsonrpc:'2.0',id:null,error:{code:-32600,message:'Invalid Request'} }
   const answer = result => ({jsonrpc:'2.0',id:rpc.id,result})
   if (rpc.method?.startsWith('notifications/')) return null
   if (rpc.method === 'initialize') return answer({protocolVersion:'2024-11-05',capabilities:{tools:{listChanged:false}},serverInfo:{name:'standard-chats',version:'1.0.0'}})

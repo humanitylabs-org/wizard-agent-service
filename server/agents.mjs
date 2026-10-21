@@ -1069,6 +1069,7 @@ export function createAgentRegistry(options = {}) {
 
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
+    credentialValues: () => folderIds().flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),

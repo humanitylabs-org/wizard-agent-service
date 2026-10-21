@@ -488,12 +488,28 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(config).toContain('standard_chats:')
     expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
     expect(config).not.toContain(token)
+    expect(config).not.toContain('  wizard:')
     const reply=await call({Authorization:`Bearer ${token}`})
     expect(reply.status).toBe(200)
     expect(JSON.stringify(await reply.json())).toContain('lighthouse')
     expect((await patchAccess(false)).status).toBe(200)
     expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
     expect(readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')).not.toContain('standard_chats:')
+  })
+  it('guards standard history and memory against service and agent credential disclosure', async () => {
+    const dir=box(),main=await fakeHermes('main'),path=join(dir,'state.db');historyFixture(path)
+    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {agent}=await withPrivate(dir,base)
+    const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
+    await fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
+    const db=new DatabaseSync(path);db.prepare("UPDATE messages SET content=? WHERE session_id='standard'").run('lighthouse '+token+' fixture-key');db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");db.close()
+    mkdirSync(join(dir,'memories'));writeFileSync(join(dir,'memories','MEMORY.md'),'fixture-key')
+    const call=(name: string,args: any)=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:`Bearer ${token}`}))
+    for(const [name,args] of [['standard_chats_search',{query:'lighthouse'}],['standard_chat_read',{session_id:'standard'}],['standard_memory_read',{name:'MEMORY.md'}]] as const) {
+      const result=await(await call(name,args)).json();expect(result.result.isError).toBe(true);expect(result.result.content[0].text).toBe('unsafe_content');expect(JSON.stringify(result)).not.toContain(token)
+    }
+    const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
+    expect((await malformed.json()).error.code).toBe(-32600)
   })
   it('never enables the permission for a standard agent', async () => {
     const main=await fakeHermes('main'),{base}=await start(box(),main)
@@ -505,6 +521,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const dir=box(),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_delete'])
     const {base}=await start(dir,main);await withPrivate(dir,base,privateApi.port)
     const path='/wizard/hermes/api/sessions/private_delete?agent=private'
+    expect((await fetch(base+path.replace('?agent=private',''),{method:'DELETE'})).status).toBe(409)
     expect((await fetch(base+path,{method:'DELETE'})).status).toBe(200)
     expect((await fetch(base+path)).status).toBe(404)
     expect(privateApi.seen.filter(r=>r.method==='DELETE')).toHaveLength(1)
