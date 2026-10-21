@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { withSqliteMigration } from './thread-reference.mjs'
+import { validAgentId, withSqliteMigration } from './thread-reference.mjs'
 
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -45,7 +45,7 @@ export function heavyRpcTransport({ origin, token }) {
 
 /** Durable outbox + continuation receipt. It never owns an interactive slot. */
 export class DurableHeavyQueue {
-  constructor({ statePath, transport, continuation, current, intervalMs = 1500 }) {
+  constructor({ statePath, transport, continuation, current, intervalMs = 1500, canDispatch = () => true }) {
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     const hadState = existsSync(statePath)
     this.db = new DatabaseSync(statePath)
@@ -65,13 +65,22 @@ export class DurableHeavyQueue {
         }
 
     }
+    // Preserve existing ids, hashes and receipts while qualifying uniqueness.
+    if (!this.db.prepare("SELECT sql FROM sqlite_master WHERE name='heavy_jobs'").get().sql.includes('UNIQUE(agent_id,session,origin,key)')) {
+      this.db.exec(`ALTER TABLE heavy_jobs RENAME TO heavy_jobs_legacy;
+        CREATE TABLE heavy_jobs(id TEXT PRIMARY KEY, session TEXT NOT NULL, origin TEXT NOT NULL,
+          key TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT 'hermes',
+          UNIQUE(agent_id,session,origin,key));
+        INSERT INTO heavy_jobs SELECT id,session,origin,key,hash,data,agent_id FROM heavy_jobs_legacy ORDER BY rowid;
+        DROP TABLE heavy_jobs_legacy;`)
+    }
     })
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     } catch (error) {
       try { this.db.close() } catch { /* preserve original */ }
       throw error
     }
-    Object.assign(this, { transport, continuation, current, intervalMs, closed: false, busy: null, timer: null })
+    Object.assign(this, { transport, continuation, current, canDispatch, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {
     const row = this.db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get(id)
@@ -80,8 +89,8 @@ export class DurableHeavyQueue {
   rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
   save(job) { this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id); return job }
   // Synchronous durable receipt: no SSH, history, or model request on this path.
-  submit({ sessionId, origin, key, spec, route = {}, watermark, agent_id = 'hermes' }) {
-    if (agent_id !== 'hermes') throw fail('invalid heavy agent')
+  submit({ sessionId, origin, key, spec, route = {}, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
+    if (!validAgentId(agent_id)) throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
     const configuredRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
     if (!configuredRoot || !posix.isAbsolute(configuredRoot)) throw fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503)
@@ -92,20 +101,21 @@ export class DurableHeavyQueue {
       || spec.argv.some(s => typeof s !== 'string' || !s || s.length > 8192 || s.includes('\0'))
       || !Number.isInteger(spec.timeout_seconds) || spec.timeout_seconds < 1 || spec.timeout_seconds > 86400) throw fail('invalid heavy command')
     const requestHash = hash(spec)
-    const existing = this.db.prepare('SELECT * FROM heavy_jobs WHERE session=? AND origin=? AND key=?').get(sessionId, origin, key)
+    const existing = this.db.prepare('SELECT * FROM heavy_jobs WHERE agent_id=? AND session=? AND origin=? AND key=?').get(agent_id, sessionId, origin, key)
     if (existing) {
       if (existing.hash !== requestHash) throw fail('heavy idempotency conflict', 409)
       return JSON.parse(existing.data)
     }
-    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id: 'hermes', session_id: sessionId, origin, spec, route, watermark,
+    if (this.rows().filter(job => job.agent_id === agent_id && !terminal.has(job.state)).length >= activeLimit) throw fail('agent heavy capacity exceeded', 429)
+    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id, session_id: sessionId, origin, spec, route, watermark,
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
       remote_ack: false, resume: '', continuation_invalidated: false, receipt: null }
-    this.db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job), 'hermes')
+    this.db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job), agent_id)
     return job
   }
-  cancel(id, sessionId) {
+  cancel(id, sessionId, agentId = 'hermes') {
     const job = this.get(id)
-    if (!job || job.sessionId !== sessionId) throw fail('heavy job not found', 404)
+    if (!job || job.sessionId !== sessionId || (job.agent_id ?? 'hermes') !== agentId) throw fail('heavy job not found', 404)
     job.cancel_requested = true
     job.continuation_invalidated = true
     job.resume = job.resume || 'suppressed'
@@ -113,10 +123,10 @@ export class DurableHeavyQueue {
     job.reason = terminal.has(job.state) ? job.reason : 'cancellation_pending'
     return this.save(job)
   }
-  supersede(sessionId) {
+  supersede(sessionId, agentId = 'hermes') {
     // Admission is a receipt, not permission to launch. Fence even terminal jobs
     // with an admitted continuation, retaining the run ID for diagnosis/replay.
-    for (const job of this.rows()) if (job.sessionId === sessionId) this.save({ ...job,
+    for (const job of this.rows()) if (job.sessionId === sessionId && (job.agent_id ?? 'hermes') === agentId) this.save({ ...job,
       continuation_invalidated: true, resume: job.resume || 'suppressed' })
   }
   summary() {
@@ -154,6 +164,7 @@ export class DurableHeavyQueue {
       if (this.closed) return
       let job = this.get(snapshot.job_id)
       if (!terminal.has(job.state)) {
+        if (!this.canDispatch(job)) job = this.cancel(job.job_id, job.sessionId, job.agent_id ?? 'hermes')
         try {
           let remote
           if (job.cancel_requested) {
