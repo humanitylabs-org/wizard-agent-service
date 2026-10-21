@@ -19,16 +19,29 @@ IMAGE_URL = 'https://cloud-images.ubuntu.com/releases/noble/release-20260615/ubu
 IMAGE_SHA = 'cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927'
 
 
+def validate_rig_root(root, volume):
+    """Require an explicitly approved volume and confine the resolved rig to it."""
+    if volume is None or not volume.is_absolute():
+        raise ValueError('set --work-volume or WIZARD_WORK_VOLUME to the approved external volume')
+    volume, root = volume.resolve(), root.resolve()
+    if volume == Path('/') or not volume.is_dir():
+        raise ValueError('approved external volume must be an existing non-root directory')
+    if not root.is_relative_to(volume) or root == volume or root.name != 'rig':
+        raise ValueError('rig root must be named rig and contained within the approved external volume')
+    return root, volume
+
+
 def main():
     p = argparse.ArgumentParser(__doc__)
     p.add_argument('--rig-root', required=True, type=Path)
+    p.add_argument('--work-volume', type=Path, default=os.environ.get('WIZARD_WORK_VOLUME'),
+                   help='approved external work volume (or WIZARD_WORK_VOLUME); required even for validation')
     modes = p.add_mutually_exclusive_group()
     modes.add_argument('--reset', action='store_true')
     modes.add_argument('--recreate-failed', action='store_true', help='delete only pp-rig when provisioning failed before a baseline')
     p.add_argument('--validate', action='store_true')
     a = p.parse_args()
-    root = a.rig_root.resolve()
-    assert str(root).startswith('/Volumes/ThalesMedia/') and root.name == 'rig'
+    root, work_volume = validate_rig_root(a.rig_root, a.work_volume)
     stage = root / 'stage'
     for file in ['source-manifest.json', 'service.tar', 'wam.tar', 'guest-setup.py', 'runtipi-setup.sh']:
         assert (stage / file).is_file(), 'missing stage file: ' + file
@@ -41,6 +54,7 @@ def main():
     # Durable runner owns the shared worker.lock; no detached process or second flock here.
     # Admission is mandatory and this command is only handed to that runner.
     assert os.uname().sysname == 'Darwin'
+    assert work_volume.is_mount(), 'approved external work volume must be a mounted filesystem'
     env = {**os.environ, 'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
            'LIMA_HOME': str(root / 'lima'), 'LIMA_CACHE_HOME': str(root / 'cache'),
            'TMPDIR': str(root / 'tmp')}
@@ -105,7 +119,7 @@ def main():
         record()
         return
     assert not vm.exists(), 'VM already exists: inspect evidence or submit --reset; never overwrite it'
-    run('df', '-h', '/', '/Volumes/ThalesMedia')
+    run('df', '-h', '/', str(work_volume))
     run('uptime')
     run('limactl', 'list')
     assert shutil.disk_usage(root).free > 80 * 1024**3, 'need 80GiB free on ThalesMedia'
