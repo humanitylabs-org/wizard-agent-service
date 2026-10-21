@@ -834,10 +834,16 @@ export function createAgentRegistry(options = {}) {
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
-    let stopped = false
-    try { const result = await (running ? runtime.start(id) : runtime.stop(id)); stopped = !running && result?.ok !== false } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    const epoch = catalogEpochs.get(id) ?? 0
+    let stoppedCensus
+    try {
+      const result = await (running ? runtime.start(id) : runtime.stop(id))
+      if (!running && result?.ok !== false) stoppedCensus = result?.census
+    } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)
-    else if (stopped) await sealCatalog(id).catch(() => undefined)
+    // Only the census produced inside the helper's locked stop action can seal.
+    // A separate census RPC after stop would leave a lifecycle gap.
+    else if (stoppedCensus) await sealCatalog(id, stoppedCensus, epoch).catch(() => undefined)
     return agent
   }
 
@@ -899,17 +905,21 @@ export function createAgentRegistry(options = {}) {
     const row = catalogs[agentId]
     if (row?.ids.includes(sessionId)) return true
     if (!row?.complete || typeof row.seal !== 'string' || !row.seal || !runtime?.inspect) return undefined
+    const epoch = catalogEpochs.get(agentId) ?? 0
+    const seal = row.seal
     try {
       const current = await runtime.inspect(agentId)
+      // A lifecycle round may finish while inspect is in flight. Never consume
+      // its old answer against a newly sealed catalog, even for the same token.
+      if (epoch !== (catalogEpochs.get(agentId) ?? 0) || catalogs[agentId]?.seal !== seal
+        || catalogs[agentId]?.complete !== true) return undefined
       // Disk-loaded seals are authority only when the driver still attests this stopped generation.
-      if (current.status === 'stopped' && current.generation === row.seal) return false
+      if (current.status === 'stopped' && current.generation === seal) return false
     } catch { /* unknown lifecycle generation never proves absence */ }
     return undefined
   }
-  async function sealCatalog(agentId) {
-    if (!runtime?.census || !runtime?.inspect) return
-    const epoch = catalogEpochs.get(agentId) ?? 0
-    const census = await runtime.census(agentId)
+  async function sealCatalog(agentId, census, epoch) {
+    if (!runtime?.inspect) return
     const current = await runtime.inspect(agentId)
     if (epoch !== (catalogEpochs.get(agentId) ?? 0) || census.status !== 'stopped' || current.status !== 'stopped'
       || typeof census.generation !== 'string' || !census.generation || census.generation !== current.generation

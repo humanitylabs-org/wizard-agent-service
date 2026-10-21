@@ -33,7 +33,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     census: async (id: string) => ({...await runtime.inspect(id), ids: [...histories.get(id)!]}),
     apply: async (id: string) => { const config = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8')); ports.set(config.runtime.port, id); histories.set(id, new Set()); status.set(id, 'running'); return {} },
     status: async (id: string) => ({ status: status.get(id) ?? 'running', status_detail: '' }),
-    start: async (id: string) => { status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return {} },
+    start: async (id: string) => { status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return { ok: true, census: await runtime.census(id) } },
   }
   const fetchImpl = async (url: any, init: any = {}) => {
     const u = new URL(String(url)), agent = ports.get(Number(u.port))

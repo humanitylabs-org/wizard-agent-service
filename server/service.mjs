@@ -4766,7 +4766,7 @@ function buildWizardServer(options, lifetime) {
           heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
-          if (agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
+          if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
           return

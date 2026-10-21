@@ -36,7 +36,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     census: async (id: string) => ({...await runtime.inspect(id), ids: [...histories.get(id)!]}),
     apply: async (id: string) => { const config = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8')); ports.set(config.runtime.port, id); histories.set(id, new Set()); status.set(id, 'running'); return {} },
     status: async (id: string) => ({ status: status.get(id) ?? 'running', status_detail: '' }),
-    start: async (id: string) => { generations.set(id, (generations.get(id) ?? 0) + 1); status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return {} },
+    start: async (id: string) => { generations.set(id, (generations.get(id) ?? 0) + 1); status.set(id, 'running'); return {} }, stop: async (id: string) => { status.set(id, 'stopped'); return { ok: true, census: await runtime.census(id) } },
   }
   const fetchImpl = async (url: any, init: any = {}) => {
     const u = new URL(String(url)), agent = ports.get(Number(u.port))
@@ -101,7 +101,7 @@ it('R3_STALE_EXTERNAL: an externally changed and stopped private history is clai
 
 it('R3_STOP_RACE: a session created between pre-stop census and actual stop cannot be claimed',async()=>{
  const s=await scene(),hidden=await s.create('Hidden','private'),id='wizard_stop_race'
- s.serverOptions.agentRuntime.stop=async(agentId:string)=>{s.histories.get(agentId)!.add(id);s.status.set(agentId,'stopped');return {}}
+ s.serverOptions.agentRuntime.stop=async(agentId:string)=>{s.histories.get(agentId)!.add(id);s.status.set(agentId,'stopped');return {ok:true,census:await s.serverOptions.agentRuntime.census(agentId)}}
  const stopped=await s.call('/wizard/v1/agents/'+hidden.id+'/stop','POST',{})
  const catalog=JSON.parse(readFileSync(join(s.agentsDir,'.session-catalog.json'),'utf8')).agents[hidden.id]
  const r=await s.call('/wizard/hermes/api/sessions?agent=hermes','POST',{id},{})
@@ -177,6 +177,7 @@ it('a persisted seal is usable only while its stopped runtime generation still m
 })
 it('a driver without an offline census cannot seal online negative evidence',async()=>{
  const s=await scene(), secondary=await s.create('Secondary')
+ s.serverOptions.agentRuntime.stop=async(id:string)=>{s.status.set(id,'stopped');return {ok:true}}
  delete s.serverOptions.agentRuntime.census
  await s.call('/wizard/v1/agents/'+secondary.id+'/stop','POST',{})
  const r=await s.call('/wizard/hermes/api/sessions?agent=hermes','POST',{id:'wizard_fresh'})
