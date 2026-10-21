@@ -567,7 +567,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const dir=box(),file=join(dir,'seen.json'),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_seen'])
     const {base}=await start(dir,main,{threadSeenStatePath:file});await withPrivate(dir,base,privateApi.port)
     const key='agent/private/direct:private_seen',now=Date.now()
-    const result=await fetch(base+'/wizard/thread-seen',{...json({schema:1,initializedAt:now,threads:{[key]:{seenAt:now,assistantAt:now,messageCount:2,updatedAt:now,previewFingerprint:'transcript-derived-hash',agent_id:'private',session_id:'private_seen'}}}),method:'PUT'})
+    const result=await fetch(base+'/wizard/thread-seen',{...json({schema:1,initializedAt:now,threads:{[key]:{seenAt:now,assistantActivityAt:new Date(now).toISOString(),messageCount:2,updatedAt:new Date(now).toISOString(),previewFingerprint:'transcript-derived-hash',agent_id:'private',session_id:'private_seen'}}}),method:'PUT'})
     expect(result.status).toBe(200);expect((await result.json()).state.threads[key].previewFingerprint).toBe('private')
     expect(readFileSync(file,'utf8')).not.toContain('transcript-derived-hash')
     expect((await(await fetch(base+'/wizard/thread-seen')).json()).state.threads[key].previewFingerprint).toBe('private')
