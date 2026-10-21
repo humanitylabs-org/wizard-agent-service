@@ -24,9 +24,17 @@ def call(action, args, session_id=None, **kwargs):
             return json.dumps({'error': 'a stateful originating session is required'})
         value = {**args, 'session_id': session_id}
         if action == 'submit':
-            value = {'session_id': session_id, 'key': args['key'], 'spec': {
-                'cwd': args['cwd'], 'argv': args['argv'],
-                'timeout_seconds': args.get('timeout_seconds', 3600)}}
+            lane = args.get('lane', 'heavy')
+            if lane not in ('heavy', 'light'):
+                return json.dumps({'error': 'lane must be heavy or light'})
+            timeout = args.get('timeout_seconds', 900 if lane == 'light' else 3600)
+            spec = {'cwd': args['cwd'], 'argv': args['argv'], 'timeout_seconds': timeout}
+            if lane == 'light':
+                # Heavy specs stay byte-identical so existing idempotency keys still match.
+                if not isinstance(timeout, int) or timeout > 900:
+                    return json.dumps({'error': 'light lane jobs must finish within 900 seconds'})
+                spec['lane'] = 'light'
+            value = {'session_id': session_id, 'key': args['key'], 'spec': spec}
         request = urllib.request.Request(origin + '/wizard/internal/heavy/' + action,
             data=json.dumps(value).encode(), method='POST', headers={
                 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
@@ -70,21 +78,30 @@ def register(ctx):
             'android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt '
             'is an authorized turn boundary: acknowledge the job and finish this turn, even though the '
             'overall task is unfinished. The service resumes this same thread on completion. Never '
-            'start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.'
-            if configured() else '', position='after_memory', max_chars=1200)
+            'start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation. '
+            'Pass lane="light" for short packaging work (Docker image packaging from prebuilt '
+            'binaries, static/web app builds, canaries; 15 min max) so it does not queue behind '
+            'Android, emulator or VM jobs.'
+            if configured() else '', position='after_memory', max_chars=1500)
     specs = [
         ('wizard_heavy_submit', submit,
          'Submit authorized sustained tests/builds to the durable Thales resource queue. '
          'Returns promptly even while another job is running. Source/work directory must already be on '
-         '/Volumes/ThalesMedia; stage source first. The command runs under the shared build lock. '
+         'the configured heavy root; stage source first. The command runs under the shared build lock. '
          'Use a stable key per intended job; retry with the same key, never generate another to poll. '
          'No credentials in command arguments. No background/detached children. After receipt, finish '
          'this turn; do not sleep or poll. The service will resume this originating thread with evidence. '
          'For an android-build-thales prepared job, use its worker.py --worker job.json command and '
-         'the inherited lock mode documented in the resource-lanes runbook.',
+         'the inherited lock mode documented in the resource-lanes runbook. '
+         'lane: "heavy" (default; Android/Gradle/signing, emulators, Mac VM guests, long suites) runs '
+         'under the shared Android/VM lock. "light" runs on its own packaging lock and never waits '
+         'behind heavy work: Docker image packaging that reuses prebuilt binaries, static/web app '
+         'builds, small canaries. Light jobs must finish within 900 seconds and cannot use the '
+         'Android helper.',
          {'key': {'type': 'string'}, 'cwd': {'type': 'string'},
           'argv': {'type': 'array', 'items': {'type': 'string'}},
-          'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 86400}},
+          'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 86400},
+          'lane': {'type': 'string', 'enum': ['heavy', 'light']}},
          ['key', 'cwd', 'argv']),
         ('wizard_heavy_status', status, 'Read one durable heavy job receipt. Do not poll in a loop.',
          {'job_id': {'type': 'string'}}, ['job_id']),

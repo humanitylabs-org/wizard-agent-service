@@ -60,6 +60,30 @@ class ImageContract(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'confirm'):
                         ci.publish(self.args(release='0.3.0', confirm=confirm, expected_sha=sha))
 
+    def test_unconfigured_runner_accepts_dedicated_volume(self):
+        env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_CI_ROOT': '/example/worker/ci'}
+        mounted = lambda p: str(p) in ('/', '/example/worker')
+        with patch.dict(os.environ, env, clear=True), patch.object(ci.os.path, 'ismount', mounted):
+            self.assertEqual(ci._volume_of('/example/worker/ci'), '/example/worker')
+            with self.assertRaises(KeyError):  # passes the storage guard; stops at the next required setting
+                ci.publish(self.args())
+
+    def test_unconfigured_runner_rejects_system_disk(self):
+        env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_CI_ROOT': '/example/worker/ci',
+               'WIZARD_CI_WORKER_LOCK': '/example/worker/lock'}
+        with patch.dict(os.environ, env, clear=True), patch.object(ci.os.path, 'ismount', lambda p: str(p) == '/'):
+            self.assertIsNone(ci._volume_of('/example/worker/ci'))
+            with self.assertRaisesRegex(RuntimeError, 'WIZARD_HEAVY_ROOT'):
+                ci.publish(self.args())
+
+    def test_configured_root_still_enforces_containment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_HEAVY_ROOT': temp + '/work',
+                   'WIZARD_CI_ROOT': temp + '/work-sibling', 'WIZARD_CI_WORKER_LOCK': temp + '/work/lock'}
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(RuntimeError, 'under the configured heavy root'):
+                    ci.publish(self.args())
+
     def test_release_not_allowed_on_push(self):
         with patch.dict(os.environ, {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push'}):
             with self.assertRaisesRegex(RuntimeError, 'confirm'):
@@ -71,7 +95,7 @@ class ImageContract(unittest.TestCase):
         registry.return_value.manifest.return_value = (DIGEST, {})
         with tempfile.TemporaryDirectory() as temp:
             env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
-                   'WIZARD_CI_ROOT': '/Volumes/ThalesMedia/Test',
+                   'WIZARD_CI_ROOT': temp, 'WIZARD_HEAVY_ROOT': temp,
                    'WIZARD_CI_WORKER_LOCK': temp + '/worker.lock',
                    'GITHUB_ACTOR': 'test', 'GHCR_TOKEN': 'unit-test-only'}
             with patch.dict(os.environ, env), patch.object(ci.tempfile, 'TemporaryDirectory') as directory:

@@ -20,21 +20,48 @@ export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 export const FOLLOW_THROUGH_SESSION_PREFIXES = ['wizard_', 'wizard-assistant-']
 export const FOLLOW_THROUGH_INPUT = '[Wizard follow-through] The delegated results above have arrived. Finish the original request now, in one self-contained reply.'
 
+// Newest active message per eligible thread, when it is a recent completion row. Grouping MAX(id)
+// over every message took ~250 ms of the shared loop every 5 s (3 M rows). Instead, walk the
+// distinct prefixed session ids with index seeks (a loose index scan) and seek each one's newest
+// row through (session_id, id). Same rows, a fraction of the cost; unprefixed threads were always
+// filtered out below, so they are never read.
+const prefixUpperBound = (prefix) => prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)
+function newestFollowThroughRows(database, sessionPrefixes, cutoffSeconds) {
+  const prefixes = [...new Set(sessionPrefixes.filter((prefix) => typeof prefix === 'string' && prefix))]
+  const distinct = database.prepare(`
+    WITH RECURSIVE ids(id) AS (
+      SELECT MIN(session_id) FROM messages WHERE session_id >= ? AND session_id < ?
+      UNION ALL
+      SELECT (SELECT MIN(session_id) FROM messages WHERE session_id > ids.id AND session_id < ?) FROM ids WHERE ids.id IS NOT NULL
+    ) SELECT id FROM ids WHERE id IS NOT NULL
+  `)
+  const newest = database.prepare(`
+    SELECT session_id, id AS message_id, role, timestamp AS at, content
+      FROM messages
+     WHERE session_id = ? AND COALESCE(active, 1) = 1
+     ORDER BY id DESC LIMIT 1
+  `)
+  const sessionIds = new Set()
+  for (const prefix of prefixes) {
+    const upper = prefixUpperBound(prefix)
+    for (const { id } of distinct.all(prefix, upper, upper)) sessionIds.add(String(id))
+  }
+  const rows = []
+  for (const id of sessionIds) {
+    const row = newest.get(id)
+    if (row?.role === 'user' && Number(row.at) >= cutoffSeconds && typeof row.content === 'string'
+      && row.content.slice(0, FOLLOW_THROUGH_PREFIX.length) === FOLLOW_THROUGH_PREFIX) rows.push(row)
+  }
+  return rows
+}
+
 /** Sessions waiting on a follow-through: newest active message is a completion row, no live turn. */
 export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), maxAgeSeconds = 2 * 3600, sessionPrefixes = FOLLOW_THROUGH_SESSION_PREFIXES } = {}) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
     const nowSeconds = now / 1000
-    const rows = database.prepare(`
-      SELECT m.session_id AS session_id, m.id AS message_id, m.timestamp AS at, m.content AS content
-        FROM messages m
-        JOIN (SELECT session_id, MAX(id) AS id FROM messages WHERE COALESCE(active, 1) = 1 GROUP BY session_id) latest
-          ON latest.session_id = m.session_id AND latest.id = m.id
-       WHERE m.role = 'user'
-         AND m.timestamp >= ?
-         AND substr(m.content, 1, ${FOLLOW_THROUGH_PREFIX.length}) = ?
-    `).all(nowSeconds - maxAgeSeconds, FOLLOW_THROUGH_PREFIX)
+    const rows = newestFollowThroughRows(database, sessionPrefixes, nowSeconds - maxAgeSeconds)
     let leased = new Set()
     try {
       leased = new Set(database.prepare('SELECT conversation_id FROM session_turn_leases WHERE expires_at > ?').all(nowSeconds).map((row) => String(row.conversation_id)))
@@ -47,7 +74,7 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
         if (delegationId && receiptConsumed(database, sessionId, delegationId)) return null
         const receipt = delegationId ? readUndeliveredHelperReceipts(sessionDbPath, { now, delegationId, includeDelivered: true })
           .find(r => r.sessionId === sessionId) : null
-        return { sessionId, messageId: Number(row.message_id), at: Number(row.at),
+        return { agent_id: 'hermes', session_id: sessionId, sessionId, messageId: Number(row.message_id), at: Number(row.at),
           ...(delegationId ? { delegationId, key: receiptKey(delegationId), input: receipt?.input
             ?? RECEIPT_PREFIX + delegationId + '\nThe saved helper findings below arrived. Finish the original request under its latest instructions and release authority.\n\n' + row.content } : {}) }
       }).filter(Boolean)
@@ -64,9 +91,9 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
  */
 export function startDelegationFollowThrough({ sessionDbPath = '', find = () => findPendingFollowThroughs(sessionDbPath), admit, enabled, allowSession = () => true, eligible = async () => true, intervalMs = 5000, log = () => {} }) {
   const done = new Set()
-  let busy = false
-  const tick = async () => {
-    if (busy) return
+  let busy = false, stopped = false, pending
+  const runTick = async () => {
+    if (busy || stopped) return
     busy = true
     try {
       if (!(await enabled())) return
@@ -101,7 +128,12 @@ export function startDelegationFollowThrough({ sessionDbPath = '', find = () => 
       busy = false
     }
   }
+  const tick = () => {
+    if (stopped) return Promise.resolve()
+    if (!pending) pending = runTick().finally(() => { pending = null })
+    return pending
+  }
   const timer = setInterval(tick, intervalMs)
   timer.unref?.()
-  return { stop: () => clearInterval(timer), tick }
+  return { stop: () => { stopped = true; clearInterval(timer); return pending }, tick }
 }

@@ -433,7 +433,7 @@ describe('manual Continue authority: only the service can mark a run as an owner
     const f = await fixture({ count: 1 }); f.pause()
     const r = (await f.list()).body.results[0]
     expect((await f.click(r)).status).toBe(202)
-    expect(JSON.parse(queueRow(f)[0].continuation_json)).toEqual({ kind: 'background-recovery', id: r.id, session_id: r.session_id })
+    expect(JSON.parse(queueRow(f)[0].continuation_json)).toEqual({ kind: 'background-recovery', id: r.id, agent_id: 'hermes', session_id: r.session_id })
   })
   it('a queued record whose body carries the marker without the service continuation never dispatches', async () => {
     const f = await fixture({ count: 1 }); f.pause()

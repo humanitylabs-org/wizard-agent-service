@@ -182,6 +182,17 @@ describe('AI usage provider reads', () => {
 })
 
 describe('ChatGPT subscriptions in the credential pool', () => {
+  it('same account with different subjects remains separate; same principal grants dedupe', async () => {
+    const alter = (sub: string) => {
+      const claims = JSON.parse(Buffer.from(FIRST_TOKEN.split('.')[1], 'base64url').toString())
+      claims.sub = sub
+      return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`
+    }
+    const {usage} = reader({...credentialFixture({pool:[poolRow(alter('person-a'),{id:'a',label:'CODEX'}),poolRow(alter('person-b'),{id:'b',label:'CODEX-2'}),poolRow(alter('person-a'),{id:'c',label:'CODEX-3'})]})})
+    const out = await usage.read()
+    expect(out.providers.filter(p=>/^codex/.test(p.id))).toHaveLength(2)
+  })
+
   const codexPayloadFor = (remaining: number, resetAt: number, plan: string) => ({
     plan_type: plan,
     rate_limit: { primary_window: { used_percent: 100 - remaining, limit_window_seconds: 604_800, reset_at: resetAt } },
@@ -441,6 +452,22 @@ describe('AI connection apps', () => {
     const call = fetcher.mock.calls.find((entry) => entry[0] === CLAUDE_APP_URL) as unknown[]
     expect(call[1]).toMatchObject({ redirect: 'error' })
     expect(JSON.stringify(call[1])).not.toContain('Authorization')
+  })
+
+  it('reads a wizard.ai-connection/2 app (adds a models catalogue) exactly like /1', async () => {
+    const v2 = { ...connectedClaude, contract: 'wizard.ai-connection/2', models: [{ id: 'claude-opus', label: 'Opus' }] }
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? v2 : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const claude = provider(await usage.read() as never, 'claude')
+    expect(claude).toMatchObject({ status: 'ok', plan: 'Max 20x', error: null })
+    expect((claude as { limits: unknown[] }).limits).toEqual([{ id: 'weekly_all:weekly', label: 'All models · weekly', usedPercent: 12, remainingPercent: 88, resetsAt: '2026-09-26T01:00:00.000Z' }])
+  })
+
+  it('still refuses a contract it does not know', async () => {
+    const fetcher = vi.fn(async (url: string) => jsonResponse(url === CLAUDE_APP_URL ? { ...connectedClaude, contract: 'wizard.ai-connection/9' } : codexPayload))
+    const { usage } = reader({ appsJsonPath: appsJson([claudeApp]) }, fetcher)
+    const claude = provider(await usage.read() as never, 'claude')
+    expect(claude).toMatchObject({ status: 'unavailable', error: { code: 'provider_error' } })
   })
 
   it('reports a not-connected app as unavailable with the app\'s own message', async () => {

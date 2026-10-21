@@ -44,9 +44,10 @@ function receiptEvidence(row) {
   if (!sessionId || !Number.isFinite(completedAt) || completedAt <= 0 || typeof row.result_json !== 'string') return null
   let results; try { results = JSON.parse(row.result_json)?.results } catch { return null }
   if (!Array.isArray(results) || !results.some(r => typeof r?.summary === 'string' && r.summary.trim())) return null
-  return { delegationId: row.delegation_id, sessionId, completedAt, resultFingerprint: fingerprint(row.result_json) }
+  return { agent_id: 'hermes', session_id: sessionId, delegationId: row.delegation_id, sessionId, completedAt, resultFingerprint: fingerprint(row.result_json) }
 }
 export function captureContinuation(path, pending) {
+  if ((pending?.agent_id ?? 'hermes') !== 'hermes') return null
   let db
   try {
     db = new DatabaseSync(path, { readOnly: true })
@@ -60,7 +61,7 @@ export function captureContinuation(path, pending) {
     // may carry that authority across ledger cleanup.
     if (pending.delegationId && (!receipt || receipt.sessionId !== pending.sessionId)) return null
     const completion = completionEvidence(db,pending.sessionId,pending.messageId,pending.delegationId)
-    return { sessionId: pending.sessionId, delegationId: pending.delegationId || '', messageId: pending.messageId || 0,
+    return { agent_id: 'hermes', session_id: pending.sessionId, sessionId: pending.sessionId, delegationId: pending.delegationId || '', messageId: pending.messageId || 0,
       completedAt: receipt ? receipt.completedAt : completion?.at ?? pending.at, request: watermark,
       ...(receipt ? { receipt } : {}), ...(completion ? { completion } : {}) }
   } catch { return null } finally { db?.close() }

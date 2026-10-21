@@ -8,6 +8,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { readSettings } from './wizard-os-settings.mjs'
+import { migrateJson, atomicStoreWrite, threadKey, threadReference, validAgentId } from './thread-reference.mjs'
 
 export const AGENT_SCHEMA = 1
 export const MAIN_AGENT_ID = 'hermes'
@@ -35,10 +37,14 @@ export const OUTSIDE_TOOLS = [
 const OUTSIDE_IDS = new Set(OUTSIDE_TOOLS.map((tool) => tool.id))
 // Toolsets that touch files; `files: none` turns them off as well.
 const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
+// Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
 }
+// Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
+// rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
+export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
 export const LOCAL = { id: 'local', label: 'This box (local model)', confidential: true, models: [] }
 // Providers that the AI Accounts app signs in. Offered for standard agents only.
 const AI_ACCOUNTS = new Map([['anthropic', 'Claude (AI Accounts)'], ['openai-codex', 'ChatGPT (AI Accounts)']])
@@ -82,9 +88,7 @@ function readJson(path) {
 }
 
 function writeJsonAtomic(path, value, mode = 0o600) {
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode })
-  renameSync(tmp, path)
+  atomicStoreWrite(path, `${JSON.stringify(value, null, 2)}\n`, { inventory: /\.(?:threads|run-threads|session-catalog)\.json$/u.test(path) })
 }
 
 function writeTextAtomic(path, text, mode = 0o600) {
@@ -162,7 +166,7 @@ function validateModel(model, providers, { privacy, confirmDowngrade = false } =
   return { provider: provider.id, model: model.model, allowed_models: allowed, fallback }
 }
 
-export function publicAgent(agent, status = { status: 'stopped', status_detail: '' }) {
+export function publicAgent(agent, status = { status: 'stopped', status_detail: '' }, defaultAgentId = MAIN_AGENT_ID) {
   return {
     id: agent.id,
     label: agent.label,
@@ -173,18 +177,37 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     permissions: { ...agent.permissions, outside_tools: [...agent.permissions.outside_tools], wizard_apps: [...agent.permissions.wizard_apps], agent_apps: [...agent.permissions.agent_apps] },
     status: status.status,
     status_detail: status.status_detail ?? '',
-    is_default: agent.id === MAIN_AGENT_ID,
+    is_default: agent.id === defaultAgentId,
+    ...(agent.role === 'recovery' ? { role: 'recovery' } : {}),
+    // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
+    created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
   }
 }
 
+/**
+ * Unified Chats routing: the agent that owns a model picked in the owner's Chats. Only a confidential provider's
+ * model routes away from the main agent, and only to a private agent that allows it. Several candidates: the oldest
+ * agent wins (created_at, then id), so the choice is the same on every request.
+ */
+export function agentForModel(agents, route) {
+  const model = typeof route?.model === 'string' ? route.model.trim() : ''
+  const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
+  if (!model || !isConfidentialProvider(provider)) return null
+  return agents
+    .filter((agent) => agent && agent.role !== 'recovery' && agent.id !== MAIN_AGENT_ID && agent.privacy === 'private'
+      && agent.model?.provider === provider && Array.isArray(agent.model.allowed_models) && agent.model.allowed_models.includes(model))
+    .sort((a, b) => (Number(a.created_at) || 0) - (Number(b.created_at) || 0) || String(a.id).localeCompare(String(b.id)))[0] ?? null
+}
+
 export function threadAgent(agent) {
-  return { id: agent.id, label: agent.label, privacy: agent.privacy, appearance: agent.appearance }
+  return { id: agent.id, label: agent.label, privacy: agent.privacy, appearance: agent.appearance, ...(agent.role === 'recovery' ? { role: 'recovery' } : {}) }
 }
 
 /** Validate a stored agent.json. Returns null for anything that is not a schema-1 agent (e.g. other experiments). */
 export function parseAgentFile(value, id) {
   if (!value || typeof value !== 'object' || value.schema !== AGENT_SCHEMA || value.id !== id || !ID_RE.test(id) || id === MAIN_AGENT_ID) return null
   if (value.harness !== 'hermes' || !['private', 'standard'].includes(value.privacy)) return null
+  if (value.role !== undefined && value.role !== 'standard') return null
   const model = value.model
   if (!model || typeof model.provider !== 'string' || typeof model.model !== 'string' || !Array.isArray(model.allowed_models)) return null
   const permissions = value.permissions
@@ -217,6 +240,20 @@ export function agentAppIds(agent) {
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
  * later appear without a restart); a private agent only once the owner ticks an app for it.
  */
+/** What a restricted agent's harness calls: its edge sidecar, which forwards to the Service's agent-only listener. */
+export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
+const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
+
+/**
+ * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
+ * combination up front instead of starting an agent whose model route does not exist.
+ */
+export function assertIsolationSupports(agent) {
+  if (agent.runtime?.isolation === 'restricted' && agent.model?.provider === TINFOIL.id) {
+    fail(409, 'restricted_provider_unsupported', 'agent.runtime.isolation', 'the restricted runtime has no Tinfoil attestation sidecar yet')
+  }
+}
+
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
   return agent.privacy === 'standard' || agentAppIds(agent).size > 0
@@ -244,6 +281,12 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
+  // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
+  const overrides = agent.model.provider === TINFOIL.id
+    ? [...TINFOIL_NO_REASONING].filter((id) => (agent.model.allowed_models ?? [agent.model.model]).includes(id)) : []
+  if (overrides.length) {
+    lines.push('model_overrides:', '  custom:', ...overrides.flatMap((id) => [`    ${yamlString(id)}:`, '      supports_reasoning: false']))
+  }
   lines.push('agent:', `  disabled_toolsets: [${disabled.map(yamlString).join(', ')}]`)
   // agent.disabled_toolsets is applied last for every platform, the API server included (hermes_cli/tools_config).
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
@@ -301,6 +344,11 @@ export function createAgentRegistry(options = {}) {
   // #59: agent-data grants (reader -> source); a private source is refused.
   const grantsPath = join(agentsDir, '.agent-grants.json')
   const gatewayUrl = typeof options.gatewayUrl === 'string' ? options.gatewayUrl : ''
+  // Restricted runtime (wizard-app-store runtimes/restricted-agent): new container agents get their own uplink and
+  // sandbox networks and reach the Service only through their edge sidecar, which forwards to the agent-only listener.
+  const isolation = options.isolation === 'restricted' ? 'restricted' : ''
+  const restricted = (agent) => agent?.runtime?.isolation === 'restricted'
+  const gatewayUrlFor = (agent) => (restricted(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
 
@@ -313,7 +361,8 @@ export function createAgentRegistry(options = {}) {
     return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
   }
   const mainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
     permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', ...mainApps(), other_agents: 'none' },
@@ -330,6 +379,11 @@ export function createAgentRegistry(options = {}) {
     try { return readdirSync(agentsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort() } catch { return [] }
   }
   const read = (id) => { syncApps(); return readRaw(id) }
+  const canStartAgent = (id) => {
+    const agent = readRaw(id)
+    return Boolean(agent && agent.role !== 'recovery' && ['external', 'container'].includes(agent.runtime?.kind))
+  }
+  const defaultAgentId = () => readSettings(options.settingsPath, { canStartAgent }).settings.agents.default_agent_id
   const list = () => {
     syncApps()
     return [mainAgent(), ...folderIds().map(readRaw).filter(Boolean)]
@@ -372,7 +426,7 @@ export function createAgentRegistry(options = {}) {
         if (stored?.schema === 1) {
           const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
           for (const app of fresh) if (!apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
-          writeJsonAtomic(mainPath, { schema: 1, ...apps })
+          writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
         }
       }
       if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))) {
@@ -387,6 +441,7 @@ export function createAgentRegistry(options = {}) {
    * choice → null (every app, exactly the gateway's behaviour before #58).
    */
   function allowedApps(agentId) {
+    if (readRaw(agentId)?.role === 'recovery') return new Set()
     if (agentId === MAIN_AGENT_ID && readJson(mainPath)?.schema !== 1) { syncApps(); return null }
     const agent = read(agentId)
     return agent ? agentAppIds(agent) : new Set()
@@ -398,7 +453,7 @@ export function createAgentRegistry(options = {}) {
     if (!kind) fail(404, 'app_not_found', 'app.id')
     return {
       app_id: appId, kind,
-      agents: list().map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === MAIN_AGENT_ID })),
+      agents: list().filter(agent => agent.role !== 'recovery').map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === defaultAgentId() })),
     }
   }
 
@@ -409,7 +464,7 @@ export function createAgentRegistry(options = {}) {
     const ids = body?.agents
     if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
     const wanted = new Set(ids)
-    const all = list()
+    const all = list().filter(agent => agent.role !== 'recovery')
     for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)
@@ -434,6 +489,7 @@ export function createAgentRegistry(options = {}) {
     if (!reader) fail(404, 'agent_not_found', 'grant.reader')
     const source = read(String(body.source ?? ''))
     if (!source) fail(404, 'agent_not_found', 'grant.source')
+    if (reader.role === 'recovery' || source.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
     if (source.privacy === 'private') sealed(`${source.id} is private; nothing can read it`)
     if (reader.id === source.id) fail(400, 'invalid_grant', 'grant.source')
     const scope = body.scope ?? 'titles'
@@ -456,8 +512,8 @@ export function createAgentRegistry(options = {}) {
    */
   function readableSources(readerId) {
     const reader = read(readerId)
-    if (!reader) return []
-    const agents = list()
+    if (!reader || reader.role === 'recovery') return []
+    const agents = list().filter(agent => agent.role !== 'recovery')
     const out = new Map()
     if (reader.permissions.other_agents !== 'none') {
       for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard') out.set(agent.id, reader.permissions.other_agents)
@@ -495,6 +551,8 @@ export function createAgentRegistry(options = {}) {
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
+    // A restricted agent is reached only through its edge relay, published on host loopback at its port.
+    if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
     if (upstreamMode === 'network') {
       const url = new URL(String(agent.runtime.api || ''))
       if (url.protocol !== 'http:' || url.hostname !== agent.runtime.app_id || url.username || url.password || url.pathname !== '/') {
@@ -583,6 +641,28 @@ export function createAgentRegistry(options = {}) {
     return id
   }
 
+  /** The lowest free /28 pair (uplink 10.250.x.y, sandbox 10.251.x.y); index 0 is left to conformance runs. */
+  function nextNetwork() {
+    const used = new Set(list().map((agent) => agent.runtime?.network?.uplink).filter((value) => typeof value === 'string'))
+    for (let index = 1; index < 4096; index += 1) {
+      const suffix = `${index >> 4}.${(index & 15) << 4}/28`
+      if (!used.has(`10.250.${suffix}`)) return { uplink: `10.250.${suffix}`, sandbox: `10.251.${suffix}` }
+    }
+    fail(503, 'network_exhausted', 'agent.runtime.network')
+  }
+
+  /** The uplink subnet an agent's edge connects from ('' = this agent has no agent-only network). */
+  function agentUplink(id) {
+    const agent = read(id)
+    const uplink = restricted(agent) ? agent.runtime?.network?.uplink : ''
+    return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
+  }
+
+  /** Whether an agent runs in the restricted runtime (its key is then bound to the agent-only listener). */
+  function agentRestricted(id) {
+    try { return restricted(read(id)) } catch { return false }
+  }
+
   function nextPort() {
     const used = new Set(list().map((agent) => agent.runtime?.port).filter(Number.isInteger))
     let port = basePort
@@ -592,8 +672,11 @@ export function createAgentRegistry(options = {}) {
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     const dir = folder(agent.id)
-    const home = join(dir, 'home')
+    // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
+    // files it manages to managed/, and the runtime driver copies them in before every start.
+    const home = join(dir, restricted(agent) ? 'managed' : 'home')
     mkdirSync(home, { recursive: true, mode: 0o700 })
+    if (restricted(agent)) mkdirSync(join(dir, 'home'), { recursive: true, mode: 0o700 })
     let key = rotateKey ? '' : apiKey(agent.id)
     if (!key) {
       key = randomBytes(32).toString('base64url')
@@ -606,14 +689,16 @@ export function createAgentRegistry(options = {}) {
       writeTextAtomic(join(dir, 'gateway.key'), `${gateway}\n`)
     }
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
-    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, gatewayUrl) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl }))
+    const agentGateway = gatewayUrlFor(agent)
+    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) ? gateway : '' }))
+    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway }))
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
   async function create(body, { idempotencyKey = '' } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
     if (idempotencyKey) {
       if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(idempotencyKey)) fail(400, 'invalid_idempotency_key', 'agent.idempotency_key')
@@ -641,10 +726,14 @@ export function createAgentRegistry(options = {}) {
       schema: AGENT_SCHEMA, id, label, harness: 'hermes', privacy: preset.privacy,
       appearance: normalizeAppearance(body.appearance, preset.privacy),
       model, permissions,
-      runtime: { kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '' },
+      runtime: {
+        kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
+        ...(isolation ? { isolation, network: nextNetwork() } : {}),
+      },
       created_at: Math.floor(now() / 1000),
     }
     assertPrivateWalls(agent)
+    assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
     try {
       writeHarnessFiles(agent)
@@ -660,6 +749,7 @@ export function createAgentRegistry(options = {}) {
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
     try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
 
@@ -668,6 +758,18 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (id === MAIN_AGENT_ID) {
+      if (body.role !== undefined) {
+        if (!['standard', 'recovery'].includes(body.role)) fail(400, 'invalid_agent_role', 'agent.role')
+        if (Object.keys(body).some(key => key !== 'role')) fail(400, 'invalid_request', 'agent.body')
+        if (body.role === 'recovery' && defaultAgentId() === MAIN_AGENT_ID) fail(409, 'recovery_cannot_be_default', 'agent.role')
+        if (body.role === 'recovery' && options.isBindingTarget?.(MAIN_AGENT_ID)) fail(409, 'recovery_agent_bound', 'agent.recovery_sealed')
+        if (body.role === 'recovery' && grants().some(grant => grant.reader === MAIN_AGENT_ID || grant.source === MAIN_AGENT_ID)) fail(409, 'recovery_agent_granted', 'agent.recovery_sealed')
+        mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+        writeJsonAtomic(mainPath, { schema: 1, ...mainApps(), role: body.role })
+        appsChanged()
+        return read(id)
+      }
+      if (agent.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
       // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
       const keys = Object.keys(body)
       const permKeys = Object.keys(body.permissions ?? {})
@@ -676,10 +778,11 @@ export function createAgentRegistry(options = {}) {
       }
       const apps = normalizePermissions(agent.permissions, body.permissions)
       mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-      writeJsonAtomic(mainPath, { schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
+      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
       appsChanged()
       return read(id)
     }
+    if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     if (agent.privacy === 'private') {
       // #59: nothing turns a private agent into something another agent can read.
       if (body.privacy !== undefined && body.privacy !== 'private') sealed('a private agent stays private')
@@ -709,13 +812,16 @@ export function createAgentRegistry(options = {}) {
       }
     }
     assertPrivateWalls(next)
+    assertIsolationSupports(next)
     const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
+      invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
       try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
   }
@@ -725,43 +831,176 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
+    invalidateCatalog(id)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
-    try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    const epoch = catalogEpochs.get(id) ?? 0
+    let stoppedCensus
+    try {
+      const result = await (running ? runtime.start(id) : runtime.stop(id))
+      if (!running && result?.ok !== false) stoppedCensus = result?.census
+    } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    if (running) await refreshCatalog(id).catch(() => undefined)
+    // Only the census produced inside the helper's locked stop action can seal.
+    // A separate census RPC after stop would leave a lifecycle gap.
+    else if (stoppedCensus) await sealCatalog(id, stoppedCensus, epoch).catch(() => undefined)
     return agent
   }
 
-  // Thread pins: session id -> agent id, set when the thread is created. Absent = the main agent.
+  // Qualified pins. A legacy id->agent entry already contains an explicit agent: preserve it, not today's default.
+  migrateJson(threadsPath, value => {
+    if (![1, 2].includes(value?.schema) || !value.threads || typeof value.threads !== 'object' || Array.isArray(value.threads)) throw new Error('Invalid thread pins')
+    if (value.schema === 2) {
+      for (const [key, row] of Object.entries(value.threads)) {
+        if (!row || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id || row.session_id.length > 200 || key !== threadKey(row.agent_id, row.session_id)) throw new Error('Invalid qualified thread pin')
+      }
+      // Pre-provenance schema-2 entries could have been seeded from side metadata. Reverify them;
+      // only schema-1 legacy pins have an unambiguous trusted migration origin.
+      return { ...value, threads: Object.fromEntries(Object.entries(value.threads).map(([key, row]) => [key, { ...row, provenance: row.provenance ?? 'legacy_unverified' }])) }
+    }
+    return { schema: 2, threads: Object.fromEntries(Object.entries(value.threads).map(([id, agent]) => {
+      if (!id || id.length > 200 || !validAgentId(agent)) throw new Error('Invalid legacy thread pin')
+      const pair = threadReference(id, agent)
+      return [threadKey(pair.agent_id, id), { ...pair, provenance: 'migrated_pin' }]
+    })) }
+  })
   let pinsCache = null
   const pins = () => {
     if (!pinsCache) pinsCache = readJson(threadsPath)?.threads ?? {}
     return pinsCache
   }
+  function pinnedAgents(sessionId) {
+    return Object.values(pins()).filter(row => row.session_id === sessionId && ['runtime_verified', 'service_admission', 'migrated_pin'].includes(row.provenance)).map(row => row.agent_id)
+  }
   function pinnedAgent(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return ''
-    return pins()[sessionId] ?? ''
+    const ids = pinnedAgents(sessionId)
+    if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread')
+    return ids[0] ?? ''
   }
-  function pin(sessionId, agentId) {
-    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || agentId === MAIN_AGENT_ID) return
+  function pin(sessionId, agentId, provenance = 'service_admission') {
+    if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(provenance)) return
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || !readRaw(agentId)) return
     const current = pins()
-    if (current[sessionId] === agentId) return
-    if (current[sessionId] && current[sessionId] !== agentId) fail(409, 'thread_agent_pinned', 'thread.agent_pinned')
+    const key = threadKey(agentId, sessionId)
+    if (['runtime_verified', 'service_admission', 'migrated_pin'].includes(current[key]?.provenance)) return
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-    pinsCache = { ...current, [sessionId]: agentId }
-    writeJsonAtomic(threadsPath, { schema: 1, threads: pinsCache })
+    const next = { ...current, [key]: { ...threadReference(sessionId, agentId), provenance } }
+    writeJsonAtomic(threadsPath, { schema: 2, threads: next })
+    pinsCache = next
   }
-  const runs = new Map()
-  function noteRun(runId, agentId) {
-    if (!runId) return
-    runs.set(runId, agentId)
-    if (runs.size > 512) runs.delete(runs.keys().next().value)
+  // This authority store is never seeded from client-authored metadata. Only runtime-authenticated
+  // history reads supply positive evidence only. Negative evidence needs an offline stopped-generation seal.
+  const catalogPath = join(agentsDir, '.session-catalog.json')
+  migrateJson(catalogPath, value => {
+    if (value?.schema !== 1 || !value.agents || typeof value.agents !== 'object' || Array.isArray(value.agents)) throw new Error('Invalid session catalog')
+    for (const [id, row] of Object.entries(value.agents)) {
+      if (!validAgentId(id) || !row || !Number.isFinite(row.at) || typeof row.complete !== 'boolean' || !Array.isArray(row.ids) || row.ids.some(id => typeof id !== 'string' || !id || id.length > 200)) throw new Error('Invalid session catalog row')
+    }
+    return value
+  })
+  let catalogs = readJson(catalogPath)?.agents ?? {}
+  const catalogEpochs = new Map()
+  async function catalogContains(agentId, sessionId) {
+    const row = catalogs[agentId]
+    if (row?.ids.includes(sessionId)) return true
+    if (!row?.complete || typeof row.seal !== 'string' || !row.seal || !runtime?.inspect) return undefined
+    const epoch = catalogEpochs.get(agentId) ?? 0
+    const seal = row.seal
+    try {
+      const current = await runtime.inspect(agentId)
+      // A lifecycle round may finish while inspect is in flight. Never consume
+      // its old answer against a newly sealed catalog, even for the same token.
+      if (epoch !== (catalogEpochs.get(agentId) ?? 0) || catalogs[agentId]?.seal !== seal
+        || catalogs[agentId]?.complete !== true) return undefined
+      // Disk-loaded seals are authority only when the driver still attests this stopped generation.
+      if (current.status === 'stopped' && current.generation === seal) return false
+    } catch { /* unknown lifecycle generation never proves absence */ }
+    return undefined
   }
+  async function sealCatalog(agentId, census, epoch) {
+    if (!runtime?.inspect) return
+    const current = await runtime.inspect(agentId)
+    if (epoch !== (catalogEpochs.get(agentId) ?? 0) || census.status !== 'stopped' || current.status !== 'stopped'
+      || typeof census.generation !== 'string' || !census.generation || census.generation !== current.generation
+      || !Array.isArray(census.ids) || census.ids.some(id => typeof id !== 'string' || !id || id.length > 200)) return
+    observeSessions(agentId, census.ids)
+    saveCatalog(agentId, { ...catalogs[agentId], complete: true, seal: census.generation })
+  }
+  function saveCatalog(agentId, row) {
+    const next = { ...catalogs, [agentId]: row }
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(catalogPath, { schema: 1, agents: next }); catalogs = next
+  }
+  function invalidateCatalog(agentId) {
+    catalogEpochs.set(agentId, (catalogEpochs.get(agentId) ?? 0) + 1)
+    if (catalogs[agentId]) saveCatalog(agentId, { ...catalogs[agentId], complete: false, seal: null })
+  }
+  function observeSessions(agentId, ids, { index = true } = {}) {
+    ids = ids.filter(id => typeof id === 'string' && id && id.length <= 200)
+    if (!readRaw(agentId)) return
+    const previous = catalogs[agentId]
+    // Retain positive sightings even if a concurrent paginated census misses a newly created row.
+    saveCatalog(agentId, { at: now(), complete: previous?.complete === true && Boolean(previous?.seal), seal: previous?.seal ?? null, ids: [...new Set([...(previous?.ids ?? []), ...ids])] })
+    if (index) for (const id of ids) pin(id, agentId, 'runtime_verified')
+  }
+  async function refreshCatalog(agentId) {
+    const agent = readRaw(agentId)
+    if (!agent) throw new Error('Unknown catalog agent')
+    const origin = agentId === MAIN_AGENT_ID ? options.mainOrigin : upstream(agent)
+    const key = agentId === MAIN_AGENT_ID ? options.mainKey : apiKey(agentId)
+    if (!origin || !key) throw new Error('Catalog runtime credentials unavailable')
+    const ids = [], seen = new Set(), epoch = catalogEpochs.get(agentId) ?? 0
+    for (let offset = 0; offset <= 100000;) {
+      const response = await fetchImpl(`${origin}/api/sessions?limit=100&offset=${offset}&include_children=true`, { headers: { Authorization: `Bearer ${key}` }, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      if (!response.ok) throw new Error('Catalog runtime unavailable')
+      const value = await response.json(), rows = value.data ?? value.sessions ?? value.items
+      const hasMore = value.has_more ?? value.pagination?.has_more
+      if (!Array.isArray(rows) || rows.some(row => typeof row?.id !== 'string' || !row.id || row.id.length > 200 || seen.has(row.id))
+        || (hasMore !== undefined && typeof hasMore !== 'boolean')
+        || (value.pagination?.offset !== undefined && value.pagination.offset !== offset)) throw new Error('Invalid catalog listing')
+      for (const row of rows) { if (seen.has(row.id)) throw new Error('Repeated catalog row'); seen.add(row.id); ids.push(row.id) }
+      // A short page may just be a clamped limit. Without an explicit final-page flag,
+      // keep paging until an empty page; repeated/ignored cursors never prove absence.
+      if (hasMore === false || (!rows.length && hasMore !== true)) {
+        if ((catalogEpochs.get(agentId) ?? 0) !== epoch) throw new Error('Catalog lifecycle changed during census')
+        observeSessions(agentId, ids, { complete: true }); return
+      }
+      if (!rows.length) break
+      offset += rows.length
+    }
+    throw new Error('Incomplete catalog listing')
+  }
+  const runsPath = join(agentsDir, '.run-threads.json')
+  migrateJson(runsPath, value => {
+    if (value?.schema !== 1 || !value.runs || typeof value.runs !== 'object' || Array.isArray(value.runs)) throw new Error('Invalid run pair index')
+    for (const [id, rows] of Object.entries(value.runs)) {
+      if (!Array.isArray(rows) || rows.some(row => !row || row.run_id !== id || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id)) throw new Error('Invalid run pair rows')
+    }
+    return value
+  })
+  const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
+  function noteRun(runId, agentId, sessionId = '') {
+    if (typeof runId !== 'string' || !runId) return
+    const rows = runs.get(runId) ?? []
+    if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
+    if (!sessionId || !readRaw(agentId)) return
+    const next = new Map(runs)
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId) }])
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next) })
+    runs.set(runId, next.get(runId))
+  }
+  const runAgents = runId => (runs.get(runId) ?? []).map(row => row.agent_id)
 
   return {
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
-    pinnedAgent, pin, runAgent: (runId) => runs.get(runId) ?? '', noteRun,
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken,
+    catalogContains, refreshCatalog, observeSessions,
+    pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
+    agentForModel: (route) => agentForModel(list(), route),
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
-    publicAgent: async (agent) => publicAgent(agent, await status(agent)),
+    publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId
       return agent ? threadAgent(agent) : null
@@ -801,6 +1040,8 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
+    inspect: (id) => call('POST', `/agents/${encodeURIComponent(id)}/inspect`),
+    census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
   }
 }

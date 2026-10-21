@@ -23,7 +23,7 @@ function cleanName(value) {
   return (name || 'file').slice(0, 200)
 }
 
-export function createShareAgentRouting({ registry, homeMount = '/opt/data', now = () => new Date(), mainThreadExists }) {
+export function createShareAgentRouting({ registry, homeMount = '/opt/data', now = () => new Date(), mainThreadExists, sessionExists }) {
   const agentDir = (id) => join(registry.agentsDir, id)
   const inboxRoot = (id) => join(agentDir(id), 'home', 'inbox')
   const stagingDir = (id) => join(agentDir(id), 'upload-staging')
@@ -75,8 +75,11 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
   async function liveAgent(agentId, { delivering = false } = {}) {
     const agent = registry.read(agentId)
     if (!agent) throw new UploadError(409, 'agent_unavailable', { agent: agentId })
+    if (agent.role === 'recovery') throw new UploadError(409, 'agent_unavailable', { agent: agentId })
     if (agent.id === MAIN_AGENT_ID) return agent
     if (agent.permissions.files === 'none') throw new UploadError(409, 'agent_files_not_allowed', { agent: agentId })
+    // A restricted agent's home belongs to its container user; files reach it once in-container placement exists.
+    if (agent.runtime?.isolation === 'restricted') throw new UploadError(409, 'agent_unavailable', { agent: agentId })
     const status = await registry.status(agent, { fresh: delivering })
     if (!LIVE.has(status.status) || (delivering && status.status !== 'running')) {
       // At delivery a stopped agent is a transient failure (retried), never a reason to deliver elsewhere.
@@ -94,7 +97,7 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
     },
 
     async resolveShareAgent(agentId, { delivering = false } = {}) {
-      const agent = await liveAgent(agentId || MAIN_AGENT_ID, { delivering })
+      const agent = await liveAgent(agentId || registry.defaultAgentId?.() || MAIN_AGENT_ID, { delivering })
       const label = registry.threadAgent(agent)?.label ?? agent.label ?? ''
       if (agent.id === MAIN_AGENT_ID) return { agent: MAIN_AGENT_ID, agent_label: label, target: 'files', query: '' }
       return {
@@ -114,7 +117,9 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
     },
 
     async threadExists(threadId, routed) {
-      const pinned = registry.pinnedAgent(threadId)
+      if (sessionExists) return sessionExists(routed.agent, threadId)
+      const ids = registry.pinnedAgents?.(threadId) ?? [registry.pinnedAgent(threadId)].filter(Boolean)
+      const pinned = ids.includes(routed.agent) ? routed.agent : ids[0]
       if (pinned && pinned !== routed.agent) throw new UploadError(409, 'thread_agent_pinned')
       if (routed.agent === MAIN_AGENT_ID) return mainThreadExists(threadId, routed)
       return pinned === routed.agent

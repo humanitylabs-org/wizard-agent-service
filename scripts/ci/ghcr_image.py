@@ -80,6 +80,17 @@ def clean_env(config):
             **{key: os.environ[key] for key in passthrough if key in os.environ}}
 
 
+def _volume_of(path):
+    """The mounted volume holding path, unless that is the system disk ("/").
+
+    Runners that predate WIZARD_HEAVY_ROOT keep WIZARD_CI_ROOT on a dedicated worker volume; accept that volume so the
+    portable check keeps the old guarantee (build storage off the control-plane disk) without a machine path in git."""
+    p = Path(path).expanduser().resolve()
+    while not os.path.ismount(p):
+        p = p.parent
+    return None if p == Path(p.anchor) else str(p)
+
+
 def publish(args):
     import fcntl  # macOS/Linux only, after CLI validation
     expected_ref = "refs/heads/" + args.branch
@@ -91,9 +102,17 @@ def publish(args):
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-candidate\.[0-9]{8})?", args.release):
             raise ValueError("only semantic versions or dated candidate tags are accepted")
     root = Path(os.environ["WIZARD_CI_ROOT"])
-    if not str(root).startswith("/Volumes/ThalesMedia/"):
-        raise RuntimeError("build storage must be on the external worker volume")
+    configured = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if configured and not Path(configured).is_absolute():
+        raise RuntimeError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
     lock_path = Path(os.environ["WIZARD_CI_WORKER_LOCK"])
+    if configured:
+        allowed = Path(configured).resolve()
+        if not root.resolve().is_relative_to(allowed) or not lock_path.resolve().is_relative_to(allowed):
+            raise RuntimeError("build storage and lock must be under the configured heavy root")
+    elif not _volume_of(root):
+        # Unconfigured runner: build storage must still sit on a dedicated mounted volume, never the system disk.
+        raise RuntimeError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
     print("Waiting for shared heavy-worker lock", flush=True)
     with lock_path.open("a") as lock:
         deadline = time.monotonic() + 3600

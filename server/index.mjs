@@ -1,8 +1,9 @@
-import { createCloudflareAccessVerifier, createWizardServer } from './service.mjs'
-import { containerGateway, createTailnetAccessVerifier } from './tailnet-access.mjs'
+import { defaultKeeperSocket } from './run-stream-keeper.mjs'
+import { createAgentIngress, createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
+import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { wizardOsHome } from './wizard-os-settings.mjs'
+import { readSettings, wizardOsHome } from './wizard-os-settings.mjs'
 import { readFileSync } from 'node:fs'
 
 const secretFile = (path) => {
@@ -36,6 +37,19 @@ if (!['tailscale', 'cloudflare', 'none'].includes(authMode)) {
   process.exit(1)
 }
 const requireAccess = authMode !== 'none'
+// Owner proof: a secret the trusted front proxy adds only after it authenticated the owner. Behind such a
+// gateway (auth mode none) it is what tells the owner's own client apart from every other local caller.
+let ownerProof = ''
+if (process.env.WIZARD_OWNER_PROOF_FILE) {
+  try { ownerProof = readFileSync(process.env.WIZARD_OWNER_PROOF_FILE, 'utf8').trim() } catch {
+    process.stderr.write('WIZARD_OWNER_PROOF_FILE is set but unreadable; the service was not started.\n')
+    process.exit(1)
+  }
+  if (ownerProof.length < 32) {
+    process.stderr.write('The owner proof secret must be at least 32 characters; the service was not started.\n')
+    process.exit(1)
+  }
+}
 // Hermes state.db fallback (read-only) for the reads stock Hermes does not serve over HTTP; off unless set.
 // spec/AGENT_BRIDGE.md "Agent adapter" lists them.
 const hermesStatePath = process.env.WIZARD_HERMES_STATE_PATH || ''
@@ -45,18 +59,35 @@ const joinedDelegation = process.env.WIZARD_JOINED_DELEGATION || 'require'
 const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL ? {
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
+const settingsPath = process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json')
+// The Serve listener: Tailscale Serve (https://<box>.<tailnet>.ts.net/) forwards here, and only here. Every
+// request on it is verified as the owner's tailnet identity, whatever WIZARD_AUTH_MODE says about the
+// box-local listener above. Unset: no tailnet listener (computer-only use).
+const tailnetPort = process.env.WIZARD_TAILNET_PORT ? Number(process.env.WIZARD_TAILNET_PORT) : 0
+if (process.env.WIZARD_TAILNET_PORT && (!Number.isInteger(tailnetPort) || tailnetPort < 1 || tailnetPort > 65535 || tailnetPort === port)) {
+  process.stderr.write('WIZARD_TAILNET_PORT must be a free TCP port other than WIZARD_PORT; the service was not started.\n')
+  process.exit(1)
+}
+let server
 // In a container, Tailscale Serve on the box reaches the published 127.0.0.1 port and the request arrives
-// from the container network's gateway; on a bare box it arrives from loopback.
-const accessVerifier = authMode === 'tailscale' ? createTailnetAccessVerifier({
+// from the container network's gateway; on a bare box it arrives from loopback. Origin and owner login come
+// from WIZARD_TAILNET_ORIGIN / WIZARD_TAILNET_LOGIN, else from settings access.tailscale (written by
+// "Connect your phone"), read per request.
+const tailnetVerifier = authMode === 'tailscale' || tailnetPort ? createSettingsTailnetVerifier({
   origin: process.env.WIZARD_TAILNET_ORIGIN,
   logins: process.env.WIZARD_TAILNET_LOGIN,
+  settings: () => readSettings(settingsPath).settings.access.tailscale,
   proxyPeers: [...['127.0.0.1', '::1'], ...(container ? [process.env.WIZARD_TAILNET_PROXY_PEER || containerGateway()] : [])].filter(Boolean),
-}) : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
+  // Opening the shared address from another app (a cross-site top-level navigation) may land on these entry pages.
+  appPaths: [...new Set(['/', '/wizard', '/wizard/', `/${String(process.env.WIZARD_UX_PREFIX || 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`])],
+  onVerified: (request) => server?.phoneSetup?.noteOwnerRequest(request),
+}) : null
+const accessVerifier = authMode === 'tailscale' ? tailnetVerifier : authMode === 'cloudflare' ? createCloudflareAccessVerifier({
   teamDomain: process.env.WIZARD_ACCESS_TEAM_DOMAIN,
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
 }) : undefined
-const server = createWizardServer({
+server = createWizardServer({
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
@@ -81,6 +112,7 @@ const server = createWizardServer({
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),
+  runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
@@ -89,18 +121,23 @@ const server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
   heavyWorker: {
-    host: process.env.WIZARD_HEAVY_SSH_HOST,
+    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
     script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
     root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
     lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
     python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
   },
   requireAccess,
+  ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
+  ...(tailnetVerifier ? { tailnetVerifier } : {}),
+  tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
+  tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
-  settingsPath: process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json'),
+  settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
@@ -136,6 +173,10 @@ const server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
+  // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
+  ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).
@@ -162,5 +203,32 @@ const server = createWizardServer({
   ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
   // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
+  // New container agents run in the restricted runtime (their own networks, edge sidecar to WIZARD_AGENT_PORT).
+  agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
 })
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+if (process.env.WIZARD_AGENT_ISOLATION === 'restricted' && !process.env.WIZARD_AGENT_PORT) {
+  process.stderr.write('WIZARD_AGENT_ISOLATION=restricted needs WIZARD_AGENT_PORT (the agent-only listener); the service was not started.\n')
+  process.exit(1)
+}
+// Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
+if (process.env.WIZARD_AGENT_PORT) {
+  // Agents reach the main listener's loopback too: without an owner proof, a loopback caller is the owner there.
+  if (!ownerProof) {
+    process.stderr.write('WIZARD_AGENT_PORT needs WIZARD_OWNER_PROOF_FILE (owner proof); the service was not started.\n')
+    process.exit(1)
+  }
+  const agentHost = process.env.WIZARD_AGENT_HOST || host
+  const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
+  // 0.0.0.0 is allowed: every agent key is accepted only from that agent's own uplink subnet, and the host
+  // firewall admits this port from the agent uplink range only (the uplink gateways come and go with compose).
+  if (!privateAddress.test(agentHost) && agentHost !== '0.0.0.0') {
+    process.stderr.write('WIZARD_AGENT_HOST must be 0.0.0.0, a loopback or a private network address.\n')
+    process.exit(1)
+  }
+  const agentPort = Number(process.env.WIZARD_AGENT_PORT)
+  createAgentIngress(server).listen(agentPort, agentHost, () => process.stdout.write(`Wizard agent listener on ${agentHost}:${agentPort}\n`))
+}
+if (tailnetPort) {
+  createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
+}

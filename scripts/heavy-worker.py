@@ -3,6 +3,14 @@
 
 The dispatcher owns a process lock; the shared build lock is held across the
 whole child process group. A lost dispatcher never blindly retries a command.
+
+Lanes: a job without ``lane`` (or ``lane: heavy``) runs under the shared
+Android/VM worker lock exactly as before. ``lane: light`` is for short packaging
+work (image packaging from prebuilt binaries, static app builds, canaries) capped
+at LIGHT_MAX_SECONDS. Light jobs live in their own spool (``<root>/light``) with
+their own exclusive lock, so they never wait behind heavy work and a heavy-only
+dispatcher (including an older release) can never see, claim or repeat them.
+Within each lane the original one-at-a-time, never-retry semantics are unchanged.
 """
 import argparse
 import fcntl
@@ -19,6 +27,16 @@ import time
 import shutil
 
 TERMINAL = ('completed', 'failed', 'cancelled', 'interrupted')
+LANES = ('heavy', 'light')
+LIGHT_MAX_SECONDS = 900
+
+
+def light_root(root):
+    return Path(root) / 'light'
+
+
+def light_lock(root):
+    return light_root(root) / 'packaging.lock'
 
 
 def connect(root):
@@ -52,16 +70,28 @@ def public(row):
             'receipt': json.loads(row['receipt']) if row['receipt'] else None}
 
 
+def heavy_root():
+    value = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if not value or not Path(value).is_absolute():
+        raise ValueError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
+    return Path(value).resolve()
+
+
 def validate(spec):
     cwd = Path(spec['cwd']).resolve(strict=True)
-    if not cwd.is_relative_to('/Volumes/ThalesMedia') or not cwd.is_dir():
-        raise ValueError('work directory must be on the external volume')
+    if not cwd.is_relative_to(heavy_root()) or not cwd.is_dir():
+        raise ValueError('work directory must be under the configured heavy root')
     argv = spec['argv']
     if not isinstance(argv, list) or not 1 <= len(argv) <= 100 or any(
             not isinstance(x, str) or not x or '\0' in x or len(x) > 8192 for x in argv):
         raise ValueError('invalid command')
     if not isinstance(spec.get('timeout_seconds'), int) or not 1 <= spec['timeout_seconds'] <= 86400:
         raise ValueError('invalid deadline')
+    lane = spec.get('lane', 'heavy')
+    if lane not in LANES:
+        raise ValueError('invalid lane')
+    if lane == 'light' and spec['timeout_seconds'] > LIGHT_MAX_SECONDS:
+        raise ValueError('light lane deadline too long')
     return {**spec, 'cwd': str(cwd)}
 
 
@@ -95,7 +125,10 @@ def execute(root, job_id, worker_fd, execution_fd):
             state, reason = 'failed', 'deadline'
         else:
             with (root / (job_id + '.log')).open('ab', buffering=0) as log:
-                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd)}
+                # A light job's fd is the packaging lock: helpers that verify the
+                # shared Android lock inode (android-build-thales) fail closed.
+                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
+                       'WIZARD_WORKER_LANE': spec.get('lane', 'heavy')}
                 # The command and all non-detached descendants stay in OUR group.
                 process = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
@@ -131,6 +164,14 @@ def resource_wait(root):
     if shutil.disk_usage(root).free < 20 * 1024**3:
         return 'disk_pressure'
     try:
+        if sys.platform.startswith('linux'):
+            # Same conservative Linux floor as interactive admission; unknown
+            # health still fails closed. macOS keeps its existing sysctl policy.
+            memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+            available_kib = int(memory['MemAvailable'].split()[0])
+            pressure_line = next(line for line in Path('/proc/pressure/memory').read_text().splitlines() if line.startswith('full '))
+            full = dict(field.split('=', 1) for field in pressure_line.split()[1:])
+            return 'memory_pressure' if available_kib < 512 * 1024 or float(full['avg10']) >= 20 else ''
         pressure = int(subprocess.check_output(['/usr/sbin/sysctl', '-n',
             'kern.memorystatus_vm_pressure_level'], text=True, timeout=2).strip())
         return 'memory_pressure' if pressure >= 4 else ''
@@ -230,28 +271,56 @@ def dispatch(root, lock_path):
                         pass
 
 
+def spawn_dispatcher(root, lock_path):
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--root', str(root),
+                      '--lock', str(lock_path), '--dispatch'], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def find(root, job_id):
+    """Spool holding job_id: heavy (root) first, then light. Never creates a spool."""
+    for lane_root in (root, light_root(root)):
+        if (lane_root / 'jobs.sqlite3').exists():
+            db = connect(lane_root)
+            try:
+                if db.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
+                    return lane_root
+            finally:
+                db.close()
+    return None
+
+
 def rpc(root, lock_path, value):
-    db = connect(root)
     job_id = value.get('job_id', '')
     if not re.fullmatch(r'heavy_[0-9a-f]{32}', job_id):
         raise ValueError('invalid job identity')
     action = value['action']
+    if action not in ('submit', 'cancel', 'status'):
+        raise ValueError('invalid action')
+    target = find(root, job_id)
     if action == 'submit':
-        spec = json.dumps(validate(value['spec']), sort_keys=True, separators=(',', ':'))
+        validated = validate(value['spec'])
+        wanted = light_root(root) if validated.get('lane') == 'light' else root
+        if target is not None and target != wanted:
+            raise ValueError('idempotency conflict')
+        target = wanted
+        spec = json.dumps(validated, sort_keys=True, separators=(',', ':'))
+        db = connect(target)
         db.execute('INSERT OR IGNORE INTO jobs(id,spec,state,created,updated) VALUES (?,?,\'queued\',?,?)',
                    (job_id, spec, time.time(), time.time()))
         row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
         if row['spec'] != spec:
             raise ValueError('idempotency conflict')
-    elif action == 'cancel':
-        db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), job_id))
-    elif action != 'status':
-        raise ValueError('invalid action')
+    else:
+        db = connect(target or root)
+        if action == 'cancel':
+            db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), job_id))
     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
     db.close()
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--root', str(root),
-                      '--lock', str(lock_path), '--dispatch'], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Every RPC ensures each existing lane has a dispatcher (submit/exit races).
+    spawn_dispatcher(root, lock_path)
+    if (light_root(root) / 'jobs.sqlite3').exists():
+        spawn_dispatcher(light_root(root), light_lock(root))
     return public(row)
 
 
@@ -265,8 +334,12 @@ if __name__ == '__main__':
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
     args = parser.parse_args()
-    if not args.root.resolve().is_relative_to('/Volumes/ThalesMedia') or not args.lock.resolve().is_relative_to('/Volumes/ThalesMedia'):
-        raise SystemExit('worker storage must be on external volume')
+    try:
+        allowed_root = heavy_root()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if not args.root.resolve().is_relative_to(allowed_root) or not args.lock.resolve().is_relative_to(allowed_root):
+        raise SystemExit('worker storage must be under the configured heavy root')
     if args.execute:
         if not re.fullmatch(r'heavy_[0-9a-f]{32}', args.execute):
             raise SystemExit('invalid job identity')

@@ -1,0 +1,140 @@
+# Restricted runtime for one managed Hermes agent.
+#
+#   agent     - stock Hermes image, non-root (uid 10000), read-only root, every capability dropped,
+#               no-new-privileges, no published ports, no host mounts, on an internal-only network
+#               where the host has no address.
+#               Writable: its own home volume and a size-capped /tmp. Nothing else.
+#   egress    - the agent's only route to the internet: HTTPS CONNECT to allowlisted hostnames, TLS only,
+#               SNI must match the vetted host.
+#   edge      - the agent's only route to the Agent Service (token-checked, agent routes only), plus
+#               the inbound relay that lets the service reach the agent's API server.
+#   home-init - one-shot: gives the home to uid 10000 and seeds config on first start. No network.
+#
+# No service bind-mounts a host path; all config arrives by environment, so the same file runs on
+# Linux Docker (VPS) and colima (Thales). See README.md for the environment contract.
+name: ${AGENT_PROJECT:-restricted-agent}
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  ipc: private
+  restart: unless-stopped
+
+x-sidecar-image: &sidecar-image
+  build: ./sidecars
+  image: ${SIDECAR_IMAGE:-restricted-agent-sidecars:local}
+
+services:
+  home-init:
+    <<: *sidecar-image
+    user: "0:0"
+    command: ["/bin/sh", "/srv/home-init.sh"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    volumes:
+      - ${AGENT_HOME_VOLUME:-agent-home}:/opt/data
+
+  agent:
+    <<: *hardening
+    image: ${AGENT_IMAGE:-ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2}
+    user: "10000:10000"
+    init: true
+    # Run Hermes directly: the image's s6 bootstrap needs root (UID remap, chown); home-init did that.
+    entrypoint: ["/opt/hermes/.venv/bin/hermes"]
+    command: ["gateway", "run"]
+    working_dir: /opt/data
+    stop_grace_period: 1m
+    depends_on:
+      home-init: {condition: service_completed_successfully}
+      egress: {condition: service_started}
+      edge: {condition: service_started}
+    environment:
+      HOME: /opt/data
+      HERMES_HOME: /opt/data
+      PATH: /opt/hermes/.venv/bin:/usr/local/bin:/usr/bin:/bin
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      # The agent's own inbound API key (the service presents it when calling the agent). Not a
+      # control-plane secret: it only opens this agent's own API.
+      API_SERVER_KEY: ${AGENT_API_KEY:?set AGENT_API_KEY}
+      HTTPS_PROXY: http://egress:3128
+      HTTP_PROXY: http://egress:3128
+      https_proxy: http://egress:3128
+      http_proxy: http://egress:3128
+      NO_PROXY: edge,localhost,127.0.0.1
+      no_proxy: edge,localhost,127.0.0.1
+      WIZARD_GATEWAY_URL: http://edge:8923
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g,mode=1777
+    volumes:
+      - ${AGENT_HOME_VOLUME:-agent-home}:/opt/data
+      - ${AGENT_SYSTEM_SKILLS_VOLUME:-system-skills}:/opt/wizard-skills:ro
+    mem_limit: ${AGENT_MEM_LIMIT:-4g}
+    memswap_limit: ${AGENT_MEM_LIMIT:-4g}
+    cpus: ${AGENT_CPUS:-2}
+    pids_limit: ${AGENT_PIDS_LIMIT:-512}
+    ulimits:
+      nofile: {soft: 4096, hard: 8192}
+    networks: [sandbox]
+
+  egress:
+    <<: [*hardening, *sidecar-image]
+    user: "65534:65534"
+    command: ["python3", "-u", "/srv/egress.py"]
+    environment:
+      EGRESS_ALLOWLIST_HOSTS: >-
+        ${EGRESS_ALLOWLIST_HOSTS:-api.anthropic.com api.openai.com openrouter.ai inference.tinfoil.sh
+        api.github.com github.com codeload.github.com objects.githubusercontent.com
+        raw.githubusercontent.com pypi.org files.pythonhosted.org registry.npmjs.org en.wikipedia.org}
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    networks: [sandbox, uplink]
+
+  edge:
+    <<: [*hardening, *sidecar-image]
+    user: "65534:65534"
+    command: ["python3", "-u", "/srv/edge.py"]
+    environment:
+      EDGE_UPSTREAM_HOST: ${EDGE_UPSTREAM_HOST:-agent-service-host}
+      EDGE_UPSTREAM_PORT: ${EDGE_UPSTREAM_PORT:-8923}
+      # sha256 of this agent's gateway token, written by the trusted side. The edge never sees the token.
+      EDGE_TOKEN_SHA256: ${EDGE_TOKEN_SHA256:?set EDGE_TOKEN_SHA256}
+    ports:
+      - ${AGENT_INGRESS_BIND:-127.0.0.1:18642}:8642
+    extra_hosts:
+      - agent-service-host:host-gateway
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    networks: [sandbox, uplink]
+
+networks:
+  sandbox:
+    # internal: no forwarding out. inhibit_ipv4: the host gets no address on this bridge, so the agent
+    # cannot open connections to host services (sshd, the Agent Service, the Docker API) through the
+    # bridge gateway; `internal` alone does not stop that. Sidecars still reach the agent over the
+    # bridge (layer 2). Pinned per agent (from 10.251.0.0/16) so the conformance scan is exhaustive.
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+    ipam:
+      config:
+        - subnet: ${AGENT_SANDBOX_SUBNET:-10.251.0.0/28}
+  uplink:
+    # Fixed per agent so the Agent Service can bind its agent-only listener to the gateway address
+    # (first host of the subnet) and nothing else. The driver assigns a unique /28 per agent from
+    # 10.250.0.0/16, outside Docker's default pools (172.17-31.x, 192.168.x), so it never collides.
+    ipam:
+      config:
+        - subnet: ${AGENT_UPLINK_SUBNET:-10.250.0.0/28}
+
+volumes:
+  agent-home: {}
+  system-skills: {}

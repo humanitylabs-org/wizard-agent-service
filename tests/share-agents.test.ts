@@ -117,7 +117,8 @@ describe('shares with an agents registry', () => {
     expect(runs[0].body.input).not.toContain(dir)
     // the thread is pinned to the private agent
     const pins = JSON.parse(readFileSync(join(dir, 'agents', '.threads.json'), 'utf8'))
-    expect(pins.threads[share.thread_id]).toBe(agent.id)
+    expect(pins.schema).toBe(2)
+    expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id, provenance: 'service_admission' })
     // staging is outside the agent's home and empty
     expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path
@@ -156,7 +157,7 @@ describe('shares with an agents registry', () => {
     const path = `/wizard/hermes/api/sessions/${share.thread_id}`
     expect((await fetch(`${base}${path}?agent=${agent.id}`)).status).toBe(200)
     expect((await fetch(`${base}${path}`)).status).toBe(409)
-    expect((await fetch(`${base}${path}?agent=hermes`)).status).toBe(409)
+    expect((await fetch(`${base}${path}?agent=hermes`)).status).toBe(404) // a qualified pair is independent; Hermes has no such session
     expect((await fetch(`${base}${path}?agent=${agent.id}&view=operator`)).status).toBeGreaterThanOrEqual(400)
     const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
     expect((await fetch(`${base}/wizard/files/${upload.file.id}/content`)).status).toBe(404)
@@ -172,6 +173,20 @@ describe('shares with an agents registry', () => {
     const switched = await post(base, '/wizard/v1/shares', { ...input, agent: agent.id })
     expect(switched.status).toBe(409)
     expect(await switched.json()).toEqual({ error: 'client_share_id_conflict' })
+  })
+
+  it('refuses shares to a restricted agent (its home belongs to its container user)', async () => {
+    const { dir, main, base } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const file = join(dir, 'agents', agent.id, 'agent.json')
+    const value = JSON.parse(readFileSync(file, 'utf8'))
+    value.runtime = { ...value.runtime, isolation: 'restricted', network: { uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' } }
+    writeFileSync(file, JSON.stringify(value))
+    const result = await post(base, '/wizard/v1/shares', { client_share_id: 'restricted-share', agent: agent.id, files: [{ filename: 'x', bytes: 5 }] })
+    expect(result.status).toBe(409)
+    expect(await result.json()).toMatchObject({ error: 'agent_unavailable' })
+    expect(agentHermes.runs()).toEqual([])
+    expect(main.runs()).toEqual([])
   })
 
   it('refuses shares when agent file permission is none', async () => {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Execute on Thales only: real RPC, process, restart and shared-lock semantics."""
+"""Portable lightweight fixtures: real RPC, process, restart and shared-lock semantics."""
+import fcntl
 import importlib.util
 import json
 from contextlib import closing
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import uuid
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/heavy-worker.py'
@@ -19,10 +21,11 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/heavy-worker.py'
 
 class WorkerTests(unittest.TestCase):
     def setUp(self):
-        if not Path('/Volumes/ThalesMedia').is_dir():
-            self.skipTest('remote volume required; never run sustained work on control plane')
-        self.temp = tempfile.TemporaryDirectory(prefix='heavy-tests-', dir='/Volumes/ThalesMedia/tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='heavy-tests-')
         self.base = Path(self.temp.name)
+        self.env = unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_ROOT': str(self.base)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.root = self.base / 'spool'
         self.lock = self.base / 'worker.lock'
         self.ids = []
@@ -36,12 +39,18 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         return json.loads(proc.stdout)
 
-    def submit(self, code, timeout=15):
+    def submit(self, code, timeout=15, lane=None):
         job_id = 'heavy_' + uuid.uuid4().hex
         self.ids.append(job_id)
         spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', code], 'timeout_seconds': timeout}
+        if lane:
+            spec['lane'] = lane
         self.rpc('submit', job_id, spec)
         return job_id, spec
+
+    def raw_rpc(self, value):
+        return subprocess.run([sys.executable, str(SCRIPT), '--root', str(self.root), '--lock', str(self.lock)],
+                              input=json.dumps(value), text=True, capture_output=True, timeout=10)
 
     def wait(self, job_id, states):
         deadline = time.monotonic() + 20
@@ -206,6 +215,172 @@ class WorkerTests(unittest.TestCase):
         code = f"import importlib.util; s=importlib.util.spec_from_file_location('a',{str(helper)!r}); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.BASE={str(self.base)!r};\nwith m.shared_worker_lock(True): print('inherited lock acquired')"
         a, _ = self.submit(code)
         self.assertEqual(self.wait(a, ('completed', 'failed'))['state'], 'completed')
+
+
+    # --- light lane -------------------------------------------------------
+    def hold_shared_lock(self):
+        self.base.mkdir(parents=True, exist_ok=True)
+        holder = self.lock.open('a')
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return holder
+
+    def test_light_job_runs_while_shared_lock_is_held_and_heavy_waits(self):
+        holder = self.hold_shared_lock()
+        try:
+            heavy, _ = self.submit("from pathlib import Path; Path('heavy-ran').touch()")
+            light, _ = self.submit("from pathlib import Path; Path('light-ran').touch(); print('light done')", lane='light')
+            result = self.wait(light, ('completed',))
+            self.assertEqual(result['receipt']['exit_code'], 0)
+            self.assertTrue((self.base / 'light-ran').exists())
+            time.sleep(1.5)
+            row = self.rpc('status', heavy)
+            self.assertEqual((row['state'], row['reason']), ('queued', 'worker_busy'))
+            self.assertFalse((self.base / 'heavy-ran').exists())
+        finally:
+            holder.close()
+        self.wait(heavy, ('completed',))
+
+    def test_light_jobs_stay_out_of_the_heavy_spool(self):
+        light, spec = self.submit("print('x')", lane='light')
+        self.wait(light, ('completed',))
+        with closing(sqlite3.connect(self.root / 'jobs.sqlite3')) as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM jobs WHERE id=?', (light,)).fetchone())
+        with closing(sqlite3.connect(self.root / 'light' / 'jobs.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (light,)).fetchone()[0], 'completed')
+        # Duplicate submit is idempotent and never re-executes.
+        self.assertEqual(self.rpc('submit', light, spec)['state'], 'completed')
+
+    def test_light_lane_is_one_at_a_time_and_fifo(self):
+        a, _ = self.submit("import time; from pathlib import Path; Path('order').open('a').write('a'); time.sleep(1.5)", lane='light')
+        self.wait(a, ('running',))
+        b, _ = self.submit("from pathlib import Path; Path('order').open('a').write('b')", lane='light')
+        self.assertEqual(self.rpc('status', b)['state'], 'queued')
+        self.wait(a, ('completed',)); self.wait(b, ('completed',))
+        self.assertEqual((self.base / 'order').read_text(), 'ab')
+
+    def test_light_lane_limits_and_identity(self):
+        job = 'heavy_' + uuid.uuid4().hex
+        base = {'cwd': str(self.base), 'argv': [sys.executable, '-c', 'print(1)']}
+        for spec in ({**base, 'timeout_seconds': 901, 'lane': 'light'},
+                     {**base, 'timeout_seconds': 60, 'lane': 'gpu'}):
+            proc = self.raw_rpc({'action': 'submit', 'job_id': job, 'spec': spec})
+            self.assertEqual(proc.returncode, 1)
+            self.assertEqual(json.loads(proc.stdout), {'error': 'worker_rpc_failed'})
+        # Same identity cannot move between lanes.
+        light, spec = self.submit("print('x')", lane='light')
+        heavy_spec = {k: v for k, v in spec.items() if k != 'lane'}
+        self.assertEqual(self.raw_rpc({'action': 'submit', 'job_id': light, 'spec': heavy_spec}).returncode, 1)
+
+    def test_light_cancel_routes_to_light_spool(self):
+        holder = self.hold_shared_lock()
+        try:
+            a, _ = self.submit("import time; time.sleep(10)", lane='light')
+            self.wait(a, ('running',))
+            b, _ = self.submit("from pathlib import Path; Path('must-not-exist').touch()", lane='light')
+            self.rpc('cancel', b); self.rpc('cancel', a)
+            self.wait(a, ('cancelled',)); self.wait(b, ('cancelled',))
+            self.assertFalse((self.base / 'must-not-exist').exists())
+        finally:
+            holder.close()
+
+    def test_light_job_cannot_borrow_the_android_shared_lock(self):
+        helper = SCRIPT.parent / 'android-build-thales.py'
+        code = f"import importlib.util; s=importlib.util.spec_from_file_location('a',{str(helper)!r}); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.BASE={str(self.base)!r};\nwith m.shared_worker_lock(True): print('ACQUIRED-' + 'MARK')"
+        self.base.mkdir(parents=True, exist_ok=True); self.lock.touch()
+        a, _ = self.submit(code, lane='light')
+        result = self.wait(a, ('completed', 'failed'))
+        self.assertEqual(result['state'], 'failed')
+        log = Path(result['receipt']['log_path']).read_text()
+        self.assertIn('inherited lock identity mismatch', log)
+        self.assertNotIn('ACQUIRED-MARK', log)
+
+class ConfigurationTests(unittest.TestCase):
+    def test_missing_configuration_refuses_before_creating_storage(self):
+        with tempfile.TemporaryDirectory(prefix='heavy-config-') as temp:
+            root = Path(temp) / 'spool'
+            env = {k: v for k, v in os.environ.items() if k not in ('WIZARD_HEAVY_ROOT', 'WIZARD_WORK_ROOT')}
+            result = subprocess.run([sys.executable, str(SCRIPT), '--root', str(root), '--lock', temp + '/lock'],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stderr.strip(), 'heavy lane not configured: set WIZARD_HEAVY_ROOT')
+            self.assertFalse(root.exists())
+
+    def test_fallback_and_canonical_path_boundaries(self):
+        module = importlib.util.spec_from_file_location('worker_config', SCRIPT)
+        worker = importlib.util.module_from_spec(module); module.loader.exec_module(worker)
+        with tempfile.TemporaryDirectory(prefix='heavy-boundary-') as temp:
+            base = Path(temp).resolve(); allowed = base / 'allowed'; allowed.mkdir()
+            outside = base / 'outside'; outside.mkdir()
+            (allowed / 'escape').symlink_to(outside, target_is_directory=True)
+            spec = {'cwd': str(allowed), 'argv': ['true'], 'timeout_seconds': 1}
+            with unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_ROOT': '', 'WIZARD_WORK_ROOT': str(allowed)}):
+                self.assertEqual(worker.validate(spec)['cwd'], str(allowed))
+                for cwd in (outside, allowed / '../outside', allowed / 'escape'):
+                    with self.assertRaisesRegex(ValueError, 'configured heavy root'):
+                        worker.validate({**spec, 'cwd': str(cwd)})
+                for root, lock in ((outside / 'spool', allowed / 'lock'), (allowed / 'spool', outside / 'lock')):
+                    result = subprocess.run([sys.executable, str(SCRIPT), '--root', str(root), '--lock', str(lock)],
+                                            capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('configured heavy root', result.stderr)
+                    self.assertFalse(root.exists())
+
+    def test_android_preparation_uses_configured_host_root_and_sdk_without_building(self):
+        import contextlib
+        import io
+        helper = SCRIPT.parent / 'android-build-thales.py'
+        with tempfile.TemporaryDirectory(prefix='android-config-') as temp:
+            base = Path(temp); project = base / 'project'; project.mkdir()
+            (project / 'gradlew').touch()
+            root = str(base / 'remote worker')
+            env = {'WIZARD_HEAVY_ROOT': root, 'WIZARD_BUILD_HOST': 'build-fixture',
+                   'ANDROID_HOME': '/opt/fixture sdk', 'HERMES_HOME': str(base / 'hermes')}
+            with unittest.mock.patch.dict(os.environ, env):
+                spec = importlib.util.spec_from_file_location('android_config', helper)
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+                self.assertEqual(module.BASE, root + '/AndroidBuilds')
+                argv = [str(helper), '--project', str(project), '--output', str(base / 'output'), '--prepare-only', '--', 'assembleDebug']
+                with unittest.mock.patch.object(module.sys, 'argv', argv), \
+                     unittest.mock.patch.object(module, 'run') as remote, \
+                     unittest.mock.patch.object(module, 'snapshot', return_value={}), \
+                     unittest.mock.patch.object(module.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'fixture-sha')), \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    old_umask = os.umask(0o077)
+                    try:
+                        module.main()
+                    finally:
+                        os.umask(old_umask)
+                prepared = json.loads(output.getvalue())
+                self.assertEqual(prepared['host'], 'build-fixture')
+                self.assertTrue(prepared['cwd'].startswith(root + '/AndroidBuilds/jobs/'))
+                self.assertIn('WIZARD_HEAVY_ROOT=' + root, prepared['argv'])
+                self.assertIn('WIZARD_BUILD_HOST=build-fixture', prepared['argv'])
+                self.assertIn('ANDROID_HOME=/opt/fixture sdk', prepared['argv'])
+                self.assertEqual(prepared, json.loads((base / 'output/job.json').read_text()))
+                commands = [call.args[0] for call in remote.call_args_list]
+                self.assertEqual(commands[0][-2], 'build-fixture')
+                self.assertIn("test -d '" + root + "'", commands[0][-1])
+                self.assertEqual(commands[-1][-1], 'build-fixture:' + prepared['cwd'] + '/')
+                self.assertEqual(len(commands), 3)  # preflight, stage mkdir, copy; never Gradle
+
+    def test_linux_health_keeps_disk_memory_pressure_and_unknown_guards(self):
+        module = importlib.util.spec_from_file_location('worker_health', SCRIPT)
+        worker = importlib.util.module_from_spec(module); module.loader.exec_module(worker)
+        with unittest.mock.patch.object(worker.sys, 'platform', 'linux'), \
+             unittest.mock.patch.object(worker.shutil, 'disk_usage') as disk, \
+             unittest.mock.patch.object(worker.Path, 'read_text') as read:
+            disk.return_value.free = 30 * 1024**3
+            read.side_effect = ['MemAvailable: 1048576 kB', 'full avg10=0.00 avg60=0.00 total=0']
+            self.assertEqual(worker.resource_wait(Path('.')), '')
+            read.side_effect = ['MemAvailable: 1 kB', 'full avg10=0.00 avg60=0.00 total=0']
+            self.assertEqual(worker.resource_wait(Path('.')), 'memory_pressure')
+            read.side_effect = ['MemAvailable: 1048576 kB', 'full avg10=20.00 avg60=0.00 total=0']
+            self.assertEqual(worker.resource_wait(Path('.')), 'memory_pressure')
+            read.side_effect = OSError('health unavailable')
+            self.assertEqual(worker.resource_wait(Path('.')), 'worker_health_unknown')
+            disk.return_value.free = 1
+            self.assertEqual(worker.resource_wait(Path('.')), 'disk_pressure')
 
 
 if __name__ == '__main__':

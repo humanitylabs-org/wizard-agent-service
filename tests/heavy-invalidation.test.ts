@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,7 +10,7 @@ import { createHeavyIntegration } from '../server/heavy-integration.mjs'
 const cleanup: (() => any)[] = []
 afterEach(async () => { for (const fn of cleanup.reverse()) await fn(); cleanup.length = 0 })
 const file = () => { const root = mkdtempSync(join(tmpdir(), 'heavy-fence-')); cleanup.push(() => rmSync(root, { recursive: true, force: true })); return join(root, 'queue.db') }
-const spec = { cwd: '/Volumes/ThalesMedia/qa', argv: ['true'], timeout_seconds: 10 }
+const spec = { cwd: join(heavyRoot, 'fixture'), argv: ['true'], timeout_seconds: 10 }
 const token = 'test-heavy-fence-token-00000000000000'
 
 it.each(['stop', 'steer'].flatMap(action => [false, true].map(restart => ({ action, restart }))))(

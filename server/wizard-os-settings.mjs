@@ -4,9 +4,11 @@
 // few facts every Wizard OS piece needs and no agent stores for us: who the user is, what they
 // call their agent, their clock. The Agent Service owns the format; front ends read it through
 // GET /wizard/v1/bootstrap and never hardcode any of it.
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import { appView } from './app-views.mjs'
+import { chatsView, CHATS_DEFAULT } from './chats-views.mjs'
 
 export const BOOTSTRAP_VERSION = 1
 export const DEFAULT_AGENT_NAME = 'Wizard'
@@ -38,12 +40,31 @@ function validHost(value) {
   return typeof value === 'string' && /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/iu.test(value) ? value.toLowerCase() : ''
 }
 
+/** The exact Tailscale HTTPS origin of this box ('https://wizard.tail1234.ts.net'), or ''. */
+export function validTailnetOrigin(value) {
+  const origin = validOrigin(value)
+  if (!origin) return ''
+  const u = new URL(origin)
+  return u.protocol === 'https:' && /^[a-z0-9.-]+\.ts\.net$/u.test(u.hostname) ? origin : ''
+}
+
+/** A Tailscale login name as Serve reports it (lower-cased), or ''. */
+export function validLogin(value) {
+  if (typeof value !== 'string') return ''
+  const login = value.trim().toLowerCase()
+  return login && login.length <= 320 && !/[\s\x00-\x1f\x7f,]/u.test(login) ? login : ''
+}
+
+function validStamp(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(value) && Number.isFinite(Date.parse(value)) ? value : ''
+}
+
 function validDayStart(value) {
   return typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value) ? value : '00:00'
 }
 
 /** Normalised settings. Unknown fields are ignored; nothing here is secret. */
-export function normalizeSettings(raw) {
+export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes' } = {}) {
   const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   const owner = value.owner && typeof value.owner === 'object' ? value.owner : {}
   const agent = value.agent && typeof value.agent === 'object' ? value.agent : {}
@@ -51,11 +72,18 @@ export function normalizeSettings(raw) {
   const voice = value.voice && typeof value.voice === 'object' ? value.voice : {}
   const fastRouter = value.fast_router && typeof value.fast_router === 'object' ? value.fast_router : {}
   const network = value.network && typeof value.network === 'object' && !Array.isArray(value.network) ? value.network : {}
+  const access = value.access && typeof value.access === 'object' && !Array.isArray(value.access) ? value.access : {}
+  const tailscale = access.tailscale && typeof access.tailscale === 'object' && !Array.isArray(access.tailscale) ? access.tailscale : {}
+  const setup = value.setup && typeof value.setup === 'object' && !Array.isArray(value.setup) ? value.setup : {}
+  const tailnetOrigin = validTailnetOrigin(tailscale.origin)
+  const ownerLogins = tailnetOrigin && Array.isArray(tailscale.owner_logins)
+    ? [...new Set(tailscale.owner_logins.map(validLogin).filter(Boolean))].slice(0, 1) : []
   const vocabulary = Array.isArray(voice.vocabulary)
     ? voice.vocabulary.map((word) => cleanText(word, 40)).filter(Boolean).slice(0, 80)
     : []
   return {
     schema: 1,
+    agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
       place: cleanText(owner.place, 80),
@@ -94,6 +122,20 @@ export function normalizeSettings(raw) {
       base_url: validOrigin(network.base_url),
       aliases: Array.isArray(network.aliases) ? [...new Set(network.aliases.map(validHost).filter(Boolean))].slice(0, 8) : [],
     },
+    // Who may use this box through Tailscale Serve (tailnet-access.mjs), written by "Connect your phone"
+    // (phone-setup.mjs) once the box is signed in and serving: the exact https origin and the one Tailscale
+    // login that owns this node. Both or neither: an origin without an owner authorizes nobody. This is an
+    // authorization input: settings.json must be writable only by the Service and owner-trusted box tools.
+    access: {
+      tailscale: tailnetOrigin && ownerLogins.length ? { origin: tailnetOrigin, owner_logins: ownerLogins } : { origin: '', owner_logins: [] },
+    },
+    // Setup app progress (ISO times, '' = not yet): the first-run checklist was seen, phone setup was
+    // started, and the owner's phone was first seen.
+    setup: {
+      seen_at: validStamp(setup.seen_at),
+      phone_started_at: validStamp(setup.phone_started_at),
+      phone_seen_at: validStamp(setup.phone_seen_at),
+    },
   }
 }
 
@@ -114,14 +156,38 @@ export function resolveFastRouter(settings, fallback = null, env = process.env) 
 }
 
 /** Read settings.json on every call (it is tiny), so edits apply without a restart. */
-export function readSettings(path) {
-  if (!path || !existsSync(path)) return { settings: normalizeSettings({}), source: 'default' }
+export function readSettings(path, options = {}) {
+  if (!path || !existsSync(path)) return { settings: normalizeSettings({}, options), source: 'default' }
   try {
     if (statSync(path).size > 64 * 1024) throw new Error('too large')
-    return { settings: normalizeSettings(JSON.parse(readFileSync(path, 'utf8'))), source: 'file' }
+    return { settings: normalizeSettings(JSON.parse(readFileSync(path, 'utf8')), options), source: 'file' }
   } catch {
-    return { settings: normalizeSettings({}), source: 'invalid' }
+    return { settings: normalizeSettings({}, options), source: 'invalid' }
   }
+}
+
+/**
+ * Change settings.json: `mutate(raw)` edits the parsed file in place. Fields this service does not
+ * know survive (other Wizard OS pieces write their own keys); the result must still normalise. Writes
+ * are atomic (temp file + rename). A file that exists but is not valid JSON is never overwritten.
+ * Returns the normalised settings.
+ */
+export function updateSettings(path, mutate) {
+  if (!path) throw Object.assign(new Error('settings path not configured'), { code: 'settings_unavailable' })
+  let raw = { schema: 1 }
+  if (existsSync(path)) {
+    if (statSync(path).size > 64 * 1024) throw Object.assign(new Error('settings too large'), { code: 'settings_invalid' })
+    try { raw = JSON.parse(readFileSync(path, 'utf8')) } catch { throw Object.assign(new Error('settings unreadable'), { code: 'settings_invalid' }) }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw Object.assign(new Error('settings unreadable'), { code: 'settings_invalid' })
+  }
+  mutate(raw)
+  const text = `${JSON.stringify(raw, null, 1)}\n`
+  if (Buffer.byteLength(text) > 64 * 1024) throw Object.assign(new Error('settings too large'), { code: 'settings_invalid' })
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.${process.pid}.tmp`
+  writeFileSync(temporary, text, { mode: 0o644 })
+  renameSync(temporary, path)
+  return normalizeSettings(raw)
 }
 
 function readJsonFile(path, limit = 2 * 1024 * 1024) {
@@ -154,8 +220,10 @@ export function readApps({ appsJsonPath, launcherPath }) {
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
-      url: view, status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
+      url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
+      provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
   const launcher = readJsonFile(launcherPath, 256 * 1024)
@@ -165,13 +233,17 @@ export function readApps({ appsJsonPath, launcherPath }) {
     if (!id || !url || seen.has(id)) continue
     seen.add(id)
     out.push({
-      id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url,
+      id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url, view: { mode: 'original', url },
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
       receives_voice_input: link.receives_voice_input === true,
     })
   }
-  return { schema: 1, apps: out }
+  const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
+  const requested = installed?.slots?.chats?.default
+  const active = candidates.includes(requested) ? requested : CHATS_DEFAULT
+  return { schema: 1, apps: out, slots: { chats: { default: active, candidates } },
+    parking: [{ slot: 'chats', name: 'Chats', required: false, default_app: CHATS_DEFAULT, active, state: 'filled' }] }
 }
 
 /**

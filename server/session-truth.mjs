@@ -6,6 +6,11 @@ import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
+// Recovery requests for an interrupted Helm card arrive as a user turn that starts with this marker; the
+// thread hides it. History written before markers were neutral carries the legacy wording (recognized only,
+// never emitted).
+export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
+export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
@@ -21,7 +26,8 @@ const INTERNAL_USER_PREFIXES = [
   '[PRIOR CONTEXT — for reference only; not a new message]',
   '[Your active task list was preserved across context compression]',
   '[Your previous agent loop was paused',
-  '[James requested recovery of this interrupted Helm card.]',
+  RECOVERY_REQUEST_MARKER,
+  LEGACY_RECOVERY_REQUEST_MARKER,
   '[STILL IN PROGRESS',
   'Workline browser QA found a concrete regression in ',
 ]
@@ -37,14 +43,14 @@ function openReadOnly(path) {
   catch { return null }
 }
 
-function visibleUserRequest(content, displayKind) {
+export function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
   if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
-function visibleAssistantReply(content, displayKind, finishReason) {
+export function visibleAssistantReply(content, displayKind, finishReason) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
   const completion = String(finishReason || '')
@@ -80,6 +86,31 @@ function lockedRoute(modelConfig) {
     const provider = typeof lock?.provider === 'string' ? lock.provider : ''
     return ROUTE_PART.test(model) && ROUTE_PART.test(provider) ? { model, provider, updatedAt: Number(lock.updated_at) || 0 } : null
   } catch { return null }
+}
+
+// Search only caller-approved session IDs in this runtime, with the same visibility rules
+// as the list truth reader. Never discover agents or open their stores here.
+export function searchHermesSessionText(path, sessionIds, query) {
+  const ids = boundedIds(sessionIds), hits = new Map();
+  const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!ids.length || !words.length) return hits;
+  const db = openReadOnly(path); if (!db) return hits;
+  try {
+    const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x=>x.name));
+    const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
+    // Let SQLite drop non-matching messages before they become JS strings (the costly part):
+    // instr(lower()) folds ASCII only, so it prefilters only ASCII words; the JS check below
+    // stays the authority.
+    const ascii = words.filter(w => /^[\x00-\x7f]+$/.test(w));
+    const prefilter = ascii.map(() => ' AND instr(lower(content), ?) > 0').join('');
+    const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL${prefilter} ORDER BY timestamp DESC`;
+    for (const row of db.prepare(sql).iterate(...ids, ...ascii)) {
+      if (hits.has(row.session_id)) continue;
+      const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
+      if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
+    }
+  } catch { /* old stores retain title/request search */ } finally { db.close(); }
+  return hits;
 }
 
 export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
@@ -357,6 +388,92 @@ export function readPendingWizardAssistantAdmissions(path, sessionIds, nowSecond
     return pending
   } catch {
     return []
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+// ---- Chats list cache signals (session-list-cache.mjs). Both readers fail open: null/undefined
+// tells the caller to rebuild everything, never to trust a cached row.
+
+/** Cheap revision of the Hermes state that can change a projected thread row. */
+export function readHermesListRevision(path) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const parts = []
+    const sessions = db.prepare('SELECT COUNT(*) AS n, MAX(COALESCE(last_activity_at, started_at)) AS at, MAX(message_count) AS m FROM sessions').get()
+    parts.push(sessions.n, sessions.at, sessions.m)
+    parts.push(db.prepare('SELECT MAX(rowid) AS id FROM messages').get().id)
+    for (const sql of [
+      'SELECT COUNT(*) AS n, MAX(expires_at) AS at FROM session_turn_leases',
+      'SELECT COUNT(*) AS n, MAX(rowid) AS id, SUM(state IN (\'running\', \'stalling\', \'finalizing\')) AS live FROM async_delegations',
+    ]) {
+      try { parts.push(...Object.values(db.prepare(sql).get())) } catch { parts.push('-') }
+    }
+    return parts.map((value) => String(value ?? '')).join(':')
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+function lineageRoots(db, ids) {
+  const parentOf = db.prepare('SELECT parent_session_id FROM sessions WHERE id = ?')
+  const parents = new Map()
+  const roots = new Set()
+  for (const start of ids) {
+    let id = String(start)
+    const seen = new Set()
+    for (let depth = 0; depth < 1000 && !seen.has(id); depth++) {
+      seen.add(id)
+      roots.add(id)
+      let parent = parents.get(id)
+      if (parent === undefined) {
+        parent = parentOf.get(id)?.parent_session_id
+        parent = parent ? String(parent) : ''
+        parents.set(id, parent)
+      }
+      if (!parent) break
+      id = parent
+    }
+  }
+  return roots
+}
+
+/**
+ * Thread ids (every lineage ancestor) with Hermes activity since `sinceSeconds`. A compression tip
+ * or a helper child counts for the thread it descends from, so its root is re-projected.
+ */
+export function readRecentHermesRootIds(path, sinceSeconds) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const recent = db.prepare('SELECT id FROM sessions WHERE COALESCE(last_activity_at, started_at) >= ?').all(Number(sinceSeconds))
+    return lineageRoots(db, recent.map((row) => row.id))
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* read-only cleanup */ }
+  }
+}
+
+/**
+ * Threads (with lineage ancestors) that received Hermes messages after message `afterId`.
+ * `roots` is null when the delta is unknown or too large to trust: the caller rebuilds everything.
+ */
+export function readHermesMessageDelta(path, afterId, maxRows = 20_000) {
+  const db = openReadOnly(path)
+  if (!db) return null
+  try {
+    const maxId = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get().id ?? 0)
+    if (!Number.isFinite(afterId) || afterId > maxId || maxId - afterId > maxRows) return { maxId, roots: null }
+    // Walk the primary key range; DISTINCT/GROUP BY here makes SQLite scan the session index.
+    const sessions = new Set(db.prepare('SELECT session_id FROM messages WHERE id > ? AND id <= ? ORDER BY id').all(afterId, maxId).map((row) => String(row.session_id)))
+    return { maxId, roots: lineageRoots(db, sessions) }
+  } catch {
+    return null
   } finally {
     try { db.close() } catch { /* read-only cleanup */ }
   }

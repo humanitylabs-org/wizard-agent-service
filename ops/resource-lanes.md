@@ -17,6 +17,7 @@ This is an opt-in native Hermes plugin + Agent Service extension, not a core pat
 - Keep `WIZARD_MAX_ACTIVE_THREADS` unchanged (live deployment was 12). This patch does not raise it or alter provider accounts/quotas. Tests use a smaller cap to prove separation.
 - Interactive dispatch no longer requires idle CPU. Linux admission retains a conservative safety floor of 512 MiB `MemAvailable` and memory full PSI avg10 below 20%. These are safety stops, **not a measured maximum concurrency recommendation**. Unknown Linux memory health fails closed. Non-Linux relies on its existing bounded run cap.
 - Remote work reuses the current helper's 20 GiB free-disk floor, macOS's own *critical* memory-pressure level, and one existing shared worker lock. A failed health read waits rather than starting work.
+- **Light lane (`lane: "light"`).** Short packaging work — Docker image packaging that reuses prebuilt/audited binaries, static or web app builds, small canaries — runs in its own spool (`<root>/light/jobs.sqlite3`) under its own exclusive lock (`<root>/light/packaging.lock`), one job at a time, FIFO, with the same disk/memory guards and never-retry recovery. It never waits behind Android, emulator or VM work, and a heavy-only dispatcher (including an older release) cannot see or claim light jobs. Light jobs are capped at 900 seconds. Their `WIZARD_HEAVY_LOCK_FD` is the packaging lock, so `android-build-thales` fails closed (`inherited lock identity mismatch`) inside a light job. A spec without `lane` is byte-identical to before and runs under the shared lock. Measured motive (16–19 Oct 2026): 30 light jobs needed 0.3 h of work and waited 4.8 h behind heavy jobs; Messenger image builds of 13–28 s waited 8–31 min.
 - Admission HTTP 429 / Retry-After produces durable per-route backoff, including HTTP-date headers and exponential fallback. Provider-owned retries inside Hermes are unchanged. Resource wait, provider wait and terminal task failure remain distinct.
 - Existing `/wizard/health` fields `queue.max_active`, `active`, `queued`, `dispatch_paused`, `liveness_available` remain. Additive fields: `lane`, `provider_waiting`, `heavy.{active,queued,worker_state,unavailable,cancellation_pending}`. `busy_external` means another existing lock owner, not a fabricated running queue job.
 
@@ -27,12 +28,15 @@ Use one stable remote spool on the external volume, distinct from immutable work
 ```
 WIZARD_HEAVY_STATE_PATH=<persistent-service-state>/heavy.sqlite3
 WIZARD_HEAVY_TOKEN=<random-secret-at-least-32-characters>
-WIZARD_HEAVY_SSH_HOST=<existing-ssh-alias>
-WIZARD_HEAVY_REMOTE_SCRIPT=/Volumes/ThalesMedia/<immutable-release>/scripts/heavy-worker.py
-WIZARD_HEAVY_REMOTE_ROOT=/Volumes/ThalesMedia/<persistent-state>/heavy-queue
-WIZARD_HEAVY_REMOTE_LOCK=/Volumes/ThalesMedia/AndroidBuilds/worker.lock
+WIZARD_BUILD_HOST=<existing-ssh-alias>
+WIZARD_HEAVY_ROOT=<absolute-remote-work-root>
+WIZARD_HEAVY_REMOTE_SCRIPT=${WIZARD_HEAVY_ROOT}/<immutable-release>/scripts/heavy-worker.py
+WIZARD_HEAVY_REMOTE_ROOT=${WIZARD_HEAVY_ROOT}/<persistent-state>/heavy-queue
+WIZARD_HEAVY_REMOTE_LOCK=${WIZARD_HEAVY_ROOT}/AndroidBuilds/worker.lock
 WIZARD_HEAVY_REMOTE_PYTHON=/opt/homebrew/bin/python3
 ```
+
+Set `WIZARD_HEAVY_ROOT` (fallback `WIZARD_WORK_ROOT`) on the service and any SSH sidecar to the **remote** allowed root, not a local VPS directory. SSH transport forwards that value to the worker, including detached children. With neither set, submit/worker refuse: `heavy lane not configured: set WIZARD_HEAVY_ROOT`. `WIZARD_BUILD_HOST` selects the SSH target; legacy `WIZARD_HEAVY_SSH_HOST` remains a fallback. The Android helper requires the same root and host and carries them in its prepared command; optional `ANDROID_HOME` / `ANDROID_SDK_ROOT` select the remote SDK.
 
 Secrets are supplied through protected environment files, never prompts/tool arguments, repo files or process arguments. Plugin origin must be loopback. Install `hermes-plugin/wizard-heavy` through the supported Hermes plugin mechanism and give its runtime:
 
@@ -64,7 +68,7 @@ Run the normal helper command with `--prepare-only` and its usual output directo
 ## Safe activation/readback
 
 1. Fetch the pushed candidate and latest shared branch/live SHA. Verify candidate contains live and concurrent fixes. Protected branches change by reviewed PR only.
-2. Run sustained tests on Thales under `/Volumes/ThalesMedia`, save immutable SHA + source hashes. Stage immutable server/plugin/worker/helper code. No full guest rebuild.
+2. Run sustained tests on Thales under `$WIZARD_WORK_ROOT`, save immutable SHA + source hashes. Stage immutable server/plugin/worker/helper code. No full guest rebuild.
 3. **Do not run the legacy deploy helper blindly:** its missing-release path runs the full test suite on the VPS and its activation immediately restarts the live service. Use verified remote evidence and an already prepared immutable release, or the release owner's remote staging procedure. Verify `RELEASE_SHA`, `SERVER_TREE`, origin and ancestry before switching anything.
 4. Provision the sidecar/worker stable state and protected env; prove the current container can reach the loopback RPC and read a canary receipt. The sidecar alone does not activate scheduling.
 5. Parent arranges a genuine idle window/continuation. Never cancel live threads to create idle. Preserve both SQLite stores and all remote spools. Activate the exact reviewed candidate, then plugin/helper at the supported runtime boundary.
@@ -73,12 +77,12 @@ Run the normal helper command with `--prepare-only` and its usual output directo
 
 ## Verification commands
 
-On Thales, with external-volume `TMPDIR` and Homebrew binaries on `PATH`:
+The lightweight worker regression fixtures run on macOS or Linux with temporary roots (no builds). For sustained suites, use the configured build host with external-storage `TMPDIR` and the worker toolchain on `PATH`:
 
 ```
 npm ci --no-audit --no-fund
 npm test
-/opt/homebrew/bin/python3 tests/heavy-worker.remote.py
+python3 tests/heavy-worker.remote.py
 # Actual Hermes source + its dependencies; no credentials required:
 PYTHONPATH=<hermes-source> <hermes-python> tests/heavy-plugin.remote.py
 ```

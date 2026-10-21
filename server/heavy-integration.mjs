@@ -8,7 +8,48 @@ export const HEAVY_PREFIX = '[Wizard heavy-work completion]'
 const fail = (message, status) => Object.assign(new Error(message), { status })
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 
-export function createHeavyIntegration({ options, queue, request }) {
+// Canonical display history includes compaction archives, but not rewound/deleted
+// turns. Do not use include_inactive or fall back to a summary/origin-body guess.
+// Hermes caps this endpoint at 500 and returns each latest page oldest-first.
+export async function heavyRequestWatermark(request, sessionId) {
+  const limit = 500
+  const base = `/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=${limit}&include_compacted=true`
+  const fingerprint = rows => createHash('sha256').update(JSON.stringify(rows.map(
+    r => [r.id, r.role, r.content, r.display_kind]))).digest('hex')
+  const read = async offset => {
+    const payload = await request(`${base}&offset=${offset}`)
+    const rows = Array.isArray(payload?.data) ? payload.data : payload?.messages
+    if (!Array.isArray(rows) || rows.length > limit || rows.some(r => !r || !Number.isSafeInteger(r.id) || r.id <= 0))
+      throw fail('history unavailable', 503)
+    const page = payload.pagination
+    // Legacy single-page responses remain usable; pagination requires an explicit
+    // offset acknowledgement, never an assumed/clamped/ignored cursor.
+    if ((offset && !page) || (page && (page.limit !== limit || page.offset !== offset
+      || page.order !== 'latest' || page.returned !== rows.length))) throw fail('history pagination unavailable', 503)
+    return rows
+  }
+  let head
+  const seen = new Set()
+  for (let page = 0; page < 32; page++) {
+    const rows = await read(page * limit)
+    if (!page) head = fingerprint(rows)
+    for (const row of rows) {
+      if (seen.has(row.id)) throw fail('history changed during pagination', 503)
+      seen.add(row.id)
+    }
+    const row = rows.slice().reverse().find(r => isHumanRequest(r) && !String(r.content).startsWith(HEAVY_PREFIX))
+    if (row) {
+      // Offset pages are not a snapshot: a new correction (or history rewrite)
+      // during the scan must not allow us to return an older request as latest.
+      if (page && fingerprint(await read(0)) !== head) throw fail('history changed during pagination', 503)
+      return { id: row.id, hash: createHash('sha256').update(String(row.content)).digest('hex') }
+    }
+    if (rows.length < limit) throw fail('human request unavailable', 503)
+  }
+  throw fail('human request history scan exhausted', 503)
+}
+
+export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -17,18 +58,12 @@ export function createHeavyIntegration({ options, queue, request }) {
     const provider = body.provider || runtime?.requested?.provider || runtime?.provider
     return model && provider && provider !== 'custom' ? { model, provider, require_model_lock: true } : null
   }
-  const watermark = async sessionId => {
-    const payload = await request(`/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=512`)
-    const rows = Array.isArray(payload?.data) ? payload.data : payload?.messages
-    if (!Array.isArray(rows)) throw fail('history unavailable', 503)
-    const row = rows.slice().reverse().find(r => isHumanRequest(r) && !String(r.content).startsWith(HEAVY_PREFIX))
-    if (!row) throw fail('human request unavailable', 503)
-    return { id: row.id, hash: createHash('sha256').update(String(row.content)).digest('hex') }
-  }
+  const watermark = sessionId => heavyRequestWatermark(request, sessionId)
   let heavy
   const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
+    if ((job.agent_id ?? 'hermes') !== 'hermes' || !isAutomaticAgentAllowed('hermes')) return false
     const fresh = heavy.get(job.job_id)
     if (!fresh || fresh.cancel_requested || fresh.continuation_invalidated || ['suppressed', 'superseded'].includes(fresh.resume)) return false
     const latest = queue.latestForSession(job.sessionId)
@@ -59,11 +94,11 @@ export function createHeavyIntegration({ options, queue, request }) {
       const body = JSON.stringify({ session_id: job.sessionId, input, ...job.route })
       const result = await queue.admit({ runtime: 'direct', sessionId: job.sessionId,
         idempotencyKey: `wizard-heavy-${job.job_id}`, requestHash: queueRequestHash('direct', body), body,
-        continuation: { kind: HEAVY_KIND, job_id: job.job_id, sessionId: job.sessionId } })
+        agent_id: job.agent_id ?? 'hermes', continuation: { kind: HEAVY_KIND, job_id: job.job_id, agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, sessionId: job.sessionId } })
       return result.record
     },
   })
-  const view = job => ({ job_id: job.job_id, state: job.state, reason: job.reason,
+  const view = job => ({ job_id: job.job_id, agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, state: job.state, reason: job.reason,
     cancel_requested: job.cancel_requested, continuation: job.resume || 'pending',
     continuation_invalidated: Boolean(job.continuation_invalidated), receipt: job.receipt,
     instruction: terminal.has(job.state) ? 'Use the receipt as evidence; do not repeat the job.' :
@@ -93,6 +128,7 @@ export function createHeavyIntegration({ options, queue, request }) {
       const sessionId = value.session_id
       if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw fail('session required', 400)
       if (path === '/wizard/internal/heavy/submit') {
+        if (!isAutomaticAgentAllowed('hermes')) throw fail('recovery agent is not automatic', 409)
         const origin = queue.latestForSession(sessionId)
         // Do not infer a private/operator route or let callers substitute a model.
         if (!origin || origin.runtime !== 'direct' || !['running', 'launching'].includes(origin.status)) throw fail('no mutation-owning direct run', 409)

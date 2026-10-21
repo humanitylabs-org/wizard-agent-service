@@ -68,3 +68,31 @@ test('unknown stream or rejected upstream never drops the lock',async()=>{
  const b=new LockedRunBridge({origin:'http://localhost:8865',fetchImpl:async()=>new Response('no',{status:503})});
  await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),/rejected before execution/)
 });
+
+// 17 Oct 2026 incident: a gateway restart cut six of James's sends mid-request; "uncertain" then failed them permanently.
+test('connection refused means never sent, so the queue may retry it without a duplicate',async()=>{
+ let calls=0;const b=new LockedRunBridge({origin:'http://localhost:8865',fetchImpl:async()=>{calls++;if(calls===1)throw new TypeError('fetch failed',{cause:Object.assign(Error('connect'),{code:'ECONNREFUSED'})});return stream(frame('run.started',{run_id:'run_after_restart',runtime:ack}))}});
+ await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),TypeError);
+ const r=await b.fetch('http://localhost:8865/v1/runs',start(payload));assert.equal((await r.json()).run_id,'run_after_restart');assert.equal(calls,2)
+});
+test('uncertain send waits retriably, then replays once Hermes provably never recorded it',async()=>{
+ let calls=0;const probes=[];
+ const b=new LockedRunBridge({origin:'http://localhost:8865',uncertainSettleMs:0,
+  deliveryProbe:(sid,since,text)=>{probes.push([sid,text]);return false},
+  fetchImpl:async()=>{calls++;if(calls===1)throw Error('socket hang up');return stream(frame('run.started',{run_id:'run_replayed',runtime:ack}))}});
+ await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),/socket hang up/);
+ const r=await b.fetch('http://localhost:8865/v1/runs',start(payload));assert.equal((await r.json()).run_id,'run_replayed');
+ assert.equal(calls,2);assert.deepEqual(probes,[['wizard_synthetic','synthetic text']])
+});
+test('uncertain send that Hermes did record is never replayed',async()=>{
+ let calls=0;const b=new LockedRunBridge({origin:'http://localhost:8865',uncertainSettleMs:0,deliveryProbe:()=>true,fetchImpl:async()=>{calls++;throw Error('socket hang up')}});
+ await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),/socket hang up/);
+ await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),/uncertain/);assert.equal(calls,1)
+});
+test('uncertain send inside the settle window or with an unreadable transcript stays retriable (503), never terminal',async()=>{
+ for (const opts of [{uncertainSettleMs:60_000,deliveryProbe:()=>false},{uncertainSettleMs:0,deliveryProbe:()=>null}]) {
+  let calls=0;const b=new LockedRunBridge({origin:'http://localhost:8865',...opts,fetchImpl:async()=>{calls++;throw Error('socket hang up')}});
+  await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),/socket hang up/);
+  await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),e=>e.status===503);assert.equal(calls,1)
+ }
+});
