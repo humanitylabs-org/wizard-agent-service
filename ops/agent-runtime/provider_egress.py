@@ -6,6 +6,7 @@ DNS/proxy settings; incompatible installations are left stopped, never bypassed.
 """
 import ipaddress
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -86,6 +87,33 @@ class ProviderEgress:
         if any(m['Destination'] in ('/var/run/docker.sock', '/run/docker.sock') for m in info.get('Mounts', [])):
             raise self.failure('provider_container_unsafe', 409)
 
+    def ensure_bootstrap(self, app, info):
+        """Docker still resolves NetworkMode after its last endpoint is removed.
+
+        Runtipi may delete that unused Compose network. Recreate only the exact
+        provider bootstrap as an empty INTERNAL bridge, never an egress route.
+        Do this before any network connect (not just before container start).
+        """
+        mode = info.get('HostConfig', {}).get('NetworkMode', '')
+        if self.inspect('network', mode):
+            return
+        labels = info.get('Config', {}).get('Labels') or {}
+        project = labels.get('com.docker.compose.project', '')
+        if (not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,127}', project) or
+                labels.get('com.docker.compose.service') != app['id'] or
+                mode != project + '_provider-bootstrap'):
+            raise self.failure('provider_bootstrap_identity_invalid', 409)
+        self.docker(['network', 'create', '--internal',
+                     '--label', 'com.docker.compose.project=' + project,
+                     '--label', 'com.docker.compose.network=provider-bootstrap',
+                     '--label', 'wizard.private-bootstrap=' + app['id'], mode],
+                    check=False, timeout=60)
+        value = self.inspect('network', mode)
+        if (not value or not value.get('Internal') or value.get('EnableIPv6') or
+                value.get('Driver') != 'bridge' or value.get('Containers') or
+                (value.get('Labels') or {}).get('wizard.private-bootstrap') != app['id']):
+            raise self.failure('provider_bootstrap_recovery_failed', 409)
+
     def helper(self, name, args, network, alias=None):
         self.docker(['rm', '-f', name], check=False, timeout=60)
         self.docker(['create', '--name', name, '--network', network, '--restart', 'no',
@@ -105,6 +133,7 @@ class ProviderEgress:
         self.docker(['stop', cid], timeout=60)
         try:
             self.validate(info, hosts)
+            self.ensure_bootstrap(app, info)
             net = self.network(app)
             proxy = self.namespace + '-egress-proxy-' + app['id']
             edge = self.namespace + '-provider-edge-' + app['id']

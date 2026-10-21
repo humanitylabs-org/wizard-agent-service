@@ -117,6 +117,25 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(any(c[:2] == ['network','disconnect'] and c[3] in {'wzpr-a','wzpr-b'} for c in calls))
         self.assertIn(['start','cid'], calls)
 
+    def test_missing_bootstrap_recreated_internal_before_connect(self):
+        import subprocess
+        calls = []
+        manager = ProviderEgress(lambda args, **kw: (calls.append(args) or subprocess.CompletedProcess(args,0,'','')), Failure)
+        value = self.fixture()
+        value['Config']['Labels'] = {'com.docker.compose.project':'wizard-tinfoil__user', 'com.docker.compose.service':'wizard-tinfoil'}
+        value['HostConfig']['NetworkMode'] = 'wizard-tinfoil__user_provider-bootstrap'
+        safe = {'Internal':True,'Driver':'bridge','Labels':{'wizard.private-bootstrap':'wizard-tinfoil'}}
+        with patch.object(manager, 'inspect', side_effect=[None, safe]):
+            manager.ensure_bootstrap({'id':'wizard-tinfoil'},value)
+        self.assertIn('--internal', calls[0])
+        self.assertEqual(calls[0][-1], value['HostConfig']['NetworkMode'])
+        for changed in ({**safe,'Internal':False}, {**safe,'Containers':{'unexpected':{}}}, None):
+            with patch.object(manager, 'inspect', side_effect=[None,changed]), self.assertRaises(Failure):
+                manager.ensure_bootstrap({'id':'wizard-tinfoil'},value)
+        value['HostConfig']['NetworkMode'] = 'unrelated-network'
+        with patch.object(manager, 'inspect', return_value=None), self.assertRaises(Failure):
+            manager.ensure_bootstrap({'id':'wizard-tinfoil'},value)
+
     def test_null_view_uses_loopback_health_for_management(self):
         import subprocess
         calls = []

@@ -187,6 +187,7 @@ class PrivateProviders:
             if attachment and alias not in (attachment.get('Aliases') or []):
                 raise self.failure('relay_network_alias_invalid', 409)
             if not attachment:
+                ProviderEgress(self.docker, self.failure).ensure_bootstrap(app, info)
                 self.docker(['network', 'connect', '--alias', alias, name, cid], timeout=60)
                 info = json.loads(self.docker(['inspect', cid], timeout=60).stdout)[0]
                 if alias not in (info['NetworkSettings']['Networks'][name].get('Aliases') or []):
