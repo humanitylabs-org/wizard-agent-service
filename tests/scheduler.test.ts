@@ -231,6 +231,34 @@ describe('schedule last/next run projections', () => {
     expect(s.project(s.get(j.id)).lastRun.outcome).toBe('posted')
   })
 
+  it('migrates a legacy occurrence ledger additively and enriches its exact receipt', async () => {
+    let s = scheduler(); const j = s.create(job()); clock += 5 * 60_000; await s.tick()
+    await s.close(); schedulers.splice(schedulers.indexOf(s), 1)
+    const db = new DatabaseSync(join(root, 'scheduler.sqlite3'))
+    for (const column of ['started_at', 'finished_at', 'outcome']) db.exec(`ALTER TABLE schedule_occurrences DROP COLUMN ${column}`)
+    const before = db.prepare('SELECT key, data, receipt FROM schedule_occurrences').all(); db.close()
+    s = scheduler(undefined, { lookup: async (occurrence: any, receipt: any) => {
+      expect(occurrence.jobId).toBe(j.id); expect(receipt.run_id).toBe('fixture')
+      return { status: 'completed', output: 'Recovered report' }
+    } })
+    expect(s.db.prepare('SELECT key, data, receipt FROM schedule_occurrences').all()).toEqual(before)
+    expect(s.project(s.get(j.id)).lastRun.outcome).toBe('running')
+    await s.refreshRuns(); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('posted')
+  })
+
+  it('drains an in-flight outcome lookup before closing the durable store', async () => {
+    let release!: () => void, entered!: () => void
+    const began = new Promise<void>(r => { entered = r }), gate = new Promise<void>(r => { release = r })
+    const s = scheduler(); const j = s.create(job()); clock += 5 * 60_000; await s.tick()
+    s.lookup = async () => { entered(); await gate; return { status: 'completed', output: 'Report' } }
+    const refresh = s.refreshRuns(); await began
+    let closed = false; const closing = s.close().then(() => { closed = true })
+    await new Promise(r => setImmediate(r)); expect(closed).toBe(false)
+    release(); await Promise.all([refresh, closing]); expect(closed).toBe(true)
+    schedulers.splice(schedulers.indexOf(s), 1)
+    const reopened = scheduler(); expect(reopened.project(reopened.get(j.id)).lastRun.outcome).toBe('posted')
+  })
+
   it('reports safe admission failures then clears them on exact-key retry, and chooses latest manual occurrence', async () => {
     let reject = true
     const s = scheduler(async () => { if (reject) throw Error('credential-fixture'); return { run_id: 'fixture' } })
