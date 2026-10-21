@@ -90,13 +90,13 @@ def selftest():
     cases = {
         "good named volume": (good, None, True),
         "good dedicated dir": ([home_bind("/srv/wizard/agents/npa/home"), skills], "/srv/wizard/agents/npa/home", True),
-        "whole host home, no expected source": ([home_bind("/home/telos"), skills], None, False),
-        "whole host home declared as expected": ([home_bind("/home/telos"), skills], "/home/telos", False),
-        "mac home declared as expected": ([home_bind("/Users/thales"), skills], "/Users/thales", False),
+        "whole host home, no expected source": ([home_bind("/home/fixture"), skills], None, False),
+        "whole host home declared as expected": ([home_bind("/home/fixture"), skills], "/home/fixture", False),
+        "mac home declared as expected": ([home_bind("/Users/fixture"), skills], "/Users/fixture", False),
         "root bind": ([home_bind("/"), skills], "/", False),
         "bind differs from expected": ([home_bind("/srv/wizard/agents/other/home"), skills], "/srv/wizard/agents/npa/home", False),
         "foreign volume as home": ([dict(good[0], src="other_agent-home"), skills], None, False),
-        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/telos/.ssh"}], None, False),
+        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/fixture/.ssh"}], None, False),
         "docker socket": (good + [{"type": "bind", "dest": "/var/run/docker.sock", "rw": True, "src": "/var/run/docker.sock"}], None, False),
         "skills writable": ([good[0], dict(skills, rw=True)], None, False),
         "home missing": ([skills], None, False),
@@ -109,11 +109,11 @@ def selftest():
     init_cases = {
         "init: same home volume": ([dict(home)], home, True),
         "init: same dedicated dir": ([home_bind("/srv/wizard/agents/npa/home")], home_bind("/srv/wizard/agents/npa/home"), True),
-        "init: host home bind": ([home_bind("/home/telos")], home, False),
+        "init: host home bind": ([home_bind("/home/fixture")], home, False),
         "init: root bind": ([home_bind("/")], home, False),
         "init: foreign volume": ([dict(home, src="other_agent-home")], home, False),
         "init: different dedicated dir": ([home_bind("/srv/wizard/agents/other/home")], home_bind("/srv/wizard/agents/npa/home"), False),
-        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/telos"}], home, False),
+        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/fixture"}], home, False),
         "init: read-only home": ([dict(home, rw=False)], home, False),
     }
     for name, (mounts, agent_home, expect_ok) in init_cases.items():
@@ -206,12 +206,22 @@ for svc in ("egress", "edge"):
     s = inspect(svc)
     shc = s[0]["HostConfig"] if s else {}
     check(f"I15-{svc}", f"{svc} sidecar: non-root, ALL capabilities dropped, read-only, no-new-privileges, limits",
-          bool(s) and s[0]["Config"].get("User") == "65534:65534" and shc.get("ReadonlyRootfs") is True
+          bool(s) and s[0]["Config"].get("User") == ("65534:65534" if svc == "egress" else os.environ.get("AGENT_EDGE_UID", "65534") + ":" + os.environ.get("AGENT_EDGE_GID", "65534")) and shc.get("ReadonlyRootfs") is True
           and drops_all(shc) and not shc.get("CapAdd") and no_new_privs(shc) and not shc.get("Privileged")
           and shc.get("Memory", 0) > 0 and (shc.get("PidsLimit") or 0) > 0
-          and not [m for m in s[0].get("Mounts", []) if m["Type"] == "bind"],
+          and (svc == "edge" or not s[0].get("Mounts")),
           {"user": s[0]["Config"].get("User") if s else None, "ro": shc.get("ReadonlyRootfs"), "drop": shc.get("CapDrop"),
            "mounts": [m["Destination"] for m in s[0].get("Mounts", [])] if s else None})
+    if svc == "edge":
+        edge_nets = list(s[0]["NetworkSettings"]["Networks"]) if s else []
+        edge_mounts = s[0].get("Mounts", []) if s else []
+        expected_source = os.environ.get("AGENT_GATEWAY_DIR", "")
+        check("I20-edge", "edge has sandbox only, no host-gateway alias, exactly its own socket directory",
+              edge_nets == [f"{project}_sandbox"] and not shc.get("ExtraHosts") and len(edge_mounts) == 1
+              and edge_mounts[0]["Destination"] == "/run/agent-gateway" and edge_mounts[0]["RW"]
+              and ((edge_mounts[0]["Type"] == "volume" and edge_mounts[0].get("Name") == f"{project}_gateway-one")
+                   or (edge_mounts[0]["Type"] == "bind" and edge_mounts[0]["Source"] == expected_source)),
+              {"networks": edge_nets, "mounts": edge_mounts, "extra_hosts": shc.get("ExtraHosts")})
     bindings = shc.get("PortBindings") or {}
     host_ips = [b.get("HostIp") for v in bindings.values() for b in (v or [])]
     if svc == "egress":

@@ -240,9 +240,8 @@ export function agentAppIds(agent) {
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
  * later appear without a restart); a private agent only once the owner ticks an app for it.
  */
-/** What a restricted agent's harness calls: its edge sidecar, which forwards to the Service's agent-only listener. */
+/** What a restricted agent's harness calls: its edge sidecar, forwarding only to its own Service socket. */
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
-const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
 
 /**
  * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
@@ -651,14 +650,7 @@ export function createAgentRegistry(options = {}) {
     fail(503, 'network_exhausted', 'agent.runtime.network')
   }
 
-  /** The uplink subnet an agent's edge connects from ('' = this agent has no agent-only network). */
-  function agentUplink(id) {
-    const agent = read(id)
-    const uplink = restricted(agent) ? agent.runtime?.network?.uplink : ''
-    return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
-  }
-
-  /** Whether an agent runs in the restricted runtime (its key is then bound to the agent-only listener). */
+  /** Whether an agent runs in the restricted runtime (its key is then bound to its own Unix socket). */
   function agentRestricted(id) {
     try { return restricted(read(id)) } catch { return false }
   }
@@ -748,7 +740,7 @@ export function createAgentRegistry(options = {}) {
       writeJsonAtomic(idempotencyPath, map)
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
-    try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    try { if (restricted(agent)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
@@ -820,7 +812,7 @@ export function createAgentRegistry(options = {}) {
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
-      try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      try { if (restricted(next)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
@@ -837,6 +829,7 @@ export function createAgentRegistry(options = {}) {
     const epoch = catalogEpochs.get(id) ?? 0
     let stoppedCensus
     try {
+      if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -998,7 +991,7 @@ export function createAgentRegistry(options = {}) {
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {

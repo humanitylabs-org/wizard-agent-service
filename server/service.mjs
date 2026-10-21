@@ -52,6 +52,7 @@ import { createListWindows } from './session-list-window.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
+import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -2286,6 +2287,7 @@ function buildWizardServer(options, lifetime) {
   const agentRuntime = options.agentRuntime ?? (options.agentRuntimeUrl && options.agentRuntimeToken
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
+  let agentSockets
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
@@ -2297,6 +2299,7 @@ function buildWizardServer(options, lifetime) {
     gatewayUrl: options.agentGatewayUrl || '',
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
+    beforeRestrictedStart: id => agentSockets.ensure(id),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
       if (!result.ok) return []
@@ -3857,7 +3860,6 @@ function buildWizardServer(options, lifetime) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
-    agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
     agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
   })
   // Only the dedicated Serve listener may use the enrolled owner identity without proxy proof.
@@ -5310,6 +5312,13 @@ function buildWizardServer(options, lifetime) {
     })
     lifetime.own(() => watcher.stop(), () => watcher.stop())
   }
+  if (agents) {
+    agentSockets = createAgentSocketGateway({ agentsDir, ingress: id => createAgentIngress(server, id) })
+    // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
+    server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
+    void server.agentSocketsReady.catch(() => undefined)
+    lifetime.own(() => agentSockets.close(), () => agentSockets.close())
+  } else server.agentSocketsReady = Promise.resolve()
   return server
 }
 
@@ -5318,8 +5327,8 @@ function buildWizardServer(options, lifetime) {
  * as `server`, but every request must carry that agent's own credential (no owner proof, no anonymous access),
  * so an agent cannot fall back to the local-automation surface by leaving its credential off.
  */
-export function createAgentIngress(server) {
-  return createServer((request, response) => server.emit('request', markAgentIngress(request), response))
+export function createAgentIngress(server, agentId = '') {
+  return createServer((request, response) => server.emit('request', markAgentIngress(request, agentId), response))
 }
 
 export async function listen(server, host = '127.0.0.1', port = 0) {

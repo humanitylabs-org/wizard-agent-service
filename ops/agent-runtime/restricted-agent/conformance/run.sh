@@ -28,12 +28,13 @@ export CONF_CANARY="$CANARY"
 export CONF_HOST_PORT="${CONF_HOST_PORT:-18923}"
 export AGENT_API_KEY="$(rand)$(rand)"
 export EDGE_TOKEN_SHA256="$(printf '%s' "$TOKEN" | python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest())')"
-export EDGE_UPSTREAM_HOST=fake-service EDGE_UPSTREAM_PORT=8923
+# Placeholders for the base file; the test overlay replaces the bind mount with Docker-local volumes.
+export AGENT_GATEWAY_DIR=/unused AGENT_EDGE_UID=65534 AGENT_EDGE_GID=65534
 export AGENT_INGRESS_BIND="${AGENT_INGRESS_BIND:-127.0.0.1:18642}"
 
-# On colima the Mac home is shared into the VM, so these sit exactly where a careless bind mount
-# would expose them. Removed on exit.
-HOST_CANARY_DIR="$HOME/.restricted-agent-conformance"
+# Synthetic host-only files stay beside receipts, never in an owner home or a Docker bind.
+# The mount validator independently rejects host-home and root-directory binds. Removed on exit.
+HOST_CANARY_DIR="$OUT/host-canary"
 mkdir -p "$HOST_CANARY_DIR/.ssh"
 printf 'synthetic host-home file %s\n' "$CANARY" > "$HOST_CANARY_DIR/canary.txt"
 printf -- '-----BEGIN SYNTHETIC TEST KEY-----\n%s\n-----END SYNTHETIC TEST KEY-----\n' "$CANARY" > "$HOST_CANARY_DIR/.ssh/id_ed25519"

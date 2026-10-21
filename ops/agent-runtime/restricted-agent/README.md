@@ -1,6 +1,6 @@
 # Restricted agent runtime
 
-Least-privilege container runtime for one managed Hermes agent (first user: James's daily agent, "NPA").
+Least-privilege container runtime for one managed Hermes agent.
 It runs the stock Wizard Hermes image unmodified; all restriction comes from how it is run.
 
 ## What the agent gets
@@ -24,7 +24,8 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 | `AGENT_HOME_VOLUME` | Named volume or absolute host dir for the agent home (default: project volume) |
 | `AGENT_API_KEY` | The agent's inbound API key (its own; the service presents it) |
 | `EDGE_TOKEN_SHA256` | sha256 hex of the agent's gateway token (`WIZARD_MCP_TOKEN` in the home `.env`) |
-| `EDGE_UPSTREAM_HOST` / `EDGE_UPSTREAM_PORT` | The service's agent-only listener (VPS: the uplink gateway IP) |
+| `AGENT_GATEWAY_DIR` | Dedicated per-agent gateway directory containing `gateway.sock` (daemon-visible Linux storage) |
+| `AGENT_EDGE_UID` / `AGENT_EDGE_GID` | Numeric unprivileged Service owner; edge runs as this identity |
 | `AGENT_UPLINK_SUBNET` | Unique /28 per agent from 10.250.0.0/16 (outside Docker's default pools) (default `10.250.0.0/28`) |
 | `AGENT_SANDBOX_SUBNET` | Unique /28 per agent from 10.251.0.0/16 for the agent-only network; the host has no address on it (default `10.251.0.0/28`) |
 | `AGENT_INGRESS_BIND` | Host loopback address:port for inbound (default `127.0.0.1:18642`) |
@@ -55,5 +56,9 @@ synthetic values redacted. Exit 0 only on full pass.
   an allowed SNI (domain fronting at a CDN that permits it). Closing that needs TLS interception, which
   this runtime deliberately does not do.
 - The edge rejects header names that are not HTTP tokens and values with CR/LF/control characters (A12).
-- The two sidecars are trusted components with uplink access. On the VPS, firewall the uplink range so
-  they reach only the Agent Service listener (see `requests/C-runtime-driver.md` in the migration notes).
+- Edge has sandbox only and only its own Service socket mounted. Egress retains ordinary uplink access but
+  has no sockets or host privileges; its CONNECT gate refuses host/private destinations. No host firewall install.
+- See `docs/restricted-agent-runtime.md` in the Service repository for path/uid requirements, Colima/Lima
+  same-kernel constraints and migration from the legacy optional firewall. Compose v2.24.4+ is needed for
+  test overlays using `!override`. `test_agent_sockets.sh` runs socket/host-port conformance against the real
+  Service modules, including socket identity mismatch, missing foreign mount and no TCP agent listener.

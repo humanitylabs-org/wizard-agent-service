@@ -29,8 +29,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-UPSTREAM_HOST = os.environ["EDGE_UPSTREAM_HOST"]
-UPSTREAM_PORT = int(os.environ.get("EDGE_UPSTREAM_PORT", "8923"))
+UPSTREAM_SOCKET = os.environ.get("EDGE_UPSTREAM_SOCKET", "/run/agent-gateway/gateway.sock")
 AGENT_HOST = os.environ.get("EDGE_AGENT_HOST", "agent")
 AGENT_PORT = int(os.environ.get("EDGE_AGENT_PORT", "8642"))
 GATEWAY_PORT = int(os.environ.get("EDGE_GATEWAY_PORT", "8923"))
@@ -175,13 +174,13 @@ async def gateway(reader, writer):
         return
     # Anything after the declared body (a pipelined second request) is never read or forwarded.
     out = [f"{method} {path}{'?' + query if query else ''} HTTP/1.1",
-           f"Host: {UPSTREAM_HOST}:{UPSTREAM_PORT}", "Connection: close"]
+           "Host: agent-service", "Connection: close"]
     for key, value in headers.items():
         if key in PASS_HEADERS and key != "content-length":
             out.append(f"{key}: {value}")
     out.append(f"Content-Length: {len(body)}")
     try:
-        up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(UPSTREAM_HOST, UPSTREAM_PORT), 15)
+        up_reader, up_writer = await asyncio.wait_for(asyncio.open_unix_connection(UPSTREAM_SOCKET), 15)
     except (OSError, asyncio.TimeoutError):
         return await reply(writer, 502, "agent service unavailable", peer=peer, path=path)
     up_writer.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1") + body)
@@ -203,7 +202,7 @@ async def ingress(reader, writer):
 async def main():
     gw = await asyncio.start_server(gateway, "0.0.0.0", GATEWAY_PORT, limit=MAX_HEAD * 2)
     ing = await asyncio.start_server(ingress, "0.0.0.0", INGRESS_PORT)
-    log(event="listening", gateway=GATEWAY_PORT, ingress=INGRESS_PORT, upstream=f"{UPSTREAM_HOST}:{UPSTREAM_PORT}",
+    log(event="listening", gateway=GATEWAY_PORT, ingress=INGRESS_PORT, upstream=UPSTREAM_SOCKET,
         routes=[f"{sorted(m)} {rx.pattern}" for m, rx in ALLOW])
     async with gw, ing:
         await asyncio.gather(gw.serve_forever(), ing.serve_forever())

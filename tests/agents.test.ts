@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -64,7 +64,14 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   const calls: string[] = []
   const deliveries: any[] = []
   const runtime = {
-    apply: async (id: string) => { calls.push(`apply ${id}`); return { ok: true } },
+    apply: async (id: string) => {
+      if (extra.agentIsolation === 'restricted') {
+        const gateway = join(dir, 'agents', id, 'gateway', 'gateway.sock')
+        expect(lstatSync(gateway).isSocket()).toBe(true) // transport exists before Docker sees the request
+        expect(lstatSync(gateway).mode & 0o777).toBe(0o600)
+      }
+      calls.push(`apply ${id}`); return { ok: true }
+    },
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },

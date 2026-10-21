@@ -1,4 +1,4 @@
-import { createAgentIngress, createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
+import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -8,6 +8,11 @@ import { readFileSync } from 'node:fs'
 const secretFile = (path) => {
   if (!path) return ''
   try { return readFileSync(path, 'utf8').trim() } catch { return '' }
+}
+
+if (process.env.WIZARD_AGENT_PORT || process.env.WIZARD_AGENT_HOST) {
+  process.stderr.write('WIZARD_AGENT_PORT/HOST are retired; remove them. Restricted agents use Unix sockets.\n')
+  process.exit(1)
 }
 
 const key = process.env.WIZARD_HERMES_API_KEY
@@ -201,32 +206,11 @@ server = createWizardServer({
   ...(process.env.WIZARD_MAIN_AGENT_LABEL ? { mainAgentLabel: process.env.WIZARD_MAIN_AGENT_LABEL } : {}),
   // The app gateway as an agent container reaches it (e.g. http://wizard-agent-service:8923/wizard/mcp).
   agentGatewayUrl: process.env.WIZARD_AGENT_GATEWAY_URL || '',
-  // New container agents run in the restricted runtime (their own networks, edge sidecar to WIZARD_AGENT_PORT).
+  // New restricted agents reach the Service through their own Unix socket, never a TCP agent port.
   agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
 })
+await server.agentSocketsReady
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
-if (process.env.WIZARD_AGENT_ISOLATION === 'restricted' && !process.env.WIZARD_AGENT_PORT) {
-  process.stderr.write('WIZARD_AGENT_ISOLATION=restricted needs WIZARD_AGENT_PORT (the agent-only listener); the service was not started.\n')
-  process.exit(1)
-}
-// Agent-only listener (optional): agents get this address; every request needs the agent's own credential.
-if (process.env.WIZARD_AGENT_PORT) {
-  // Agents reach the main listener's loopback too: without an owner proof, a loopback caller is the owner there.
-  if (!ownerProof) {
-    process.stderr.write('WIZARD_AGENT_PORT needs WIZARD_OWNER_PROOF_FILE (owner proof); the service was not started.\n')
-    process.exit(1)
-  }
-  const agentHost = process.env.WIZARD_AGENT_HOST || host
-  const privateAddress = /^(127\.\d+\.\d+\.\d+|::1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/u
-  // 0.0.0.0 is allowed: every agent key is accepted only from that agent's own uplink subnet, and the host
-  // firewall admits this port from the agent uplink range only (the uplink gateways come and go with compose).
-  if (!privateAddress.test(agentHost) && agentHost !== '0.0.0.0') {
-    process.stderr.write('WIZARD_AGENT_HOST must be 0.0.0.0, a loopback or a private network address.\n')
-    process.exit(1)
-  }
-  const agentPort = Number(process.env.WIZARD_AGENT_PORT)
-  createAgentIngress(server).listen(agentPort, agentHost, () => process.stdout.write(`Wizard agent listener on ${agentHost}:${agentPort}\n`))
-}
 if (tailnetPort) {
   createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
 }

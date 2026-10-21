@@ -1,18 +1,23 @@
-Vendored unchanged from humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
-Conformance: Thales heavy_e904f591b9814db1ab6546946978539f PASS; review round 3 SHIP. Do not edit here; change upstream and re-vendor.
+Base: humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
+Locally adapted for per-agent Unix socket gateways in wizard-agent-service. Digests below cover this adaptation.
+Prior TCP-runtime conformance: Thales heavy_e904f591b9814db1ab6546946978539f PASS; not evidence for the socket adaptation.
 
-dfe5b6c8ed91b63d6f168585bc81edfb5f59bbff1b523649553aff18ee8478e8  ./README.md
-7f1c6136830373078ace647c9bbf424dc49e09d1a986cb26a24362a422ab9c52  ./compose.yml
-39658033c644cafe1ab3282a645b923b918627aa9c899b50e88388fcbe6c3021  ./conformance/Dockerfile
-9255327432c32186589b2d7c0d0394f0d3c3ae49d0749e2ed1aaf1f0e8a4fa8e  ./conformance/compose.test.yml
+079e9f45bdbb04cdd7583a314201d14ecf797ab47915f47ce8a0a1f5f1d088a9  ./README.md
+f130f60ead79ca84da924e49cec691bd14a0baf55d33db689ba9b7c8336ce7b1  ./compose.yml
+d616a06277c6f939581659bb8653c2a9c76136d2a1ed89a75adaf8e940081f57  ./conformance/Dockerfile
+084f720c2e7f3cf7e0c054134934bbdc7ba85630aeb2c32fbf3d0efab7747023  ./conformance/SocketService.Dockerfile
+16b49d0862c8006b5ab104dc45f32aca3b0f2a32fa055930649dafefde660766  ./conformance/compose.socket.yml
+5d5d80516bd68191a107405a7d472626d7a0b029cb93ba9d4eec0338bf891a11  ./conformance/compose.test.yml
 fac12ff62d85bef160b3f9fbd5faedc8c62a4b6009367fa4b39f641744ea9e86  ./conformance/egress_selftest.py
-9fcacfb8f8fa1f93aae1f02166a75ee9a638eb7a96f79fa515f302f3b1eebf86  ./conformance/fake_service.py
-916dbefe8b5c831022a232b8073d4a8a00f7c0f90cdf52316c0763b8a42ffe00  ./conformance/in_agent.py
-31ad51a5638d67415b09493fd0fdca94acd6d55c032092192dbee37167806711  ./conformance/inspect_check.py
+6734542a417670383909523c6f3e9fbaec83264848e3d26c2ea10a119ebaacef  ./conformance/fake_service.py
+ae5bfade97920078a54830ce4ee0e603a07c91f2c630aac1887982806d38a94a  ./conformance/in_agent.py
+438985b9fbe11911cbee377d4478f5616e397d4e00a5cf3e7570ae7199e13eea  ./conformance/inspect_check.py
 a482bf79608dcdbd45b3d7a36bd19d7430a0593a098271612b674ed8629c5be4  ./conformance/redact.py
-f6b6e244ef30a62dd85b550ecd5c5972629ef4077c0ee8e185c329550f9c3b24  ./conformance/run.sh
+1f582654a96e15eb6f178b7c8a3619255ba953c6f38b257fc1ee70b2ab7bf877  ./conformance/run.sh
+39b048ad0c66a52e532c130bae55cd7c74eee57cdc11d47aab5192e31bb0cb40  ./conformance/socket_probe.py
+251271d78eb55622642ca490a04fe640ccd5d9d5e7c0c82230f131cb135f5fe1  ./conformance/socket_service.mjs
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
 07c3281f07daf116aa5e687d44ca228dd226fa29496c00b94be65809b8d95b58  ./sidecars/Dockerfile
-ed11571981db3e4f0a9ba5fccb6fde56b71bf6717ec38fd38a9eb871c0e654b7  ./sidecars/edge.py
+c9a8dfa815efd0ad4124e3b7dd24cc599f0a76ae8a0890c7c602784a07a0f29d  ./sidecars/edge.py
 32aa5f8126b842566d8afd82bce591256bc97b68f52c8c424ec8321ae37e89a6  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh

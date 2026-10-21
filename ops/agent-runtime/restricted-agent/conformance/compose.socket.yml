@@ -1,0 +1,38 @@
+# Fast socket/isolation drill: no model/provider, no real state, production edge and Service modules.
+services:
+  agent:
+    image: python:3.12-slim
+    entrypoint: ["python3"]
+    command: ["-m", "http.server", "8642", "--bind", "0.0.0.0"]
+  edge:
+    volumes: !override
+      - gateway-one:/run/agent-gateway
+    depends_on:
+      socket-service: {condition: service_started}
+  host-listener:
+    image: python:3.12-slim
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: host
+    command: ["python3", "-m", "http.server", "${SOCKET_HOST_PORT:-28923}", "--bind", "0.0.0.0"]
+  socket-service:
+    build:
+      context: ../../..
+      dockerfile: ops/agent-runtime/restricted-agent/conformance/SocketService.Dockerfile
+    image: restricted-agent-socket-service:local
+    user: "1000:1000"
+    # Synthetic Service state lives only in the disposable container layer.
+    read_only: false
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m,uid=1000
+    volumes:
+      - gateway-one:/state/agents/one/gateway
+      - gateway-two:/state/agents/two/gateway
+volumes:
+  gateway-one: {}
+  gateway-two: {}

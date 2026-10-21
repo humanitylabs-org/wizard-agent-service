@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import shlex
+import stat
 import subprocess
 import sys
 import threading
@@ -321,8 +322,8 @@ class RestrictedDriver:
     (README environment contract). Kept off Runtipi's shared network; the compose project holds the agent and its
     sidecars, so stop/start act on all of them."""
 
-    def __init__(self, agents: Agents, runtime_dir: Path, image: str, listener_port: int):
-        self.agents, self.image, self.listener_port = agents, image, listener_port
+    def __init__(self, agents: Agents, runtime_dir: Path, image: str):
+        self.agents, self.image = agents, image
         self.runtime_dir = runtime_dir.resolve()
         self.compose_file = self.runtime_dir / "compose.yml"
         verify_vendored(self.runtime_dir)
@@ -344,8 +345,9 @@ class RestrictedDriver:
             "AGENT_UPLINK_SUBNET": str(uplink),
             "AGENT_SANDBOX_SUBNET": str(sandbox),
             "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
-            "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
-            "EDGE_UPSTREAM_PORT": str(self.listener_port),
+            "AGENT_GATEWAY_DIR": str(self.agents.root / agent["id"] / "gateway"),
+            "AGENT_EDGE_UID": str(os.getuid()),
+            "AGENT_EDGE_GID": str(os.getgid()),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         if self.image:
@@ -389,6 +391,17 @@ class RestrictedDriver:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
+        # The Service must create the socket before Docker; never let bind-mount auto-create a directory.
+        gateway = self.agents.root / agent["id"] / "gateway"
+        try:
+            st = gateway.lstat()
+            sock = (gateway / "gateway.sock").lstat()
+            safe = (stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+                    and stat.S_ISSOCK(sock.st_mode) and sock.st_uid == os.getuid() and stat.S_IMODE(sock.st_mode) == 0o600)
+        except OSError:
+            safe = False
+        if not safe:
+            raise RuntimeFailure("agent_socket_not_ready", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
@@ -843,7 +856,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
-    ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:
@@ -857,8 +869,7 @@ def main(argv: list[str] | None = None) -> int:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
-        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
-                                             args.agent_listener_port)
+        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
