@@ -8,6 +8,7 @@
 // one-off backfill record that applies only while that exact reply is still the latest one.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { isSilentResult, isScheduleInput } from './scheduler.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'
@@ -74,9 +75,14 @@ export function stripStatus(text) {
 // Strip markers from any string inside a JSON-like value (message history rows).
 export function stripStatusDeep(value, depth = 0) {
   if (depth > 6) return value
-  if (typeof value === 'string') return stripStatus(value)
+  if (typeof value === 'string') return isSilentResult(value) || isScheduleInput(value) ? '' : stripStatus(value)
   if (Array.isArray(value)) return value.map((item) => stripStatusDeep(item, depth + 1))
   if (value && typeof value === 'object') {
+    const role = value.role ?? value.author
+    const content = value.content ?? value.text ?? value.output
+    if ((role === 'assistant' && isSilentResult(content)) || (role === 'user' && isScheduleInput(content))) {
+      return { ...(value.id ? { id: value.id } : {}), role: 'system', display_kind: 'hidden', content: '', display_content: '', shareable: false }
+    }
     const out = {}
     for (const [key, item] of Object.entries(value)) out[key] = stripStatusDeep(item, depth + 1)
     return out
@@ -85,7 +91,7 @@ export function stripStatusDeep(value, depth = 0) {
 }
 
 export function projectStatusMarkers(result) {
-  if (!Buffer.isBuffer(result) || !result.includes('WIZARD_STATUS_V1')) return result
+  if (!Buffer.isBuffer(result) || !['WIZARD_STATUS_V1', '[SILENT]', '[Wizard schedule]'].some(marker => result.includes(marker))) return result
   try { return Buffer.from(JSON.stringify(stripStatusDeep(JSON.parse(result.toString('utf8'))))) } catch { return result }
 }
 
