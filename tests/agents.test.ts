@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
@@ -104,16 +105,16 @@ describe('agents registry and API', () => {
     const { base } = await start(dir, main, { agentIsolation: 'restricted', agentGatewayUrl: 'http://wizard-agent-service:8923/wizard/mcp' })
     const create = (label: string, key: string, model = { provider: 'anthropic', model: 'claude-opus-5-5' }) => fetch(`${base}/wizard/v1/agents`, json({ label, harness: 'hermes', model, permissions: { preset: 'standard' } }, { 'Idempotency-Key': key }))
     const make = async (label: string, key: string) => (await (await create(label, key)).json()).agent
-    // No Tinfoil attestation sidecar in the restricted runtime yet: refused up front, and nothing is created.
+    // Confidential apps now use the same in-seal client in the restricted runtime.
     const tinfoil = await create('Confidential', 'restricted-0', { provider: 'tinfoil', model: 'glm-5-3' })
-    expect(tinfoil.status).toBe(409)
-    expect(await tinfoil.json()).toMatchObject({ error: 'restricted_provider_unsupported' })
-    expect(existsSync(join(dir, 'agents', 'confidential'))).toBe(false)
+    expect(tinfoil.status).toBe(201)
+    expect((await tinfoil.json()).agent.model.provider).toBe('wizard-tinfoil')
+    expect(existsSync(join(dir, 'agents', 'confidential'))).toBe(true)
     const first = await make('Daily', 'restricted-1')
     const second = await make('Other', 'restricted-2')
     const stored = (id: string) => JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
-    expect(stored(first.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' } })
-    expect(stored(second.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.32/28', sandbox: '10.251.0.32/28' } })
+    expect(stored(first.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.32/28', sandbox: '10.251.0.32/28' } })
+    expect(stored(second.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.48/28', sandbox: '10.251.0.48/28' } })
     // Managed files go to managed/: the home belongs to the agent's container user and stays empty here.
     const config = readFileSync(join(dir, 'agents', first.id, 'managed', 'config.yaml'), 'utf8')
     expect(config).toContain('http://edge:8923/wizard/mcp')
@@ -122,20 +123,21 @@ describe('agents registry and API', () => {
     expect(readdirSync(join(dir, 'agents', first.id, 'home'))).toEqual([])
     // The network allocation is not part of the public agent shape.
     expect(JSON.stringify(first)).not.toContain('10.250.')
-    // ...and an existing restricted agent cannot move onto Tinfoil either.
+    // Existing restricted agents can switch to installed private providers too.
     const moved = await fetch(`${base}/wizard/v1/agents/${first.id}`, { ...json({ model: { provider: 'tinfoil', model: 'glm-5-3' } }), method: 'PATCH' })
-    expect(moved.status).toBe(409)
-    expect(stored(first.id).model.provider).toBe('anthropic')
+    expect(moved.status).toBe(200)
+    expect(stored(first.id).model.provider).toBe('wizard-tinfoil')
   })
 
-  it('without isolation, new agents keep the existing runtime shape', async () => {
+  it('without isolation, new private agents still get restricted managed-file placement', async () => {
     const dir = box()
     const main = await fakeHermes('main')
     const { base } = await start(dir, main)
     const { agent } = await withPrivate(dir, base)
     const runtime = JSON.parse(readFileSync(join(dir, 'agents', agent.id, 'agent.json'), 'utf8')).runtime
-    expect(runtime.isolation).toBeUndefined()
-    expect(runtime.network).toBeUndefined()
+    expect(runtime).toMatchObject({ isolation: 'restricted', uid: 10000, gid: 10000 })
+    expect(runtime.private_client).toBe(true)
+    expect(runtime.network).toMatchObject({ uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' })
   })
   it('redacts shared and agent-local attachment roots in routed context', async () => {
     const dir = box()
@@ -169,7 +171,7 @@ describe('agents registry and API', () => {
     expect(first.status).toBe(201)
     expect(first.agent).toMatchObject({
       id: 'private', label: 'Private', harness: 'hermes', privacy: 'private', appearance: { glyph: 'lock', hue: 160 },
-      model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false },
+      model: { provider: 'wizard-tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false },
       permissions: { preset: 'private', outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' },
       is_default: false,
     })
@@ -180,11 +182,11 @@ describe('agents registry and API', () => {
     expect(stored).toMatchObject({ schema: 1, id: 'private', runtime: { kind: 'container', app_id: 'agent-private', api: 'http://agent-private:8642', port: 47650 } })
     const key = readFileSync(join(folder, 'runtime.key'), 'utf8').trim()
     expect(key.length).toBeGreaterThan(30)
-    const env = readFileSync(join(folder, 'home', '.env'), 'utf8')
+    const env = readFileSync(join(folder, 'managed', '.env'), 'utf8')
     expect(env).toContain(`API_SERVER_KEY=${key}`)
     expect(env).not.toContain('TINFOIL_API_KEY')
-    const config = readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')
-    expect(config).toContain('base_url: "http://agent-private-tinfoil:3301/v1"')
+    const config = readFileSync(join(folder, 'managed', 'config.yaml'), 'utf8')
+    expect(config).toContain('base_url: "http://agent-private-client:3301/v1"')
     expect(config).toContain('fallback_providers: []')
     for (const tool of ['web', 'browser', 'image_gen', 'tts', 'vision', 'delegation', 'x_search']) expect(config).toContain(`"${tool}"`)
     expect(config).toContain('mcp_servers: {}')
@@ -230,7 +232,7 @@ describe('agents registry and API', () => {
     expect(patch.status).toBe(200)
     const { agent } = await patch.json()
     expect(agent).toMatchObject({ label: 'Vault', appearance: { glyph: 'key', hue: 30 }, privacy: 'private', permissions: { preset: 'private', outside_tools: ['web'], wizard_apps: ['meditate'], agent_apps: ['transcriber'], files: 'shared-read' } })
-    const config = readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')
+    const config = readFileSync(join(dir, 'agents', 'private', 'managed', 'config.yaml'), 'utf8')
     expect(config).not.toMatch(/disabled_toolsets: \[[^\]]*"web"/)
     expect(config).toMatch(/disabled_toolsets: \[[^\]]*"browser"/)
     expect(calls).toEqual(['apply private', 'apply private'])
@@ -252,7 +254,7 @@ describe('agents registry and API', () => {
     const { base } = await start(dir, main)
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
     expect(options.harnesses).toEqual([{ id: 'hermes', label: 'Hermes' }])
-    expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['tinfoil', true], ['anthropic', false], ['openai-codex', false]])
+    expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['wizard-tinfoil', true], ['anthropic', false], ['openai-codex', false]])
     expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }])
     expect(options.presets.map((p: any) => p.id)).toEqual(['private', 'standard'])
     expect(options.wizard_apps.map((a: any) => a.id)).toEqual(['meditate'])
@@ -349,7 +351,7 @@ describe('per-agent threads and runs', () => {
     expect(ok.status).toBe(202)
     expect(priv.seen.find((s) => s.path === '/v1/runs')!.body.model).toBeUndefined()
     const options = await (await fetch(`${base}/wizard/hermes/api/model/options?agent=private`)).json()
-    expect(options.providers).toEqual([expect.objectContaining({ slug: 'tinfoil', models: ['glm-5-3'] })])
+    expect(options.providers).toEqual([expect.objectContaining({ slug: 'wizard-tinfoil', models: ['glm-5-3'] })])
   })
 
   it('thread lists carry the server-side agent; each agent lists only its own threads', async () => {
