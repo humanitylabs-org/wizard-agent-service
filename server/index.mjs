@@ -110,6 +110,7 @@ server = createWizardServer({
   boomerangStatePath: process.env.WIZARD_BOOMERANG_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'boomerang.sqlite3'),
   boomerangNotifyOrigin: process.env.WIZARD_NOTIFICATIONS_ORIGIN || '',
   boomerangNotifyTopic: process.env.WIZARD_NOTIFICATIONS_TOPIC || 'wizard',
+  boomerangShellOrigin: process.env.WIZARD_SHELL_ORIGIN || '',
   threadTitleStatePath: process.env.WIZARD_THREAD_TITLE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-titles.json'),
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),

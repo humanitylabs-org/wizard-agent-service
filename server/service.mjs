@@ -2540,19 +2540,32 @@ function buildWizardServer(options, lifetime) {
   })
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
-  const deliverBoomerangs = async () => {
+  let boomerangDelivery = Promise.resolve([])
+  const deliverBoomerangsOnce = async () => {
     if (!boomerangStore) return []
     const due = boomerangStore.claimDue()
-    if (options.boomerangNotifyOrigin) for (const reminder of due) {
+    const pending = options.boomerangNotifyOrigin && options.boomerangShellOrigin ? boomerangStore.pendingNotifications() : []
+    for (const reminder of pending) {
       try {
-        await rawFetchImpl(`${String(options.boomerangNotifyOrigin).replace(/\/$/u, '')}/${encodeURIComponent(options.boomerangNotifyTopic || 'wizard')}`, {
+        const shell = new URL('/wizard-os-home/', String(options.boomerangShellOrigin))
+        shell.searchParams.set('session', reminder.session_id); shell.searchParams.set('boomerang', reminder.id)
+        if (!['http:', 'https:'].includes(shell.protocol) || shell.username || shell.password || shell.hash) throw new Error('Invalid Wizard shell origin')
+        const notification = await rawFetchImpl(String(options.boomerangNotifyOrigin).replace(/\/$/u, ''), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: 'Wizard reminder', message: reminder.note || reminder.context || 'A deferred thread is ready',
-            click: `/wizard-os-home/?session=${encodeURIComponent(reminder.session_id)}&boomerang=${encodeURIComponent(reminder.id)}` }),
+          body: JSON.stringify({ topic: options.boomerangNotifyTopic || 'wizard', title: 'Wizard reminder',
+            message: reminder.note || reminder.context || 'A deferred thread is ready', click: shell.href }),
         })
-      } catch { /* in-shell due state is authoritative; notification delivery is best effort */ }
+        if (!notification.ok) throw new Error(`ntfy HTTP ${notification.status}`)
+        await notification.body?.cancel().catch(() => undefined)
+        boomerangStore.notificationSent(reminder.id)
+      } catch (error) { boomerangStore.notificationFailed(reminder.id, error?.message || 'notification failed') }
     }
     return due
+  }
+  const deliverBoomerangs = () => {
+    const run = boomerangDelivery.then(deliverBoomerangsOnce, deliverBoomerangsOnce)
+    boomerangDelivery = run.catch(() => [])
+    return run
   }
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
   const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
@@ -4712,7 +4725,11 @@ function buildWizardServer(options, lifetime) {
         if (request.method === 'GET') {
           const sessionId = url.searchParams.get('session_id') || ''
           if (sessionId && hiddenSession(request, sessionId)) { sendJson(response, 404, { error: 'not_found' }); return }
-          sendJson(response, 200, { reminders: boomerangStore.list(scope, { sessionId }) }); return
+          const reminders = boomerangStore.list(scope, { sessionId }).filter(reminder => {
+            if (hiddenSession(request, reminder.session_id)) return false
+            try { return sideAgent(request, reminder.session_id, reminder.agent_id) === reminder.agent_id } catch { return false }
+          })
+          sendJson(response, 200, { reminders }); return
         }
         if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }

@@ -29,7 +29,18 @@ describe('BoomerangStore', () => {
     const s = store(); const db = s.open()
     expect(() => db.create(reminder('not-a-date'))).toThrow(/due_at/)
     expect(() => db.create(reminder('2026-10-21T07:59:59.000Z'))).toThrow(/future/)
+    expect(() => db.create({...reminder(),clientRequestId:'offsetless',dueAt:'2026-10-21T09:00:00'})).toThrow(/explicit offset/)
+    expect(() => db.create({...reminder(),clientRequestId:'bad-calendar',dueAt:'2026-02-30T09:00:00Z'})).toThrow(/real calendar/)
+    expect(() => db.create({...reminder(),clientRequestId:'bad-zone',timezone:'Mars/Olympus'})).toThrow(/timezone/)
+    expect(() => db.create({...reminder(),clientRequestId:'bad-anchor',anchorAt:null})).toThrow(/Invalid boomerang/)
     db.close()
+  })
+
+  it('returns an idempotent retry even after its original due time', () => {
+    const s = store(); const db = s.open(); const created = db.create(reminder())
+    db.now = () => Date.parse('2026-10-22T00:00:00Z')
+    const retried = db.create(reminder())
+    expect(retried.id).toBe(created.id); db.close()
   })
 
   it('claims each due reminder once even after restart', () => {
@@ -44,5 +55,14 @@ describe('BoomerangStore', () => {
     expect(moved.due_at).toBe('2026-10-21T11:00:00.000Z'); expect(moved.status).toBe('scheduled')
     expect(db.cancel('wizard-account-local', created.id).status).toBe('cancelled')
     expect(db.claimDue(Date.parse('2026-10-22T00:00:00.000Z'))).toEqual([]); db.close()
+  })
+
+  it('keeps failed notifications pending across restart and marks success once', () => {
+    const s = store(Date.parse('2026-10-21T10:00:00Z')); let db = s.open()
+    const created = db.create(reminder('2026-10-21T09:00:00Z'), {allowPast:true}); db.claimDue()
+    expect(db.pendingNotifications()).toHaveLength(1); db.notificationFailed(created.id,'offline')
+    expect(db.pendingNotifications()).toHaveLength(0); db.close()
+    db=s.open(); expect(db.pendingNotifications(Date.parse('2026-10-21T10:00:06Z'))).toHaveLength(1)
+    db.notificationSent(created.id); expect(db.pendingNotifications(Date.parse('2026-10-22T00:00:00Z'))).toHaveLength(0); db.close()
   })
 })
