@@ -2527,6 +2527,7 @@ function buildWizardServer(options, lifetime) {
         : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
+  let mainCatalogCensus = null, mainCatalogCensusAt = 0
   let canonicalSessionInFlight = null
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
@@ -3226,7 +3227,18 @@ function buildWizardServer(options, lifetime) {
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
-      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) return refreshCanonicalSessions()
+      // A new assistant reply refreshes the listing, but a busy Hermes can take seconds to answer
+      // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
+      // short moment, then serve the last listing; the refresh bumps the generation and the list
+      // snapshot rebuilds as soon as it lands.
+      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) {
+        const fresh = refreshCanonicalSessions()
+        const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
+        let timer
+        const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
+        const sessions = await Promise.race([fresh.catch(() => null), late]).finally(() => clearTimeout(timer))
+        return Array.isArray(sessions) ? sessions : canonicalSessionCache.sessions
+      }
       if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
       return canonicalSessionCache.sessions
     }
@@ -3556,7 +3568,7 @@ function buildWizardServer(options, lifetime) {
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
       last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
-    const snapshot = createSharedSnapshot()
+    const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
       const entry = { at: new Date().toISOString(), kind, ...detail }
       console.log(`[list-cache] ${kind} ${JSON.stringify(detail).slice(0, 4000)}`)
@@ -5321,7 +5333,13 @@ function buildWizardServer(options, lifetime) {
           if (agents && !operator) {
             const rows = parseJsonBody(result)
             agents.observeSessions(MAIN_AGENT_ID, (rows.data ?? rows.sessions ?? []).map(row => row?.id))
-            await agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined)
+            // The catalog census pages through every Hermes thread (100 per call, ~3 s each when
+            // Hermes is busy). The list does not use its result, so it never waits for it: one
+            // census at a time, at most once a minute.
+            if (!mainCatalogCensus && Date.now() - mainCatalogCensusAt > 60_000) {
+              mainCatalogCensusAt = Date.now()
+              mainCatalogCensus = agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined).finally(() => { mainCatalogCensus = null })
+            }
           }
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }

@@ -197,3 +197,21 @@ test('diff names the threads and fields that differ', () => {
   const d = diffProjectedRows([{ id: 'a', status: 'running' }, { id: 'b' }], [{ id: 'a' }, { id: 'c' }])
   assert.deepEqual(d, [{ id: 'a', kind: 'changed', fields: ['status'] }, { id: 'b', kind: 'missing' }, { id: 'c', kind: 'extra' }])
 })
+
+test('stale-while-revalidate: a moved gate serves the current snapshot and rebuilds behind it', async () => {
+  let t = 0, builds = 0, release
+  const snap = createSharedSnapshot({ staleMs: 20_000, now: () => t })
+  const first = await snap.get({ gate: 'a', local: 1, build: async () => (++builds, 'v1') })
+  assert.equal(first, 'v1')
+  t = 5_000
+  const slow = new Promise((r) => { release = r })
+  const served = await snap.get({ gate: 'b', local: 1, build: async () => { builds++; await slow; return 'v2' } })
+  assert.equal(served, 'v1', 'answers at once from the current snapshot')
+  assert.equal(builds, 2, 'one background rebuild started')
+  release(); await new Promise((r) => setImmediate(r))
+  assert.equal(await snap.get({ gate: 'b', local: 1, build: async () => 'never' }), 'v2')
+  t = 6_000
+  assert.equal(await snap.get({ gate: 'c', local: 2, build: async () => 'v3' }), 'v3', 'an owner action waits for fresh rows')
+  t = 40_000
+  assert.equal(await snap.get({ gate: 'd', local: 2, build: async () => 'v4' }), 'v4', 'past staleMs it waits')
+})
