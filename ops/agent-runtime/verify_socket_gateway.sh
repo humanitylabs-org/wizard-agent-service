@@ -15,8 +15,9 @@ cd "$ROOT"
 docker volume create "$NAME" > /dev/null
 docker create --name "$NAME" -v "$NAME:/work" -w /work \
   -e TMPDIR=/scratch -e HERMES_HOME=/scratch/hermes -e WIZARD_OS_HOME=/scratch/os \
-  node:22-alpine sh -lc 'set -eu; apk add --no-cache python3 bash; mkdir -p /scratch/hermes /scratch/os; npm ci --ignore-scripts --no-audit --no-fund; npm test; python3 ops/agent-runtime/test_agent_runtime.py; python3 ops/agent-runtime/test_edge_ingress.py' > "$OUT/unit-container.txt"
-tar --exclude=.git --exclude=node_modules --exclude=__pycache__ --exclude='.env*' -cf - . | docker cp - "$NAME:/work"
+  node:22-alpine sh -lc 'set -eu; apk add --no-cache python3 bash git; git config --global --add safe.directory /work; mkdir -p /scratch/hermes /scratch/os; npm ci --ignore-scripts --no-audit --no-fund; npm test; python3 ops/agent-runtime/test_agent_runtime.py; python3 ops/agent-runtime/test_edge_ingress.py' > "$OUT/unit-container.txt"
+# .git is streamed so the portable-paths guard can list tracked files.
+tar --exclude=node_modules --exclude=__pycache__ --exclude='.env*' -cf - . | docker cp - "$NAME:/work"
 docker start -a "$NAME" > "$OUT/full-suite.log" 2>&1
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$NAME")" = 0 ] || { printf 'unit container failed; see full-suite.log\n' >&2; exit 1; }
 cleanup
