@@ -65,6 +65,8 @@ async function addPrivate(dir: string, base: string) {
   const agentHermes = await fakeHermes('private')
   const file = join(dir, 'agents', agent.id, 'agent.json')
   const value = JSON.parse(readFileSync(file, 'utf8'))
+  // These tests exercise the retained legacy host-managed inbox, not restricted in-container placement.
+  delete value.runtime.isolation
   value.runtime.port = agentHermes.port
   writeFileSync(file, JSON.stringify(value))
   return { agent, agentHermes }

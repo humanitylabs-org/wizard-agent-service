@@ -319,6 +319,10 @@ describe('review regressions', () => {
 
   it('a replayed private share and its upload ids give a non-owner nothing to read or write', async () => {
     const s = await scene(withUploads)
+    // Exercise replay authorization for the legacy host-managed inbox. Restricted inbox placement stays fail-closed.
+    const file = join(s.dir, 'agents', s.privateId, 'agent.json')
+    const legacy = JSON.parse(readFileSync(file, 'utf8')); delete legacy.runtime.isolation
+    writeFileSync(file, JSON.stringify(legacy))
     const body = { client_share_id: 'owner-share-1', agent: s.privateId, files: [{ filename: 'a.txt', bytes: 5 }] }
     const created = await fetch(`${s.base}/wizard/v1/shares`, send('POST', body, OWNER))
     expect(created.status).toBe(201)

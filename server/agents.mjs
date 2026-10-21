@@ -185,6 +185,7 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     status: status.status,
     status_detail: status.status_detail ?? '',
     is_default: agent.id === MAIN_AGENT_ID,
+    ...(agent.runtime?.isolation === 'restricted' ? { runtime: { isolation: 'restricted', uid: agent.runtime.uid ?? 10000, gid: agent.runtime.gid ?? 10000 } } : {}),
     // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
     created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
   }
@@ -609,8 +610,29 @@ export function createAgentRegistry(options = {}) {
   function sealRuntime(agent) {
     if (agent.privacy === 'private' || isConfidentialProvider(agent.model.provider, privateApps())) {
       agent.model.fallback = false
-      agent.runtime = { ...agent.runtime, private_client: true, network: agent.runtime.network || nextNetwork() }
+      agent.runtime = { ...agent.runtime, private_client: true, isolation: 'restricted', network: agent.runtime.network || nextNetwork() }
     }
+  }
+
+  async function preparePrivateMigration(agent) {
+    if (agent.privacy !== 'private' && !isConfidentialProvider(agent.model.provider, privateApps())) return false
+    const wasRestricted = restricted(agent)
+    // Existing restricted agents already used 10000. Legacy agents must prove their existing identity via metadata.
+    if (!wasRestricted || agent.runtime.uid !== undefined || agent.runtime.gid !== undefined) {
+      let identity = { uid: agent.runtime.uid, gid: agent.runtime.gid }
+      if (identity.uid === undefined && identity.gid === undefined) {
+        if (!runtime?.identity) fail(409, 'agent_identity_unknown', 'agent.runtime')
+        identity = await runtime.identity(agent.id)
+      }
+      if (![identity?.uid, identity?.gid].every((v) => Number.isInteger(v) && v > 0 && v <= 2147483647)) fail(409, 'agent_identity_invalid', 'agent.runtime')
+      agent.runtime.uid = identity.uid
+      agent.runtime.gid = identity.gid
+    } else {
+      agent.runtime.uid = 10000
+      agent.runtime.gid = 10000
+    }
+    sealRuntime(agent)
+    return !wasRestricted
   }
 
   async function assertProviderAvailable(agent) {
@@ -697,7 +719,7 @@ export function createAgentRegistry(options = {}) {
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     const dir = folder(agent.id)
-    // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
+    // A restricted agent owns its home (recorded uid/gid, default 10000): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
     const home = join(dir, restricted(agent) ? 'managed' : 'home')
     mkdirSync(home, { recursive: true, mode: 0o700 })
@@ -758,6 +780,7 @@ export function createAgentRegistry(options = {}) {
     }
     assertPrivateWalls(agent, privateApps())
     sealRuntime(agent)
+    if (restricted(agent)) Object.assign(agent.runtime, { uid: 10000, gid: 10000 })
     assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
     try {
@@ -823,6 +846,7 @@ export function createAgentRegistry(options = {}) {
       }
     }
     assertPrivateWalls(next, privateApps())
+    const migrated = await preparePrivateMigration(next)
     sealRuntime(next)
     if (agent.runtime?.private_client && next.privacy !== 'private' && !isConfidentialProvider(next.model.provider, privateApps())) {
       // Stop/revoke through the old record before publishing the new provider. Failure leaves the old seal intact.
@@ -832,10 +856,10 @@ export function createAgentRegistry(options = {}) {
       if (!restricted(next)) delete next.runtime.network
     }
     assertIsolationSupports(next)
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
-    if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
+    const harnessChanged = migrated || JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+    if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       writeServiceState(id, { started_at: now(), last_error: '' })
       try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -850,9 +874,10 @@ export function createAgentRegistry(options = {}) {
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
     if (running) {
       await assertProviderAvailable(agent)
+      await preparePrivateMigration(agent)
       sealRuntime(agent)
-      writeJsonAtomic(join(folder(id), 'agent.json'), agent, 0o600)
       writeHarnessFiles(agent)
+      writeJsonAtomic(join(folder(id), 'agent.json'), agent, 0o600)
     }
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
     try { await (running ? runtime.start(id) : runtime.stop(id)) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -938,6 +963,7 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     return reply
   }
   return {
+    identity: (id) => call('POST', `/agents/${encodeURIComponent(id)}/identity`),
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),

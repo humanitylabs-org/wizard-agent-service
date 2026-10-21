@@ -198,9 +198,9 @@ describe('#58 which agents can use an app', () => {
     expect(helperConfig).toContain('url: "http://wizard-agent-service:8923/wizard/mcp"')
     expect(helperConfig).toContain('Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     expect(readFileSync(join(dir, 'agents', helper.id, 'home', '.env'), 'utf8')).toContain(`WIZARD_MCP_TOKEN=${gatewayKey(dir, helper.id)}`)
-    const privConfig = readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')
+    const privConfig = readFileSync(join(dir, 'agents', 'private', 'managed', 'config.yaml'), 'utf8')
     expect(privConfig).toContain('mcp_servers: {}')
-    expect(readFileSync(join(dir, 'agents', 'private', 'home', '.env'), 'utf8')).not.toContain('WIZARD_MCP_TOKEN')
+    expect(readFileSync(join(dir, 'agents', 'private', 'managed', '.env'), 'utf8')).not.toContain('WIZARD_MCP_TOKEN')
     // The main agent's other settings stay read-only here.
     const label = await fetch(`${base}/wizard/v1/agents/hermes`, json({ label: 'x' }, 'PATCH'))
     expect(await label.json()).toMatchObject({ check: 'agent.main' })
@@ -226,7 +226,7 @@ describe('#58 which agents can use an app', () => {
     expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps'])
     expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps'])
     // Ticked from the private agent's side now writes the gateway into its harness config.
-    expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
+    expect(readFileSync(join(dir, 'agents', 'private', 'managed', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
     expect((await fetch(`${base}/wizard/v1/apps/nope/agents`)).status).toBe(404)
     expect(await (await fetch(`${base}/wizard/v1/apps/notes/agents`, json({ agents: ['ghost'] }, 'PUT'))).json()).toMatchObject({ check: 'agent.id' })
   })
