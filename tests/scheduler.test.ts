@@ -180,6 +180,70 @@ describe('durable Wizard scheduler', () => {
   })
 })
 
+describe('schedule last/next run projections', () => {
+  it.each([
+    [{ cron: '0 9 * * *' }, '2026-10-21T02:00:00.000Z'],
+    [{ every: 5 }, '2026-10-21T00:05:00.000Z'],
+    [{ once: '2026-10-22T00:00:00Z' }, '2026-10-22T00:00:00.000Z'],
+  ])('projects the durable next cursor for %j; paused schedules have no next run', (when, expected) => {
+    const s = scheduler(), created = s.create(job({ when }))
+    expect(s.project(created)).toMatchObject({ lastRun: null, nextRun: expected })
+    expect(s.project(s.update(created.id, { enabled: false })).nextRun).toBeNull()
+    expect(s.project(s.update(created.id, { enabled: true })).nextRun).toBe(expected)
+  })
+
+  it.each([
+    ['completed', 'Report', 'posted', null],
+    ['completed', 'Nothing changed [SILENT]', 'silent', null],
+    ['completed', '', 'silent', null],
+    ['failed', '', 'failed', 'Run failed'],
+    ['cancelled', '', 'failed', 'Run cancelled'],
+    ['interrupted', '', 'failed', 'Run interrupted'],
+    ['running', '', 'running', null],
+    ['queued', '', 'running', null],
+  ])('persists %s/%s as %s across restart without storing raw error/output', async (status, output, outcome, error) => {
+    let s = scheduler(undefined, { lookup: async () => ({ status, output, error: 'credential-fixture-do-not-persist', started_at: '2026-10-21T00:05:01Z', finished_at: '2026-10-21T00:05:09Z' }) })
+    const created = s.create(job())
+    clock += 5 * 60_000; await s.tick()
+    const result = s.project(s.get(created.id))
+    expect(result).toMatchObject({ nextRun: '2026-10-21T00:10:00.000Z', lastRun: {
+      scheduledFor: '2026-10-21T00:05:00.000Z', startedAt: '2026-10-21T00:05:01.000Z', outcome, error,
+      finishedAt: outcome === 'running' ? null : '2026-10-21T00:05:09.000Z',
+    } })
+    expect(JSON.stringify(s.db.prepare('SELECT * FROM schedule_occurrences').all())).not.toContain('credential-fixture')
+    await s.close(); schedulers.splice(schedulers.indexOf(s), 1)
+    s = scheduler(); expect(s.project(s.get(created.id))).toEqual(result)
+  })
+
+  it('does not infer success from admission, edits, lookup outages or unrelated thread activity', async () => {
+    let state: any = { status: 'queued' }
+    const s = scheduler(undefined, { lookup: async () => { if (!state) throw Error('credential-fixture'); return state } })
+    const j = s.create(job({ when: { once: '2026-10-21T00:01:00Z' } }))
+    clock += 60_000; await s.tick()
+    expect(s.project(s.get(j.id))).toMatchObject({ nextRun: null, lastRun: { outcome: 'running', startedAt: null, finishedAt: null } })
+    state = { status: 'running' }; clock += 1000; await s.refreshRuns()
+    expect(s.project(s.get(j.id)).lastRun.startedAt).toBe('2026-10-21T00:01:01.000Z')
+    state = null; await s.refreshRuns()
+    expect(s.project(s.update(j.id, { name: 'Edited', enabled: true }))).toMatchObject({ nextRun: null, lastRun: { outcome: 'running', finishedAt: null } })
+    state = { status: 'completed', output: 'Update' }; clock += 1000; await s.refreshRuns()
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'posted', finishedAt: '2026-10-21T00:01:02.000Z' })
+    state = { status: 'failed' }; await s.refreshRuns()
+    expect(s.project(s.get(j.id)).lastRun.outcome).toBe('posted')
+  })
+
+  it('reports safe admission failures then clears them on exact-key retry, and chooses latest manual occurrence', async () => {
+    let reject = true
+    const s = scheduler(async () => { if (reject) throw Error('credential-fixture'); return { run_id: 'fixture' } })
+    const j = s.create(job()); clock += 5 * 60_000; await s.tick()
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'failed', error: 'Admission failed; will retry', finishedAt: null })
+    reject = false; await s.tick()
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'running', error: null })
+    clock += 1000; s.runNow(j.id); await s.tick(false)
+    expect(s.project(s.get(j.id)).lastRun.scheduledFor).toBe('2026-10-21T00:05:01.000Z')
+    expect(s.project(s.get(j.id)).nextRun).toBe('2026-10-21T00:10:00.000Z')
+  })
+})
+
 describe('paused read-only Hermes import', () => {
   it('imports native cron/interval/once/skill/model fields paused; dry-run and retries do not mutate or duplicate anything', () => {
     const path = join(process.env.HERMES_HOME!, 'cron', 'jobs.json'); mkdirSync(join(process.env.HERMES_HOME!, 'cron'))
@@ -270,7 +334,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       }
       if (path === '/v1/runs' && req.method === 'POST') {
         const key = String(req.headers['idempotency-key'])
-        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: 'completed', output: extra.fixtureOutput ?? 'fixture report' }) }
+        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? 'fixture report', error: 'credential-fixture-do-not-expose' }) }
         send(202, admitted.get(key)); return
       }
       if (path.startsWith('/v1/runs/') && path.endsWith('/events')) {
@@ -351,6 +415,21 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(events).toContain('run.completed')
     await f.server.scheduler.tick(false)
     expect(f.bodies).toHaveLength(1)
+  })
+
+  it.each([
+    ['completed', 'Report', 'posted'], ['completed', '[SILENT]', 'silent'],
+    ['failed', '', 'failed'], ['running', '', 'running'],
+  ])('GET and PATCH expose last/next run through the ordinary run lookup: %s/%s', async (fixtureStatus, fixtureOutput, outcome) => {
+    const f = await fixture({ fixtureStatus, fixtureOutput })
+    const created = await (await api(f.origin, '', 'POST', job())).json()
+    expect(created).toMatchObject({ lastRun: null, nextRun: '2026-10-21T00:05:00.000Z' })
+    clock += 5 * 60_000; await f.server.scheduler.tick()
+    const read = (await (await api(f.origin)).json()).schedules[0]
+    expect(read).toMatchObject({ nextRun: '2026-10-21T00:10:00.000Z', lastRun: { scheduledFor: '2026-10-21T00:05:00.000Z', outcome } })
+    const edited = await (await api(f.origin, `/${created.id}`, 'PATCH', { name: 'Renamed' })).json()
+    expect(edited.lastRun).toEqual(read.lastRun); expect(edited.nextRun).toBe(read.nextRun)
+    expect(JSON.stringify(edited)).not.toContain('credential-fixture')
   })
 
   it('exposes dry-run import without writing to the source or enabling jobs', async () => {

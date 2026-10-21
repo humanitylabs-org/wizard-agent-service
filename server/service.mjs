@@ -3940,6 +3940,16 @@ function buildWizardServer(options, lifetime) {
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now,
     intervalMs: options.schedulerIntervalMs ?? 15_000,
+    lookup: async (occurrence, receipt) => {
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      if (!selfOrigin) return null
+      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
+        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+      })
+      if (!result.ok) { await result.body?.cancel(); return null }
+      return result.json()
+    },
     deliver: async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent

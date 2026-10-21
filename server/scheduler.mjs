@@ -104,7 +104,7 @@ function latestInstant(job, now) {
 // Delivery is an outbox: only a confirmed ordinary chat admission acknowledges it.
 // There is deliberately no bounded seen-list and no log/file scanning for delivery.
 export class Scheduler {
-  constructor({ statePath, deliver, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000 }) {
+  constructor({ statePath, deliver, lookup = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000 }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -116,6 +116,13 @@ export class Scheduler {
         data TEXT NOT NULL, admitted INTEGER NOT NULL DEFAULT 0, receipt TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS schedule_pending ON schedule_occurrences(admitted, job_id);
       CREATE TABLE IF NOT EXISTS schedule_imports (source TEXT PRIMARY KEY, job_id TEXT NOT NULL);`)
+    // Additive migration of the durable occurrence ledger, including pre-feature jobs.
+    const columns = new Set(this.db.prepare('PRAGMA table_info(schedule_occurrences)').all().map(row => row.name))
+    for (const column of ['started_at', 'finished_at', 'outcome']) {
+      if (!columns.has(column)) this.db.exec(`ALTER TABLE schedule_occurrences ADD COLUMN ${column} TEXT`)
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
+    this.lookup = lookup
     this.deliver = deliver
     this.now = now
     this.timezone = timezone
@@ -133,6 +140,47 @@ export class Scheduler {
     const row = this.db.prepare('SELECT data FROM schedules WHERE id=?').get(jobId)
     if (!row) throw fail('schedule not found', 404)
     return JSON.parse(row.data)
+  }
+  latest(jobId) {
+    return this.db.prepare('SELECT * FROM schedule_occurrences WHERE job_id=? ORDER BY instant DESC, key DESC LIMIT 1').get(jobId)
+  }
+  project(job) {
+    const row = this.latest(job.id)
+    const onceClaimed = job.when.once && this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE key=?').get(`schedule:${job.id}:${job.when.once}`)
+    return { ...job, nextRun: job.enabled && job.nextAt !== null && !onceClaimed ? iso(job.nextAt) : null,
+      lastRun: row ? { scheduledFor: iso(row.instant), startedAt: row.started_at ?? null, finishedAt: row.finished_at ?? null,
+        outcome: row.outcome || (row.error ? 'failed' : 'running'), error: row.error || null } : null }
+  }
+  async refreshRuns() {
+    if (this.stopped || !this.lookup) return
+    if (this.refreshing) return this.refreshing
+    this.refreshing = (async () => {
+      // Only the last occurrence can be shown. Never use unrelated chat activity.
+      await Promise.all(this.list().map(async job => {
+        const row = this.latest(job.id)
+        if (!row?.admitted || row.finished_at) return
+        const receipt = JSON.parse(row.receipt || '{}')
+        if (!receipt.run_id) return
+        try {
+          const run = await this.lookup(JSON.parse(row.data), receipt)
+          if (!run || !['queued', 'accepted', 'pending', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) return
+          const terminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
+          const output = typeof run.output === 'string' ? run.output : ''
+          const outcome = run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted') : terminal ? 'failed' : 'running'
+          // Upstream errors can contain credentials. Only service-owned short copy is stored.
+          const error = terminal && outcome === 'failed' ? (run.status === 'cancelled' ? 'Run cancelled' : run.status === 'interrupted' ? 'Run interrupted' : 'Run failed') : null
+          const timestamp = value => {
+            const ms = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN
+            return Number.isFinite(ms) ? iso(ms) : null
+          }
+          const started = row.started_at || timestamp(run.started_at) || (['running', 'waiting_for_approval', 'stopping'].includes(run.status) ? iso(this.now()) : null)
+          const finished = terminal ? timestamp(run.finished_at || run.completed_at) || iso(this.now()) : null
+          this.db.prepare('UPDATE schedule_occurrences SET started_at=?, finished_at=?, outcome=?, error=? WHERE key=?')
+            .run(started, finished, outcome, error, row.key)
+        } catch { /* A lookup outage is not a failed run. Keep the last durable observation. */ }
+      }))
+    })().finally(() => { this.refreshing = null })
+    return this.refreshing
   }
   save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
   normalize(input, prior = null) {
@@ -237,12 +285,13 @@ export class Scheduler {
       if (this.stopped) break
       try {
         const receipt = await this.deliver(JSON.parse(row.data))
-        this.db.prepare('UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL WHERE key=?').run(JSON.stringify(receipt ?? {}), row.key)
+        this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='running', finished_at=NULL WHERE key=?").run(JSON.stringify(receipt ?? {}), row.key)
       } catch (error) {
         // No arbitrary exception/body strings in state/API responses (they may contain credentials).
-        this.db.prepare('UPDATE schedule_occurrences SET error=? WHERE key=?').run(`admission failed (${Number(error?.status) || 503})`, row.key)
+        this.db.prepare("UPDATE schedule_occurrences SET error=?, outcome='failed' WHERE key=?").run('Admission failed; will retry', row.key)
       }
     }
+    await this.refreshRuns()
   }
   hasRun(agent, runId) {
     return Boolean(this.db.prepare("SELECT 1 FROM schedule_occurrences WHERE json_extract(data,'$.agent')=? AND json_extract(receipt,'$.run_id')=? LIMIT 1").get(agent, runId))
@@ -254,7 +303,7 @@ export class Scheduler {
     this.timer.unref?.()
     tick()
   }
-  quiesce() { this.stopped = true; clearInterval(this.timer); this.timer = null; return this.inflight }
+  quiesce() { this.stopped = true; clearInterval(this.timer); this.timer = null; return Promise.all([this.inflight, this.refreshing]) }
   async close() { await this.quiesce(); this.db.close() }
 }
 
@@ -295,14 +344,15 @@ export async function handleSchedulesApi(request, response, url, { scheduler, re
   if (url.pathname !== '/wizard/v1/schedules' && !url.pathname.startsWith('/wizard/v1/schedules/')) return false
   if (!scheduler) throw fail('scheduler state unavailable', 503)
   const suffix = url.pathname.slice('/wizard/v1/schedules'.length)
-  if (!suffix && request.method === 'GET') sendJson(response, 200, { schedules: scheduler.list() })
-  else if (!suffix && request.method === 'POST') sendJson(response, 201, scheduler.create(await readBody(request)))
+  if (request.method === 'GET' || request.method === 'PATCH') await scheduler.refreshRuns()
+  if (!suffix && request.method === 'GET') sendJson(response, 200, { schedules: scheduler.list().map(job => scheduler.project(job)) })
+  else if (!suffix && request.method === 'POST') sendJson(response, 201, scheduler.project(scheduler.create(await readBody(request))))
   else if (suffix === '/import-hermes' && request.method === 'POST') sendJson(response, 200, importHermesSchedules(scheduler, await readBody(request)))
   else {
     const match = /^\/([A-Za-z0-9._:-]+)(\/run)?$/.exec(suffix)
     if (!match) throw fail('schedule route not found', 404)
     if (match[2] && request.method === 'POST') sendJson(response, 202, scheduler.runNow(match[1]))
-    else if (!match[2] && request.method === 'PATCH') sendJson(response, 200, scheduler.update(match[1], await readBody(request)))
+    else if (!match[2] && request.method === 'PATCH') sendJson(response, 200, scheduler.project(scheduler.update(match[1], await readBody(request))))
     else if (!match[2] && request.method === 'DELETE') { scheduler.delete(match[1]); sendJson(response, 200, { deleted: true }) }
     else throw fail('method not allowed', 405)
   }

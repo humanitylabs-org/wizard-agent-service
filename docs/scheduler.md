@@ -95,6 +95,49 @@ A 202 run-now response is a durable receipt, not proof the agent has completed
 on the next manual request or when scheduling is enabled. Errors stay pending
 without reflecting arbitrary upstream exception/credential strings into state.
 
+### Last and next run (additive read-only projection)
+
+Every job in GET and the job returned by POST/PATCH includes:
+
+```json
+{
+  "lastRun": {
+    "scheduledFor": "2026-10-21T00:00:00.000Z",
+    "startedAt": "2026-10-21T00:00:01.000Z",
+    "finishedAt": "2026-10-21T00:00:09.000Z",
+    "outcome": "posted",
+    "error": null
+  },
+  "nextRun": "2026-10-22T00:00:00.000Z"
+}
+```
+
+`lastRun` is null before any occurrence. Otherwise it is the latest durable
+occurrence by scheduled instant (including run-now), never the job's edit time or
+unrelated activity in its destination. `outcome` is `running` after admission or
+while queued/running, `posted` for completed nonempty visible output, `silent` for
+completed empty/[SILENT] output, and `failed` for failed/cancelled/interrupted runs
+or an admission failure awaiting exact-key retry. Admission is not completion.
+`error` is null or short service-owned copy; raw upstream errors/output are never
+copied into this projection. Admission retry clears its error on success.
+
+Run status is refreshed on the scheduler tick and before GET/PATCH via the ordinary
+exact run-ID/agent route. Last observations persist in the existing occurrence
+SQLite ledger (additive schema migration); completed observations survive restart
+and upstream retention. A lookup outage preserves the durable observation, not a
+fabricated failure. `startedAt` is nullable until known (or first observed running);
+`finishedAt` is nullable until terminal and uses runtime time when provided, else
+first terminal observation time. Old receipts can be enriched by exact-ID lookup;
+unavailable upstream history cannot retrospectively recover exact timestamps.
+
+`nextRun` is a UTC ISO rendering of the durable `nextAt` cursor for enabled
+cron/interval/once jobs, null while paused or after a claimed one-shot (including
+pause/resume). It describes the schedule cursor, not a promise of worker capacity
+or proof the opt-in timer is active. Existing numeric `nextAt` remains for
+compatibility. Both new fields are read-only and rejected in write bodies.
+Clients format these ISO instants in the owner's clock timezone and retain an
+unavailable fallback when connecting to older services without these fields.
+
 ## Silent reports
 
 `[SILENT]` at either boundary of the final answer (ignoring a Wizard status
