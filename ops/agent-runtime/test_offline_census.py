@@ -120,8 +120,6 @@ class OfflineCensusTest(unittest.TestCase):
                     removed.append(argv)
                     return SimpleNamespace(returncode=0)
                 return self.docker(argv, **kwargs)
-            if granted:
-                self.agents.set_secret('fixture', 'claude.token', 'synthetic-not-a-real-token')
             before = self._home_files()
             with self.subTest(granted=granted), patch.object(ar, 'docker', docker):
                 with patch.object(driver, 'stop', pregrant_stop):
