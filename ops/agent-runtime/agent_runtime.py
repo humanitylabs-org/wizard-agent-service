@@ -427,12 +427,14 @@ class RestrictedDriver:
     def apply(self, agent: dict) -> dict:
         self._prepare(agent)
         project = self.project(agent["id"])
-        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
+        # Reconcile actual endpoints/mounts, not only Compose's saved config hash. Legacy
+        # projects can retain an endpoint without the `agent` alias after network migration,
+        # leaving a healthy agent unreachable through the new socket relay.
+        self._compose(agent, "up", "-d", "--force-recreate", "--remove-orphans", timeout=1800)
         return {"ok": True, "driver": "restricted", "project": project}
 
     def start(self, agent: dict) -> dict:
-        self._prepare(agent)
-        self._compose(agent, "up", "-d", timeout=1800)
+        self.apply(agent)
         return {"ok": True}
 
     def stop(self, agent: dict) -> dict:
