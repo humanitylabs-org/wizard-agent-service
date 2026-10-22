@@ -2,13 +2,13 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
+import { agentVisionHelper, claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -288,6 +288,24 @@ describe('agents registry and API', () => {
     expect(status.status).toBe(200)
   })
 
+  it('gives a text-only Tinfoil agent its allowed Tinfoil vision model as confidential eyes', () => {
+    const agent: any = { id: 'private', privacy: 'private', model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false },
+      permissions: { files: 'own', outside_tools: [], other_agents: 'none' }, apps: [], runtime: { kind: 'container' } }
+    expect(agentVisionHelper(agent)).toBe('deepseek-v4-1-flash')
+    const yaml = hermesConfigYaml(agent)
+    expect(yaml).toContain("auxiliary:\n  vision:\n    provider: custom\n    model: \"deepseek-v4-1-flash\"\n    base_url: \"http://agent-private-tinfoil:3301/v1\"\n    key_env: TINFOIL_API_KEY")
+    const disabled = yaml.match(/disabled_toolsets: \[(.*)\]/)[1]
+    expect(disabled).not.toContain('"vision"')
+    expect(disabled).toContain('"web"')
+    // No vision model allowed, files off, or a vision main model: no helper, the public vision tool stays off.
+    for (const change of [{ model: { ...agent.model, allowed_models: ['glm-5-3'] } }, { permissions: { ...agent.permissions, files: 'none' } }, { model: { ...agent.model, model: 'deepseek-v4-1-flash' } }]) {
+      const other = { ...agent, ...change }
+      expect(agentVisionHelper(other)).toBeNull()
+      expect(hermesConfigYaml(other)).not.toContain('auxiliary:')
+      expect(hermesConfigYaml(other).match(/disabled_toolsets: \[(.*)\]/)[1]).toContain('"vision"')
+    }
+  })
+
   it('lists the main agent and only schema-1 agent folders', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -380,6 +398,24 @@ describe('agents registry and API', () => {
     expect(stop.status).toBe(202)
     expect((await stop.json()).agent.status).toBe('stopped')
     expect(calls.at(-1)).toBe('stop private')
+  })
+
+  it('an unchanged update re-applies only a config an older release wrote, not one Hermes normalised', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base, calls } = await start(dir, main)
+    await withPrivate(dir, base)
+    const same = () => fetch(`${base}/wizard/v1/agents/private`, { ...json({ label: 'Private' }), method: 'PATCH' })
+    const applies = () => calls.filter((c: string) => c === 'apply private').length
+    const before = applies()
+    writeFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), '# normalised by Hermes on start\n')
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before)                     // Hermes rewriting its own file is not stale
+    rmSync(join(dir, 'agents', 'private', 'config.sha256'))   // a release before the stamp, or a changed generator
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
   })
 
   it('agent options: harnesses, Tinfoil plus signed-in AI Accounts providers, presets, Wizard apps vs agent apps', async () => {
