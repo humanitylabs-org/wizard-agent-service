@@ -42,7 +42,23 @@ const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
 // Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }],
+}
+/** False only for a model its provider rejects image input for (Tinfoil GLM 5.3: HTTP 400 "not a multimodal model"). */
+export function agentModelSeesImages(agent) {
+  if (agent?.model?.provider !== TINFOIL.id) return true
+  return TINFOIL.models.find((model) => model.id === agent.model.model)?.images !== false
+}
+/**
+ * A Tinfoil agent whose own model is text-only gets an image-capable Tinfoil model from its own allowed list as its
+ * eyes: Hermes' vision_analyze runs on it (auxiliary.vision) through the same attested proxy, so images never leave
+ * the confidential route. Null when the agent sees images itself or has no allowed vision model.
+ */
+export function agentVisionHelper(agent) {
+  if (agent?.model?.provider !== TINFOIL.id || agentModelSeesImages(agent)) return null
+  if (agent.permissions?.files === 'none') return null
+  const allowed = new Set(agent.model.allowed_models ?? [agent.model.model])
+  return TINFOIL.models.find((model) => model.images && allowed.has(model.id))?.id ?? null
 }
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
@@ -315,6 +331,9 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
+  const visionHelper = agentVisionHelper(agent)
+  // The Tinfoil vision helper is confidential, not a public model: its image tool stays on.
+  if (visionHelper) granted.add('vision')
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
   const lines = [
@@ -337,6 +356,10 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // persistence. Pin its supported secure setting for the restricted grant.
   if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
     lines.push('security:', '  redact_secrets: true')
+  }
+  if (visionHelper) {
+    lines.push('auxiliary:', '  vision:', '    provider: custom', `    model: ${yamlString(visionHelper)}`,
+      `    base_url: ${yamlString(tinfoilUrl)}`, '    key_env: TINFOIL_API_KEY')
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
@@ -665,7 +688,7 @@ export function createAgentRegistry(options = {}) {
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
-    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' }
+    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' }
     else if (state.desired === 'stopped') value = { status: 'stopped', status_detail: '' }
     else if (state.last_error) value = { status: 'error', status_detail: String(state.last_error).slice(0, 200) }
     else if (Number(state.started_at) && now() - Number(state.started_at) < startingGraceMs) value = { status: 'starting', status_detail: '' }
@@ -754,6 +777,14 @@ export function createAgentRegistry(options = {}) {
     let port = basePort
     while (used.has(port)) port += 1
     return port
+  }
+
+  /** True when the agent's managed config.yaml is not what this release would write (a new release changed it). */
+  function harnessStale(agent) {
+    if (agent.runtime.kind === 'profile') return false
+    const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
+    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
+    try { return readFileSync(join(home, 'config.yaml'), 'utf8') !== expected } catch { return false }
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
@@ -854,7 +885,7 @@ export function createAgentRegistry(options = {}) {
     try {
       if (restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await runtime.apply(id)
-      writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
@@ -927,7 +958,8 @@ export function createAgentRegistry(options = {}) {
     assertPrivateWalls(next)
     assertStandardTransport(next)
     assertIsolationSupports(next)
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
+    // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
+    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
@@ -937,7 +969,7 @@ export function createAgentRegistry(options = {}) {
       try {
         if (restricted(next)) await options.beforeRestrictedStart?.(id)
         const result = await runtime.apply(id)
-        writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+        writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
@@ -970,7 +1002,7 @@ export function createAgentRegistry(options = {}) {
     try {
       if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
-      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)
@@ -1221,5 +1253,7 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     inspect: (id) => call('POST', `/agents/${encodeURIComponent(id)}/inspect`),
     census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
+    place: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/place`, payload),
+    fetch: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/fetch`, payload),
   }
 }

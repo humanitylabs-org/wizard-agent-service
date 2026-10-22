@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
@@ -52,12 +52,13 @@ import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
-import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { placeAgentFiles } from './agent-files.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -98,6 +99,7 @@ const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
+const ROUTED_MIRROR_FRESH_MS = 20_000
 const SESSION_LIST_PREVIEW_LIMIT = 48
 const CANONICAL_SESSION_LIMIT = 2_000
 const CANONICAL_SESSION_CACHE_MS = 30_000
@@ -1540,11 +1542,17 @@ function nativeImageParts(files) {
   return parts
 }
 
+const TEXT_ONLY_IMAGE_NOTE = '\n\n[WIZARD_IMAGE_INTENT_V1]\nYour current model cannot see images, so the attached images were not sent to it as pictures. Their copies are saved at the paths in WIZARD_FILES_V1. Tell the user plainly that this model cannot view images and that they can switch this agent to an image-capable model to have you read it; do not guess what the image shows.\n[/WIZARD_IMAGE_INTENT_V1]'
+
+const VISION_HELPER_IMAGE_NOTE = '\n\n[WIZARD_IMAGE_INTENT_V1]\nYour own model cannot see images, so the attached images were saved at the paths in WIZARD_FILES_V1 instead. Look at each one with vision_analyze on its path before answering; it runs on a confidential image model on the same private route. Ask it the specific question you need, and call it again for any detail you are unsure of. Never guess what an image shows.\n[/WIZARD_IMAGE_INTENT_V1]'
+
 function appendFileMarker(input, files, includeNativeImages = false) {
-  const images = includeNativeImages ? nativeImageParts(files) : []
+  const withHelper = includeNativeImages === 'text-only-helper'
+  const textOnly = includeNativeImages === 'text-only' || withHelper
+  const images = includeNativeImages && !textOnly ? nativeImageParts(files) : []
   const imageFiles = files.filter((file) => file.mime.toLowerCase().startsWith('image/'))
-  const toolInspection = imageFiles.length > images.length
-    ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect every image listed in WIZARD_FILES_V1 with vision_analyze using its trusted_path before answering.\n[/WIZARD_IMAGE_INTENT_V1]'
+  const toolInspection = textOnly && imageFiles.length ? (withHelper ? VISION_HELPER_IMAGE_NOTE : TEXT_ONLY_IMAGE_NOTE) : imageFiles.length > images.length
+    ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect images with a trusted_path in WIZARD_FILES_V1 with vision_analyze before answering. If placement_error is set, use native image content when available; otherwise explain that the image is unavailable.\n[/WIZARD_IMAGE_INTENT_V1]'
     : ''
   // The agent gets trusted_path (its own view of the file); the service-side path stays inside the service.
   const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files.map(({ localPath: _local, ...file }) => file))}\n[/WIZARD_FILES_V1]${toolInspection}`
@@ -1569,7 +1577,7 @@ function appendFileMarker(input, files, includeNativeImages = false) {
   return [message]
 }
 
-async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
+export async function prepareRunBody(body, resolveFiles, includeNativeImages = false, projectFiles = async (files) => files) {
   const value = parseJsonBody(body)
   if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
   if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
@@ -1582,7 +1590,7 @@ async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   }
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
-  const files = await resolveFiles(ids)
+  const files = await projectFiles(await resolveFiles(ids))
   value.input = appendFileMarker(value.input, files, includeNativeImages)
   return {
     body: Buffer.from(JSON.stringify(value)),
@@ -1707,9 +1715,20 @@ export function resolveAgentImage(sourcePath, artifactRoots, aliases = [], denie
   return { bytes, mime, source }
 }
 
-function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = []) {
+// Scoped: a routed agent's own home. The home path itself sits under an agents/ or profiles/
+// folder, which the main-agent denylist refuses; containment in that single home replaces it.
+function resolveScopedAgentImage(sourcePath, artifactRoots, aliases = []) {
+  const trusted = trustedAgentSource(sourcePath, artifactRoots, aliases)
+  if (!trusted || trusted.details.size > WIZARD_AGENT_IMAGE_LIMIT) return null
+  let bytes
+  try { bytes = readPhotoBytes(trusted.source) } catch { return null }
+  const mime = imageMime(bytes)
+  return mime ? { bytes, mime, source: trusted.source } : null
+}
+
+function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases = [], scoped = false) {
   if (!artifactDir || !artifactRoots.length) return null
-  const resolved = resolveAgentImage(sourcePath, artifactRoots, aliases)
+  const resolved = (scoped ? resolveScopedAgentImage : resolveAgentImage)(sourcePath, artifactRoots, aliases)
   if (!resolved) return null
   const { bytes, mime, source } = resolved
   const sha256 = createHash('sha256').update(bytes).digest('hex')
@@ -1800,7 +1819,38 @@ function readAgentArtifact(id, artifactDir) {
   } catch { return null }
 }
 
-export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null) {
+/**
+ * A routed agent's MEDIA:/path lines become the same openable attachments as the main agent's.
+ * Only files inside that agent's own home resolve (container paths under /opt/data map to it);
+ * bytes are copied into the agent's own artifact folder, never the shared main one.
+ */
+export function projectRoutedAgentMedia(result, { home, artifactDir, containerRoot = '', mirror = '' }) {
+  // A sandboxed home is owned by the agent's own uid; its sent files are read through the runtime into `mirror`.
+  let readable = true
+  try { accessSync(home, fsConstants.R_OK | fsConstants.X_OK) } catch { readable = false }
+  const roots = canonicalArtifactRoots([readable || !mirror ? home : mirror])
+  if (!roots.length || !artifactDir) return result
+  const aliases = containerRoot ? [[containerRoot, roots[0]]] : []
+  return projectAgentMedia(result, artifactDir, roots, aliases, null, true)
+}
+
+/** Container MEDIA paths (/opt/data/...) named anywhere in a JSON payload. */
+export function routedMediaPaths(result, containerRoot = '/opt/data') {
+  const found = new Set()
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(AGENT_MEDIA_LINE)) {
+        const path = resolve(match[1].trim())
+        if (path.startsWith(`${containerRoot}/`)) found.add(path)
+      }
+    } else if (Array.isArray(value)) value.forEach(walk)
+    else if (value && typeof value === 'object') Object.values(value).forEach(walk)
+  }
+  try { walk(JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result))) } catch { return [] }
+  return [...found].slice(0, 16)
+}
+
+export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null, scoped = false) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
@@ -1818,7 +1868,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       return _marker
     })
     const register = (_line, sourcePath) => {
-      const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
+      const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases, scoped)
         ?? registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases)
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
@@ -1832,7 +1882,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       text = text.replace(/^\s*\[Image(?: attached at)?:\s*(\/[^\]\n]+)\]\s*$/gm, register)
       text = text.replace(AGENT_IMAGE_REFERENCE_LINE, (_line, backtick, doubleQuote, singleQuote, bare) => {
         const sourcePath = backtick || doubleQuote || singleQuote || bare
-        const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases)
+        const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases, scoped)
         if (artifact && !durableImageHashes.has(artifact.sha256)
             && !artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
         return ''
@@ -2390,10 +2440,62 @@ function buildWizardServer(options, lifetime) {
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
     : null
+  // Each routed agent's sent files live in its own folder, so a private agent's bytes never join the
+  // main agent's shared artifact store. Container homes are mounted at /opt/data; host profiles are read in place.
+  const routedAgentMedia = (agent) => {
+    if (!agents || !agent?.id || agent.id === MAIN_AGENT_ID) return null
+    const artifactDir = join(agents.agentsDir, agent.id, 'wizard-artifacts')
+    if (agent.runtime?.kind === 'profile') {
+      const hermesHome = options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes')
+      return { home: join(hermesHome, 'profiles', agent.runtime.profile), artifactDir }
+    }
+    if (agent.runtime?.kind === 'container') return { home: join(agents.agentsDir, agent.id, 'home'), artifactDir, containerRoot: '/opt/data', mirror: join(artifactDir, 'mirror') }
+    return null
+  }
+  // Sandboxed homes are unreadable to this service: copy each named file out through the runtime, as the agent's uid.
+  const mirrorMisses = new Map()
+  const mirrorRoutedAgentMedia = async (result, agent, media) => {
+    if (!media?.mirror || !agentRuntime?.fetch || agent.permissions?.files === 'none') return
+    try { accessSync(media.home, fsConstants.R_OK | fsConstants.X_OK); return } catch { /* sandboxed */ }
+    for (const path of routedMediaPaths(result, media.containerRoot)) {
+      const relative = path.slice(media.containerRoot.length + 1)
+      const target = resolve(media.mirror, relative)
+      if (!target.startsWith(`${media.mirror}${sep}`)) continue
+      // An agent may rewrite the same file and send it again; a copy older than this is read again.
+      try { if (Date.now() - statSync(target).mtimeMs < ROUTED_MIRROR_FRESH_MS) continue } catch { /* not mirrored yet */ }
+      const key = `${agent.id}\0${path}`
+      if (Date.now() - (mirrorMisses.get(key) ?? 0) < 60_000) continue
+      try {
+        const got = await agentRuntime.fetch(agent.id, { path })
+        const bytes = Buffer.from(String(got?.data_base64 ?? ''), 'base64')
+        if (!got?.verified || !bytes.length || bytes.length !== got.bytes || createHash('sha256').update(bytes).digest('hex') !== got.sha256) throw new Error('changed')
+        mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+        const temporary = `${target}.${randomUUID()}.tmp`
+        writeFileSync(temporary, bytes, { mode: 0o600 })
+        renameSync(temporary, target)
+      } catch { mirrorMisses.set(key, Date.now()) }
+    }
+  }
+  const readRoutedAgentArtifact = (id) => {
+    if (!agents || !AGENT_ARTIFACT_ID.test(id)) return null
+    for (const entry of (() => { try { return readdirSync(agents.agentsDir, { withFileTypes: true }) } catch { return [] } })()) {
+      if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,30}$/u.test(entry.name)) continue
+      const artifact = readAgentArtifact(id, join(agents.agentsDir, entry.name, 'wizard-artifacts'))
+      if (artifact) return artifact
+    }
+    return null
+  }
   const agentCtx = agents ? {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
-    projectAgentHistory: (result, agent) => {
+    projectAgentHistory: async (result, agent) => {
+      // The agent's own MEDIA:/path lines become openable chat attachments before paths are redacted.
+      const media = routedAgentMedia(agent)
+      if (media) {
+        if (media.mirror) mkdirSync(media.mirror, { recursive: true, mode: 0o700 })
+        await mirrorRoutedAgentMedia(result, agent, media)
+        result = projectRoutedAgentMedia(result, media)
+      }
       // Routed agents have a host-side home and the runtime mounts it at /opt/data.
       // Shared inbox roots still apply when a note mentions a main-agent attachment.
       const roots = [...inboxTrustedRoots, join(agents.agentsDir, agent.id, 'home'), '/opt/data']
@@ -2404,6 +2506,7 @@ function buildWizardServer(options, lifetime) {
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
+    prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : agentVisionHelper(agent) ? 'text-only-helper' : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
@@ -4747,7 +4850,8 @@ function buildWizardServer(options, lifetime) {
       if (helmAttachmentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
         mainHistoryPair(request, '', Object.fromEntries(url.searchParams))
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir) || readLegacyHelmImage(helmAttachmentMatch[1], options.helmAttachmentsRoot)
+        const artifact = readAgentArtifact(helmAttachmentMatch[1], agentArtifactDir) || readRoutedAgentArtifact(helmAttachmentMatch[1])
+          || readLegacyHelmImage(helmAttachmentMatch[1], options.helmAttachmentsRoot)
         if (artifact) {
           // Images, audio and video play in place; everything else (APK, PDF, archives, documents)
           // downloads with its real type so the phone offers the right app, e.g. the APK installer.
