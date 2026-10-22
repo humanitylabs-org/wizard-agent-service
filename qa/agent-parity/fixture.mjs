@@ -14,7 +14,7 @@ export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Typ
 
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
-export async function scene(kind) {
+export async function scene(kind, serverOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), 'parity-'))
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
@@ -113,11 +113,11 @@ export async function scene(kind) {
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
   let wizard, base
-  const start = async () => { wizard = createWizardServer(options); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
+  const start = async () => { wizard = createWizardServer({ ...options, ...serverOptions }); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
   await start()
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
   const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
-  return { kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt,
+  return { kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },
