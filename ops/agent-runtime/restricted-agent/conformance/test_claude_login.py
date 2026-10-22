@@ -13,12 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 def render(granted=False, hosts=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith(('AGENT_', 'EDGE_', 'EGRESS_', 'COMPOSE_', 'CLAUDE_'))}
     env.update(AGENT_API_KEY='synthetic-api-key', EDGE_TOKEN_SHA256='0' * 64,
-               CLAUDE_TOKEN_FILE='/synthetic/agent/claude.token',
+               CLAUDE_CODE_OAUTH_TOKEN='',
                AGENT_GATEWAY_DIR='/synthetic/agent/gateway', AGENT_EDGE_UID='1000', AGENT_EDGE_GID='1000')
     args = ['docker', 'compose', '--project-name', 'claude-grant-fixture', '-f', str(ROOT / 'compose.yml')]
     if granted:
-        args += ['-f', str(ROOT / 'compose.claude-token.yml')]
+        args += ['-f', str(ROOT / 'compose.claude-login.yml')]
     with tempfile.TemporaryDirectory() as folder:
+        if granted:
+            spec = importlib.util.spec_from_file_location('claude_source', ROOT / 'claude_source.py')
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            path = Path(folder) / 'source.json'
+            path.write_text(json.dumps(module.compose_override({'type': 'volume', 'source': module.LEGACY_VOLUME})))
+            args += ['-f', str(path)]
         if hosts:
             spec = importlib.util.spec_from_file_location('passthrough', ROOT / 'passthrough.py')
             module = importlib.util.module_from_spec(spec)
@@ -45,15 +51,17 @@ class ClaudeComposeTest(unittest.TestCase):
             self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', service.get('environment', {}))
         agent = doc['services']['agent']
         self.assertEqual(agent['environment']['CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR'], '/run/claude-login')
-        self.assertNotIn('/run/secrets/claude.token', [v['target'] for v in agent['volumes']])
+        self.assertNotIn('/claude-app', [v['target'] for v in agent['volumes']])
+        session = next(v for v in agent['volumes'] if v['target'] == '/run/claude-login')
+        self.assertTrue(session['read_only'])
         init = doc['services']['claude-init']
         self.assertEqual(init['network_mode'], 'none')
         self.assertTrue(init['read_only'])
-        self.assertEqual(init['volumes'][0]['source'], '/synthetic/agent/claude.token')
-        self.assertTrue(init['volumes'][0]['read_only'])
-        self.assertFalse(init['volumes'][0]['bind']['create_host_path'])
+        source = next(v for v in init['volumes'] if v['target'] == '/claude-app')
+        self.assertEqual(source['source'], 'claude-app-login')
+        self.assertTrue(source['read_only'])
+        self.assertEqual(doc['volumes']['claude-app-login'], {'name': 'wizard-ai-accounts-claude', 'external': True})
         self.assertEqual(doc['volumes']['claude-session']['driver_opts']['type'], 'tmpfs')
-        self.assertNotIn('claude-login', doc.get('volumes', {}))
 
     def test_grant_preserves_hardening(self):
         base, grant = render(), render(True)

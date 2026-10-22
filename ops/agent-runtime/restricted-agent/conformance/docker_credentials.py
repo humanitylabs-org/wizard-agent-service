@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,16 @@ assert next(l.split()[1] for l in pathlib.Path('/proc/self/status').read_text().
 result = json.loads(handle_function_call('terminal', {
     'command': 'printf snapshot-ok', 'timeout': 10}, task_id='claude-credential-regression'))
 assert result.get('exit_code') == 0 and result.get('output') == 'snapshot-ok', 'dispatcher failed'
-token = json.loads(config.read_text())['claudeAiOauth']['accessToken'].encode()
+auth = json.loads(config.read_text())['claudeAiOauth']
+assert 'refreshToken' not in auth
+assert not pathlib.Path('/claude-app').exists(), 'raw app login reached agent'
+try:
+    with config.open('a'): pass
+except OSError:
+    pass
+else:
+    raise AssertionError('agent projection must be read-only')
+token = auth['accessToken'].encode()
 files = list(pathlib.Path('/opt/data').rglob('*'))
 assert any(p.name.startswith('hermes-snap-') for p in files), 'snapshot control missing'
 status = directsdk_setup.setup_status()
@@ -94,34 +104,53 @@ def main():
     volume = tag + '-config'
     names = [tag + '-init', tag + '-legacy', tag + '-redaction-off', tag + '-fixed']
     try:
-        docker('volume', 'create', '--label', 'claude-grant-test', '--label', 'fixture=' + tag,
+        docker('volume', 'create', '--label', 'claude-app-grant-test', '--label', 'fixture=' + tag,
                '--driver', 'local', '--opt', 'type=tmpfs', '--opt', 'device=tmpfs', '--opt',
                'o=size=4m,uid=10000,gid=10000,mode=0700,nosuid,nodev,noexec', volume)
         assert json.loads(docker('volume', 'inspect', volume))[0]['Options']['type'] == 'tmpfs'
         with tempfile.TemporaryDirectory(prefix='claude-credential-') as folder:
-            secret = Path(folder) / 'claude.token'
-            secret.write_text(SYNTHETIC)
-            secret.chmod(0o600)
+            login = Path(folder) / 'claude'; login.mkdir(mode=0o700)
+            secret = login / '.credentials.json'
+            def write_login(token=SYNTHETIC):
+                replacement = login / 'new'
+                replacement.write_text(json.dumps({'claudeAiOauth': {'accessToken': token,
+                    'refreshToken': 'SYNTHETIC-REFRESH-NEVER-GRANTED', 'expiresAt': time.time()*1000+3600000,
+                    'scopes': ['user:inference','user:profile'], 'subscriptionType': 'max'}}))
+                replacement.chmod(0o600); replacement.replace(secret)
+            write_login()
+            before = (secret.read_bytes(), secret.stat().st_mode, secret.stat().st_uid)
+            assert login.stat().st_uid == 1000 and login.stat().st_mode & 0o777 == 0o700
             # Same production seeder, isolated from the home and all networks.
-            docker('run', '--rm', '-d', '--name', names[0], '--label', 'claude-grant-test',
+            docker('run', '--rm', '-d', '--name', names[0], '--label', 'claude-app-grant-test',
                    '--label', 'fixture=' + tag, '--network', 'none', '--read-only', '--user', '0:0',
                    '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'FOWNER', '--cap-add', 'DAC_OVERRIDE',
                    '--security-opt', 'no-new-privileges:true', '--memory', '64m', '--pids-limit', '32',
-                   '--mount', f'type=bind,src={secret},dst=/run/secrets/claude.token,readonly',
+                   '--mount', f'type=bind,src={login},dst=/claude-app,readonly',
                    '-v', volume + ':/run/claude-login', '--entrypoint', '/opt/hermes/.venv/bin/python',
                    IMAGE, '-c', (ROOT / 'sidecars/claude-init.py').read_text())
+            def wait_check(expected):
+                for _ in range(50):
+                    check = subprocess.run(['docker','exec', names[0], '/opt/hermes/.venv/bin/python','-c',
+                        (ROOT/'sidecars/claude-init.py').read_text(), '--check'], capture_output=True, timeout=10)
+                    projected = subprocess.run(['docker','exec', names[0], 'test','-f','/run/claude-login/.credentials.json'],
+                                               capture_output=True, timeout=10)
+                    if (check.returncode == 0) == expected and (projected.returncode == 0) == expected:
+                        return
+                    time.sleep(0.2)
+                raise AssertionError('projection readiness timeout')
+            wait_check(True)
             receipts = {}
             for mode, name in zip(('legacy', 'redaction-off', 'fixed'), names[1:]):
                 legacy = mode == 'legacy'
                 env_args = ['-e', 'CLAUDE_CODE_OAUTH_TOKEN=' + SYNTHETIC] if legacy else []
                 if mode == 'redaction-off': env_args += ['-e', 'HERMES_REDACT_SECRETS=false']
-                raw = docker('run', '--rm', '-i', '--name', name, '--label', 'claude-grant-test',
+                raw = docker('run', '--rm', '-i', '--name', name, '--label', 'claude-app-grant-test',
                     '--label', 'fixture=' + tag, '--network', 'none', '--read-only', '--user', '10000:10000',
                     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                     '--memory', '768m', '--pids-limit', '128',
                     '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m,mode=1777',
                     '--tmpfs', '/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000,mode=700',
-                    '-v', volume + ':/run/claude-login', '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data',
+                    '-v', volume + ':/run/claude-login:ro', '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data',
                     '-e', 'HERMES_YOLO_MODE=1', '-e', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login',
                     *env_args, '--workdir', '/opt/data', '--entrypoint', '/opt/hermes/.venv/bin/python',
                     IMAGE, '-', input=PROBE)
@@ -132,6 +161,25 @@ def main():
                     assert any('trajectory_samples.jsonl' in p for p in receipt['matching_home_files'])
                 assert receipt['token_in_gateway_env'] == legacy
                 receipts[mode] = receipt
+            assert before == (secret.read_bytes(), secret.stat().st_mode, secret.stat().st_uid), 'app login changed'
+            # Rotation of the source inode must be observed without seeder restart.
+            write_login(SYNTHETIC + '-rotated')
+            time.sleep(2.5)
+            rotated = json.loads(docker('run','--rm','-i','--name',names[-1], '--label','claude-app-grant-test',
+                '--label','fixture='+tag, '--network','none','--read-only','--user','10000:10000','--cap-drop','ALL',
+                '--security-opt','no-new-privileges:true','--memory','768m','--pids-limit','128',
+                '--tmpfs','/tmp:rw,nosuid,nodev,size=64m,mode=1777',
+                '--tmpfs','/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000,mode=700',
+                '-v',volume+':/run/claude-login:ro','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
+                '-e','HERMES_YOLO_MODE=1','-e','CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login',
+                '--workdir','/opt/data','--entrypoint','/opt/hermes/.venv/bin/python',IMAGE,'-',input=PROBE).splitlines()[-1])
+            assert not rotated['matching_home_files']
+            receipts['rotated'] = rotated
+            secret.unlink(); wait_check(False)
+            assert docker('inspect',names[0],'--format','{{.State.Running}}').strip() == 'true'
+            write_login(); wait_check(True)
+            receipts['source_unchanged_uid1000_modes'] = True
+            receipts['rotation_logout_reconnect_without_restart'] = True
             print(json.dumps(receipts, indent=2))
     finally:
         for name in reversed(names):

@@ -1,4 +1,6 @@
-# Owner-authorized standard/anthropic grant. Never put the token in process env.
+# Independent owner grant: restricted + standard privacy + anthropic provider.
+# The driver adds exactly one app-owned source at /claude-app, read-only, using
+# claude_source.py (legacy named volume or installed app's compiled share bind).
 services:
   claude-init:
     build: ./sidecars
@@ -10,10 +12,9 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
-    # Keep the local tmpfs volume mounted while the agent starts/restarts.
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "from pathlib import Path; raise SystemExit(not Path('/run/claude-login/.credentials.json').is_file())"]
+      test: ["CMD", "python3", "-c", "from pathlib import Path; raise SystemExit(not Path('/run/claude-login/.initialized').is_file())"]
       interval: 1s
       timeout: 2s
       retries: 20
@@ -21,11 +22,6 @@ services:
     memswap_limit: 64m
     pids_limit: 32
     volumes:
-      - type: bind
-        source: ${CLAUDE_TOKEN_FILE:?set the agent-scoped secret file}
-        target: /run/secrets/claude.token
-        read_only: true
-        bind: {create_host_path: false}
       - claude-session:/run/claude-login
   agent:
     depends_on:
@@ -33,7 +29,7 @@ services:
     environment:
       CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR: /run/claude-login
     volumes:
-      - claude-session:/run/claude-login
+      - claude-session:/run/claude-login:ro
 volumes:
   claude-session:
     driver: local

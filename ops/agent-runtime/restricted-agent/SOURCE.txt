@@ -1,40 +1,40 @@
-Base: humanitylabs-org/wizard-app-store main @ afeb2073e8517420a4a3c8f3d3a1aaf341cc09e5
-Includes Store PRs #20 and #21; path: runtimes/restricted-agent.
-Plus local socket-gateway adaptation from wizard-agent-service main @ abea43dd7c3f53483cd866020eacdc4792f5e990.
-Main SOURCE.txt provenance: "Locally adapted for per-agent Unix socket gateways in wizard-agent-service. Digests below cover this adaptation."
-Retains main's heavy edge allowlist (Store feature/restricted-edge-agent-heavy @ 657f1c327cbbbd5742471636aff55990b4895161).
-Digests cover the combined actual vendored bytes, including socket-aware conformance fixtures.
-Combined conformance is covered by the Thales suite gate; this merge head needs its own recheck and fresh Thales run.
-Prior grant-only evidence: review round 3 PASS and Thales heavy_fd618261 ALL PASS at Service 1ee268d; not approval of this merge.
-Change upstream first for Store-owned behavior; preserve and explicitly repin the Service socket adaptation.
+Source: https://github.com/humanitylabs-org/wizard-app-store
+Branch: fix/restricted-claude-app-login
+Commit: 4122120fefedf6dbe179ae9810d1184db6577038
+Path: runtimes/restricted-agent
+All runtime files are byte-identical to this upstream commit. The prior Service
+Unix-socket adaptation was moved upstream first (39ff02c); no local adaptation.
+Claude login source is the installed app metadata, never a per-agent token.
 
-898a4c2521a95c974fd1ec66bc51c8051895fe2282c3d9d4e273158280b6976c  ./README.md
-5d22893afcf9a129af19a61d0e1ce63d5000c09beabac9e4500aa1f54656409b  ./compose.claude-token.yml
+d729485b96907164e572c124175b967166343ca3ba4f2526951bee0a472b5bca  ./README.md
+8423c5463a21080c97070e04bc9abbb4c1e1c80cca1f1d5a912bb24e4069c85b  ./claude_source.py
+b52f7f19a17f9f09c5dc3575d163af2abb34147360f57f1bfe3fe3b9bc97b79a  ./compose.claude-login.yml
 989e0dd27b2a1b238e95d14b226e2997a188630e4ccc67899eb32e6b7d736fe9  ./compose.yml
 d616a06277c6f939581659bb8653c2a9c76136d2a1ed89a75adaf8e940081f57  ./conformance/Dockerfile
 48c76441405187ccd6604428251f9484054efb2f2a79185a1ec1209f5e01911f  ./conformance/SocketService.Dockerfile
 ac5e131cd08195846a15f004c89b185b54ef08e60790cd18d32dbf4bd1d89374  ./conformance/compose.socket.yml
 5d5d80516bd68191a107405a7d472626d7a0b029cb93ba9d4eec0338bf891a11  ./conformance/compose.test.yml
-baa374a5aa07d2ff2f0a3ec3722d5be28a7cf0c34d3378013b6625fa396591d2  ./conformance/docker_credentials.py
+6306bb55f9352e090c7b75a9cc0b7155cd4f15132e671072d9f099fa1da8d419  ./conformance/docker_credentials.py
 e1409275b7f683e250ce690e1de34c63e9085e4128a2276b8da1037f493a22bb  ./conformance/docker_passthrough.py
 fac12ff62d85bef160b3f9fbd5faedc8c62a4b6009367fa4b39f641744ea9e86  ./conformance/egress_selftest.py
 6734542a417670383909523c6f3e9fbaec83264848e3d26c2ea10a119ebaacef  ./conformance/fake_service.py
 7bdfbedde2d15d13d5378511e35778f83579f467491fbbd25b840a9ec8e9ce8d  ./conformance/in_agent.py
 3e645860d2e4e02cc4ff6c24d7161a1ea58d396916185ac7b8afdbb8a5769cdb  ./conformance/ingress_probe.py
 9b45d7c08a4ebad47d61cfa1b5cffce5699d8f2ee9c39408066c69d1915149ca  ./conformance/ingress_service_probe.mjs
-4cd182ecd8b870bb9a95966636e5cf9abc8c46ae88b24d4f7439cab4f8ce944e  ./conformance/inspect_check.py
+946c0fefb60b0de7e84e9ddc6cecf25605fa41da891b6f5d506bf0766c63ab5a  ./conformance/inspect_check.py
 7ddd4f1c83b5041fbc8210d893260321d418c68db3f2d5f298ae0863fd97f2dc  ./conformance/redact.py
 cc4a0adc72174dc97fd07ad11259eedd2880e197ea5eccfe6c117ece96937a5b  ./conformance/run.sh
 28686e14f5b9807c563c3472b66343d981d0bc9421f0bcc9d0003aebe13f4150  ./conformance/socket_probe.py
 d3c85c842f2399f773c246996bb8dc1de7132207fdb494426a76bfd36e5dda74  ./conformance/socket_service.mjs
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
-8e33bae4f6b2f81478f90a2a01847f7b6c0202def21ae07b90d923642e76fdce  ./conformance/test_claude_login.py
-38e15fe3906662f42706131dad4ef208d9d632203cdd0e79c3f62d08bee3af12  ./conformance/test_claude_seed.py
+a8a2341e58cfb1a3f3a5d903bd196a959bdfb94a8f35e33c32945412fa6e80e0  ./conformance/test_claude_login.py
+94bcfbe2e9c4c10ddb3dc01c63ae586f67bfa89ca832db36b35f9089b26770ba  ./conformance/test_claude_seed.py
+2b0aafbeb94987b7a4be032db6c4bdaef8d53753ed4640767c6f3c60021b8c26  ./conformance/test_claude_source.py
 ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
 edc731730daffd878838d9f33b23fdb4a9547134680ba35a3970f7e8f979ba26  ./conformance/test_passthrough.py
 67a67ddd0243ad8fe5944ffb9e55a182f7ef11ba70aceb5acd919e67110303ff  ./passthrough.py
 5704656a3c8e8f15cc2eee2bd93bf6ff2fbf8cce96467e03f247037f90bf665c  ./sidecars/Dockerfile
-a93a231711cfdad2a50091f74215b2c536b4032eb11af8e96acc71e82e53790e  ./sidecars/claude-init.py
+dae79f75ec6581b6daa362a255944c9acf7a9aa24f16a7c892c9ce51cac8c085  ./sidecars/claude-init.py
 27bf3847e3eb289aeaf25c05bff9269e099f0f1401a8744902ea01a68d50a454  ./sidecars/edge.py
 f4b0d531b683bba2ae114d811a8d526ea9d15d8fce7cdba54ca38ecd0c7739da  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh
