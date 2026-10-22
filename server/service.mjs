@@ -58,6 +58,7 @@ import { serviceLifetime } from './service-lifetime.mjs'
 import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { placeAgentFiles } from './agent-files.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -1544,7 +1545,7 @@ function appendFileMarker(input, files, includeNativeImages = false) {
   const images = includeNativeImages ? nativeImageParts(files) : []
   const imageFiles = files.filter((file) => file.mime.toLowerCase().startsWith('image/'))
   const toolInspection = imageFiles.length > images.length
-    ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect every image listed in WIZARD_FILES_V1 with vision_analyze using its trusted_path before answering.\n[/WIZARD_IMAGE_INTENT_V1]'
+    ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect images with a trusted_path in WIZARD_FILES_V1 with vision_analyze before answering. If placement_error is set, use native image content when available; otherwise explain that the image is unavailable.\n[/WIZARD_IMAGE_INTENT_V1]'
     : ''
   // The agent gets trusted_path (its own view of the file); the service-side path stays inside the service.
   const marker = `\n\n[WIZARD_FILES_V1]\n${JSON.stringify(files.map(({ localPath: _local, ...file }) => file))}\n[/WIZARD_FILES_V1]${toolInspection}`
@@ -1569,7 +1570,7 @@ function appendFileMarker(input, files, includeNativeImages = false) {
   return [message]
 }
 
-async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
+export async function prepareRunBody(body, resolveFiles, includeNativeImages = false, projectFiles = async (files) => files) {
   const value = parseJsonBody(body)
   if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
   if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
@@ -1582,7 +1583,7 @@ async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   }
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
-  const files = await resolveFiles(ids)
+  const files = await projectFiles(await resolveFiles(ids))
   value.input = appendFileMarker(value.input, files, includeNativeImages)
   return {
     body: Buffer.from(JSON.stringify(value)),
@@ -2402,6 +2403,7 @@ function buildWizardServer(options, lifetime) {
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
+    prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, true, files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')

@@ -870,6 +870,82 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
+# ---------------------------------------------------------------- file placement (only the agent's inbox, as its uid)
+
+PLACE_LIMIT = 25 * 1024 * 1024
+PLACE_SCRIPT = r'''
+import base64, datetime, hashlib, json, os, re, sys
+p = json.load(sys.stdin)
+data = base64.b64decode(p["data_base64"], validate=True)
+if not 0 < len(data) <= 25 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != p["sha256"]:
+    raise SystemExit("invalid_file")
+name = p["filename"]
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", name):
+    raise SystemExit("invalid_filename")
+day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+fd = os.open("/opt/data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in ("inbox", day):
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = next_fd
+    # A content-qualified name is idempotent without overwriting existing agent files.
+    try:
+        out = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        created = True
+    except FileExistsError:
+        out = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        created = False
+    with os.fdopen(out, "r+b" if created else "rb") as f:
+        if created:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            f.seek(0)
+        if hashlib.sha256(f.read(25 * 1024 * 1024 + 1)).hexdigest() != p["sha256"]:
+            raise SystemExit("file_conflict")
+finally:
+    os.close(fd)
+print(json.dumps({"verified": True, "path": "/opt/data/inbox/" + day + "/" + name, "bytes": len(data), "sha256": p["sha256"]}))
+'''
+
+
+def place(driver, agent: dict, payload: dict) -> dict:
+    import base64
+    if (agent.get("permissions") or {}).get("files") == "none":
+        raise RuntimeFailure("agent_files_disabled", 409)
+    raw = payload.get("data_base64")
+    if not isinstance(raw, str) or len(raw) > 4 * ((PLACE_LIMIT + 2) // 3):
+        raise RuntimeFailure("file_too_large", 413)
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except ValueError:
+        raise RuntimeFailure("invalid_file", 400)
+    if not 0 < len(data) <= PLACE_LIMIT:
+        raise RuntimeFailure("file_too_large", 413)
+    digest = hashlib.sha256(data).hexdigest()
+    if payload.get("sha256") != digest:
+        raise RuntimeFailure("file_hash_mismatch", 400)
+    name = payload.get("filename")
+    if not isinstance(name, str) or not name:
+        raise RuntimeFailure("invalid_filename", 400)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name.replace("\\", "/").split("/")[-1]).lstrip("._-") or "attachment"
+    name = digest[:16] + "-" + name[:180]
+    clean = {"filename": name, "data_base64": raw, "sha256": digest}
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    result = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", PLACE_SCRIPT],
+                    input_text=json.dumps(clean), timeout=60, check=False)
+    if result.returncode:
+        raise RuntimeFailure("file_placement_failed", 502)
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 # ---------------------------------------------------------------- HTTP
 
 def driver_for(agent: dict, driver, restricted_driver):
@@ -907,12 +983,17 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 512 * 1024:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._json(400, {"error": "invalid_length"})
+                return
+            limit = 4 * ((PLACE_LIMIT + 2) // 3) + 4096 if m.group(2) == "place" else 512 * 1024
+            if length < 0 or length > limit:
                 self._json(413, {"error": "too_large"})
                 return
             try:
@@ -930,6 +1011,11 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     return
                 agent = agents.read(agent_id)
                 chosen = driver_for(agent, driver, restricted_driver)
+                if action == "place":
+                    if not isinstance(payload, dict):
+                        raise RuntimeFailure("invalid_payload", 400)
+                    self._json(200, place(chosen, agent, payload))
+                    return
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
