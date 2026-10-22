@@ -75,7 +75,7 @@ describe('file-provisioned host profile agents', () => {
     expect(existsSync(join(dir, 'agents', 'quick', 'home'))).toBe(false)
   })
   it('preserves the profile prefix, authentication, pins and badges for sessions, runs, SSE, stop and steer', async () => {
-    const seen: any[] = []
+    const seen: any[] = []; let runStatus = 'running'
     const main = await serve(createServer(async (req, res) => {
       let raw = ''; for await (const chunk of req) raw += chunk
       seen.push({ method: req.method, path: req.url, auth: req.headers.authorization, body: raw ? JSON.parse(raw) : null })
@@ -87,6 +87,7 @@ describe('file-provisioned host profile agents', () => {
         ? json(201, { session: { id: 'wizard_quick', source: 'wizard-mobile' } })
         : json(200, { data: [{ id: 'wizard_quick', source: 'wizard-mobile', title: 'Quick chat' }], has_more: false })
       if (path === '/p/quick/v1/runs') return json(202, { run_id: 'quick-run', status: 'started' })
+      if (path === '/p/quick/v1/runs/quick-run') return json(200, { run_id: 'quick-run', session_id: 'wizard_quick', status: runStatus, created_at: 1792612000, updated_at: 1792612002, output: runStatus === 'completed' ? 'Quick reply' : '' })
       if (path === '/p/quick/v1/runs/quick-run/events') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end('event: run.completed\ndata: {"output":"Quick reply"}\n\n')
       }
@@ -103,6 +104,11 @@ describe('file-provisioned host profile agents', () => {
     const admission = await fetch(`${base}/wizard/hermes/v1/runs`, post({ session_id: 'wizard_quick', input: 'Hi', agent: 'quick' }))
     expect(admission.status).toBe(202)
     expect((await admission.json()).run_id).toBe('quick-run')
+    const running = await (await fetch(`${base}/wizard/hermes/api/sessions?agent=quick&view=list&window=archive-50`)).json()
+    expect(running.data[0]).toMatchObject({ status: 'running', runId: 'quick-run', lastRunStatus: 'running', agent: 'quick' })
+    runStatus = 'completed'
+    const completed = await (await fetch(`${base}/wizard/hermes/api/sessions?agent=quick&view=list&window=archive-50`)).json()
+    expect(completed.data[0]).toMatchObject({ status: 'completed', runId: 'quick-run', lastRunStatus: 'completed', preview: 'Quick reply', previewRole: 'assistant', lastAssistantAt: new Date(1792612002 * 1000).toISOString() })
     const events = await fetch(`${base}/wizard/hermes/v1/runs/quick-run/events`)
     expect(events.headers.get('content-type')).toContain('text/event-stream')
     expect(await events.text()).toContain('Quick reply')
