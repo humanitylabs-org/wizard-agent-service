@@ -298,7 +298,7 @@
       "reference_tests": [
         "tests/proxy-queue.test.ts"
       ],
-      "fixture": null,
+      "fixture": "queue-busy",
       "policy_exemptions": []
     },
     {
@@ -312,7 +312,7 @@
       "reference_tests": [
         "tests/restart-interrupt-recovery.test.ts"
       ],
-      "fixture": null,
+      "fixture": "queue-restart",
       "policy_exemptions": []
     },
     {
@@ -676,7 +676,7 @@
       "reference_tests": [
         "tests/app-bindings.test.ts"
       ],
-      "fixture": null,
+      "fixture": "app-context",
       "policy_exemptions": []
     },
     {
@@ -704,7 +704,7 @@
       "reference_tests": [
         "tests/proxy-queue.test.ts"
       ],
-      "fixture": null,
+      "fixture": "model-lock",
       "policy_exemptions": []
     },
     {

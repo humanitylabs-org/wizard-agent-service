@@ -128,6 +128,21 @@ export const serverChecks = {
       assert.deepEqual(ids, expected)
     }
   },
+  'app-context': async s => {
+    const changed = await s.raw('/wizard/v1/apps/parity-qa/binding', { ...post({agent:s.id}),method:'PUT' });assert.equal(changed.status,200)
+    await s.restart()
+    const binding = await (await s.raw('/wizard/v1/apps/parity-qa/binding')).json()
+    assert.equal(binding.binding.agent,s.id)
+    const r = await s.raw(`/wizard/hermes/v1/runs?agent=${binding.binding.agent}`,post({session_id:'wizard_parity',input:'Synthetic owner question about bound app',instructions:'[Wizard OS context] Window in front: Synthetic Parity App. Visible on screen: Bound synthetic context '+ 'X'.repeat(12000)}))
+    assert.equal(r.status,202);assert.equal((await r.json()).agent_id,s.id)
+    const body=sent(s)
+    assert.ok(body.instructions.includes('Synthetic Parity App'));assert.ok(body.instructions.includes('Background only:'))
+    assert.ok(!body.instructions.includes('X'.repeat(6000)),'screen context stays bounded')
+    assert.equal(body.wizard_file_ids,undefined)
+    assert.ok(!JSON.stringify(body).includes(s.root));assert.ok(!JSON.stringify(body).includes('parity-runtime-secret'))
+    const target=s.seen.filter(x=>x.method==='POST'&&x.path.endsWith('/v1/runs')).at(-1)
+    assert.equal(target.path,s.kind==='host-profile'?'/p/parity-profile/v1/runs':'/v1/runs')
+  },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
     row.messages = [{ role: 'user', content: 'Synthetic request', timestamp: Date.now() / 1000 - 2 }]

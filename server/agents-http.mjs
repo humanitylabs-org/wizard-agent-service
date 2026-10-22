@@ -6,7 +6,7 @@
 //   /wizard/v1/agent-grants           (agent-data grants; a private source is refused, #59)
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { privateChatMatches } from './private-chat-search.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
@@ -28,7 +28,7 @@ async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
         const ref = ctx.registry.latestThreadRun?.(agent.id, row.id)
         let run = ref ? cache.get(`${agent.id}:${ref.run_id}`) : null
         if (ref && !run) {
-          const response = await ctx.registry.fetchAgent(agent, `/v1/runs/${encodeURIComponent(ref.run_id)}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
+          const response = await (ctx.fetchAgent || ctx.registry.fetchAgent)(agent, `/v1/runs/${encodeURIComponent(ref.run_id)}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
           const raw = Buffer.from(await response.arrayBuffer())
           if (response.ok && !secrets.some(secret => raw.includes(Buffer.from(secret)))) {
             const candidate = JSON.parse(raw.toString('utf8'))
@@ -560,6 +560,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     try { value = JSON.parse(body.toString('utf8')) } catch { throw new AgentError(400, 'invalid_json', 'request.body') }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentError(400, 'invalid_json', 'request.body')
   }
+  const wizardRequestHash = hasBody ? createHash('sha256').update(body).digest('hex') : undefined
   // The model picker shows only this agent's allowed models.
   if (method === 'GET' && upstreamPath === '/api/model/options') {
     sendJson(response, 200, {
@@ -627,11 +628,12 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   response.once('close', () => { if (!response.writableEnded) controller.abort() })
   let upstream
   try {
-    upstream = await registry.fetchAgent(agent, `${upstreamPath}${query.size ? `?${query}` : ''}`, {
-      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal,
+    upstream = await (ctx.fetchAgent || registry.fetchAgent)(agent, `${upstreamPath}${query.size ? `?${query}` : ''}`, {
+      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal, wizardRequestHash,
     })
   } catch (error) {
     if (error instanceof AgentError) throw error
+    if (Number.isInteger(error.status) && error.status >= 400 && error.status < 600) throw new AgentError(error.status, 'run_unavailable', 'agent.run')
     throw new AgentError(503, 'agent_unavailable', 'agent.running')
   }
   if (upstream.ok && pinOnSuccess) registry.pin(pinOnSuccess, agent.id)

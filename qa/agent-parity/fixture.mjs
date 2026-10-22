@@ -38,6 +38,7 @@ export async function scene(kind, serverOptions = {}) {
     for (const row of sessions.values()) for (const m of row.messages) insert.run(row.id,m.role,m.finish_reason || (m.role === 'assistant' ? 'stop' : null), typeof m.content === 'string' ? m.content : JSON.stringify(m.content),m.display_kind || (m.role === 'assistant' ? 'final' : null),m.timestamp)
   }
   writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA'] }))
+  writeFileSync(join(root, 'apps.json'), JSON.stringify({ apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }] }))
   let sequence = 0
   const handler = async (req, res) => {
     const url = new URL(req.url, 'http://fixture')
@@ -75,6 +76,7 @@ export async function scene(kind, serverOptions = {}) {
     if (path === '/v1/runs' && req.method === 'POST') {
       const key = req.headers['idempotency-key']
       if (key && keys.has(key)) return json(202, keys.get(key), { 'Idempotency-Replayed': 'true' })
+      if ([...runs.values()].some(r=>r.session_id===body.session_id&&r.status==='running')) return json(409,{error:'session_busy'})
       const at = Date.now() / 1000, run = { run_id: `fixture-run-${++sequence}`, session_id: body.session_id, status: 'running', created_at: at }
       runs.set(run.run_id, run); if (key) keys.set(key, run)
       const row = sessions.get(body.session_id)
@@ -108,7 +110,7 @@ export async function scene(kind, serverOptions = {}) {
       await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(socketPath, resolve) }); chmodSync(socketPath, 0o600)
     }
   }
-  const options = { upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: false, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
+  const options = { appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: false, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }

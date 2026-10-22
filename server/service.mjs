@@ -27,6 +27,7 @@ import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectSt
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
+import { createRoutedQueues } from './routed-run-queue.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
@@ -2440,8 +2441,10 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
   const agentCtx = agents ? {
     routedPresentation,
+    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
       const body = JSON.stringify({ input: value.input })

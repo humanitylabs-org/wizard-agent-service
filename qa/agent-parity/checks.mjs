@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
+import { queueChecks } from './queue-checks.mjs'
 
 export const checks = {
   ...serverChecks,
+  ...queueChecks,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')
@@ -65,7 +67,7 @@ export const checks = {
   },
   'steer': async s => {
     const r = await s.request(`/v1/runs/${s.runId}/steer`, post({ input: 'Synthetic steering note' })); assert.equal(r.status, 200)
-    assert.equal(s.seen.at(-1).body.input, 'Synthetic steering note')
+    assert.equal(s.seen.filter(r => r.path.endsWith('/steer')).at(-1).body.input, 'Synthetic steering note')
   },
   'stop': async s => {
     const r = await s.request(`/v1/runs/${s.runId}/stop`, post({})); assert.equal(r.status, 200)

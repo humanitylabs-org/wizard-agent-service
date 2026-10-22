@@ -96,6 +96,7 @@ export function queueRequestHash(runtime, body) {
 export class DurableRunQueue {
   constructor({
     statePath,
+    agentId = 'hermes',
     maxActive = 8,
     reservedInteractive = 0,
     pollIntervalMs = 1_500,
@@ -120,6 +121,8 @@ export class DurableRunQueue {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
+    if (typeof agentId !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(agentId)) throw new Error('Wizard run queue agent is invalid')
+    this.agentId = agentId
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
     if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
@@ -207,6 +210,7 @@ export class DurableRunQueue {
       this.database.exec("ALTER TABLE wizard_run_queue ADD COLUMN worker_dispatch_body TEXT")
     }
     })
+    if (this.database.prepare('SELECT 1 FROM wizard_run_queue WHERE agent_id <> ? LIMIT 1').get(this.agentId)) throw new Error('Wizard run queue belongs to another agent')
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     } catch (error) {
       try { this.database.close() } catch { /* preserve original */ }
@@ -524,9 +528,10 @@ export class DurableRunQueue {
     return result.replayed ? result : { record: this.get(result.record.publicRunId), replayed: false }
   }
 
-  _admitRow({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null, agent_id = 'hermes', recoveryAuthorized = false }) {
-    // Secondary runtime runs are admitted by that runtime, not this external-Hermes queue.
-    if (agent_id !== 'hermes') throw requestError('invalid queue agent', 400)
+  _admitRow({ runtime, sessionId, idempotencyKey, requestHash, body, trustedPaths = [], continuation = null, agent_id = this.agentId, recoveryAuthorized = false }) {
+    // A queue has one immutable agent authority. Main still rejects routed agents;
+    // an isolated routed queue can admit only its own configured identity.
+    if (agent_id !== this.agentId) throw requestError('invalid queue agent', 400)
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw requestError('invalid queued run', 400)
     if (typeof idempotencyKey !== 'string' || !SAFE_KEY.test(idempotencyKey)) throw requestError('idempotency key required', 400)
     if (typeof requestHash !== 'string' || !/^[0-9a-f-]{16,128}$/.test(requestHash)) throw requestError('invalid request hash', 400)
