@@ -27,6 +27,7 @@ jobs:
           python3 -m venv .import-venv
           .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
           printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
           REQUIRE_ROLLBACK_REHEARSAL: '1'

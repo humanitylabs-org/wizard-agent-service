@@ -11,7 +11,10 @@
     "start": "node server/index.mjs",
     "start:local": "node --env-file=.env.local server/index.mjs",
     "fixture": "node scripts/run-fixture.mjs",
-    "test": "node scripts/test-hermes-import.mjs && vitest run && node --test tests/chat-photo-*.node.mjs tests/chats-install-e2e.node.mjs && python3 tests/test_chat_photo_reader.py && python3 tests/test_standard_chats_relay.py"
+    "test": "node scripts/test-hermes-import.mjs && npm run test:unit && npm run test:agent-parity",
+    "test:unit": "vitest run && node --test tests/chat-photo-*.node.mjs tests/chats-install-e2e.node.mjs && python3 tests/test_chat_photo_reader.py && python3 tests/test_standard_chats_relay.py",
+    "test:agent-parity": "node --test qa/agent-parity/fixture.test.mjs",
+    "qa:agent-parity": "node qa/agent-parity/run.mjs"
   },
   "dependencies": {
     "cron-parser": "^5.10.2",
