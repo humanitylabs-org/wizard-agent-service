@@ -198,7 +198,8 @@ def read_inventory(root):
                 continue
             rows.append((rel, s.st_size, s.st_mtime_ns))
             text_scope = (rel in {'config.yaml', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json', '.env'}
-                          or rel.startswith(('skills/', 'memories/', 'plugins/', 'profiles/', 'scripts/', 'cron/')))
+                          or rel.startswith(('skills/', 'memories/', 'plugins/', 'profiles/', 'scripts/'))
+                          or (rel.startswith('cron/') and not rel.startswith('cron/output/') and rel.endswith(('.py', '.sh'))))
             if text_scope and s.st_size < 2 * 1024**2 and p.suffix.lower() in {'.md', '.yaml', '.yml', '.json', '.toml', '.py', '.sh', '.txt', '.env', ''}:
                 try:
                     texts[rel] = p.read_text()
@@ -217,7 +218,7 @@ def scan(source, *, owner_home=None):
         texts = {}
         with zipfile.ZipFile(source) as z:
             for n, r, size in entries:
-                if size < 2 * 1024**2 and (r in {'config.yaml', '.env', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json'} or r.startswith(('skills/', 'plugins/', 'memories/', 'scripts/', 'cron/'))):
+                if size < 2 * 1024**2 and (r in {'config.yaml', '.env', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json'} or r.startswith(('skills/', 'plugins/', 'memories/', 'scripts/')) or (r.startswith('cron/') and not r.startswith('cron/output/') and r.endswith(('.py', '.sh')))):
                     with contextlib.suppress(UnicodeError):
                         texts[r] = z.read(n).decode()
         with zipfile.ZipFile(source) as z:
@@ -248,14 +249,18 @@ def scan(source, *, owner_home=None):
             continue  # Never derive dependency strings from credentials.
         for line_no, line in enumerate(text.splitlines(), 1):
             # Key/value credentials and URLs are not eligible for path extraction.
-            fields = re.finditer(r'''(?<![\w.-])["']?([\w.-]*(?:token|secret|password|api[_-]?key|access[_-]?key|credential|authorization)[\w.-]*)["']?\s*[:=]''', line, re.I)
-            if any(not match[1].lower().endswith(('_file', '_path', '-file', '-path')) for match in fields):
+            # Tokenize field names first. Embedding an unbounded keyword search
+            # between two greedy key spans was superlinear on long script/data lines.
+            fields = re.finditer(r'''(?<![\w.-])["']?([\w.-]+)["']?\s*[:=]''', line)
+            if any(re.search(r'token|secret|password|api[_-]?key|access[_-]?key|credential|authorization', match[1], re.I)
+                   and not match[1].lower().endswith(('_file', '_path', '-file', '-path')) for match in fields):
                 continue
             # Report locations only: never include command/credential bytes.
             if re.search(r'\b(?:ssh|scp|rsync)\b[^\n]*\bthales\b', line, re.I):
                 ref = f'{rel}:{line_no}'
                 warnings.append({'reference': ref, 'warning': 'needs Machines/heavy job'})
                 add('Thales remote execution', 'host-service', ref, 'leave behind', warning='needs Machines/heavy job')
+            credential_ref = re.search(r'(?:token|secret|password|credential|key)[_-](?:file|path)', line, re.I) is not None
             for m in PATH_RE.finditer(line):
                 raw = m.group().rstrip('/.,;')
                 path = str(owner_home / raw[2:]) if raw.startswith('~/') else raw
@@ -263,7 +268,6 @@ def scan(source, *, owner_home=None):
                     continue
                 if path in {'/dev/null', '/bin/sh', '/bin/bash', '/usr/bin/env'}:
                     continue
-                credential_ref = re.search(r'(?:token|secret|password|credential|key)[_-](?:file|path)', line, re.I) is not None
                 kind = 'credential' if credential_ref or any(x in path for x in ('/.ssh', '/.config/gh', '/.gitconfig', '/.config/op', '/.config/Bitwarden')) else 'folder' if path.startswith((str(owner_home) + '/', '/Volumes/', '/workspace', '/opt/')) else 'unknown'
                 proposal = 'carry secret' if kind == 'credential' else 'mount ro' if kind == 'folder' else 'leave behind'
                 add(path, kind, f'{rel}:{line_no}', proposal)

@@ -155,6 +155,16 @@ class RestrictedImportTests(unittest.TestCase):
         with self.assertRaisesRegex(h.ImportFailure, 'grants_invalid'):
             h.validate_plan(self.plan, self.root)
 
+    def test_scan_long_noncredential_script_line_is_linear(self):
+        import time
+        script = self.home / 'scripts/long.sh'
+        script.parent.mkdir(parents=True)
+        script.write_text('a' * 100000 + ': harmless ' + '/work/folder ' * 10000 + '\nssh ' + 'thales uname -a\n')
+        start = time.monotonic()
+        plan = h.scan(self.home, owner_home=self.owner)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(plan['warnings'], [{'reference': 'scripts/long.sh:2', 'warning': 'needs Machines/heavy job'}])
+
     def test_scan_reports_thales_usages_without_command_bytes(self):
         for rel, text in [('skills/build/SKILL.md', 'ssh ' + 'thales uname -a'),
                           ('scripts/fetch.sh', 'scp thales:/work/artifact ./out'),
@@ -162,6 +172,9 @@ class RestrictedImportTests(unittest.TestCase):
             dest = self.home / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(text)
+        output = self.home / 'cron/output/past.md'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text('ssh ' + 'thales historical-output-only')
         plan = h.scan(self.home, owner_home=self.owner)
         self.assertFalse(plan['grants']['heavy'])
         self.assertFalse(plan['grant_items'][0]['approved'])

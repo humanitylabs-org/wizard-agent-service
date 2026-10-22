@@ -74,7 +74,9 @@ socket; no TCP port is published.
 
 The scanner reports `ssh`/`scp`/`rsync` references to Thales in skills, cron and
 scripts as `needs Machines/heavy job`, with file/line references and no command or
-secret values. These dependencies do not become mounts or automatic grants.
+secret values. Cron execution outputs are not treated as prompt/script definitions.
+Field-name filtering and credential-path classification stay linear per line,
+including long script literals. These dependencies do not become mounts or automatic grants.
 Review cron disposition separately: bounded staged builds can become heavy jobs;
 host reachability, recovery and maintenance stay on the recovery host until the
 Machines design is authorized.
