@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -187,6 +187,60 @@ describe('agents registry and API', () => {
     expect(payload.data[0].run_context.redacted).toBe(true)
     expect(JSON.stringify(payload)).not.toMatch(/(?:PRIVATE|CONTAINER|HOST)_PATH_CANARY/)
     expect(payload.data[0].run_context.original).toContain('[private attachment]')
+  })
+
+  it('turns a routed agent\'s own MEDIA files into openable attachments kept in that agent\'s folder', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const home = join(dir, 'agents', 'private', 'home')
+    const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex')
+    const priv = await fakeHermes('private', ['wizard_private_media'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Here are your notes.\n\nMEDIA:/opt/data/cache/documents/notes.md\nMEDIA:/opt/data/cache/images/chart.png' },
+      { id: 2, role: 'assistant', timestamp: 2, content: `Escapes.\n\nMEDIA:/opt/data/cache/documents/escape.md\nMEDIA:${join(dir, 'outside.md')}` },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    mkdirSync(join(home, 'cache', 'documents'), { recursive: true })
+    mkdirSync(join(home, 'cache', 'images'), { recursive: true })
+    writeFileSync(join(home, 'cache', 'documents', 'notes.md'), '# OUTBOUND_MD_CANARY\n')
+    writeFileSync(join(home, 'cache', 'images', 'chart.png'), png)
+    writeFileSync(join(dir, 'outside.md'), 'OUTSIDE_CANARY')
+    symlinkSync(join(dir, 'outside.md'), join(home, 'cache', 'documents', 'escape.md'))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_media/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).not.toContain('/opt/data')
+    expect(text).not.toContain(dir)
+    const rows = JSON.parse(text).data
+    const envelope = JSON.parse(rows[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+    expect(envelope.items.map((i: any) => [i.name, i.kind])).toEqual([['notes.md', 'file'], ['chart.png', 'image']])
+    expect(rows[1].content).toContain('[file: escape.md unavailable]')
+    expect(rows[1].content).toContain('[file: outside.md unavailable]')
+    expect(rows[1].content).not.toContain('<helm_attachments>')
+    // Bytes live in the agent's own folder, not the main agent's shared artifact store.
+    expect(readdirSync(join(dir, 'agents', 'private', 'wizard-artifacts')).filter(n => n.endsWith('.bin')).length).toBe(2)
+    const md = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+    expect(md.status).toBe(200)
+    expect(md.headers.get('content-disposition')).toContain('notes.md')
+    expect(await md.text()).toContain('OUTBOUND_MD_CANARY')
+    const image = await fetch(`${base}/wizard/attachments/${envelope.items[1].id}`)
+    expect(image.status).toBe(200)
+    expect(image.headers.get('content-type')).toBe('image/png')
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
+  })
+
+  it('tells routed agents how to send files and projects a finished run\'s MEDIA output', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_run'])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const run = await fetch(`${base}/wizard/hermes/v1/runs?agent=private`, json({ session_id: 'wizard_private_run', input: 'send it' }))
+    expect(run.status).toBe(202)
+    const sent = priv.seen.find(r => r.path === '/v1/runs')
+    expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
+    expect(status.status).toBe(200)
   })
 
   it('lists the main agent and only schema-1 agent folders', async () => {
