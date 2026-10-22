@@ -107,6 +107,19 @@ class RestrictedDriverTest(unittest.TestCase):
         # Provider keys land in managed/.env, not in the home.
         self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
 
+    def test_start_and_apply_recreate_legacy_container_endpoints(self):
+        # Pre-socket projects can retain stale Docker endpoints without the `agent` DNS alias.
+        # Compose's config hash need not change; ordinary `up` leaves that drift untouched.
+        agent = agent_folder(self.tmp / "agents", "legacy", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        self.assertNotIn("ingress_socket", agent["runtime"])
+        for action in (self.driver.start, self.driver.apply):
+            self.calls.clear()
+            action(agent)
+            up = next(args for args, _ in self.calls if args[0] == "compose" and args[5] == "up")
+            self.assertIn("--force-recreate", up)
+            self.assertIn("--remove-orphans", up)
+            self.assertEqual(up[:3], ["compose", "-p", "agent-legacy"])
+
     def test_tinfoil_agents_are_refused_before_anything_runs(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         agent["model"] = {"provider": "tinfoil"}

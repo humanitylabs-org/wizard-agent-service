@@ -80,6 +80,10 @@ Migration is an explicit maintenance action, **not** something this source chang
    it must lose edge's uplink/host-gateway alias and **all published ports**, gain only that agent's
    dedicated socket directory mount, and create the inbound `ingress.sock` there. Retire
    `AGENT_INGRESS_BIND`; it is no longer read. No host TCP port is needed per restricted agent.
+   Restricted start/apply force-recreates that project's containers to reconcile actual Docker
+   endpoints as well as Compose configuration. This restores the `agent` DNS alias if an old
+   endpoint lost it during migration; a matching config hash alone is not a health guarantee.
+   Agent homes and allocated networks are preserved; other projects are untouched.
 4. Verify socket health/authenticated API, wrong-key refusal, foreign-socket denial, correct agent
    attribution, no published edge/agent ports and no TCP 8929 listener. Preserve
    old receipts; do not treat them as proof for the new runtime.
