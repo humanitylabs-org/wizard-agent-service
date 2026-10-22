@@ -1916,8 +1916,31 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
-function setupHostAllowed(request, settings) {
-  const allowed = new Set(LOOPBACK_HOSTS)
+// The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
+// `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
+// this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
+// Setup never opened. apps.json is written by the App Manager and mounted read-only; a page cannot change it.
+export function shellHostsFromApps(appsJsonPath) {
+  const hosts = new Set()
+  if (!appsJsonPath) return hosts
+  let doc = null
+  try {
+    if (statSync(appsJsonPath).size > 2 * 1024 * 1024) return hosts
+    doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
+  } catch { return hosts }
+  for (const app of Array.isArray(doc?.apps) ? doc.apps : []) {
+    if (!Array.isArray(app?.provides) || !app.provides.includes('shell')) continue
+    const url = typeof app.view === 'string' ? app.view : app.view?.url
+    try {
+      const u = new URL(String(url ?? ''))
+      if (u.protocol === 'https:' && !u.username && !u.password && u.hostname) hosts.add(u.hostname.toLowerCase())
+    } catch { /* not an absolute https url */ }
+  }
+  return hosts
+}
+
+function setupHostAllowed(request, settings, extraHosts = []) {
+  const allowed = new Set([...LOOPBACK_HOSTS, ...extraHosts])
   for (const origin of [settings.network.base_url, settings.access.tailscale.origin]) {
     try { if (origin) allowed.add(new URL(origin).hostname) } catch { /* normalised already */ }
   }
@@ -3194,7 +3217,7 @@ function buildWizardServer(options, lifetime) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
@@ -4122,7 +4145,7 @@ function buildWizardServer(options, lifetime) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
-      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
@@ -4149,7 +4172,7 @@ function buildWizardServer(options, lifetime) {
         // Enrollment decides who owns this box on the tailnet: a DNS-rebound page must not reach it through an
         // unauthenticated box-local listener, so there the Host must be loopback or one of this box's own
         // configured addresses. (Verified listeners already pin the Host: Serve origin or Access.)
-        if (!requireAccess && !setupHostAllowed(request, readSettings(settingsPath).settings)) { sendJson(response, 403, { error: 'host_not_allowed' }); return }
+        if (!requireAccess && !setupHostAllowed(request, readSettings(settingsPath).settings, shellHostsFromApps(appsJsonPath))) { sendJson(response, 403, { error: 'host_not_allowed' }); return }
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         // Reads can advance enrollment (turn Serve on after sign-in) and carry the sign-in link: same-origin only.
         if (request.headers['sec-fetch-site'] !== undefined && !['same-origin', 'none'].includes(request.headers['sec-fetch-site'])) {
@@ -4436,6 +4459,13 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname === '/wizard/mcp') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         await bridge.handle(request, response)
+        return
+      }
+      if (url.pathname.startsWith('/wizard/v1/agent-heavy/')) {
+        if (!heavyWork) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
+        sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {
@@ -4996,6 +5026,15 @@ function buildWizardServer(options, lifetime) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
           if (principalOf(request).kind === 'agent' && (operator || agentResolution.agentId !== principalOf(request).agentId)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
+              const input = parseJsonBody(agentResolution.body)
+              heavyWork?.stopAgentSession(agentResolution.agentId, input?.session_id, false)
+            }
+            const mutation = upstreamPath.match(/^\/v1\/runs\/([^/]+)\/(steer|stop)$/u)
+            if (request.method === 'POST' && mutation) {
+              const pair = agents.runThread?.(agentResolution.agentId, mutation[1])
+              if (pair) heavyWork?.stopAgentSession(pair.agent_id, pair.session_id, mutation[2] === 'stop')
+            }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
               request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
@@ -5446,9 +5485,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 409, { error: { code: error.code, message: error.message } })
         return
       }
-      if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
-        const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
-        sendJson(response, error.status, { error: names[error.status] })
+      if (error instanceof SyntaxError && request.url?.startsWith('/wizard/v1/agent-heavy/')) error.status = 400
+      if ([400, 403, 404, 409, 410, 413, 415, 429, 503].includes(error?.status) && !response.headersSent) {
+        const names = { 400: 'invalid_request', 403: 'forbidden', 404: 'not_found', 409: 'conflict', 410: 'gone', 413: 'body_too_large', 415: 'unsupported_media_type', 429: 'rate_limited', 503: 'service_unavailable' }
+        sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
     } finally { requestDone() }

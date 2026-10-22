@@ -298,6 +298,35 @@ describe('setup API (box-local listener)', () => {
     }
   })
 
+  it('allows the shell host apps.json records on a fresh box with no settings.json (first-run Setup)', async () => {
+    const dir = tempDir()
+    const appsJsonPath = join(dir, 'apps.json')
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [
+      { id: 'wizard-ux', provides: ['shell'], view: { url: `https://${DNS}:8796/wizard-os-home/`, local: 'http://127.0.0.1:8796/wizard-os-home/' } },
+      { id: 'hermes-agent', provides: ['agent'], view: { url: 'https://other.tail1234.ts.net:9119/' } },
+      { id: 'evil', provides: ['shell'], view: { url: 'http://plain.example/' } },
+    ] }))
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: helper.socketPath })
+    // Tailscale Serve keeps the browser's Host (the shell's own address, with its port).
+    const ok = await call(port, '/wizard/v1/setup', { headers: { host: `${DNS}:8796` } })
+    expect(ok.status).toBe(200)
+    expect(ok.body.first_run).toBe(true)
+    expect((await call(port, '/wizard/v1/setup/seen', jsonPost({ host: `${DNS}:8796`, origin: `https://${DNS}:8796`, 'sec-fetch-site': 'same-origin' }))).status).toBe(200)
+    // Only the app that provides `shell`, only https: other apps' hosts and plain-http views stay refused.
+    for (const host of ['other.tail1234.ts.net:9119', 'plain.example', 'attacker.example']) {
+      expect((await call(port, '/wizard/v1/setup', { headers: { host } })).status).toBe(403)
+    }
+    expect((await call(port, '/wizard/v1/setup', { headers: { host: '127.0.0.1', 'x-forwarded-host': 'attacker.example' } })).status).toBe(403)
+  })
+
+  it('refuses the Serve host on a fresh box when apps.json does not name it', async () => {
+    const dir = tempDir()
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath: join(dir, 'missing.json'), privateAccessSocket: helper.socketPath })
+    expect((await call(port, '/wizard/v1/setup', { headers: { host: `${DNS}:8796` } })).status).toBe(403)
+  })
+
   it('is owner-only when the listener requires access', async () => {
     const dir = tempDir()
     const helper = await fakeHelper(dir)
