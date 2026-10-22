@@ -426,6 +426,48 @@ print('edge allowlist passed')`
   })
   expect(result).toContain('edge allowlist passed')
 })
+it('wires routed origin observation through the real Service before agent-heavy submission', async () => {
+  const root = home(); records(root); const fake = fakeRuntime()
+  await serveFakeAgents(root, fake)
+  const service = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:47130', hermesKey: 'fixture-main-key', fetchImpl: fake.fetchImpl,
+    wizardOsHome: root, appsJsonPath: join(root, 'apps.json'), settingsPath: join(root, 'settings.json'),
+    ownerProof: proof, requireAccess: false, agentBridge: false, joinedDelegation: 'off', followThrough: false,
+    runQueueStatePath: join(root, 'runs.db'), heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
+    heavyTransport: fake.transport, heavyPollIntervalMs: 10, agentHeavy: 'on' })
+  const ingress = createAgentIngress(service, 'alpha')
+  clean.push(async () => { for (const server of [ingress, service]) { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) } })
+  const host = await listen(service) as any, edge = await listen(ingress) as any
+  const base = `http://127.0.0.1:${host.port}`, agent = `http://127.0.0.1:${edge.port}`
+  const ownerHeaders = { 'Content-Type': 'application/json', 'x-wizard-owner-proof': proof }
+  const admitted = await fetch(base + '/wizard/hermes/v1/runs?agent=alpha', { method: 'POST', headers: ownerHeaders,
+    body: JSON.stringify({ session_id: 'shared', input: 'Run the checks', model: 'model-a', provider: 'fixture' }) })
+  expect(admitted.status).toBe(202)
+  const origin = await admitted.json()
+  expect(origin.run_id).toMatch(/^wizardq_/)
+  await vi.waitFor(async () => {
+    const observed = await fetch(base + `/wizard/hermes/v1/runs/${origin.run_id}?agent=alpha`, { headers: ownerHeaders })
+    expect((await observed.json()).runtime?.provider).toBe('fixture')
+  })
+  // Counterfactual: removing fetchAgent from Service's createHeavyIntegration
+  // sends this public id straight to Hermes, whose fixture deliberately returns 404.
+  const submitted = await fetch(agent + path('submit'), { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gateway('alpha')}` },
+    body: JSON.stringify({ session_id: 'shared', key: 'service-routed-origin',
+      spec: { cwd: join(root, 'staging', 'agents', 'alpha'), argv: ['true'], timeout_seconds: 10, lane: 'light' } }) })
+  expect(submitted.status).toBe(200)
+  const job = await submitted.json()
+  fake.states.workerDone = true; fake.states.originDone = true
+  await vi.waitFor(async () => {
+    const response = await fetch(base + path('status'), { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ job_id: job.job_id }) })
+    const status = await response.json()
+    expect(status.state).toBe('completed')
+    expect(status.receipt.exit_code).toBe(0)
+    expect(status.continuation).toMatch(/^alpha-run-/)
+  })
+  expect(fake.posts.filter(row => row.headers.get('idempotency-key') === `wizard-heavy-${job.job_id}`)).toHaveLength(1)
+  expect(fake.reads.some(row => /^\/v1\/runs\/wizardq_/.test(row.path))).toBe(false)
+})
+
 it.each(['on', undefined])('wires the real Service agent-only listener and credential boundaries (flag=%s)', async flag => {
   const root = home(); records(root); const fake = fakeRuntime()
   await serveFakeAgents(root, fake)
