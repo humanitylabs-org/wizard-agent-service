@@ -47,11 +47,29 @@ export async function scene(kind, serverOptions = {}) {
     const body = raw && !path.startsWith('/v1/audio/') ? JSON.parse(raw) : null
     seen.push({ path: url.pathname, method: req.method, body, headers: req.headers })
     const json = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)) }
+    const streamRun = run => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        if (!serverOptions.fixtureHoldEvents) return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n')
+        res.write(`event: run.started\ndata: ${JSON.stringify(run)}\n\n`)
+        const timer=setInterval(()=>{if(['completed','failed','cancelled','interrupted'].includes(run.status))res.end(`event: run.${run.status}\ndata: ${JSON.stringify(run)}\n\n`);else res.write(': synthetic heartbeat\n\n')},250)
+        res.on('close',()=>clearInterval(timer));return
+      }
     if (path === '/health') return json(200, { status: 'ok' })
     if (path === '/v1/models') return json(200, { data: [] })
     if (path === '/v1/audio/transcriptions') return json(200, { text: stt.text, model: 'fixture-stt' })
     if (path === '/v1/capabilities') return json(200, { features: {} })
     if (path === '/api/model/options') return json(200, { model: 'fixture-model', provider: 'anthropic', providers: [{ slug: 'anthropic', authenticated: true, models: ['fixture-model', 'fixture-other'] }] })
+    const locked = path.match(/^\/api\/sessions\/([^/]+)\/chat\/stream$/)
+    if (locked && req.method === 'POST') {
+      const sessionId=locked[1],key=req.headers['idempotency-key']
+      if(key&&keys.has(key))return streamRun(keys.get(key))
+      if([...runs.values()].some(r=>r.session_id===sessionId&&r.status==='running'))return json(409,{error:'session_busy'})
+      const run={run_id:`fixture-run-${++sequence}`,session_id:sessionId,status:'running',created_at:Date.now()/1000,runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}}
+      runs.set(run.run_id,run);if(key)keys.set(key,run)
+      const content=Array.isArray(body.message)?body.message.map(p=>p.type==='text'?p.text:'[screenshot]').join('\n'):body.message
+      sessions.get(sessionId)?.messages.push({id:`user-${sequence}`,role:'user',content,timestamp:run.created_at})
+      syncMessages();return streamRun(run)
+    }
     if (path === '/api/sessions' && req.method === 'POST') {
       const row = { ...body, id: body.id || body.session_id, created_at: Date.now() / 1000, messages: [] }
       sessions.set(row.id, row); titleDb.prepare('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)').run(row.id, row.title || '', row.title_source || 'llm', row.created_at); return json(201, { session: row })
@@ -85,13 +103,13 @@ export async function scene(kind, serverOptions = {}) {
         const content = Array.isArray(input) ? input.map(p => p.type === 'text' ? p.text : '[screenshot]').join('\n') : input
         row.messages.push({ id: `user-${sequence}`, role: 'user', timestamp: at, content })
       }
-      return json(202, run)
+      syncMessages();return json(202, run)
     }
     const rm = path.match(/^\/v1\/runs\/([^/]+)(?:\/(events|stop|steer|approval|clarify))?$/)
     if (rm) {
       const run = runs.get(rm[1]); if (!run) return json(404, { error: 'not_found' })
       if (rm[2] === 'stop') run.status = 'cancelled'
-      if (rm[2] === 'events') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n') }
+      if (rm[2] === 'events') return streamRun(run)
       return json(200, rm[2] ? { ok: true } : run)
     }
     return json(404, { error: 'fixture_route_missing', path })
