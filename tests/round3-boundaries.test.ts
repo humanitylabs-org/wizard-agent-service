@@ -1,7 +1,7 @@
 import { heavyRoot } from './support/heavy-root'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('node:child_process', async (importOriginal) => ({ ...await importOriginal(), execFile: (...args: any[]) => { const cb = args.at(-1); cb(null, 't-123456789abc\n', ''); return { stdin: {on() {}, end() {}}, on() {} } } }))
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -160,7 +160,9 @@ it('R3_WORKER_CLOSE: service lease survives asynchronous heavy writer shutdown',
  await new Promise(resolve=>setTimeout(resolve,20))
  expect(error).toContain('exclusive writer ownership unavailable');expect(restored).toEqual([])
  await s.service.drained
- expect(restoreStoreSet([s.dir,s.agentsDir],{serviceStopped:true})).toContain(heavyPath)
+ // Restore returns canonical paths and removes newly created stores; resolve before restore.
+ const canonicalHeavyPath=realpathSync(heavyPath)
+ expect(restoreStoreSet([s.dir,s.agentsDir],{serviceStopped:true})).toContain(canonicalHeavyPath)
 })
 
 it.each(['changed', 'unknown', 'running', 'unsupported'])('sealed negative evidence fails closed when lifecycle is %s', async mode => {
