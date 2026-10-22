@@ -23,9 +23,11 @@ The home belongs to the agent's container user. The host never writes into it di
   (`504 agent_sync_timeout`). The runtime's own `home-init` then re-owns anything that is not `10000:10000`.
 - Restricted agents' lifecycle actions lock per agent, so one stuck agent never holds up the others. The other
   drivers keep one global lock, because the Runtipi install patches shared module state.
-- Anything else that must land in the home runs inside the agent container as its own user, for example an import:
-  `docker exec -u 10000:10000 <agent container> hermes import <archive>`. Files written this way stay owned correctly.
-  The runtime's `home-init` repairs ownership on the next start if something lands as another uid.
+- Bring-your-Hermes admission uses the owner CLI in [hermes-import.md](hermes-import.md), not a raw unreviewed
+  archive injected into a running home. The registry reserves the stopped restricted record/network; per-item
+  credential policy runs in private staging; constrained helpers seal and place `/opt/data` without a database
+  copy. Only `RestrictedDriver` starts the uid-10000 agent. Staging/rollback never enter its mount namespace.
+  Any later in-home operation must run as uid 10000; no host chmod/read bypass or agent-root bootstrap is allowed.
 - Shares (files sent to an agent from the phone) answer `409 agent_unavailable` for restricted agents until
   in-container placement exists.
 

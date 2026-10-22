@@ -116,6 +116,16 @@ class ImportTests(unittest.TestCase):
         for rel, data in before.items():
             self.assertEqual((self.home / rel).read_bytes(), data)
 
+    def test_corrupt_backup_fails_before_any_rollback_mutation(self):
+        result = self.apply()
+        directory = self.wizard / 'agents/fixture-agent'
+        (directory / 'originals/config.yaml').write_text('corrupt')
+        current = (directory / 'home/config.yaml').read_bytes()
+        with self.assertRaisesRegex(m.ImportFailure, 'backup_corrupt'):
+            self.undo(result)
+        self.assertTrue((directory / 'agent.json').exists())
+        self.assertEqual((directory / 'home/config.yaml').read_bytes(), current)
+
     def test_crash_during_backup_never_publishes_partial(self):
         before = (self.home / 'config.yaml').read_bytes()
         real_copy = m.shutil.copy2

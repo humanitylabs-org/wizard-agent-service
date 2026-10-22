@@ -534,6 +534,14 @@ def atomic_backup(source, dest):
         os.close(fd)
 
 
+def validate_backups(directory, journal):
+    for name in journal['backups']:
+        original = Path(directory) / 'originals' / name
+        if original.exists():
+            marker = original.with_name(original.name + '.sha256')
+            require(marker.is_file() and marker.read_text() == file_hash(original), 'backup_corrupt')
+
+
 def sanitize_credentials(home, plan, directory, journal, journal_path):
     current = credential_policy.inventory([r for _, r, _, link in files(home) if not link],
                                           lambda r: managed_path(home, r).read_text())
@@ -972,6 +980,7 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
         current_main = json.loads(main.read_text()) if main.exists() else None
         require(digest(current) in {journal['settings_after_value_hash'], digest(journal['settings_before'])}, 'settings_changed_since_cutover')
         require(digest(current_main) in {journal['main_after_value_hash'], digest(journal['main_before'])}, 'recovery_changed_since_cutover')
+    validate_backups(directory, journal)  # fail before any record/assets/originals are changed
     runtime = runtime_factory(journal['plan'], directory, journal['id'])
     runtime.remove()  # Stop before restoring anything; failures leave the journal recoverable.
     (directory / 'agent.json').unlink(missing_ok=True)
@@ -988,11 +997,6 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
                 dest.unlink(missing_ok=True)
         for rel in journal.get('managed_absent', []):
             managed_path(home, rel).unlink(missing_ok=True)
-        # Validate the entire completed backup set before restoring any bytes.
-        for name in journal['backups']:
-            original = directory / 'originals' / name
-            if original.exists():
-                require((original.with_name(original.name + '.sha256')).read_text() == file_hash(original), 'backup_corrupt')
         for name in journal['backups']:
             original = directory / 'originals' / name
             if original.exists():

@@ -48,6 +48,12 @@ class StagingRuntime:
         reown(self.directory / 'home', rt.AGENT_UID)
         from hermes_import import DockerRuntime
         runtime = DockerRuntime(self.plan, self.directory, 'staging-only')
+        # The filtered transport is private 0600, not world-readable. Give only
+        # this ephemeral file to uid 10000 before its read-only import mount.
+        if Path(archive) != self.directory / 'transport.zip':
+            raise rt.RuntimeFailure('import_transport_invalid', 409)
+        helper(self.directory, 'import os; os.chown("/opt/data/transport.zip",10000,10000,follow_symlinks=False)',
+               uid=0, privileged=True)
         runtime.import_archive(archive, uid=rt.AGENT_UID)
         reown(self.directory / 'home', os.getuid())
 
@@ -280,6 +286,9 @@ def undo(h, journal_path):
         (target / '.import-transfer').rename(stage)
     if (stage / '.import-transfer').exists() and not target.exists():
         (stage / '.import-transfer').rename(target)
+    staged_journal = stage / 'import-journal.json'
+    if staged_journal.exists():
+        h.validate_backups(stage, json.loads(staged_journal.read_text()))
     if target.exists():
         with lock(target):
             d = driver(h, root, journal['plan'])

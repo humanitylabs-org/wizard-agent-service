@@ -45,6 +45,21 @@ class RestrictedImportTests(unittest.TestCase):
         for p in reversed(self.mocks):
             p.stop()
         shutil.rmtree(self.tmp)
+    def test_archive_helper_uses_uid_10000_and_private_transport(self):
+        directory = self.tmp / 'staging-only'
+        directory.mkdir()
+        (directory / 'home').mkdir()
+        archive = directory / 'transport.zip'
+        archive.write_bytes(b'fixture')
+        archive.chmod(0o600)
+        with patch.object(h.DockerRuntime, 'import_archive') as native:
+            r.StagingRuntime(self.plan, directory, 'fixture').import_archive(archive)
+        native.assert_called_once_with(archive, uid=10000)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        r.helper.assert_called_once()
+        self.assertEqual(r.reown.call_args_list[-2].args[1], 10000)
+        self.assertEqual(r.reown.call_args_list[-1].args[1], os.getuid())
+
     def test_registry_authority_allocates_pair_and_moves_inode(self):
         inode = (self.home / 'state.db').stat().st_ino
         result = h.apply(self.plan, 'restricted-fixture', self.root)
@@ -72,6 +87,20 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 self.assertFalse((self.root / 'agents/restricted-fixture').exists())
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
+    def test_undo_crash_during_both_sealed_transfer_windows(self):
+        before = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
+        inode = (self.home / 'state.db').stat().st_ino
+        for step in ['transfer-staged', 'transfer-moved']:
+            with self.subTest(step=step):
+                result = h.apply(self.plan, 'restricted-fixture', self.root)
+                with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': step}), self.assertRaises(SystemExit):
+                    h.undo(result['journal'])
+                h.undo(result['journal'])
+                after = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
+                self.assertEqual(before, after)
+                self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
+                shutil.rmtree(self.root / 'imports/restricted-fixture')
+
     def test_rw_mount_groups_explicit_and_never_root(self):
         workspace = self.owner / 'workspace'
         workspace.mkdir(mode=0o775)

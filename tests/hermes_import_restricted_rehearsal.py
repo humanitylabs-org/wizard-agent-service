@@ -67,6 +67,7 @@ def access_only(value):
 
 
 def model_exercise(service, cid, model, fact):
+    host = os.environ[PREFIX + 'BUILD_HOST']
     session = 'wizard_import_restricted_' + secrets.token_hex(6)
     # This helper does POST, PATCH hidden, GET and asserts true before returning.
     canary.hidden_session(service, AGENT, session)
@@ -76,7 +77,7 @@ def model_exercise(service, cid, model, fact):
     emit(session=session, hidden_readback=hidden, before_message=True,
          fact_sha256=hashlib.sha256(fact.encode()).hexdigest())
     prompt = ('This is a single authorized hidden restricted-agent import rehearsal. Do not load skills. '
-              'Run these as separate terminal calls, exactly: gh auth status ; ssh -o BatchMode=yes thales echo ok . '
+              'Run these as separate terminal calls, exactly: gh auth status ; ssh -o BatchMode=yes ' + shlex.quote(host) + ' echo ok . '
               'Do not join commands or add echo/pipe. The sandbox currently blocks tailnet SSH and no broad host gh '
               'credential is granted: report failures honestly; never bypass the proxy/firewall or edit configuration. '
               'Use fact_store action=search to recall this existing Thales fact: ' + fact + '\n'
@@ -97,16 +98,19 @@ def model_exercise(service, cid, model, fact):
         time.sleep(2)
     # Read canonical messages only through the uid-10000 container, never by
     # opening/unsealing its home on the host. Capture, redact, then emit proofs.
-    code = '''import sqlite3,json
-with sqlite3.connect('file:/opt/data/state.db?mode=ro',uri=True) as db:
- db.row_factory=sqlite3.Row
- row=db.execute('select * from sessions where id=?',(__import__('sys').argv[1],)).fetchone()
- session=dict(row) if row else {}
- messages=[dict(r) for r in db.execute('select * from messages where session_id=? order by id',(__import__('sys').argv[1],))]
-print(json.dumps({'session':session,'messages':messages}))
+    code = '''import sys,json
+from pathlib import Path
+sys.path.insert(0,'/opt/hermes')
+from hermes_state import SessionDB
+db=SessionDB(Path('/opt/data/state.db'),read_only=True)
+try:
+ session=db.get_session(sys.argv[1]) or {}
+ messages=db.get_messages(sys.argv[1])
+ print(json.dumps({'session':session,'messages':messages},default=lambda v:v.decode('utf-8','replace') if isinstance(v,bytes) else str(v)))
+finally: db.close()
 '''
     emit(service_run_terminal_status=status.get('status', (status.get('run') or {}).get('status')), status_keys=sorted(status))
-    raw = command(['docker', 'exec', cid, 'python3', '-c', code, session], log=False)
+    raw = command(['docker', 'exec', cid, '/opt/hermes/.venv/bin/python', '-c', code, session], log=False)
     if raw.returncode:
         emit(canonical_read_exit_code=raw.returncode, canonical_read_error=raw.stderr[-1800:])
     h.require(raw.returncode == 0, 'canonical_read_failed')
@@ -155,6 +159,8 @@ def main():
     source, root, wizard = [Path(get(k)).absolute() for k in ['SOURCE', 'ROOT', 'WIZARD_HOME']]
     service, image = get('SERVICE'), get('IMAGE')
     workspace, context = Path(get('WORKSPACE')), Path(get('CONTEXT'))
+    host = get('BUILD_HOST')
+    h.require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', host), 'build_host_invalid')
     LOG = Path(os.environ['WIZARD_IMPORT_RESTRICTED_EVIDENCE'])
     previous.emit = emit
     h.require(not root.exists() and not (wizard / 'agents' / AGENT).exists(), 'rehearsal_target_exists')
@@ -196,15 +202,15 @@ def main():
         section('2. Per-item grants, fresh build-host key, no broad gh authority')
         scoped = root / 'scoped-ssh'; scoped.mkdir(mode=0o700)
         command(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', COMMENT, '-f', str(scoped / 'id_ed25519')], check=True)
-        cfg = command(['ssh', '-G', 'thales'], check=True, log=False)
+        cfg = command(['ssh', '-G', host], check=True, log=False)
         fields = dict(x.split(' ', 1) for x in cfg.stdout.splitlines() if ' ' in x)
         address, user = fields['hostname'], fields['user']
         known = command(['ssh-keygen', '-F', address, '-f', str(source.parent / '.ssh/known_hosts')], check=True, log=False)
         line = next(x.split() for x in known.stdout.splitlines() if not x.startswith('#') and ' ssh-ed25519 ' in x)
-        (scoped / 'known_hosts').write_text('thales ' + ' '.join(line[1:]) + '\n')
-        (scoped / 'config').write_text(f'Host thales\n  HostName {address}\n  User {user}\n  IdentityFile /opt/data/.ssh/id_ed25519\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  HostKeyAlias thales\n  UserKnownHostsFile /opt/data/.ssh/known_hosts\n  ConnectTimeout 8\n')
+        (scoped / 'known_hosts').write_text(host + ' ' + ' '.join(line[1:]) + '\n')
+        (scoped / 'config').write_text(f'Host {host}\n  HostName {address}\n  User {user}\n  IdentityFile /opt/data/.ssh/id_ed25519\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  HostKeyAlias {host}\n  UserKnownHostsFile /opt/data/.ssh/known_hosts\n  ConnectTimeout 8\n')
         key_added = True
-        previous.remote_key('thales', (scoped / 'id_ed25519.pub').read_text())
+        previous.remote_key(host, (scoped / 'id_ed25519.pub').read_text())
         emit(new_thales_key_added=True, key_comment=COMMENT, no_forwarding=True, scope_verified_readback=True)
         claude = root / 'claude-access.json'
         h.dump(claude, access_only(json.loads((source.parent / '.claude/.credentials.json').read_text())))
@@ -245,12 +251,12 @@ def main():
         command(['ls', str(wizard / 'agents' / AGENT / 'home')])
         probe(['python3', '-c', 'import yaml,json; c=yaml.safe_load(open("/opt/data/config.yaml")); j=json.load(open("/opt/data/cron/jobs.json")); j=j if isinstance(j,list) else j["jobs"]; print(json.dumps({"cron_paused":all(x.get("enabled")==False and x.get("state")=="paused" for x in j),"messaging_disabled":all(not v.get("enabled") for k,v in c["gateway"]["platforms"].items() if k!="api_server"),"memory_backend":c.get("memory",{}).get("provider"),"plugins":c["plugins"]["enabled"]}))'])
         section('4. Literal container tool exits and mount boundaries')
-        probe(['ssh', '-o', 'BatchMode=yes', 'thales', 'true'])
+        probe(['ssh', '-o', 'BatchMode=yes', host, 'true'])
         probe(['gh', 'auth', 'status'])
         probe(['git', '-C', str(workspace / 'wizard-os'), 'fetch', '--dry-run'])
         probe(['sh', '-c', 'p="$1/.restricted-import-write-$$"; printf probe > "$p" && rm "$p" && test ! -e "$p"', 'probe', str(workspace)])
         probe(['sh', '-c', 'printf probe > "$1/.restricted-import-write-refused"', 'probe', str(context)])
-        probe(['sh', '-c', 'test ! -e /var/run/docker.sock && test ! -e /run/docker.sock && test ! -e /home/telos/.wizard-os/agents/private && test ! -e /opt/data/.wizard-os/agents/private'])
+        probe(['sh', '-c', 'test ! -e /var/run/docker.sock && test ! -e /run/docker.sock && test ! -e "$1/.wizard-os/agents/private" && test ! -e /opt/data/.wizard-os/agents/private', 'probe', str(source.parent)])
         section('5. Live Service hidden session then one original-provider model turn')
         model_pass = model_exercise(service, cid, plan['summary']['model'], fact)
         h.require(model_pass, 'restricted_acceptance_remaining_gates')
@@ -259,7 +265,7 @@ def main():
         if journal.exists():
             emit(undo=h.undo(journal))
         if key_added:
-            previous.remote_key('thales')
+            previous.remote_key(host)
             emit(thales_key_removed_verified=True)
         shutil.rmtree(root)
         if journal.parent.exists():
