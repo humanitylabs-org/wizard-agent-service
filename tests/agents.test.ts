@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -84,6 +85,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
+    ...(extra.runtimeFetch ? { fetch: extra.runtimeFetch } : {}),
   }
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
@@ -189,6 +191,103 @@ describe('agents registry and API', () => {
     expect(payload.data[0].run_context.original).toContain('[private attachment]')
   })
 
+  it('turns a routed agent\'s own MEDIA files into openable attachments kept in that agent\'s folder', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const home = join(dir, 'agents', 'private', 'home')
+    const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex')
+    const priv = await fakeHermes('private', ['wizard_private_media'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Here are your notes.\n\nMEDIA:/opt/data/cache/documents/notes.md\nMEDIA:/opt/data/cache/images/chart.png' },
+      { id: 2, role: 'assistant', timestamp: 2, content: `Escapes.\n\nMEDIA:/opt/data/cache/documents/escape.md\nMEDIA:${join(dir, 'outside.md')}` },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    mkdirSync(join(home, 'cache', 'documents'), { recursive: true })
+    mkdirSync(join(home, 'cache', 'images'), { recursive: true })
+    writeFileSync(join(home, 'cache', 'documents', 'notes.md'), '# OUTBOUND_MD_CANARY\n')
+    writeFileSync(join(home, 'cache', 'images', 'chart.png'), png)
+    writeFileSync(join(dir, 'outside.md'), 'OUTSIDE_CANARY')
+    symlinkSync(join(dir, 'outside.md'), join(home, 'cache', 'documents', 'escape.md'))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_media/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).not.toContain('/opt/data')
+    expect(text).not.toContain(dir)
+    const rows = JSON.parse(text).data
+    const envelope = JSON.parse(rows[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+    expect(envelope.items.map((i: any) => [i.name, i.kind])).toEqual([['notes.md', 'file'], ['chart.png', 'image']])
+    expect(rows[1].content).toContain('[file: escape.md unavailable]')
+    expect(rows[1].content).toContain('[file: outside.md unavailable]')
+    expect(rows[1].content).not.toContain('<helm_attachments>')
+    // Bytes live in the agent's own folder, not the main agent's shared artifact store.
+    expect(readdirSync(join(dir, 'agents', 'private', 'wizard-artifacts')).filter(n => n.endsWith('.bin')).length).toBe(2)
+    const md = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+    expect(md.status).toBe(200)
+    expect(md.headers.get('content-disposition')).toContain('notes.md')
+    expect(await md.text()).toContain('OUTBOUND_MD_CANARY')
+    const image = await fetch(`${base}/wizard/attachments/${envelope.items[1].id}`)
+    expect(image.status).toBe(200)
+    expect(image.headers.get('content-type')).toBe('image/png')
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
+  })
+
+  it('reads a sandboxed agent\'s MEDIA file through the runtime as the agent and serves it', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_sandbox'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Report ready.\n\nMEDIA:/opt/data/cache/documents/report.md\nMEDIA:/opt/data/cache/documents/missing.md' },
+    ])
+    let report = Buffer.from('# SANDBOX_CANARY\n')
+    const fetched: string[] = []
+    const runtimeFetch = async (id: string, payload: any) => {
+      fetched.push(`${id} ${payload.path}`)
+      if (!payload.path.endsWith('report.md')) throw Object.assign(new Error('file_unavailable'), { code: 'file_unavailable' })
+      return { verified: true, bytes: report.length, sha256: createHash('sha256').update(report).digest('hex'), data_base64: report.toString('base64') }
+    }
+    const { base } = await start(dir, main, { runtimeFetch })
+    await withPrivate(dir, base, priv.port)
+    const home = join(dir, 'agents', 'private', 'home')
+    mkdirSync(home, { recursive: true })
+    chmodSync(home, 0o000)   // owned by the sandbox uid in production: unreadable to the service
+    try {
+      for (let pass = 0; pass < 2; pass++) {
+        const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+        expect(response.status).toBe(200)
+        const text = await response.text()
+        expect(text).not.toContain('/opt/data')
+        const content = JSON.parse(text).data[0].content
+        const envelope = JSON.parse(content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+        expect(envelope.items.map((i: any) => i.name)).toEqual(['report.md'])
+        expect(content).toContain('[file: missing.md unavailable]')
+        const file = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+        expect(await file.text()).toBe('# SANDBOX_CANARY\n')
+      }
+      // Fetched once, then served from the mirror; a miss is not retried on every poll.
+      expect(fetched).toEqual(['private /opt/data/cache/documents/report.md', 'private /opt/data/cache/documents/missing.md'])
+      // The agent rewrites the same file and sends it again: a stale mirror is read again.
+      report = Buffer.from('# SANDBOX_CANARY v2\n')
+      const mirrored = join(dir, 'agents', 'private', 'wizard-artifacts', 'mirror', 'cache', 'documents', 'report.md')
+      utimesSync(mirrored, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+      const again = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+      const envelope = JSON.parse(JSON.parse(await again.text()).data[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+      expect(await (await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)).text()).toBe('# SANDBOX_CANARY v2\n')
+    } finally { chmodSync(home, 0o700) }
+  })
+
+  it('tells routed agents how to send files and projects a finished run\'s MEDIA output', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_run'])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const run = await fetch(`${base}/wizard/hermes/v1/runs?agent=private`, json({ session_id: 'wizard_private_run', input: 'send it' }))
+    expect(run.status).toBe(202)
+    const sent = priv.seen.find(r => r.path === '/v1/runs')
+    expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
+    expect(status.status).toBe(200)
+  })
+
   it('lists the main agent and only schema-1 agent folders', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -290,7 +389,7 @@ describe('agents registry and API', () => {
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
     expect(options.harnesses).toEqual([{ id: 'hermes', label: 'Hermes' }])
     expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['tinfoil', true], ['anthropic', false], ['openai-codex', false]])
-    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }])
+    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }])
     expect(options.presets.map((p: any) => p.id)).toEqual(['private', 'standard'])
     expect(options.wizard_apps.map((a: any) => a.id)).toEqual(['meditate'])
     expect(options.agent_apps.map((a: any) => a.id)).toEqual(['transcriber'])

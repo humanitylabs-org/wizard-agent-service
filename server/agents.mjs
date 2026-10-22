@@ -42,7 +42,12 @@ const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
 // Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }],
+}
+/** False only for a model its provider rejects image input for (Tinfoil GLM 5.3: HTTP 400 "not a multimodal model"). */
+export function agentModelSeesImages(agent) {
+  if (agent?.model?.provider !== TINFOIL.id) return true
+  return TINFOIL.models.find((model) => model.id === agent.model.model)?.images !== false
 }
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
@@ -1195,5 +1200,6 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
     place: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/place`, payload),
+    fetch: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/fetch`, payload),
   }
 }
