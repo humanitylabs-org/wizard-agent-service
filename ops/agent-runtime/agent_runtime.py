@@ -203,6 +203,23 @@ def service_names(agent: dict) -> tuple[str, str]:
 
 
 CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
+# Metadata only: no reads, writes, token refreshes, permissions changes, or credential output.
+CLAUDE_LOGIN_CHECK = """import os, stat, sys
+
+def private(path, directory=False):
+    st = os.lstat(path)
+    kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    access = os.R_OK | os.W_OK | (os.X_OK if directory else 0)
+    return kind and st.st_uid == os.geteuid() and not (st.st_mode & 0o077) and os.access(path, access)
+
+try:
+    ok = private('/claude', directory=True) and private('/claude/.credentials.json')
+    if os.path.lexists('/claude/.claude.json'):
+        ok = ok and private('/claude/.claude.json')
+except OSError:
+    ok = False
+sys.exit(0 if ok else 1)
+"""
 
 
 def uses_claude_login(agent: dict) -> bool:
@@ -333,9 +350,8 @@ class ComposeDriver:
 
 
 class RestrictedDriver:
-    """Runs an agent in the restricted runtime: the vendored compose file unchanged, configured by environment
-    (README environment contract). Kept off Runtipi's shared network; the compose project holds the agent and its
-    sidecars, so stop/start act on all of them."""
+    """Runs the pinned restricted runtime, optionally with its reviewed Claude grant override.
+    Kept off Runtipi's shared network; the project holds the agent and its sidecars."""
 
     def __init__(self, agents: Agents, runtime_dir: Path, image: str, listener_port: int):
         self.agents, self.image, self.listener_port = agents, image, listener_port
@@ -369,8 +385,37 @@ class RestrictedDriver:
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
-        return docker(["compose", "-p", self.project(agent["id"]), "-f", str(self.compose_file), *args],
+        files = ["-f", str(self.compose_file)]
+        if uses_claude_login(agent):
+            # Authorization comes from the owner-managed record, never an agent env/label.
+            files += ["-f", str(self.runtime_dir / "compose.claude-login.yml")]
+        return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
                       timeout=timeout, env=self.env(agent))
+
+    def check_claude_login(self, agent: dict) -> None:
+        """Metadata-only, no-network check as the exact restricted uid. Never repair a live login.
+        Every writer must use uid 10000: chmod/ACL alone breaks on atomic 0600 replacement.
+        The trusted operator must separately verify the Claude app uses this uid before rollout.
+        """
+        if not uses_claude_login(agent):
+            return
+        if docker(["volume", "inspect", CLAUDE_LOGIN_VOLUME, "--format", "{{.Name}}"],
+                  timeout=60, check=False).returncode:
+            raise RuntimeFailure("claude_login_missing", 409)
+        name = f"{self.project(agent['id'])}-login-check-{secrets.token_hex(4)}"
+        try:
+            result = docker(["run", "--rm", "--name", name, "--network", "none", "--read-only",
+                             "--user", f"{AGENT_UID}:{AGENT_UID}", "--cap-drop", "ALL",
+                             "--security-opt", "no-new-privileges:true",
+                             "--mount", f"type=volume,src={CLAUDE_LOGIN_VOLUME},dst=/claude",
+                             "--entrypoint", "python3", SIDECAR_IMAGE, "-c", CLAUDE_LOGIN_CHECK],
+                            timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            docker(["rm", "-f", name], timeout=60, check=False)
+            raise RuntimeFailure("claude_login_check_timeout", 504) from None
+        if result.returncode:
+            # Do not log probe stdout/stderr or inspect any credential contents.
+            raise RuntimeFailure("claude_login_permissions", 409)
 
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
@@ -407,6 +452,7 @@ class RestrictedDriver:
             raise RuntimeFailure("restricted_provider_unsupported", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
+        self.check_claude_login(agent)   # refuse before stopping an existing agent or syncing its home
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -435,8 +481,9 @@ def verify_vendored(runtime_dir: Path) -> None:
     except OSError:
         raise SystemExit("restricted runtime: SOURCE.txt missing") from None
     listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
-    if not any(name == "./compose.yml" for _, name in listed):
-        raise SystemExit("restricted runtime: compose.yml is not listed in SOURCE.txt")
+    for required in ("./compose.yml", "./compose.claude-login.yml"):
+        if not any(name == required for _, name in listed):
+            raise SystemExit(f"restricted runtime: {required[2:]} is not listed in SOURCE.txt")
     for digest, name in listed:
         try:
             actual = hashlib.sha256((runtime_dir / name).read_bytes()).hexdigest()

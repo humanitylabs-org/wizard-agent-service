@@ -2,7 +2,7 @@
 """Outside-in checks of what Docker actually applied to the restricted agent's containers.
 
 Usage:
-  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source]
+  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-login]
   inspect_check.py --selftest     # proves the mount and environment rules reject bad layouts
 
 Without a home bind source the home must be the project's own named volume `<project>_agent-home`.
@@ -23,8 +23,12 @@ COMPOSE_ENV = {"HOME", "HERMES_HOME", "PATH", "API_SERVER_ENABLED", "API_SERVER_
                "WIZARD_GATEWAY_URL"}
 
 
-def mount_problems(mounts, project, home_source=None):
-    """Return a list of problems with the agent's mounts (empty = exactly the intended two)."""
+CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"
+CLAUDE_CONFIG_ENV = "CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"
+
+
+def mount_problems(mounts, project, home_source=None, claude_login=False):
+    """Exact mounts, with the shared login only when independently granted by the checker caller."""
     problems = []
     home_volume, skills_volume = f"{project}_agent-home", f"{project}_system-skills"
     by_dest = {}
@@ -33,7 +37,8 @@ def mount_problems(mounts, project, home_source=None):
     for dest, ms in by_dest.items():
         if len(ms) > 1:
             problems.append(f"{dest} mounted {len(ms)} times")
-    extra = sorted(set(by_dest) - {"/opt/data", "/opt/wizard-skills"})
+    allowed = {"/opt/data", "/opt/wizard-skills"} | ({"/claude"} if claude_login else set())
+    extra = sorted(set(by_dest) - allowed)
     if extra:
         problems.append(f"unexpected mounts: {extra}")
     home = (by_dest.get("/opt/data") or [None])[0]
@@ -54,6 +59,10 @@ def mount_problems(mounts, project, home_source=None):
     skills = (by_dest.get("/opt/wizard-skills") or [None])[0]
     if not skills or skills["type"] != "volume" or skills["rw"] or skills["src"] != skills_volume:
         problems.append(f"system skills must be read-only volume {skills_volume}, got {skills}")
+    if claude_login:
+        login = (by_dest.get("/claude") or [None])[0]
+        if not login or login["type"] != "volume" or login["src"] != CLAUDE_LOGIN_VOLUME or not login["rw"]:
+            problems.append("Claude login must be the writable external login volume at /claude")
     for m in mounts:
         if "sock" in str(m["src"]) or "sock" in m["dest"]:
             problems.append(f"socket mounted: {m}")
@@ -73,9 +82,18 @@ def init_problems(init_mounts, agent_home):
     return [] if same else [f"home-init mount {m} differs from agent home {agent_home}"]
 
 
-def env_problems(env_names, image_env_names):
-    extra = sorted(set(env_names) - set(image_env_names) - COMPOSE_ENV)
-    return [f"environment not granted by image or compose: {extra}"] if extra else []
+def env_problems(env_names, image_env_names, claude_login=False):
+    allowed = COMPOSE_ENV | ({CLAUDE_CONFIG_ENV} if claude_login else set())
+    extra = sorted(set(env_names) - set(image_env_names) - allowed)
+    problems = [f"environment not granted by image or compose: {extra}"] if extra else []
+    if (CLAUDE_CONFIG_ENV in env_names) != claude_login:
+        problems.append("Claude config environment must match the explicit login grant")
+    return problems
+
+
+def sidecar_login_problems(mounts):
+    return ["Claude login must never be mounted in a sidecar"] if any(
+        m.get("Name") == CLAUDE_LOGIN_VOLUME or m.get("Destination") == "/claude" for m in mounts) else []
 
 
 def selftest():
@@ -105,6 +123,24 @@ def selftest():
     for name, (mounts, src, expect_ok) in cases.items():
         ok = not mount_problems(mounts, p, src)
         results.append({"case": name, "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
+    login = {"type": "volume", "dest": "/claude", "rw": True, "src": CLAUDE_LOGIN_VOLUME}
+    grant_cases = {
+        "login: explicit grant": (good + [login], True, True),
+        "login: ungranted": (good + [login], False, False),
+        "login: missing when granted": (good, True, False),
+        "login: wrong volume": (good + [dict(login, src="other-login")], True, False),
+        "login: bind instead of volume": (good + [dict(login, type="bind")], True, False),
+        "login: read-only prevents refresh": (good + [dict(login, rw=False)], True, False),
+        "login: duplicate": (good + [login, login], True, False),
+        "login: wrong destination": (good + [dict(login, dest="/other")], True, False),
+    }
+    for name, (mounts, granted, expect_ok) in grant_cases.items():
+        ok = not mount_problems(mounts, p, claude_login=granted)
+        results.append({"case": name, "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
+    for mounts, expect_ok in (([], True), ([{"Name": CLAUDE_LOGIN_VOLUME, "Destination": "/alias"}], False),
+                              ([{"Name": "other", "Destination": "/claude"}], False)):
+        ok = not sidecar_login_problems(mounts)
+        results.append({"case": f"sidecar login {mounts}", "pass": ok == expect_ok})
     home = good[0]
     init_cases = {
         "init: same home volume": ([dict(home)], home, True),
@@ -115,6 +151,7 @@ def selftest():
         "init: different dedicated dir": ([home_bind("/srv/wizard/agents/other/home")], home_bind("/srv/wizard/agents/npa/home"), False),
         "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/owner"}], home, False),
         "init: read-only home": ([dict(home, rw=False)], home, False),
+        "init: login forbidden": ([dict(home), login], home, False),
     }
     for name, (mounts, agent_home, expect_ok) in init_cases.items():
         ok = not init_problems(mounts, agent_home)
@@ -124,6 +161,11 @@ def selftest():
     for names, image, expect_ok in env_cases:
         ok = not env_problems(names, image)
         results.append({"case": f"env {names}", "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
+    for granted, present, image_present, expect_ok in ((True, True, False, True), (False, True, False, False),
+                                                      (True, False, False, False), (False, True, True, False)):
+        ok = not env_problems([CLAUDE_CONFIG_ENV] if present else [],
+                              [CLAUDE_CONFIG_ENV] if image_present else [], granted)
+        results.append({"case": f"login env {granted}/{present}/{image_present}", "pass": ok == expect_ok})
     print(json.dumps({"summary": {"total": len(results), "passed": sum(r["pass"] for r in results),
                                   "failed": [r["case"] for r in results if not r["pass"]]}, "checks": results}, indent=1))
     sys.exit(0 if all(r["pass"] for r in results) else 1)
@@ -132,8 +174,12 @@ def selftest():
 if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
     selftest()
 
-project, ingress, api_key = sys.argv[1:4]
-home_source = sys.argv[4] if len(sys.argv) > 4 else None
+args = sys.argv[1:]
+claude_login = "--claude-login" in args
+if claude_login:
+    args.remove("--claude-login")
+project, ingress, api_key = args[:3]
+home_source = args[3] if len(args) > 3 else None
 CHECKS = []
 
 
@@ -168,9 +214,9 @@ check("I4", "no-new-privileges", no_new_privs(hc), hc.get("SecurityOpt"))
 check("I5", "read-only root filesystem", hc.get("ReadonlyRootfs") is True, hc.get("ReadonlyRootfs"))
 mounts = [{"type": m["Type"], "dest": m["Destination"], "rw": m["RW"], "src": m.get("Name") or m.get("Source")}
           for m in a.get("Mounts", [])]
-problems = mount_problems(mounts, project, home_source)
-check("I6", "exactly the intended mounts: own home (rw) and system skills (ro)", not problems,
-      {"mounts": mounts, "problems": problems, "expected_home_source": home_source})
+problems = mount_problems(mounts, project, home_source, claude_login)
+check("I6", "exactly the intended mounts: own home, system skills and explicitly granted login only", not problems,
+      {"mounts": mounts, "problems": problems, "expected_home_source": home_source, "claude_login": claude_login})
 check("I7", "no socket or other host path mounted", not any("sock" in p or "unexpected" in p for p in problems), problems)
 check("I8", "no published ports on the agent", not (hc.get("PortBindings") or {}), hc.get("PortBindings"))
 nets = list((a.get("NetworkSettings") or {}).get("Networks", {}))
@@ -194,7 +240,9 @@ image_env = []
 if cfg.get("Image"):
     image_env = [e.split("=", 1)[0] for e in json.loads(subprocess.check_output(
         ["docker", "image", "inspect", cfg["Image"]], text=True))[0]["Config"].get("Env") or []]
-env_bad = env_problems(env_names, image_env)
+env_bad = env_problems(env_names, image_env, claude_login)
+if claude_login and f"{CLAUDE_CONFIG_ENV}=/claude" not in (cfg.get("Env") or []):
+    env_bad.append("Claude config directory must be /claude")
 check("I14", "environment is exactly image defaults plus the compose grants", not env_bad and bool(image_env),
       {"env": env_names, "problems": env_bad})
 tmpfs = hc.get("Tmpfs") or {}
@@ -212,6 +260,8 @@ for svc in ("egress", "edge"):
           and not [m for m in s[0].get("Mounts", []) if m["Type"] == "bind"],
           {"user": s[0]["Config"].get("User") if s else None, "ro": shc.get("ReadonlyRootfs"), "drop": shc.get("CapDrop"),
            "mounts": [m["Destination"] for m in s[0].get("Mounts", [])] if s else None})
+    login_bad = sidecar_login_problems(s[0].get("Mounts", []) if s else [])
+    check(f"I20-{svc}", f"{svc} never gets the Claude login", not login_bad, login_bad)
     bindings = shc.get("PortBindings") or {}
     host_ips = [b.get("HostIp") for v in bindings.values() for b in (v or [])]
     if svc == "egress":

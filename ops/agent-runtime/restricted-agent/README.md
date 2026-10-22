@@ -35,6 +35,42 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 docker compose -f compose.yml -p agent-<id> up -d --build
 ```
 
+## Optional box Claude login grant
+
+The trusted driver may add `-f compose.claude-login.yml` **only** when the agent record has
+`privacy: standard` and `model.provider: anthropic`. Missing/unknown privacy does not grant access.
+Private agents and other providers use the base compose file only. Never infer authorization from an
+agent-controlled environment variable, label, or a volume already present on the host.
+
+This override mounts the external `wizard-ai-accounts-claude` volume **only in `agent`**, at `/claude`,
+and sets `CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/claude`. Neither `home-init`, `edge`, nor `egress`
+gets the login. The base runtime remains credential-free. The grant intentionally gives this agent
+access to the box Claude account and all data in that login directory; it is not a per-agent token.
+
+**Read-write, not read-only:** Claude Code refreshes single-use OAuth tokens and atomically replaces
+its credential file. A read-only mount can consume a refresh token without persisting its successor.
+The directory and credential files must therefore be privately owned by uid 10000, and **every writer
+of this shared login, including the Claude app, must run as the same uid**. A one-time chmod/group/ACL
+workaround is not sufficient: a writer replacing a file with mode 0600 can lock the other uid out.
+Do not relax modes, add capabilities, run the restricted agent as root/uid 1000, copy credentials into
+its home, or chown the live shared volume automatically. The Service driver checks compatibility
+before stopping an existing agent, returns `claude_login_permissions` on failure, and does not migrate
+the provider's ownership. Provisioning/migrating all login writers needs a separate approved rollout.
+A missing external volume returns `claude_login_missing`; it is never created by the preflight.
+
+The override adds only `platform.claude.com` to default egress for token refresh. Evidence: the shipped
+Claude Code binary uses `https://platform.claude.com/v1/oauth/token`; the official
+[network requirements](https://code.claude.com/docs/en/network-config) list this host for refresh.
+`api.anthropic.com` was already allowed for inference. No need to allow `claude.ai` (interactive login),
+`console.anthropic.com` (not used by this installed CLI), Statsig, telemetry, or download hosts. The
+DirectSDK plugin disables nonessential traffic. A trusted `EGRESS_ALLOWLIST_HOSTS` override still
+replaces the default and must include the refresh host if this grant is used.
+
+For outside-in checks, pass `--claude-login` to `inspect_check.py` only after independently verifying
+the owner grant. I6 rejects the login by default, or a wrong source/type/mode/duplicate even when
+granted. I14 requires the matching config environment; I19 and I20 deny login mounts in helpers and
+sidecars. Never derive the expected grant from the inspected container itself.
+
 ## Conformance (acceptance test 6)
 
 `conformance/run.sh <receipts-dir>` starts a disposable copy with an empty home and a stand-in Agent

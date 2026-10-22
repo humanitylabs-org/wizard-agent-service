@@ -1,23 +1,26 @@
-Base vendored from humanitylabs-org/wizard-app-store @ dc8c54d (branch feature/restricted-agent-runtime, runtimes/restricted-agent).
-Base conformance: heavy_e904f591b9814db1ab6546946978539f PASS; review round 3 SHIP.
-sidecars/edge.py and conformance/test_edge_heavy.py: wizard-app-store branch feature/restricted-edge-agent-heavy @ 657f1c327cbbbd5742471636aff55990b4895161.
-Edge receipt: python3 runtimes/restricted-agent/conformance/test_edge_heavy.py: 3 tests pass. Full container conformance not rerun for this allowlist addition.
-conformance/inspect_check.py retains the Service main portable-path revision (fbad41c).
+Vendored exact bytes from humanitylabs-org/wizard-app-store @ 84fe907a91824851c172c367a1b2ed48423a988a
+Branch: feature/restricted-claude-login; path: runtimes/restricted-agent.
+Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21
+Receipts: inspect_check.py --selftest 39/39; test_claude_login.py 4/4 (offline Compose rendering).
+Full container conformance and real OAuth refresh not rerun. Live uid 1000 login is incompatible with uid 10000;
+no ownership/mode changes or deployment performed. See README.md for the fail-closed grant contract.
 Do not edit here; change upstream and re-vendor.
 
-dfe5b6c8ed91b63d6f168585bc81edfb5f59bbff1b523649553aff18ee8478e8  ./README.md
+06bf7b7e3bc6e33a8afb25f3ad8f4dfcb3a9fefdb18326faf057d61f2ea5d4aa  ./README.md
+b07ca83f98239e730c3888552e20ba3339d2d4b15037499eb616e96c3c4e2fdb  ./compose.claude-login.yml
 7f1c6136830373078ace647c9bbf424dc49e09d1a986cb26a24362a422ab9c52  ./compose.yml
 39658033c644cafe1ab3282a645b923b918627aa9c899b50e88388fcbe6c3021  ./conformance/Dockerfile
 9255327432c32186589b2d7c0d0394f0d3c3ae49d0749e2ed1aaf1f0e8a4fa8e  ./conformance/compose.test.yml
 fac12ff62d85bef160b3f9fbd5faedc8c62a4b6009367fa4b39f641744ea9e86  ./conformance/egress_selftest.py
 9fcacfb8f8fa1f93aae1f02166a75ee9a638eb7a96f79fa515f302f3b1eebf86  ./conformance/fake_service.py
 916dbefe8b5c831022a232b8073d4a8a00f7c0f90cdf52316c0763b8a42ffe00  ./conformance/in_agent.py
-a6125e1958e36b7f7064d66028ce1c5f5fbb485521bf5ecd8975d5dd31dea39c  ./conformance/inspect_check.py
+e9efe49d2e9afd2f0cd454d899722c4a8fcd715824fff6a7e24cd33c35391beb  ./conformance/inspect_check.py
 a482bf79608dcdbd45b3d7a36bd19d7430a0593a098271612b674ed8629c5be4  ./conformance/redact.py
 f6b6e244ef30a62dd85b550ecd5c5972629ef4077c0ee8e185c329550f9c3b24  ./conformance/run.sh
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
+4b8c8fe80185e305630cf6021905928e5424a1fe0491f7938702e21c4cdb466a  ./conformance/test_claude_login.py
+ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
 07c3281f07daf116aa5e687d44ca228dd226fa29496c00b94be65809b8d95b58  ./sidecars/Dockerfile
 7f7561c1b6c2be5baa9a32c75da154d1327e88a9ae5129dfe39041508180193d  ./sidecars/edge.py
 32aa5f8126b842566d8afd82bce591256bc97b68f52c8c424ec8321ae37e89a6  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh
-ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
