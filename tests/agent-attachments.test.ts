@@ -113,8 +113,13 @@ it('a text-only model gets the durable copy and a plain note, never an image par
   expect(JSON.stringify(body.input)).not.toContain('image_url')
   const text = typeof body.input === 'string' ? body.input : body.input[0].content
   expect(text).toContain('/opt/data/inbox/2026-10-22/fixture.png')
-  expect(text).toContain('cannot see images')
-  expect(text).not.toContain('vision_analyze')
+  expect(text).toContain('vision_analyze')   // GLM's eyes: the allowed Tinfoil vision model
+  expect(text).toContain('Never guess what an image shows')
+  const blind = await scene('own', false, { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false })
+  expect((await blind.send()).status).toBe(202)
+  const blindText = typeof blind.seen.at(-1).input === 'string' ? blind.seen.at(-1).input : blind.seen.at(-1).input[0].content
+  expect(blindText).toContain('cannot see images')
+  expect(blindText).not.toContain('vision_analyze')
   const vision = await scene('own', false, { provider: 'tinfoil', model: 'deepseek-v4-1-flash', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false })
   expect((await vision.send()).status).toBe(202)
   expect(vision.seen.at(-1).input[0].content[1].type).toBe('image_url')

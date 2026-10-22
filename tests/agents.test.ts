@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
+import { agentVisionHelper, claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -286,6 +286,24 @@ describe('agents registry and API', () => {
     expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
     const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
     expect(status.status).toBe(200)
+  })
+
+  it('gives a text-only Tinfoil agent its allowed Tinfoil vision model as confidential eyes', () => {
+    const agent: any = { id: 'private', privacy: 'private', model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false },
+      permissions: { files: 'own', outside_tools: [], other_agents: 'none' }, apps: [], runtime: { kind: 'container' } }
+    expect(agentVisionHelper(agent)).toBe('deepseek-v4-1-flash')
+    const yaml = hermesConfigYaml(agent)
+    expect(yaml).toContain("auxiliary:\n  vision:\n    provider: custom\n    model: \"deepseek-v4-1-flash\"\n    base_url: \"http://agent-private-tinfoil:3301/v1\"\n    key_env: TINFOIL_API_KEY")
+    const disabled = yaml.match(/disabled_toolsets: \[(.*)\]/)[1]
+    expect(disabled).not.toContain('"vision"')
+    expect(disabled).toContain('"web"')
+    // No vision model allowed, files off, or a vision main model: no helper, the public vision tool stays off.
+    for (const change of [{ model: { ...agent.model, allowed_models: ['glm-5-3'] } }, { permissions: { ...agent.permissions, files: 'none' } }, { model: { ...agent.model, model: 'deepseek-v4-1-flash' } }]) {
+      const other = { ...agent, ...change }
+      expect(agentVisionHelper(other)).toBeNull()
+      expect(hermesConfigYaml(other)).not.toContain('auxiliary:')
+      expect(hermesConfigYaml(other).match(/disabled_toolsets: \[(.*)\]/)[1]).toContain('"vision"')
+    }
   })
 
   it('lists the main agent and only schema-1 agent folders', async () => {

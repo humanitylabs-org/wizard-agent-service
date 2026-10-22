@@ -49,6 +49,17 @@ export function agentModelSeesImages(agent) {
   if (agent?.model?.provider !== TINFOIL.id) return true
   return TINFOIL.models.find((model) => model.id === agent.model.model)?.images !== false
 }
+/**
+ * A Tinfoil agent whose own model is text-only gets an image-capable Tinfoil model from its own allowed list as its
+ * eyes: Hermes' vision_analyze runs on it (auxiliary.vision) through the same attested proxy, so images never leave
+ * the confidential route. Null when the agent sees images itself or has no allowed vision model.
+ */
+export function agentVisionHelper(agent) {
+  if (agent?.model?.provider !== TINFOIL.id || agentModelSeesImages(agent)) return null
+  if (agent.permissions?.files === 'none') return null
+  const allowed = new Set(agent.model.allowed_models ?? [agent.model.model])
+  return TINFOIL.models.find((model) => model.images && allowed.has(model.id))?.id ?? null
+}
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
 export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
@@ -318,6 +329,9 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
+  const visionHelper = agentVisionHelper(agent)
+  // The Tinfoil vision helper is confidential, not a public model: its image tool stays on.
+  if (visionHelper) granted.add('vision')
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
   const lines = [
@@ -340,6 +354,10 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // persistence. Pin its supported secure setting for the restricted grant.
   if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
     lines.push('security:', '  redact_secrets: true')
+  }
+  if (visionHelper) {
+    lines.push('auxiliary:', '  vision:', '    provider: custom', `    model: ${yamlString(visionHelper)}`,
+      `    base_url: ${yamlString(tinfoilUrl)}`, '    key_env: TINFOIL_API_KEY')
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
@@ -758,6 +776,14 @@ export function createAgentRegistry(options = {}) {
     return port
   }
 
+  /** True when the agent's managed config.yaml is not what this release would write (a new release changed it). */
+  function harnessStale(agent) {
+    if (agent.runtime.kind === 'profile') return false
+    const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
+    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
+    try { return readFileSync(join(home, 'config.yaml'), 'utf8') !== expected } catch { return false }
+  }
+
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
     const dir = folder(agent.id)
@@ -917,7 +943,8 @@ export function createAgentRegistry(options = {}) {
     assertPrivateWalls(next)
     assertStandardTransport(next)
     assertIsolationSupports(next)
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
+    // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
+    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)

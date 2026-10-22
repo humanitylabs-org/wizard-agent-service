@@ -52,7 +52,7 @@ import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
-import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, createAgentRegistry, createRuntimeClient } from './agents.mjs'
+import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
@@ -1544,11 +1544,14 @@ function nativeImageParts(files) {
 
 const TEXT_ONLY_IMAGE_NOTE = '\n\n[WIZARD_IMAGE_INTENT_V1]\nYour current model cannot see images, so the attached images were not sent to it as pictures. Their copies are saved at the paths in WIZARD_FILES_V1. Tell the user plainly that this model cannot view images and that they can switch this agent to an image-capable model to have you read it; do not guess what the image shows.\n[/WIZARD_IMAGE_INTENT_V1]'
 
+const VISION_HELPER_IMAGE_NOTE = '\n\n[WIZARD_IMAGE_INTENT_V1]\nYour own model cannot see images, so the attached images were saved at the paths in WIZARD_FILES_V1 instead. Look at each one with vision_analyze on its path before answering; it runs on a confidential image model on the same private route. Ask it the specific question you need, and call it again for any detail you are unsure of. Never guess what an image shows.\n[/WIZARD_IMAGE_INTENT_V1]'
+
 function appendFileMarker(input, files, includeNativeImages = false) {
-  const textOnly = includeNativeImages === 'text-only'
+  const withHelper = includeNativeImages === 'text-only-helper'
+  const textOnly = includeNativeImages === 'text-only' || withHelper
   const images = includeNativeImages && !textOnly ? nativeImageParts(files) : []
   const imageFiles = files.filter((file) => file.mime.toLowerCase().startsWith('image/'))
-  const toolInspection = textOnly && imageFiles.length ? TEXT_ONLY_IMAGE_NOTE : imageFiles.length > images.length
+  const toolInspection = textOnly && imageFiles.length ? (withHelper ? VISION_HELPER_IMAGE_NOTE : TEXT_ONLY_IMAGE_NOTE) : imageFiles.length > images.length
     ? '\n\n[WIZARD_IMAGE_INTENT_V1]\nThese attached images are direct user evidence. Inspect images with a trusted_path in WIZARD_FILES_V1 with vision_analyze before answering. If placement_error is set, use native image content when available; otherwise explain that the image is unavailable.\n[/WIZARD_IMAGE_INTENT_V1]'
     : ''
   // The agent gets trusted_path (its own view of the file); the service-side path stays inside the service.
@@ -2501,7 +2504,7 @@ function buildWizardServer(options, lifetime) {
     isThreadVisible: (session) => isHumanSession(session, false),
     mainSecrets: [hermesKey, options.inboxToken ?? ''].filter(Boolean),
     accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
-    prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
+    prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : agentVisionHelper(agent) ? 'text-only-helper' : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
