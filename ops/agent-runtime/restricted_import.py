@@ -208,11 +208,17 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
                     h.dump(inner_path, inner)
                     alias.symlink_to('native-home/' + top)
         mounts = [{'type': 'bind', 'source': str(target / 'home' / 'native-home'), 'target': plan['owner_home']}]
+        writable_groups = set()
         for item in plan['dependencies']:
             if item.get('approved') and item.get('action', item['proposal']) in {'mount rw', 'mount ro'}:
                 src = h.safe_mount(item['path'], owner_home=plan['owner_home'], wizard_home=root, source=plan['source'])
                 mounts.append({'type': 'bind', 'source': src, 'target': item['path'], 'read_only': item.get('action', item['proposal']) == 'mount ro'})
-        h.dump(target / 'import-runtime.json', {'services': {'agent': {'volumes': mounts, 'environment': {'HOME': '/opt/data', 'HERMES_HOME': '/opt/data'}}}})
+                s = Path(src).stat()
+                if item.get('action', item['proposal']) == 'mount rw' and s.st_mode & stat.S_IWGRP:
+                    writable_groups.add(s.st_gid)
+        groups = plan.get('supplemental_groups', [])
+        h.require(all(type(g) is int and g > 0 and g in writable_groups for g in groups), 'import_mount_group_not_granted')
+        h.dump(target / 'import-runtime.json', {'services': {'agent': {'volumes': mounts, 'group_add': [str(g) for g in groups], 'environment': {'HOME': '/opt/data', 'HERMES_HOME': '/opt/data'}}}})
         checkpoint(h, path, journal, 'prepared')
         reown(home, rt.AGENT_UID)
         helper(home, 'import os; assert os.getuid()==10000; assert os.stat("/opt/data").st_uid==10000; os.chmod("/opt/data",0o700)')

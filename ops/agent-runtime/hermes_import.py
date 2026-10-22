@@ -298,7 +298,7 @@ def scan(source, *, owner_home=None):
             'path_preserving': not is_zip, 'logical_home': str(source) if not is_zip else '/opt/data',
             'mode': 'paused', 'move': False,
             'image': IMAGE, 'network': 'restricted', 'port': 18720,
-            'credentials': credential_items, 'isolation': 'restricted',
+            'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [],
             'gateway_url': '', 'approved_plugins': [], 'approved_mcp': [],
             'approved_env_names': [],  # deprecated; use per-path credentials entries
             'outside_tools': [],

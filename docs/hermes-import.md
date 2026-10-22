@@ -13,6 +13,10 @@ The stopped tree is re-owned in place with a network-none, read-only-root helper
 using only CHOWN/FOWNER/DAC_OVERRIDE. A uid-10000 helper verifies/populates the
 sealed home; `RestrictedDriver` alone starts the actual agent. The agent is never
 run as root or the host UID. HOME and HERMES_HOME are `/opt/data`.
+Approved RW mounts may separately grant a positive `supplemental_groups` GID
+that actually owns that group-writable mount. This does not change the agent UID,
+primary GID or sealed-home ownership, or make any additional host path visible.
+The importer never chmods a workspace or grants root's group.
 
 The database is not copied: directory renames preserve its inode through staging,
 admission and undo. Renaming a foreign-owned 0700 directory across parents needs

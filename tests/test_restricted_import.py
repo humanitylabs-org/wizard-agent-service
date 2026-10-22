@@ -72,6 +72,24 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 self.assertFalse((self.root / 'agents/restricted-fixture').exists())
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
+    def test_rw_mount_groups_explicit_and_never_root(self):
+        workspace = self.owner / 'workspace'
+        workspace.mkdir(mode=0o775)
+        workspace.chmod(0o775)
+        self.plan['dependencies'] = [{'kind': 'folder', 'path': str(workspace), 'proposal': 'mount rw', 'action': 'mount rw', 'approved': True}]
+        self.plan['supplemental_groups'] = [workspace.stat().st_gid]
+        h.approve(self.plan)
+        result = h.apply(self.plan, 'restricted-fixture', self.root)
+        override = json.loads((self.root / 'agents/restricted-fixture/import-runtime.json').read_text())
+        self.assertEqual(override['services']['agent']['group_add'], [str(workspace.stat().st_gid)])
+        h.undo(result['journal'])
+        shutil.rmtree(self.root / 'imports/restricted-fixture')
+        self.plan['supplemental_groups'] = [0]
+        h.approve(self.plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'import_mount_group_not_granted'):
+            h.apply(self.plan, 'restricted-fixture', self.root)
+        h.undo(self.root / 'imports/restricted-fixture/journal.json')
+
     def test_reservation_start_is_denied_before_any_docker(self):
         agent = {'id': 'fixture', 'runtime': {'admission': 'importing'}, 'model': {}}
         with self.assertRaisesRegex(r.rt.RuntimeFailure, 'agent_import_in_progress'):
