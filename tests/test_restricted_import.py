@@ -119,6 +119,35 @@ class RestrictedImportTests(unittest.TestCase):
             h.apply(self.plan, 'restricted-fixture', self.root)
         h.undo(self.root / 'imports/restricted-fixture/journal.json')
 
+    def test_explicit_gh_file_only_and_declared_tcp_survive_admission(self):
+        gh = self.owner / '.config/gh'
+        gh.mkdir(parents=True)
+        hosts = gh / 'hosts.yml'
+        hosts.write_text('github.com:\n  oauth_token: synthetic-fixture-not-a-real-token\n')
+        (gh / 'unapproved').write_text('not granted')
+        self.plan['dependencies'] = [{'kind': 'credential', 'path': str(hosts), 'credential_source': str(hosts),
+                                      'proposal': 'carry secret', 'action': 'carry secret', 'approved': True}]
+        grant = {'alias': 'builder', 'address': '100.100.100.100', 'port': 22, 'relay_port': 18222}
+        self.plan['declared_tcp'] = [grant]
+        h.approve(self.plan)
+        result = h.apply(self.plan, 'restricted-fixture', self.root)
+        folder = self.root / 'agents/restricted-fixture'
+        self.assertEqual((folder / 'home/native-home/.config/gh/hosts.yml').read_text(), hosts.read_text())
+        self.assertFalse((folder / 'home/native-home/.config/gh/unapproved').exists())
+        self.assertEqual(json.loads((folder / 'agent.json').read_text())['runtime']['declared_tcp'], [grant])
+        h.undo(result['journal'])
+        self.assertTrue(hosts.is_file())
+
+    def test_declared_policy_is_covered_by_approval(self):
+        self.plan['declared_tcp'] = [{'alias': 'builder', 'address': '100.100.100.100', 'port': 22, 'relay_port': 18222}]
+        with self.assertRaisesRegex(h.ImportFailure, 'plan_not_approved'):
+            h.validate_plan(self.plan, self.root)
+        h.approve(self.plan)
+        self.plan['declared_tcp'][0]['port'] = 443
+        h.approve(self.plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'declared_tcp_invalid'):
+            h.validate_plan(self.plan, self.root)
+
     def test_reservation_start_is_denied_before_any_docker(self):
         agent = {'id': 'fixture', 'runtime': {'admission': 'importing'}, 'model': {}}
         with self.assertRaisesRegex(r.rt.RuntimeFailure, 'agent_import_in_progress'):

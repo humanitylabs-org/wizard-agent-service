@@ -298,7 +298,7 @@ def scan(source, *, owner_home=None):
             'path_preserving': not is_zip, 'logical_home': str(source) if not is_zip else '/opt/data',
             'mode': 'paused', 'move': False,
             'image': IMAGE, 'network': 'restricted', 'port': 18720,
-            'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [],
+            'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [], 'declared_tcp': [],
             'gateway_url': '', 'approved_plugins': [], 'approved_mcp': [],
             'approved_env_names': [],  # deprecated; use per-path credentials entries
             'outside_tools': [],
@@ -375,6 +375,12 @@ def validate_plan(plan, wizard_home):
     require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]+', plan.get('image', '')) is not None, 'image_invalid')
     require(re.fullmatch(r'https?://[a-zA-Z0-9_.:-]+/wizard/mcp', plan.get('gateway_url', '')) is not None, 'wizard_gateway_required')
     require(set(plan.get('outside_tools', [])) <= set(OUTSIDE_TOOLS), 'outside_tools_invalid')
+    import declared_egress
+    try:
+        declared_egress.validate(plan.get('declared_tcp', []))
+    except (ValueError, TypeError):
+        raise ImportFailure('declared_tcp_invalid') from None
+    require(not plan.get('declared_tcp') or plan.get('isolation') == 'restricted', 'declared_tcp_requires_restricted')
     for name in plan.get('approved_env_names', []):
         require(re.fullmatch(r'[A-Z_][A-Z0-9_]*', name) is not None, 'env_name_invalid')
     for name in plan.get('approved_plugins', []) + plan.get('approved_mcp', []):

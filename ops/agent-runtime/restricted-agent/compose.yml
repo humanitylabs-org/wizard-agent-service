@@ -88,6 +88,8 @@ services:
     user: "65534:65534"
     command: ["python3", "-u", "/srv/egress.py"]
     environment:
+      EGRESS_DECLARED_TCP: ${EGRESS_DECLARED_TCP:-[]}
+      EGRESS_TCP_RELAY_HOST: ${EGRESS_TCP_RELAY_HOST:-}
       EGRESS_ALLOWLIST_HOSTS: >-
         ${EGRESS_ALLOWLIST_HOSTS:-api.anthropic.com api.openai.com openrouter.ai inference.tinfoil.sh
         api.github.com github.com codeload.github.com objects.githubusercontent.com

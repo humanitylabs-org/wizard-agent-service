@@ -58,3 +58,56 @@ model.
   `test_agent_firewall.sh`, which runs in a privileged throwaway container. It checks after every single iptables
   change that each guard is still hooked, for a normal refresh and for recovery from refreshes interrupted while
   hooking in the new set, while dropping the old set, and before the rename.
+
+## Declared TCP build-host egress
+
+This is separate from the Private provider seal: no Private runtime, provider relay,
+Tailscale daemon or host gateway configuration changes. The empty default policy
+retains public, SNI-checked HTTPS only. For an explicitly approved non-private import:
+
+1. Put `declared_tcp:[{alias,address,port,relay_port}]` in the approved plan. Each
+   address is one tailnet IPv4, not a CIDR or DNS pattern; each alias and high relay
+   port is unique. Port 443 cannot be used to bypass the TLS gate. The plan digest
+   covers the entire list. The admitted `agent.json` stores the exact list.
+2. Preload the source-matching sidecar image from the Thales light lane. Set
+   `WIZARD_AGENT_SIDECAR_IMAGE` only for the owner CLI invocation. For declared grants
+   the driver compares `/srv/egress.py` in that image to the vendored source before
+   starting anything. No on-box image build/pull or mutating shared image tags.
+3. The driver supplies `EGRESS_DECLARED_TCP` and this agent's /28 gateway through
+   Compose. Egress accepts only a literal `CONNECT alias:port` from that table and
+   connects to that gateway's fixed high relay port. It never resolves the alias,
+   connects directly to tailnet, or accepts numeric-IP CONNECT as a substitute.
+4. After the /28 exists, use **only** `agent-firewall.sh declared-add UPLINK/28 PORT`
+   and `declared-check`. They add one source-/28, gateway-/32, TCP-port rule within
+   the already-installed host guard. Other agents and tailnet/host ports stay closed.
+   The helper validates arguments before calling iptables. It does not create or
+   refresh global firewall hooks. A global firewall refresh drops these exceptions
+   (fail closed); the owner must explicitly re-apply a still-approved grant.
+5. Run `declared_egress.py --agent-json RECORD --alias ALIAS --tailscale BINARY
+   --socket HOST_SOCKET` on the trusted host. It reads the exact admitted declaration,
+   binds only that /28's gateway/high port, validates source peers, and launches
+   `tailscale --socket=HOST_SOCKET nc ADDRESS PORT` with **fixed argv** for every
+   stream. It parses no destination from the stream. No shell, SOCKS listener,
+   published sidecar port, Docker socket or Tailscale socket enters the agent.
+   This is an explicit owner-side process, not a new Service/daemon installation.
+   It has 16-client and idle-time bounds; SIGTERM closes its children/connections.
+6. Carry an agent-owned `ssh_connect_proxy.py` and a fresh build-host-only key/config
+   with a pinned host key. The ProxyCommand sends the declared tuple through egress;
+   it has no host-side privilege. The SSH key must not authorize SSH into the VPS.
+7. Verify uid-10000 SSH, gh and git success plus undeclared alias/port, another tailnet
+   IP/port and VPS SSH refusal **both through egress and directly**. Public
+   github.com/api.github.com TLS positive controls do not prove authentication.
+8. On undo, `declared-remove UPLINK/28 PORT`, read back its absence, stop/reap the
+   relay, undo the imported agent, revoke/read back the rehearsal key, delete copies,
+   verify no containers and the exact original agent list/config hash. Cleanup
+   attempts all steps even if one fails, and preserves journals if undo is incomplete.
+
+The restricted reduced-copy harness automates those steps and then requires one real
+hidden-session Service turn with exact successful gh, SSH and git terminal results
+plus an existing `fact_store` recall. It fails closed unless CREATE → PATCH hidden →
+GET true happens before any message. A passing unit/socket test is not this live
+acceptance. No production cutover is authorized by the rehearsal.
+
+Packaging is `scripts/package-restricted-sidecars.py SOURCE_SHA IMAGE_TAG OUTPUT_DIR`
+on Thales only. It refuses the VPS, dirty/wrong source, wrong architecture or source-
+image mismatch; it exports a tar and sha256 receipt without registry publication.

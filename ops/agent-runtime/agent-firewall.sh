@@ -17,6 +17,41 @@
 #   agent-firewall.sh check [port]   print the rules (exit 1 when any hook is missing)
 #   agent-firewall.sh remove         take them out again
 set -eu
+
+# Per-agent fixed relay exception. Never refresh global guards for a rehearsal.
+# Only this validated /28 -> its own gateway:high-port ACCEPT is added/removed.
+case "${1:-}" in
+  declared-add|declared-check|declared-remove)
+    [ "$#" -eq 3 ] || { echo "usage: $0 declared-add|declared-check|declared-remove uplink/28 relay-port" >&2; exit 2; }
+    GATEWAY=$(python3 -c 'import ipaddress,sys
+n=ipaddress.ip_network(sys.argv[1],strict=True)
+p=int(sys.argv[2])
+assert isinstance(n,ipaddress.IPv4Network) and n.prefixlen==28 and n.subnet_of(ipaddress.ip_network("10.250.0.0/16"))
+assert str(p)==sys.argv[2] and 1024<=p<=65535
+print(n.network_address+1)' "$2" "$3")
+    # Guard must already be installed; do not create or alter any global hook.
+    iptables -C INPUT -s 10.250.0.0/16 -j WIZARD-AGENTS
+    has_declared() { iptables -C WIZARD-AGENTS -s "$2" -d "$GATEWAY/32" -p tcp --dport "$3" -m comment --comment wizard-declared-tcp -j ACCEPT 2>/dev/null; }
+    case "$1" in
+      declared-add)
+        if ! has_declared "$@"; then
+          iptables -I WIZARD-AGENTS 2 -s "$2" -d "$GATEWAY/32" -p tcp --dport "$3" -m comment --comment wizard-declared-tcp -j ACCEPT
+        fi
+        has_declared "$@"
+        ;;
+      declared-check) has_declared "$@" ;;
+      declared-remove)
+        while has_declared "$@"; do
+          iptables -D WIZARD-AGENTS -s "$2" -d "$GATEWAY/32" -p tcp --dport "$3" -m comment --comment wizard-declared-tcp -j ACCEPT
+        done
+        ! has_declared "$@"
+        ;;
+    esac
+    echo "agent firewall: $1 ($2 -> $GATEWAY:$3)"
+    exit 0
+    ;;
+esac
+
 RANGE=WIZARD-AGENTS
 LISTEN=WIZARD-AGENT-PORT
 NEXT=-NEXT

@@ -18,6 +18,7 @@ import time
 import zipfile
 
 import agent_runtime as rt
+import declared_egress
 
 
 @contextmanager
@@ -238,6 +239,7 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
                               'auto_app_grants': False, 'denied_apps': ['privacycom', 'privacy-com', 'privacy.com']}
         record['runtime'].pop('admission')
         record['runtime']['image'] = plan['image']
+        record['runtime']['declared_tcp'] = declared_egress.validate(plan.get('declared_tcp', []))
         h.dump(target / 'import-journal.json', {'restricted_import': True, 'journal': str(path)})
         h.dump(target / 'agent.json', record)
         checkpoint(h, path, journal, 'admitted')

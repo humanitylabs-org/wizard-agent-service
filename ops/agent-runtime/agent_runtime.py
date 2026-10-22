@@ -52,7 +52,7 @@ RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
 AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
 MANAGED_FILES = (".env", "config.yaml")
-SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
+SIDECAR_IMAGE = os.environ.get("WIZARD_AGENT_SIDECAR_IMAGE", "restricted-agent-sidecars:local")  # owner-selected, preloaded only
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
@@ -346,6 +346,13 @@ class RestrictedDriver:
 
     def env(self, agent: dict) -> dict:
         uplink, sandbox = agent_networks(agent)
+        import declared_egress
+        try:
+            grants = declared_egress.validate(agent['runtime'].get('declared_tcp', []))
+        except (ValueError, TypeError):
+            raise RuntimeFailure('declared_tcp_invalid', 409) from None
+        if grants and not agent.get('imported'):
+            raise RuntimeFailure('declared_tcp_import_required', 409)
         api_key = self.agents.secret(agent["id"], "runtime.key")
         gateway_key = self.agents.secret(agent["id"], "gateway.key")
         if not api_key or not gateway_key:
@@ -360,6 +367,8 @@ class RestrictedDriver:
             "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
             "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
             "EDGE_UPSTREAM_PORT": str(self.listener_port),
+            "EGRESS_DECLARED_TCP": json.dumps(grants, separators=(',', ':')),
+            "EGRESS_TCP_RELAY_HOST": str(next(uplink.hosts())) if grants else '',
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         image = agent["runtime"].get("image") if agent.get("imported") else self.image
@@ -411,6 +420,15 @@ class RestrictedDriver:
         if agent["runtime"].get("admission") == "importing":
             raise RuntimeFailure("agent_import_in_progress", 409)
         if agent.get('imported'):
+            if agent['runtime'].get('declared_tcp'):
+                self.env(agent)  # validate policy before any start or helper
+                expected = hashlib.sha256((self.runtime_dir / 'sidecars/egress.py').read_bytes()).hexdigest()
+                code = 'import hashlib; print(hashlib.sha256(open("/srv/egress.py","rb").read()).hexdigest())'
+                actual = docker(['run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+                                 '--security-opt', 'no-new-privileges:true', '--user', '65534:65534',
+                                 '--entrypoint', 'python3', SIDECAR_IMAGE, '-c', code], timeout=30).stdout.strip()
+                if actual != expected:
+                    raise RuntimeFailure('declared_tcp_image_mismatch', 409)
             docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
             docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
             refresh = self.agents.root / agent["id"] / "import-update.json"

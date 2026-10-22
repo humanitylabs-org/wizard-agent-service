@@ -12,9 +12,15 @@ Do not execute those old commands. No production cutover is authorized here.
    inode-preserving in-place re-ownership, **not a full state.db copy**. Validate
    the source writer census and backup/future-writer fence for any later cutover.
 3. Scan, then review every entry in `credentials`: path + dotenv name, auth
-   provider/pool, config field or entire credential file. Default denied. Supply
-   separate scoped gh and a newly generated Thales-only SSH identity. Enumerate
-   each replacement-directory `approved_files`; do not carry host-wide authority.
+   provider/pool, config field or entire credential file. Default denied. The
+   2026-10-22 owner decision approves the existing GitHub OAuth `hosts.yml` as one
+   explicit credential file grant (scopes `gist`, `read:org`, `repo`, `workflow`):
+   same authority as the current main agent, not a change to the Private seal.
+   Record that date/rationale in `owner_approvals`, and use agent-owned HTTPS git
+   config with an empty helper reset followed by `!gh auth git-credential`.
+   A newly generated build-host-only `restrict` SSH identity remains required.
+   Enumerate each replacement-directory `approved_files`; do not copy whole
+   host SSH/gh directories or carry owner-proof/Docker/private-agent credentials.
 4. Leave `mode:paused`, `isolation:restricted`, `approved_mcp:[]`, no default route
    action. Choose a preloaded image, not an arbitrary Docker network. The Service
    library reserves the stopped agent and allocates the uplink/sandbox /28 pair.
@@ -25,9 +31,15 @@ Do not execute those old commands. No production cutover is authorized here.
    original absolute paths. No host Docker socket/home/private-agent mount exists.
 6. From the real uid-10000 container, verify identity, host-UID read refusal,
    memory/auth harness, RW workspace/RO context, gh auth, git fetch --dry-run and
-   SSH. The existing TLS-only egress permits GitHub HTTPS but **does not permit
-   tailnet SSH**. That acceptance gate must remain red until declared-host TCP
-   egress is reviewed, built remotely and proven; never bypass sandbox/firewall.
+   SSH. Declare exactly the owner-approved alias/address/port in `declared_tcp`;
+   use the source-matching remotely built egress sidecar and fixed host TCP relay.
+   The sidecar matches only the literal alias:port; the relay forwards only to
+   that address:port through userspace Tailscale with fixed argv. The agent never
+   gets the Tailscale socket or a generic SOCKS route. Host firewall exceptions
+   must be scoped to this agent's /28, its gateway /32 and one high relay port.
+   Require another tailnet IP/port and VPS SSH refusal through egress and directly.
+   Source/unit tests alone do not clear this gate: remote image packaging and
+   a complete exit-0 restricted rehearsal with cleanup remain required.
 7. Through the live Service create a session for this agent, PATCH `hidden:true`,
    GET readback true **before any message**, then make one original-provider turn
    and verify canonical terminal exit codes and fact_store recall. Fail closed.
@@ -35,7 +47,9 @@ Do not execute those old commands. No production cutover is authorized here.
    admission, downs only this compose project, reverses the sealed rename into
    private staging and restores originals/inodes. Atomic fsynced backups carry
    completion hashes; partial files never become rollback input. Remove the
-   temporary Thales authorized_keys entry and delete every reduced copy.
+   temporary build-host authorized_keys entry (read back absence), remove/read
+   back the per-/28 relay firewall rule, stop/reap the relay and delete every
+   reduced copy. Attempt all cleanup steps even if an earlier one fails.
 9. Verify agent-list restoration, key removal readback, unchanged live config
    SHA256, unchanged service activity and free space. A reduced-copy result is
    not full-home acceptance, recovery/default routing proof, or cutover approval.

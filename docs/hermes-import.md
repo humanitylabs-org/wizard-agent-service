@@ -44,10 +44,21 @@ merge into that base on the next stopped sync rather than replacing the harness.
 Only preloaded images are accepted. Restricted imports never build or pull on the
 control plane. Preinstall/cache PyYAML and python-dotenv for lifecycle refreshes.
 Do not use the old bridge-network/native-UID runbook below as an acceptance path.
-GitHub HTTPS is on the vendored egress allowlist; tailnet SSH is **not**: CONNECT
-permits TLS/443 and rejects non-public addresses. No host-network/relay bypass is
-permitted. Tailnet SSH acceptance is blocked until separately reviewed declared-
-host TCP egress exists. A successful restricted import alone does not clear it.
+GitHub HTTPS is on the vendored egress allowlist. Tailnet SSH requires a separate,
+approval-bound `declared_tcp` list and a fixed owner-side relay; see
+[restricted-agent-runtime.md](restricted-agent-runtime.md#declared-tcp-build-host-egress).
+The default remains public TLS/443 only. Never use host networking, a general SOCKS
+proxy, or an agent-mounted Tailscale socket. An old sidecar image fails closed for
+declared grants; a source change alone does not clear the live SSH acceptance gate.
+
+The owner may approve an existing GitHub OAuth `hosts.yml` as a **single file**
+credential grant, with its actual scopes and rationale recorded in `owner_approvals`
+and covered by the plan approval hash. Do not silently scope-expand or copy all
+of `.config/gh`. Use an agent-owned gitconfig with an empty credential-helper reset
+then `!gh auth git-credential` for `https://github.com`. This preserves existing
+GitHub authority only when the owner explicitly approves it; it changes no Private
+agent authority. Verify `gh auth status` and private `git fetch --dry-run` as uid
+10000, not just public HTTPS or `command -v`.
 
 Status: implementation/acceptance preview, **not approved for a live cutover**. No UI or remote-agent link is introduced. The scheduler is deliberately untouched: only `paused` and `take-over` (Hermes owns its own cron) exist.
 
