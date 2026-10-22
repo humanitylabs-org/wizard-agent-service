@@ -1085,13 +1085,14 @@ export function createAgentRegistry(options = {}) {
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
   const latestRuns = new Map(Object.entries(readJson(runsPath)?.latest_runs ?? {}))
   const latestAllRuns = new Map(Object.entries(readJson(runsPath)?.latest_all_runs ?? {}))
-  function noteRun(runId, agentId, sessionId = '', { heavyOrigin } = {}) {
+  function noteRun(runId, agentId, sessionId = '', idempotencyKey = '', { heavyOrigin } = {}) {
+    if (idempotencyKey && typeof idempotencyKey === 'object') { heavyOrigin = idempotencyKey.heavyOrigin; idempotencyKey = '' }
     if (typeof runId !== 'string' || !runId) return
     const rows = runs.get(runId) ?? []
     if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
     if (!sessionId || !readRaw(agentId)) return
     const next = new Map(runs)
-    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(idempotencyKey ? { idempotency_key: String(idempotencyKey) } : {}), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
     const nextLatest = new Map(latestRuns)
     const nextAll = new Map(latestAllRuns)
     nextAll.set(JSON.stringify([agentId, sessionId]), runId)
@@ -1130,7 +1131,7 @@ export function createAgentRegistry(options = {}) {
     agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
     credentialValues: () => folderIds().flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
-    pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
+    pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
