@@ -43,7 +43,67 @@ class SandboxTest(unittest.TestCase):
             'WIZARD_HEAVY_AGENT_IMAGE': IMAGE, 'WIZARD_HEAVY_DOCKER_BIN': '/fixture/docker',
             'HOME': str(self.home), 'WORKER_FIXTURE_SECRET': 'fixture-host-only-secret'})
         self.env.start()
+        os.environ.pop('WIZARD_HEAVY_DOCKER_HOST', None)
         self.addCleanup(self.env.stop)
+
+    def test_unix_socket_only_client_environment_never_container_env(self):
+        host = 'unix:///disk/colima/docker.sock'
+        with patch.dict(os.environ, {'WIZARD_HEAVY_DOCKER_HOST': host}), \
+                patch.object(worker.subprocess, 'run', return_value=Mock(stdout=json.dumps(IMAGE_CONFIG))) as inspect, \
+                patch.object(worker.subprocess, 'Popen') as popen:
+            self.assertEqual(worker.docker_environment(), {'DOCKER_HOST': host})
+            worker.launch_command(self.spec, JOB, 45, 'fixture-log')
+            self.assertEqual(inspect.call_args.kwargs['env'], {'DOCKER_HOST': host})
+            self.assertEqual(popen.call_args.kwargs['env'], {'DOCKER_HOST': host})
+            self.assertNotIn(host, popen.call_args.args[0])
+        for bad in ['', 'tcp://localhost:2375', 'unix:///disk/../socket', 'unix:///disk/sock\nBAD=1']:
+            with patch.dict(os.environ, {'WIZARD_HEAVY_DOCKER_HOST': bad}), self.assertRaises(ValueError):
+                worker.docker_environment()
+
+    def test_agent_specs_are_invisible_to_old_dispatchers_and_share_lane_locks(self):
+        spool = self.root / 'spool-upgrade'
+        lock = self.root / 'heavy.lock'
+        for lane in ('heavy', 'light'):
+            job = 'heavy_' + ('b' if lane == 'heavy' else 'c') * 32
+            spec = {**self.spec, 'lane': lane}
+            with patch.object(worker, 'spawn_dispatcher') as spawn:
+                result = worker.rpc(spool, lock, {'action': 'submit', 'job_id': job, 'spec': spec})
+            self.assertEqual(result['state'], 'queued')
+            target = worker.agent_spool(spool)
+            if lane == 'light':
+                target = worker.light_root(target)
+            self.assertEqual(worker.find(spool, job), target)
+            spawn.assert_any_call(target, worker.light_lock(spool) if lane == 'light' else lock)
+            for legacy in (spool, worker.light_root(spool)):
+                if (legacy / 'jobs.sqlite3').exists():
+                    db = worker.connect(legacy)
+                    self.assertEqual(db.execute('SELECT count(*) FROM jobs WHERE id=?', (job,)).fetchone()[0], 0)
+                    db.close()
+            with patch.object(worker, 'spawn_dispatcher'):
+                readback = worker.rpc(spool, lock, {'action': 'status', 'job_id': job})
+            self.assertEqual(readback, result)
+
+    def test_first_agent_light_dispatch_works_without_a_host_light_database(self):
+        spool = self.root / 'fresh-spool'
+        lock = self.root / 'heavy.lock'
+        with patch.object(worker, 'spawn_dispatcher'):
+            worker.rpc(spool, lock, {'action': 'submit', 'job_id': JOB,
+                                    'spec': {**self.spec, 'lane': 'light'}})
+        self.assertTrue(worker.light_lock(spool).parent.is_dir())
+        self.assertFalse((worker.light_root(spool) / 'jobs.sqlite3').exists())
+        target = worker.light_root(worker.agent_spool(spool))
+        process = Mock(pid=os.getpid())
+        process.poll.return_value = 0
+        with patch.object(worker, 'resource_wait', return_value=''), \
+                patch.object(worker.subprocess, 'Popen', return_value=process) as popen, \
+                patch.object(worker, 'kill_agent_container'):
+            worker.dispatch(target, worker.light_lock(spool))
+        popen.assert_called_once()
+        db = worker.connect(target)
+        row = db.execute('SELECT state, reason FROM jobs WHERE id=?', (JOB,)).fetchone()
+        db.close()
+        self.assertEqual((row['state'], row['reason']), ('interrupted', 'worker_restarted_no_retry'))
+        self.assertIn(str(worker.light_lock(spool)), popen.call_args.args[0])
 
     def test_traversal_and_foreign_absolute_cwd(self):
         for cwd in (str(self.project / '../../beta/project'), str(self.beta), str(self.home), 'relative'):

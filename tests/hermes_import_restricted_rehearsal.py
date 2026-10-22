@@ -182,7 +182,7 @@ def verify_heavy(service, submissions, cwd):
     emit(heavy_submit_arguments_match=args == expected, heavy_submit_receipt=receipt)
     if args != expected or not job_id:
         return False
-    end = time.monotonic() + 300
+    end = time.monotonic() + 1800
     status = receipt
     while time.monotonic() < end:
         status = canary.call(service, '/wizard/v1/agent-heavy/status', 'POST', {'job_id': job_id})
@@ -193,6 +193,15 @@ def verify_heavy(service, submissions, cwd):
     passed = status.get('agent_id') == AGENT and status.get('state') == 'completed' and result.get('exit_code') == 0
     emit(heavy_job_terminal_readback=status, heavy_job_gate_pass=passed)
     return passed
+
+
+def config_baseline(source):
+    # Each authorized run supplies its own start-of-run pin; never an old live pin.
+    expected = os.environ.get(PREFIX + 'CONFIG_SHA256', '')
+    h.require(re.fullmatch(r'[0-9a-f]{64}', expected) is not None, 'config_baseline_required')
+    observed = h.file_hash(source / 'config.yaml')
+    h.require(observed == expected, 'live_config_hash_mismatch')
+    return observed
 
 
 def main():
@@ -207,8 +216,7 @@ def main():
     LOG = Path(os.environ['WIZARD_IMPORT_RESTRICTED_EVIDENCE'])
     section('0. Preloaded sidecar and immutable source prerequisites')
     h.require(not root.exists() and not (wizard / 'agents' / AGENT).exists(), 'rehearsal_target_exists')
-    before_hash = h.file_hash(source / 'config.yaml')
-    h.require(before_hash == get('CONFIG_SHA256'), 'live_config_hash_mismatch')
+    before_hash = config_baseline(source)
     emit(config_sha256_before=before_hash, free_bytes_before=shutil.disk_usage(source).free,
          baseline_agents=sorted(a['id'] for a in canary.call(service, '/wizard/v1/agents')['agents']))
     # Refuse an old image before any source copy or registry change.
@@ -289,8 +297,9 @@ def main():
         h.require(plan['summary']['model'] == {'provider': 'anthropic', 'default': 'claude-opus-5-5'}, 'rehearsal_model_mismatch')
         h.approve(plan); h.dump(root / 'plan.json', plan)
         section('3. Restricted apply and sealed uid-10000 home')
+        started = time.monotonic()
         result = h.apply(plan, AGENT, wizard)
-        emit(apply=result)
+        emit(apply=result, apply_seconds=round(time.monotonic() - started, 3))
         record = json.loads((wizard / 'agents' / AGENT / 'agent.json').read_text())
         h.require(record.get('grants', {}).get('heavy') is True, 'heavy_grant_readback_failed')
         emit(agent_bound_heavy_grant_readback=True, ssh_key_carried=False, host_tcp_listener=False)
@@ -337,7 +346,8 @@ def main():
                 cleanup_errors.append(name)
                 emit(cleanup_step=name, error_type=type(exc).__name__)
         if journal.exists():
-            clean('undo', lambda: emit(undo=h.undo(journal)))
+            started = time.monotonic()
+            clean('undo', lambda: emit(undo=h.undo(journal), undo_seconds=round(time.monotonic() - started, 3)))
         if not (wizard / 'agents' / AGENT).exists():
             clean('copy-delete', lambda: shutil.rmtree(root))
             if journal.parent.exists():

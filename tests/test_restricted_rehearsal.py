@@ -16,6 +16,21 @@ import hermes_import as h
 
 
 class RehearsalTests(unittest.TestCase):
+    def test_current_baseline_is_explicit_and_unchanged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)
+            (source / 'config.yaml').write_text('fixture current configuration')
+            current = h.file_hash(source / 'config.yaml')
+            with patch.dict(os.environ, {r.PREFIX + 'CONFIG_SHA256': current}):
+                self.assertEqual(r.config_baseline(source), current)
+                (source / 'config.yaml').write_text('changed during rehearsal')
+                with self.assertRaisesRegex(h.ImportFailure, 'live_config_hash_mismatch'):
+                    r.config_baseline(source)
+            for invalid in ['', 'old-pin', 'a' * 63]:
+                with patch.dict(os.environ, {r.PREFIX + 'CONFIG_SHA256': invalid}):
+                    with self.assertRaisesRegex(h.ImportFailure, 'config_baseline_required'):
+                        r.config_baseline(source)
+
     def test_no_root_tcp_or_ssh_key_path(self):
         source = Path(r.__file__).read_text()
         for forbidden in ['sudo', 'iptables', 'remote_key(', 'ProxyCommand', 'declared_' + 'tcp', 'ssh-keygen']:
