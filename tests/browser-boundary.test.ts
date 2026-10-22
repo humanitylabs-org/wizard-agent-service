@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer, request as httpRequest } from 'node:http'
 import { createBrowserBoundary, browserBoundaryFromEnv } from '../server/browser-boundary.mjs'
 import { createWizardServer, createTailnetIngress, listen } from '../server/service.mjs'
 
@@ -39,7 +40,7 @@ describe('browser owner boundary', () => {
     }
   })
 
-  async function service(enabled: boolean, requireAccess = false) {
+  async function service(enabled: boolean, requireAccess = false, extra = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'boundary-http-'))
     resources.push(() => rmSync(dir, { recursive: true, force: true }))
     const accessVerifier = Object.assign(async () => ({ sub: 'synthetic-owner' }), { fromRequest: true })
@@ -48,7 +49,7 @@ describe('browser owner boundary', () => {
       upstreamOrigin: 'http://127.0.0.1:1', hermesKey: 'fixture-key', ownerProof: PROOF,
       browserBoundary: { enabled, token: TOKEN },
       wizardOsHome: dir, settingsPath: join(dir, 'settings.json'), appsJsonPath: join(dir, 'apps.json'),
-      launcherPath: join(dir, 'launcher.json'), agentBridge: false, followThrough: false, joinedDelegation: 'off',
+      launcherPath: join(dir, 'launcher.json'), agentBridge: false, followThrough: false, joinedDelegation: 'off', ...extra,
     })
     const address = await listen(server)
     resources.push(() => new Promise(resolve => server.close(resolve)))
@@ -76,6 +77,33 @@ describe('browser owner boundary', () => {
     expect((await fetch(base + '/wizard/v1/setup', { headers: { 'X-Wizard-Shell-Token': TOKEN } })).status).toBe(403)
     expect((await fetch(base + '/wizard/v1/settings', { headers: { ...headers, Origin: 'null' } })).status).toBe(401)
     expect((await fetch(base + '/wizard-os-home/api/voice')).status).toBe(401)
+  })
+  it('tailnet static proxy preserves browser metadata and opener isolation, never owner credentials', async () => {
+    const seen: any[] = []
+    const shell = createServer((req, res) => {
+      seen.push(req.headers)
+      res.writeHead(req.headers['sec-fetch-dest'] === 'document' ? 200 : 403, {
+        'Content-Type': 'text/html', 'Cache-Control': 'private, no-store',
+        'Cross-Origin-Opener-Policy': 'noopener-allow-popups', 'Content-Security-Policy': "frame-ancestors 'none'",
+      })
+      res.end('<!doctype html><title>Synthetic shell only</title>')
+    })
+    const addr = await listen(shell)
+    resources.push(() => new Promise(resolve => shell.close(resolve)))
+    const { tailnet } = await service(true, true, { tailnetShellOrigin: `http://127.0.0.1:${addr.port}` })
+    const headers = { 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'none', 'X-Wizard-Owner-Proof': PROOF, 'X-Wizard-Shell-Token': TOKEN, Cookie: 'synthetic=not-forwarded' }
+    const doc: any = await new Promise((resolve, reject) => {
+      const request = httpRequest(tailnet + '/wizard-os-home/desktop.html', { headers }, reply => { reply.resume(); reply.on('end', () => resolve(reply)) })
+      request.on('error', reject); request.end()
+    })
+    expect(doc.statusCode).toBe(200)
+    expect(doc.headers['cross-origin-opener-policy']).toBe('noopener-allow-popups')
+    expect(doc.headers['content-security-policy']).toBe("frame-ancestors 'none'")
+    expect(seen[0]['sec-fetch-mode']).toBe('navigate')
+    expect(seen[0]['sec-fetch-site']).toBe('none')
+    for (const name of ['x-wizard-owner-proof', 'x-wizard-shell-token', 'cookie', 'tailscale-user-login']) expect(seen[0][name]).toBeUndefined()
+    const script = await fetch(tailnet + '/wizard-os-home/desktop.html', { headers: { ...headers, 'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors' } })
+    expect(script.status).toBe(403)
   })
   it('flag off preserves the legacy body and HTTP status, not a token-shaped success substitute', async () => {
     const { base } = await service(false)
