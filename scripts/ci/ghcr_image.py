@@ -73,8 +73,22 @@ def docker(args, env, **kwargs):
 
 def clean_env(config):
     # No Docker credential helper, DOCKER_AUTH_CONFIG, cloud identity, or gh token.
+    # RUNNER_TRACKING_ID is not a credential: the self-hosted runner uses it to reap
+    # orphaned docker/buildx clients when a job is cancelled or times out.
+    passthrough = ("DOCKER_HOST", "RUNNER_TRACKING_ID")
     return {"PATH": os.environ["PATH"], "HOME": config, "DOCKER_CONFIG": config,
-            **({"DOCKER_HOST": os.environ["DOCKER_HOST"]} if "DOCKER_HOST" in os.environ else {})}
+            **{key: os.environ[key] for key in passthrough if key in os.environ}}
+
+
+def _volume_of(path):
+    """The mounted volume holding path, unless that is the system disk ("/").
+
+    Runners that predate WIZARD_HEAVY_ROOT keep WIZARD_CI_ROOT on a dedicated worker volume; accept that volume so the
+    portable check keeps the old guarantee (build storage off the control-plane disk) without a machine path in git."""
+    p = Path(path).expanduser().resolve()
+    while not os.path.ismount(p):
+        p = p.parent
+    return None if p == Path(p.anchor) else str(p)
 
 
 def publish(args):
@@ -89,12 +103,16 @@ def publish(args):
             raise ValueError("only semantic versions or dated candidate tags are accepted")
     root = Path(os.environ["WIZARD_CI_ROOT"])
     configured = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
-    if not configured or not Path(configured).is_absolute():
+    if configured and not Path(configured).is_absolute():
         raise RuntimeError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
-    allowed = Path(configured).resolve()
     lock_path = Path(os.environ["WIZARD_CI_WORKER_LOCK"])
-    if not root.resolve().is_relative_to(allowed) or not lock_path.resolve().is_relative_to(allowed):
-        raise RuntimeError("build storage and lock must be under the configured heavy root")
+    if configured:
+        allowed = Path(configured).resolve()
+        if not root.resolve().is_relative_to(allowed) or not lock_path.resolve().is_relative_to(allowed):
+            raise RuntimeError("build storage and lock must be under the configured heavy root")
+    elif not _volume_of(root):
+        # Unconfigured runner: build storage must still sit on a dedicated mounted volume, never the system disk.
+        raise RuntimeError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
     print("Waiting for shared heavy-worker lock", flush=True)
     with lock_path.open("a") as lock:
         deadline = time.monotonic() + 3600

@@ -26,6 +26,11 @@ class ImageContract(unittest.TestCase):
         self.assertEqual(env['DOCKER_CONFIG'], '/isolated')
         self.assertFalse({'GHCR_TOKEN', 'GITHUB_TOKEN', 'DOCKER_AUTH_CONFIG'} & env.keys())
 
+    def test_clean_environment_keeps_runner_orphan_tracking(self):
+        with patch.dict(os.environ, {'RUNNER_TRACKING_ID': 'github_job_1'}, clear=False):
+            env = ci.clean_env('/isolated')
+        self.assertEqual(env['RUNNER_TRACKING_ID'], 'github_job_1')
+
     def test_missing_architecture_fails(self):
         registry = Mock()
         registry.manifest.return_value = (DIGEST, {'manifests': []})
@@ -54,6 +59,30 @@ class ImageContract(unittest.TestCase):
                 with self.subTest(confirm=confirm, sha=sha):
                     with self.assertRaisesRegex(RuntimeError, 'confirm'):
                         ci.publish(self.args(release='0.3.0', confirm=confirm, expected_sha=sha))
+
+    def test_unconfigured_runner_accepts_dedicated_volume(self):
+        env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_CI_ROOT': '/example/worker/ci'}
+        mounted = lambda p: str(p) in ('/', '/example/worker')
+        with patch.dict(os.environ, env, clear=True), patch.object(ci.os.path, 'ismount', mounted):
+            self.assertEqual(ci._volume_of('/example/worker/ci'), '/example/worker')
+            with self.assertRaises(KeyError):  # passes the storage guard; stops at the next required setting
+                ci.publish(self.args())
+
+    def test_unconfigured_runner_rejects_system_disk(self):
+        env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_CI_ROOT': '/example/worker/ci',
+               'WIZARD_CI_WORKER_LOCK': '/example/worker/lock'}
+        with patch.dict(os.environ, env, clear=True), patch.object(ci.os.path, 'ismount', lambda p: str(p) == '/'):
+            self.assertIsNone(ci._volume_of('/example/worker/ci'))
+            with self.assertRaisesRegex(RuntimeError, 'WIZARD_HEAVY_ROOT'):
+                ci.publish(self.args())
+
+    def test_configured_root_still_enforces_containment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push', 'WIZARD_HEAVY_ROOT': temp + '/work',
+                   'WIZARD_CI_ROOT': temp + '/work-sibling', 'WIZARD_CI_WORKER_LOCK': temp + '/work/lock'}
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(RuntimeError, 'under the configured heavy root'):
+                    ci.publish(self.args())
 
     def test_release_not_allowed_on_push(self):
         with patch.dict(os.environ, {'GITHUB_REF': 'refs/heads/daily', 'GITHUB_EVENT_NAME': 'push'}):
