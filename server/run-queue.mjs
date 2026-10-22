@@ -887,6 +887,7 @@ export class DurableRunQueue {
     this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (
       SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
        WHERE terminal_at IS NOT NULL AND terminal_at < ?
+          AND idempotency_key NOT LIKE 'schedule:%'
        ORDER BY terminal_at DESC LIMIT -1 OFFSET 128
     )`).run(now - 7 * 24 * 60 * 60)
   }

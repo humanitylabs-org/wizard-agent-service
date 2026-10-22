@@ -477,11 +477,12 @@ describe('review regressions', () => {
     const record = JSON.parse(readFileSync(recordPath, 'utf8'))
     record.runtime = { ...record.runtime, isolation: 'restricted', network: { uplink: '127.0.0.0/28', sandbox: '127.0.1.0/28' } }
     writeFileSync(recordPath, JSON.stringify(record))
-    const ingress = createAgentIngress(svc)
+    const ingress = createAgentIngress(svc, s.helperId)
     servers.push(ingress)
-    const address = await listen(ingress, '0.0.0.0') as import('node:net').AddressInfo
+    const socketPath = join(s.dir, 'test-gateway.sock')
+    await new Promise<void>(resolve => ingress.listen(socketPath, resolve))
     const call = (path: string, headers: Record<string, string>, { method = 'GET' } = {}) => new Promise<{ status: number, body: string }>((resolvePromise, reject) => {
-      const req = httpRequest({ host: '127.0.0.1', port: address.port, path, method, headers }, (res) => {
+      const req = httpRequest({ socketPath, path, method, headers }, (res) => {
         let body = ''
         res.on('data', (chunk) => { body += chunk })
         res.on('end', () => resolvePromise({ status: res.statusCode ?? 0, body }))
@@ -506,24 +507,15 @@ describe('review regressions', () => {
       expect([path, response.status, JSON.parse(response.body).check]).toEqual([path, 403, 'principal.agent_scope'])
     }
     expect((await call('/wizard/v1/agent-context', helper, { method: 'POST' })).status).toBe(403)
-    // The right key from outside the agent's uplink, and a key whose agent has no uplink, are refused.
-    // Move the helper's uplink elsewhere: the same key from the old address is now outside it.
-    writeFileSync(recordPath, JSON.stringify({ ...record, runtime: { ...record.runtime, network: { uplink: '127.0.0.16/28', sandbox: '127.0.1.0/28' } } }))
-    const outside = await call('/wizard/v1/agent-context', helper)
-    expect([outside.status, JSON.parse(outside.body).check]).toEqual([403, 'principal.agent_network'])
-    // A restricted agent's key does nothing on the main listener, even from the right address.
-    writeFileSync(recordPath, JSON.stringify(record))
+    // Network data is no longer authority. A token is accepted only on its own receiving socket.
     const main = await fetch(`${s.base}/wizard/v1/agent-context`, { headers: helper })
-    expect([main.status, (await main.json()).check]).toEqual([403, 'principal.agent_network'])
-    // ...and still refused when its stored network is broken: restricted alone binds the key (fail closed).
+    expect([main.status, (await main.json()).check]).toEqual([403, 'principal.agent_socket'])
     writeFileSync(recordPath, JSON.stringify({ ...record, runtime: { ...record.runtime, network: { uplink: 'not-a-subnet' } } }))
+    expect((await call('/wizard/v1/agent-context', helper)).status).not.toBe(403)
     const broken = await fetch(`${s.base}/wizard/v1/agent-context`, { headers: helper })
-    expect([broken.status, (await broken.json()).check]).toEqual([403, 'principal.agent_network'])
-    const brokenAgentListener = await call('/wizard/v1/agent-context', helper)
-    expect(brokenAgentListener.status).toBe(403)
-    writeFileSync(recordPath, JSON.stringify(record))
-    const unbound = await call('/wizard/v1/agent-context', { Authorization: `Bearer ${s.privateKey}` })
-    expect([unbound.status, JSON.parse(unbound.body).check]).toEqual([403, 'principal.agent_network'])
+    expect([broken.status, (await broken.json()).check]).toEqual([403, 'principal.agent_socket'])
+    const other = await call('/wizard/v1/agent-context', { Authorization: `Bearer ${s.privateKey}` })
+    expect([other.status, JSON.parse(other.body).check]).toEqual([403, 'principal.agent_socket'])
   })
 
 })

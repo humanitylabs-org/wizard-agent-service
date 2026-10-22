@@ -1,4 +1,6 @@
 #!/bin/sh
+# LEGACY/OPTIONAL: TCP-runtime guard only. Socket-based restricted installs do not install/run this.
+# Retained for existing boxes; never remove live rules automatically. See docs/restricted-agent-runtime.md.
 # Host firewall for restricted agents (run as root; idempotent).
 #
 # Restricted agents' sidecars sit on per-agent uplink networks carved from 10.250.0.0/16; the agents themselves

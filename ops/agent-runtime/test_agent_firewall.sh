@@ -1,4 +1,5 @@
 #!/bin/sh
+# LEGACY TCP firewall test; use test_agent_sockets.sh for socket runtimes.
 # Functional test of agent-firewall.sh inside a privileged throwaway container (needs NET_ADMIN + netns).
 # Two fake agent namespaces: "up" at 10.250.0.17 (an uplink sidecar) and "sb" at 10.251.0.17 (a sandbox agent),
 # plus "pub" at 192.0.2.17 (stands in for the public interface). The "host" is the container's root namespace.

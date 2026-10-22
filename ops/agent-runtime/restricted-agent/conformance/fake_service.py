@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import time
+import socketserver
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("FAKE_LOG", "/tmp/requests.jsonl")
@@ -66,4 +68,17 @@ if __name__ == "__main__":
     if os.environ.get("FAKE_MODE") == "host-listener":
         host_listener(int(os.environ.get("FAKE_PORT", "18923")))
     plant_canaries()
-    ThreadingHTTPServer(("0.0.0.0", 8923), Handler).serve_forever()
+    class UnixHTTP(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    servers = []
+    for path in (os.environ["FAKE_SOCKET"], os.environ["FAKE_OTHER_SOCKET"]):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        server = UnixHTTP(path, Handler)
+        os.chmod(path, 0o600)
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Event().wait()

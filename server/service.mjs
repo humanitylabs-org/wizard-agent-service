@@ -51,9 +51,12 @@ import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest,
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
+import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
+import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
+import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
@@ -1297,6 +1300,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
     const rawReply = historyContentStrings(message.content ?? message.text ?? message.output).join('\n')
+    if ((role === 'assistant' && isSilentResult(rawReply)) || (role === 'user' && isScheduleInput(rawReply))) return []
     const status = role === 'assistant' ? parseStatus(rawReply) : null
     const appId = role === 'assistant' && !hasAppToolCalls(message) && (!message.finish_reason || message.finish_reason === 'stop') ? replyAppId(rawReply, message.display_metadata) : null
     const content = sessionPreviewText([message.content ?? message.text ?? message.output, message.attachments, message.files, message.image_urls, message.images])
@@ -1460,6 +1464,9 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
           if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
         }
+        const role = sourceItem?.role ?? sourceItem?.author
+        const content = historyContentStrings(sourceItem?.content ?? sourceItem?.text ?? sourceItem?.output).join('\n')
+        if ((role === 'assistant' && isSilentResult(content)) || (role === 'user' && isScheduleInput(content))) return []
         if (legacyInternalHistoryMessage(item) && !historyRunContext(sourceItem)) return []
         const projected = visit(item, sourceItem)
         if (projected?.display_kind === 'run_context') {
@@ -2236,7 +2243,7 @@ export function speechText(value) {
 
 export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
-  const paths = ['runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  const paths = ['schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
@@ -2349,6 +2356,7 @@ function buildWizardServer(options, lifetime) {
   const agentRuntime = options.agentRuntime ?? (options.agentRuntimeUrl && options.agentRuntimeToken
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
+  let agentSockets
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
@@ -2358,8 +2366,10 @@ function buildWizardServer(options, lifetime) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    standardChatsUrl: options.standardChatsUrl || '',
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
+    beforeRestrictedStart: id => agentSockets.ensure(id),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
       if (!result.ok) return []
@@ -2380,6 +2390,7 @@ function buildWizardServer(options, lifetime) {
     : null
   const agentCtx = agents ? {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: (result, agent) => {
       // Routed agents have a host-side home and the runtime mounts it at /opt/data.
       // Shared inbox roots still apply when a note mentions a main-agent attachment.
@@ -2403,7 +2414,9 @@ function buildWizardServer(options, lifetime) {
       const origin = agentId === MAIN_AGENT_ID ? upstreamOrigin : agents.upstream(agent)
       const key = agentId === MAIN_AGENT_ID ? hermesKey : agents.apiKey(agentId)
       try {
-        const result = await fetchImpl(`${origin}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        const path = `/api/sessions/${encodeURIComponent(sessionId)}`
+        const init = { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) }
+        const result = await (agentId === MAIN_AGENT_ID ? fetchImpl(`${origin}${path}`, init) : agents.fetchAgent(agent, path, init))
         await result.body?.cancel().catch(() => undefined)
         if (result.ok) agents.observeSessions(agentId, [sessionId], { index: false })
         if (!result.ok && result.status !== 404) {
@@ -3741,6 +3754,7 @@ function buildWizardServer(options, lifetime) {
       await pipeline(
         Readable.fromWeb(upstream.body),
         replaceLiteral(record.upstreamRunId, record.publicRunId),
+        ...(record.idempotencyKey.startsWith('schedule:') ? [scheduledRunEvents()] : []),
         secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
         response,
       )
@@ -3971,6 +3985,39 @@ function buildWizardServer(options, lifetime) {
     if (!run.ok) throw Object.assign(new Error('share run admission failed'), { status: run.status })
     return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
   })
+  const scheduler = options.schedulerStatePath ? new Scheduler({
+    statePath: resolve(String(options.schedulerStatePath)),
+    hermesHome: options.schedulerHermesHome ?? '',
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    intervalMs: options.schedulerIntervalMs ?? 15_000,
+    lookup: async (occurrence, receipt) => {
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      if (!selfOrigin) return null
+      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
+        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+      })
+      if (!result.ok) { await result.body?.cancel(); return null }
+      return result.json()
+    },
+    deliver: async occurrence => {
+      // 'main' is the portable schedule spelling; Hermes is the registry's main id.
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      if (!agents && agent !== MAIN_AGENT_ID) throw Object.assign(new Error('agent unavailable'), { status: 404 })
+      if (agents && (!agents.read(agent) || agents.read(agent)?.role === 'recovery')) throw Object.assign(new Error('agent unavailable'), { status: 409 })
+      if (agent === MAIN_AGENT_ID && !runQueue) throw Object.assign(new Error('durable run queue required'), { status: 503 })
+      if (occurrence.createThread) {
+        const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
+        if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+      }
+      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
+      if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
+      return { run_id: run.payload.run_id || run.payload.id }
+    },
+  }) : null
+  if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
@@ -4071,7 +4118,6 @@ function buildWizardServer(options, lifetime) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
-    agentSubnet: (agentId) => agents?.agentUplink?.(agentId) ?? '',
     agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
   })
   // Only the dedicated Serve listener may use the enrolled owner identity without proxy proof.
@@ -4140,10 +4186,11 @@ function buildWizardServer(options, lifetime) {
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
       const pair = sideReference(key, record)
       const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, agent_id: agent, session_id: pair.session_id }]
+      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
     })) }
   }
 
+  const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
     const requestDone = lifetime.request()
@@ -4171,11 +4218,32 @@ function buildWizardServer(options, lifetime) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
         if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
+        if (url.pathname === '/wizard/standard-chats/mcp' || url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
         if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (url.pathname === '/wizard/standard-chats/mcp') {
+        if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response,415,{error:'json_required'}); return }
+        const agent = principal.kind === 'agent' ? agents?.read(principal.agentId) : null
+        if (!agent || agent.privacy !== 'private' || agent.permissions.read_standard_chats !== true) { sendJson(response,403,{error:'standard_chats_denied'}); return }
+        const now = Date.now()
+        for (const [id,rate] of standardRetrievalRate) if (now-rate.at>60000) standardRetrievalRate.delete(id)
+        const rate = standardRetrievalRate.get(agent.id) || {at:now,count:0}
+        if (++rate.count>30) { sendJson(response,429,{error:'standard_chats_rate_limited'},{'Retry-After':'60'}); return }
+        standardRetrievalRate.set(agent.id,rate)
+        const rpc = parseJsonBody(await readBoundedBody(request,16384))
+        const secrets = [hermesKey,options.inboxToken || '',...(agents.credentialValues?.() || [])].filter(Boolean)
+        let result = standardChatRpc(agent,principal,rpc,hermesStatePath,secrets)
+        const serialized = JSON.stringify(result)
+        if (result && secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1,-1)))) {
+          result = {jsonrpc:'2.0',id:rpc?.id ?? null,result:{content:[{type:'text',text:'unsafe_content'}],isError:true}}
+        }
+        if (result === null) { response.writeHead(202); response.end() }
+        else sendJson(response,200,result,{'Cache-Control':'no-store'})
+        return
       }
       if (url.pathname === '/wizard/v1/setup' || url.pathname.startsWith('/wizard/v1/setup/')) {
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
@@ -4501,6 +4569,15 @@ function buildWizardServer(options, lifetime) {
           response.end(body)
         }
         return
+      }
+      if (url.pathname === '/wizard/v1/schedules' || url.pathname.startsWith('/wizard/v1/schedules/')) {
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (await handleSchedulesApi(request, response, url, { scheduler, sendJson, readBody: async req => {
+          try { return JSON.parse((await readBoundedBody(req, 128 * 1024)).toString('utf8')) }
+          catch { throw Object.assign(new Error('invalid schedule body'), { status: 400 }) }
+        } })) return
       }
       if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents') || url.pathname.startsWith('/wizard/v1/agent-grants'))) {
         if (await handleAgentsApi(agentCtx, url, request, response)) return
@@ -5463,6 +5540,11 @@ function buildWizardServer(options, lifetime) {
           'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
+        // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
+        if (decoded.includes('/') && decoded.endsWith('.html')) {
+          headers['X-Frame-Options'] = 'SAMEORIGIN'
+          headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+        }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
         response.writeHead(200, headers)
         if (request.method === 'HEAD') response.end()
@@ -5521,7 +5603,9 @@ function buildWizardServer(options, lifetime) {
     if (!address || typeof address !== 'object') return
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
+    if (options.schedulerEnabled === true && process.env.WIZARD_SCHEDULER === '1') scheduler?.start()
   })
+  server.scheduler = scheduler
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''
@@ -5557,6 +5641,13 @@ function buildWizardServer(options, lifetime) {
     })
     lifetime.own(() => watcher.stop(), () => watcher.stop())
   }
+  if (agents) {
+    agentSockets = createAgentSocketGateway({ agentsDir, ingress: id => createAgentIngress(server, id) })
+    // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
+    server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
+    void server.agentSocketsReady.catch(() => undefined)
+    lifetime.own(() => agentSockets.close(), () => agentSockets.close())
+  } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
     const listCacheTimer = setInterval(() => { void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
     listCacheTimer.unref?.()
@@ -5570,8 +5661,8 @@ function buildWizardServer(options, lifetime) {
  * as `server`, but every request must carry that agent's own credential (no owner proof, no anonymous access),
  * so an agent cannot fall back to the local-automation surface by leaving its credential off.
  */
-export function createAgentIngress(server) {
-  return createServer((request, response) => server.emit('request', markAgentIngress(request), response))
+export function createAgentIngress(server, agentId = '') {
+  return createServer((request, response) => server.emit('request', markAgentIngress(request, agentId), response))
 }
 
 export async function listen(server, host = '127.0.0.1', port = 0) {

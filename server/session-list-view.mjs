@@ -75,6 +75,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       runId: String(item.wizard_run_id || ''),
       // The idempotency key of the newest run Wizard knows for this thread (= the outbox item id for our sends).
       lastRunKey: String(item.wizard_last_run_idempotency_key || ''),
+      lastRunStatus: ALIASES[item.wizard_last_run_status] || String(item.wizard_last_run_status || ''),
       preview, previewRole: latest?.role === 'assistant' ? 'assistant' : latest?.role === 'user' ? 'user' : undefined,
       previewAt: latestAt,
       requestAt: userAt || lastUserAt,
