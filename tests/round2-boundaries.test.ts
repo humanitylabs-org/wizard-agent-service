@@ -257,7 +257,7 @@ it('failed start refresh never trusts the previous stopped negative catalog', as
 
 
 it('catalog census follows clamped short pages and validates every cursor', async () => {
-  const s = await scene(), secondary = await s.create('Secondary'), offsets: number[] = []
+  const s = await scene(), secondary = await s.create('Secondary', 'standard', 'anthropic'), offsets: number[] = []
   const registry = createAgentRegistry({ agentsDir: s.agentsDir, upstreamHost: 'fixture', fetchImpl: async (raw: string) => {
     const offset = Number(new URL(raw).searchParams.get('offset')); offsets.push(offset)
     return Response.json({ data: offset < 2 ? [{ id: 'wizard_page_' + offset }] : [], pagination: { offset } })
@@ -269,11 +269,12 @@ it('catalog census follows clamped short pages and validates every cursor', asyn
 })
 
 it('old in-flight census cannot restore negative authority across a start transition', async () => {
-  const s = await scene(), secondary = await s.create('Secondary')
+  const s = await scene(), secondary = await s.create('Secondary', 'standard', 'anthropic')
   let finish: (value: Response) => void = () => {}; let reads = 0
   const registry = createAgentRegistry({ agentsDir: s.agentsDir, appsJsonPath: s.serverOptions.appsJsonPath, upstreamHost: 'fixture', runtime: s.serverOptions.agentRuntime,
     fetchImpl: async (url: string) => String(url) === 'http://127.0.0.1:1/api/connection' ? Response.json({ status: 'connected', models: fixtureModels }) : ++reads === 1 ? await new Promise<Response>(resolve => { finish = resolve }) : Response.json({ error: 'unavailable' }, { status: 503 }) })
   const old = registry.refreshCatalog(secondary.id)
+  void old.catch(() => {}) // Attach before lifecycle can invalidate the concurrent census.
   await registry.setRunning(secondary.id, true)
   finish(Response.json({ data: [], has_more: false }))
   await expect(old).rejects.toThrow(/lifecycle changed/)
