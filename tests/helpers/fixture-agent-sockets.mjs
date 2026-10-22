@@ -7,7 +7,6 @@ import { join } from 'node:path'
 export function fixtureAgentSockets(options) {
   const agentsDir = options.agentsDir || join(options.wizardOsHome, 'agents')
   const peers = new Set()
-  const fetchImpl = options.fetchImpl || fetch
   const prepare = async id => {
     let agent
     try { agent = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8')) } catch { return }
@@ -21,7 +20,7 @@ export function fixtureAgentSockets(options) {
         // Re-read: fixture lifecycle callbacks can change a synthetic runtime's port.
         const current = JSON.parse(readFileSync(join(agentsDir, id, 'agent.json'), 'utf8'))
         const origin = options.agentUpstreamMode === 'network' ? current.runtime.api : `http://127.0.0.1:${current.runtime.port}`
-        const response = await fetchImpl(new URL(req.url, origin).href, { method: req.method,
+        const response = await (options.fetchImpl || fetch)(new URL(req.url, origin).href, { method: req.method,
           headers: req.headers, ...(body ? { body } : {}), redirect: 'error' })
         res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(Buffer.from(await response.arrayBuffer()))
       } catch { res.writeHead(503); res.end('{"error":"fixture_runtime_unavailable"}') }

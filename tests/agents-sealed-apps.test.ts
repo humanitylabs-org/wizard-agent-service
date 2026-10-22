@@ -94,10 +94,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
         const agent = JSON.parse(readFileSync(join(dir, 'agents', id, 'agent.json'), 'utf8'))
         const key = readFileSync(join(dir, 'agents', id, 'gateway.key'), 'utf8').trim()
         if (agent.runtime.private_client && req.headers.authorization === `Bearer ${key}`) {
-          markAgentIngress(req)
-          const base = agent.runtime.network.uplink.split('/')[0].split('.').map(Number)
-          base[3] += 2
-          Object.defineProperty(req.socket, 'remoteAddress', { value: base.join('.'), configurable: true })
+          markAgentIngress(req, id)
         }
       } catch {}
     }

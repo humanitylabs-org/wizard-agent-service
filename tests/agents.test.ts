@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { listen } from '../server/service.mjs'
+import { createAgentIngress, listen } from '../server/service.mjs'
 import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
@@ -95,7 +95,9 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   })
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
-  return { base: `http://127.0.0.1:${address.port}`, calls, deliveries }
+  const privateIngress = createAgentIngress(svc, 'private'); servers.push(privateIngress)
+  const privateAddress = await listen(privateIngress) as import('node:net').AddressInfo
+  return { base: `http://127.0.0.1:${address.port}`, privateBase: `http://127.0.0.1:${privateAddress.port}`, calls, deliveries }
 }
 
 const json = (body: unknown, headers: Record<string, string> = {}) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
@@ -523,36 +525,37 @@ describe('private round 2: read-only standard retrieval, private search and dele
   })
   it('owner switch generates a stock MCP config; agent token reads; immediate revocation blocks cached calls', async () => {
     const dir=box(), main=await fakeHermes('main'), path=join(dir,'standard.db'); historyFixture(path)
-    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {base,privateBase}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
     const {agent}=await withPrivate(dir,base)
-    const call=(headers: Record<string,string>={})=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'standard_chats_search',arguments:{query:'lighthouse'}}},headers))
+    const call=(headers: Record<string,string>={})=>fetch((headers.Authorization ? privateBase : base)+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'standard_chats_search',arguments:{query:'lighthouse'}}},headers))
     expect((await call()).status).toBe(403)
     const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
     expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
     const patchAccess=(enabled: unknown)=>fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:enabled}}),method:'PATCH'})
     expect((await patchAccess('true')).status).toBe(400)
     expect((await patchAccess(true)).status).toBe(200)
-    const config=readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')
+    const config=readFileSync(join(dir,'agents',agent.id,'managed','config.yaml'),'utf8')
     expect(config).toContain('standard_chats:')
-    expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
+    expect(config).toContain('http://edge:8923/wizard/standard-chats/mcp')
     expect(config).not.toContain(token)
     expect(config).not.toContain('  wizard:')
+    expect((await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/list'},{Authorization:`Bearer ${token}`}))).status).toBe(403)
     const reply=await call({Authorization:`Bearer ${token}`})
     expect(reply.status).toBe(200)
     expect(JSON.stringify(await reply.json())).toContain('lighthouse')
     expect((await patchAccess(false)).status).toBe(200)
     expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
-    expect(readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')).not.toContain('standard_chats:')
+    expect(readFileSync(join(dir,'agents',agent.id,'managed','config.yaml'),'utf8')).not.toContain('standard_chats:')
   })
   it('guards standard history and memory against service and agent credential disclosure', async () => {
     const dir=box(),main=await fakeHermes('main'),path=join(dir,'state.db');historyFixture(path)
-    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {base,privateBase}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
     const {agent}=await withPrivate(dir,base)
     const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
     await fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
     const db=new DatabaseSync(path);db.prepare("UPDATE messages SET content=? WHERE session_id='standard'").run('lighthouse '+token+' fixture-key');db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");db.close()
     mkdirSync(join(dir,'memories'));writeFileSync(join(dir,'memories','MEMORY.md'),'fixture-key')
-    const call=(name: string,args: any)=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:`Bearer ${token}`}))
+    const call=(name: string,args: any)=>fetch(privateBase+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:`Bearer ${token}`}))
     for(const [name,args] of [['standard_chats_search',{query:'lighthouse'}],['standard_chat_read',{session_id:'standard'}],['standard_memory_read',{name:'MEMORY.md'}]] as const) {
       const result=await(await call(name,args)).json();expect(result.result.isError).toBe(false);expect(JSON.stringify(result)).not.toContain(token);expect(JSON.stringify(result)).not.toContain('fixture-key')
       const payload=JSON.parse(result.result.content[0].text)
@@ -573,25 +576,27 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(JSON.parse(unicodeResult.result.content[0].text).text).toBe('€'.repeat(8000))
     const prefixResult=await(await call('standard_chats_search',{query:token.slice(0,8)+'*'})).json()
     expect(JSON.parse(prefixResult.result.content[0].text).results).toEqual([])
-    const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
+    const malformed=await fetch(privateBase+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
     expect((await malformed.json()).error.code).toBe(-32600)
   })
   it('dedicated read-only transport works with app gateway entirely unset',async()=>{
     const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main,{standardChatsUrl:'http://readonly-relay:18986/wizard/standard-chats/mcp'})
     const created=await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private',read_standard_chats:true}}))
     expect(created.status).toBe(201)
-    const config=readFileSync(join(dir,'agents','private','home','config.yaml'),'utf8')
-    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
-    expect(readFileSync(join(dir,'agents','private','home','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
+    const config=readFileSync(join(dir,'agents','private','managed','config.yaml'),'utf8')
+    expect(config).toContain('http://edge:8923/wizard/standard-chats/mcp');expect(config).not.toContain('readonly-relay');expect(config).not.toContain('  wizard:')
+    expect(readFileSync(join(dir,'agents','private','managed','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
     const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','config.yaml'),'utf8')).not.toContain('readonly-relay')
   })
-  it('refuses a nonfunctional grant before persisting when no retrieval transport is configured',async()=>{
+  it('uses the sealed socket transport for a grant without enabling the app gateway',async()=>{
     const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main);await withPrivate(dir,base)
     const result=await fetch(base+'/wizard/v1/agents/private',{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
-    expect(result.status).toBe(409);expect((await result.json()).error).toBe('standard_chats_unconfigured')
-    expect(JSON.parse(readFileSync(join(dir,'agents','private','agent.json'),'utf8')).permissions.read_standard_chats).toBe(false)
+    expect(result.status).toBe(200)
+    expect(JSON.parse(readFileSync(join(dir,'agents','private','agent.json'),'utf8')).permissions.read_standard_chats).toBe(true)
+    const config=readFileSync(join(dir,'agents','private','managed','config.yaml'),'utf8')
+    expect(config).toContain('http://edge:8923/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
   })
   it('never enables the permission for a standard agent', async () => {
     const main=await fakeHermes('main'),{base}=await start(box(),main)
