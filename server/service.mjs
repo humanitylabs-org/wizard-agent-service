@@ -26,6 +26,7 @@ import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, m
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { createRoutedPresentation } from './routed-presentation.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
@@ -144,6 +145,7 @@ const allowed = [
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
+  { method: 'DELETE', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order', 'limit', 'offset', 'include_compacted', 'view']) },
   { method: 'POST', pattern: new RegExp(`^/api/sessions/${ID}/model$`), query: new Set() },
   { method: 'POST', pattern: /^\/v1\/runs$/, query: new Set() },
@@ -2437,7 +2439,9 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
   const agentCtx = agents ? {
+    routedPresentation,
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
       const body = JSON.stringify({ input: value.input })
@@ -5173,6 +5177,7 @@ function buildWizardServer(options, lifetime) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !(!operator && internalCall(request)) && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        if (request.method === 'DELETE' && principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
         // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
         let agentResolution = null
         if (agentCtx) {

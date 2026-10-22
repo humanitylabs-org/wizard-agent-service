@@ -284,7 +284,7 @@
       "reference_tests": [
         "tests/agent-attachments.test.ts"
       ],
-      "fixture": null,
+      "fixture": "nonimage-files",
       "policy_exemptions": []
     },
     {
@@ -326,7 +326,7 @@
       "reference_tests": [
         "tests/thread-status-backfill-list.test.ts"
       ],
-      "fixture": null,
+      "fixture": "status-list-state",
       "policy_exemptions": []
     },
     {
@@ -340,7 +340,7 @@
       "reference_tests": [
         "tests/thread-titles.test.ts"
       ],
-      "fixture": null,
+      "fixture": "automatic-titles",
       "policy_exemptions": []
     },
     {
@@ -354,7 +354,7 @@
       "reference_tests": [
         "tests/thread-subjects.test.ts"
       ],
-      "fixture": null,
+      "fixture": "subjects",
       "policy_exemptions": []
     },
     {
@@ -396,7 +396,7 @@
       "reference_tests": [
         "tests/agent-media.test.ts"
       ],
-      "fixture": null,
+      "fixture": "assistant-media",
       "policy_exemptions": []
     },
     {
@@ -410,7 +410,7 @@
       "reference_tests": [
         "tests/content-disposition.test.ts"
       ],
-      "fixture": null,
+      "fixture": "download-links",
       "policy_exemptions": []
     },
     {
@@ -424,7 +424,7 @@
       "reference_tests": [
         "tests/unified-chats-routing.test.ts"
       ],
-      "fixture": null,
+      "fixture": "read-receipts",
       "policy_exemptions": []
     },
     {
@@ -438,7 +438,7 @@
       "reference_tests": [
         "tests/agents.test.ts"
       ],
-      "fixture": null,
+      "fixture": "session-search",
       "policy_exemptions": []
     },
     {
@@ -452,7 +452,7 @@
       "reference_tests": [
         "tests/agents.test.ts"
       ],
-      "fixture": null,
+      "fixture": "session-delete",
       "policy_exemptions": []
     },
     {
@@ -466,7 +466,7 @@
       "reference_tests": [
         "tests/voice-input-projection.test.ts"
       ],
-      "fixture": null,
+      "fixture": "voice-notes",
       "policy_exemptions": []
     },
     {
@@ -494,7 +494,7 @@
       "reference_tests": [
         "tests/voice-transcribe-types.test.ts"
       ],
-      "fixture": null,
+      "fixture": "transcription",
       "policy_exemptions": []
     },
     {
@@ -648,7 +648,7 @@
       "reference_tests": [
         "tests/chats-views.test.ts"
       ],
-      "fixture": null,
+      "fixture": "history-pagination",
       "policy_exemptions": []
     },
     {
@@ -662,7 +662,7 @@
       "reference_tests": [
         "tests/agent-principals.test.ts"
       ],
-      "fixture": null,
+      "fixture": "tool-approval",
       "policy_exemptions": []
     },
     {

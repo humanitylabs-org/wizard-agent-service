@@ -14,44 +14,57 @@ import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
 const profileRunCache = new WeakMap()
 
-// Profile gateways return raw sessions, not Wizard's run projection. Reconcile only
-// runs admitted to this exact agent/thread pair; never consult another profile.
+// Every runtime uses the same Wizard status/title projection. Fetch through the
+// registry so a restricted ingress stays on its mode-0600 Unix socket.
 async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
-  if (agent.runtime?.kind !== 'profile') return rows
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
-  const cache = profileRunCache.get(ctx)
-  return Promise.all(rows.map(async row => {
-    const ref = ctx.registry.latestThreadRun?.(agent.id, row.id)
-    if (!ref) return row
-    const cacheKey = `${agent.id}:${ref.run_id}`
-    let run = cache.get(cacheKey)
-    try {
-      if (!run) {
-        const response = await ctx.fetchImpl(`${ctx.registry.upstream(agent)}/v1/runs/${encodeURIComponent(ref.run_id)}`, {
-          headers, redirect: 'manual', signal: AbortSignal.timeout(1500),
-        })
-        if (!response.ok) return row
-        const raw = Buffer.from(await response.arrayBuffer())
-        if (secrets.some(secret => raw.includes(Buffer.from(secret)))) return row
-        run = JSON.parse(raw.toString('utf8'))
-        if (run.session_id !== row.id || (run.run_id || run.id) !== ref.run_id) return row
-        if (['completed', 'failed', 'cancelled', 'interrupted', 'expired'].includes(run.status)) {
-          cache.set(cacheKey, run)
-          if (cache.size > 512) cache.delete(cache.keys().next().value)
+  const cache = profileRunCache.get(ctx), result = new Array(rows.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
+    while (next < rows.length) {
+      const index = next++, row = rows[index]
+      result[index] = row
+      try {
+        const ref = ctx.registry.latestThreadRun?.(agent.id, row.id)
+        let run = ref ? cache.get(`${agent.id}:${ref.run_id}`) : null
+        if (ref && !run) {
+          const response = await ctx.registry.fetchAgent(agent, `/v1/runs/${encodeURIComponent(ref.run_id)}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
+          const raw = Buffer.from(await response.arrayBuffer())
+          if (response.ok && !secrets.some(secret => raw.includes(Buffer.from(secret)))) {
+            const candidate = JSON.parse(raw.toString('utf8'))
+            if (candidate.session_id === row.id && (candidate.run_id || candidate.id) === ref.run_id) run = candidate
+          }
+          if (run && ['completed', 'failed', 'cancelled', 'interrupted', 'expired'].includes(run.status)) {
+            cache.set(`${agent.id}:${ref.run_id}`, run)
+            if (cache.size > 512) cache.delete(cache.keys().next().value)
+          }
         }
-      }
-      const active = ['started','accepted','queued','running','stopping','waiting_for_approval'].includes(run.status)
-      return { ...row, status: run.status, wizard_run_id: ref.run_id,
-        wizard_last_run_id: ref.run_id, wizard_last_run_status: run.status,
-        wizard_last_run_idempotency_key: ref.idempotency_key || '',
-        wizard_assigned_at: run.created_at, wizard_last_user_at: run.created_at,
-        ...(run.runtime?.model ? { model: run.runtime.model, provider: run.runtime.provider || '' } : {}),
-        ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
-          wizard_attention: parseStatus(run.output),
-          latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
-      }
-    } catch { return row }
+        const active = run && ['started','accepted','queued','running','stopping','waiting_for_approval'].includes(run.status)
+        let projected = run ? { ...row, status: run.status, wizard_run_id: ref.run_id,
+          wizard_last_run_id: ref.run_id, wizard_last_run_status: run.status,
+          wizard_last_run_idempotency_key: ref.idempotency_key || '',
+          wizard_assigned_at: run.created_at, wizard_last_user_at: run.created_at,
+          ...(run.runtime?.model ? { model: run.runtime.model, provider: run.runtime.provider || '' } : {}),
+          ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
+            latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
+        } : row
+        let attention = !active && run?.output ? parseStatus(run.output) : null
+        let assistantAt = run?.updated_at || null
+        if (!run) {
+          const response = await ctx.registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&include_compacted=true`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
+          const raw = Buffer.from(await response.arrayBuffer())
+          if (response.ok && !secrets.some(secret => raw.includes(Buffer.from(secret)))) {
+            const payload = JSON.parse(raw.toString('utf8')), messages = payload.data || payload.messages || []
+            const latest = [...messages].filter(m => ['user', 'assistant'].includes(m.role)).sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0]
+            if (latest?.role === 'assistant') { attention = parseStatus(latest.content); assistantAt = latest.timestamp }
+          }
+        }
+        projected = attention ? { ...projected, wizard_attention: attention } : projected
+        result[index] = ctx.routedPresentation ? await ctx.routedPresentation.project(agent, projected, attention, assistantAt, headers) : projected
+      } catch { /* Keep this row visible if its own gateway is temporarily unavailable. */ }
+    }
   }))
+  return result
 }
 import { pipeline } from 'node:stream/promises'
 import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
@@ -589,7 +602,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (!sessionId) throw new AgentError(400, 'session_required', 'thread.session_id')
     claim(sessionId)
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
-    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (screenContext ? `\n\n${screenContext}` : '') }
+    const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
+    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }
@@ -621,6 +635,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     throw new AgentError(503, 'agent_unavailable', 'agent.running')
   }
   if (upstream.ok && pinOnSuccess) registry.pin(pinOnSuccess, agent.id)
+  if (upstream.ok && method === 'PATCH' && typeof value?.title === 'string') ctx.routedPresentation?.noteRename(agent, sessionIdFromPath(upstreamPath), value.title)
   const secrets = [key, ...ctx.mainSecrets].filter(Boolean)
   const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
   const responseHeaders = { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Wizard-Agent': agent.id }
