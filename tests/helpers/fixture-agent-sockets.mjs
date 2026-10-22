@@ -29,11 +29,14 @@ export function fixtureAgentSockets(options) {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
     chmodSync(socketPath, 0o600); peers.add(server)
   }
-  const runtime = { ...options.agentRuntime }
-  for (const action of ['apply', 'start']) if (typeof runtime[action] === 'function') {
-    const original = runtime[action]
-    runtime[action] = async (...args) => { const result = await original(...args); await prepare(args[0]); return result }
-  }
+  const runtime = new Proxy(options.agentRuntime || {}, {
+    get(target, action) {
+      const original = target[action]
+      if (!['apply', 'start'].includes(String(action)) || typeof original !== 'function') return original
+      // Some lifecycle tests replace methods after constructing the Service; preserve that contract.
+      return async (...args) => { const result = await original(...args); await prepare(args[0]); return result }
+    },
+  })
   return {
     runtime,
     attach(server) {
