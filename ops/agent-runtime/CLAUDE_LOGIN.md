@@ -66,7 +66,10 @@ To avoid resolving its own aliases, egress queries explicit public IPv4 DNS reso
 returned IPs as globally routable, then splices encrypted TCP to port 443. Both listeners share a
 64-connection cap, 300s idle/drain timeout and 64KiB/10s ClientHello limits. No MITM, TLS termination,
 other destination ports or new public port bindings. Existing uid10000, cap-drop ALL, ro agent root,
-internal/inhibit-ipv4 sandbox and loopback-only edge publication remain intact.
+internal/inhibit-ipv4 sandbox remain intact. The socket-gateway lane replaces loopback edge
+publication with private per-agent ingress/gateway Unix sockets; neither edge nor agent publishes
+TCP ports. Provider aliases still point only at egress on sandbox, and egress alone has uplink.
+SNI passthrough/CONNECT are independent of this ingress migration.
 
 Custom `EGRESS_PASSTHROUGH_HOSTS` are rendered by upstream `passthrough.py` into an exact `!override`
 Compose alias list (requires Compose 2.24.4+). The helper writes only that secret-free override in
@@ -98,11 +101,13 @@ hibernation policy are separate from tmpfs memory backing. No malicious-agent no
 
 ## Provenance and evidence
 
-Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21,
-branch `feature/restricted-claude-login`, commit `4350ca9e9e026d67ef12f378d1feef6b8e454e33`.
-All 26 upstream files are vendored byte-for-byte with hashes in `restricted-agent/SOURCE.txt`.
-The helper requires the base/token Compose files, alias/policy renderer, egress/DNS, seeder/Dockerfile,
-and conformance masking guard/real-image credential regression in that manifest.
+Base Store main: `afeb2073e8517420a4a3c8f3d3a1aaf341cc09e5`, including merged PRs #20 and #21.
+The combined 32-file runtime keeps Service main `abea43d`'s explicit local per-agent socket-gateway
+adaptation, including its heavy edge allowlist and socket conformance fixtures; this is no longer
+an upstream-byte-exact runtime. `restricted-agent/SOURCE.txt` cites both sources and hashes every
+actual vendored file. The helper requires both the grant security files and socket edge/inspect/
+ingress probe manifest entries. Historical upstream-byte-equality claims below refer only to
+those prior heads, not this locally adapted merge.
 
 - Round 2 baseline (historical): focused runtime/offline census/token unittest suite **53 passed** with per-command isolated HOME/HERMES_HOME.
   Includes synthetic atomic CLI, private/ambient denial, missing-token start/apply, no HTTP secret route,
@@ -137,7 +142,7 @@ and conformance masking guard/real-image credential regression in that manifest.
 - All **26/26** upstream tracked files are byte-identical, SOURCE hashes valid; Service syntax and
   `git diff --check` pass.
 
-### Round 4 review fixes
+### Round 4 review fixes (historical baseline)
 
 - The three stopped-census failures reproduced locally at the Round 3 starting revision. The
   restricted fixture returned the **agent id for every Docker ps query**, including the new
@@ -166,9 +171,30 @@ and conformance masking guard/real-image credential regression in that manifest.
 No model request, real token provisioning, full agent conformance or production deployment is claimed.
 The dispatcher and offline readiness proofs do not claim complete DirectSDK inference/admission.
 
-## Deployment order — not executed; no merge/deploy authorized
+### Round 5: merge with socket lane
 
-1. Owner reviews/merges **Store PR #21**, then **Service draft PR #92** (keep draft until review).
+- Merge (not rebase) of Service main `abea43d` into the grant branch. Helper start delegates to
+  apply, retaining sealed-endpoint reconciliation via `--force-recreate` and stop-before-seeder
+  removal. Service create/update/start prepare sockets before the helper and preserve/clear the
+  missing-token warning. A combined socket/Claude fixture covers all three lifecycle paths.
+- Inspect keeps the socket ingress probe and edge mount/no-TCP checks alongside independent grant,
+  seeder/tmpfs gating and source-at-any-destination credential exclusions. Compose still separates
+  sandbox-only socket edge from dual-network alias egress, with and without the Claude grant.
+- Focused local checks: runtime Python **70/70**; vendored conformance Python **44/44**; inspect
+  **82/82**; CONNECT **12/12**; Vitest **177/177 in 11 files**, archived rollback required, no skips.
+  Socket Docker drill **66/66** across initial/restart/recreate, with verified clean teardown.
+- Round-3 real stock-image credential and redaction probes rerun with synthetic OAuth-shaped data,
+  uid10000/no caps/ro-root and labelled `--rm` fixtures: legacy-env and redaction-off leak controls
+  positive; fixed dispatcher/session/trajectory/DB reopen and token rotation leave no credential
+  matches under the disposable home; offline login positive/negative and gateway restart pass.
+  Finally cleanup and label-filtered absence verified. No real credential or inference used.
+- Review round 3 PASS and Thales `heavy_fd618261` ALL PASS apply to grant-only `1ee268d`.
+  **This merge head needs its own independent recheck and fresh full Thales suite.**
+
+## Deployment order — not executed; no main merge/deploy authorized here
+
+1. Store PR #21 is merged. Independently recheck the merged **Service draft PR #92** and run the
+   full Thales suite at its new head before considering a Service main merge; keep it draft.
 2. Prepare/release an immutable helper from the pushed Service commit, including the exact vendored
    runtime and SOURCE.txt; validate digests before activation. Preserve the previous release for rollback.
 3. Owner privately sets `claude.token` using the CLI above; no HTTP credential route is introduced.

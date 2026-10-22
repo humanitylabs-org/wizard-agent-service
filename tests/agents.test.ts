@@ -1,4 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
+import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
+import { privateChatMatches } from '../server/private-chat-search.mjs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +22,7 @@ async function readBody(req: IncomingMessage) {
 }
 
 // A stock-shaped Hermes API: sessions, runs, model options, health. Records every request.
-async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[]) {
+async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[], socketPath?: string) {
   const seen: Seen[] = []
   const known = new Set(sessions)
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -36,6 +39,7 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
     ] })
     if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+    if (req.method === 'DELETE' && sessionMatch) return known.delete(decodeURIComponent(sessionMatch[1])) ? json(200,{ok:true}) : json(404,{error:'not found'})
     if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
     if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: messages ?? [{ role: 'assistant', content: `${name} says hi` }] })
     if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
@@ -44,6 +48,11 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
     json(404, { error: 'nope' })
   })
   servers.push(server)
+  if (socketPath) {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
+    chmodSync(socketPath, 0o600)
+    return { port: 0, origin: '', seen, known }
+  }
   const address = await listen(server) as import('node:net').AddressInfo
   return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known }
 }
@@ -64,7 +73,14 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   const calls: string[] = []
   const deliveries: any[] = []
   const runtime = {
-    apply: async (id: string) => { calls.push(`apply ${id}`); return { ok: true } },
+    apply: async (id: string) => {
+      if (extra.agentIsolation === 'restricted') {
+        const gateway = join(dir, 'agents', id, 'gateway', 'gateway.sock')
+        expect(lstatSync(gateway).isSocket()).toBe(true) // transport exists before Docker sees the request
+        expect(lstatSync(gateway).mode & 0o777).toBe(0o600)
+      }
+      calls.push(`apply ${id}`); return { ok: true }
+    },
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
@@ -127,6 +143,26 @@ describe('agents registry and API', () => {
     const moved = await fetch(`${base}/wizard/v1/agents/${first.id}`, { ...json({ model: { provider: 'tinfoil', model: 'glm-5-3' } }), method: 'PATCH' })
     expect(moved.status).toBe(409)
     expect(stored(first.id).model.provider).toBe('anthropic')
+  })
+
+  it('routes sealed-agent session reads and writes over ingress while preserving its own API key', async () => {
+    const dir = box(), main = await fakeHermes('main')
+    const { base } = await start(dir, main, { agentIsolation: 'restricted' })
+    const created = await fetch(`${base}/wizard/v1/agents`, json({ label: 'Sealed', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }))
+    expect(created.status).toBe(201)
+    const folder = join(dir, 'agents', 'sealed')
+    const stored = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(stored.runtime.ingress_socket).toBe(join(folder, 'gateway', 'ingress.sock'))
+    const sealed = await fakeHermes('sealed', ['wizard_socket_thread'], undefined, stored.runtime.ingress_socket)
+    const listing = await fetch(`${base}/wizard/hermes/api/sessions?agent=sealed`)
+    expect(listing.status).toBe(200)
+    expect((await listing.json()).data[0].id).toBe('wizard_socket_thread')
+    const made = await fetch(`${base}/wizard/hermes/api/sessions?agent=sealed`, json({ id: 'socket-created' }))
+    expect(made.status).toBe(201); await made.json()
+    const key = readFileSync(join(folder, 'runtime.key'), 'utf8').trim()
+    expect(sealed.seen.filter(r => r.path.startsWith('/api/sessions')).every(r => r.auth === `Bearer ${key}`)).toBe(true)
+    expect(sealed.known.has('socket-created')).toBe(true)
+    expect(main.seen.some(r => r.body?.id === 'socket-created')).toBe(false)
   })
 
   it('without isolation, new agents keep the existing runtime shape', async () => {
@@ -440,5 +476,168 @@ describe('agent folder parsing and harness config', () => {
     expect(apps).toContain('meditate')
     expect(apps).not.toContain('agent-old')
     expect(existsSync(join(dir, 'agents', 'claude-explore', 'notes.json'))).toBe(true)
+  })
+})
+
+function historyFixture(path: string) {
+  const db = new DatabaseSync(path)
+  db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,source TEXT,parent_session_id TEXT,hidden INTEGER);
+    CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL);
+    CREATE VIRTUAL TABLE messages_fts USING fts5(content,content='messages',content_rowid='id');`)
+  const add = (id: string, hidden: number, source: string, text: string) => {
+    db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(id,id,source,null,hidden)
+    db.prepare("INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,'user',?,1)").run(id,text)
+  }
+  add('standard',0,'wizard-mobile','roundtwo mango lighthouse')
+  add('hidden_probe',1,'wizard-mobile','roundtwo hidden mango')
+  add('cron_noise',0,'cron','roundtwo cron mango')
+  db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+  db.close()
+}
+
+describe('same-origin hosted Agents app',()=>{
+  it('permits only the nested app document to be framed; the shell stays DENY',async()=>{
+    const ux=mkdtempSync(join(tmpdir(),'was-ux-frame-'));mkdirSync(join(ux,'agents'))
+    writeFileSync(join(ux,'index.html'),'<!doctype html>shell');writeFileSync(join(ux,'agents','index.html'),'<!doctype html>agents')
+      const main=await fakeHermes('main'),{base}=await start(box(),main,{uxDir:ux})
+      const outer=await fetch(base+'/wizard-os-home/'),inner=await fetch(base+'/wizard-os-home/agents/index.html')
+      expect(outer.status).toBe(200);expect(outer.headers.get('x-frame-options')).toBe('DENY')
+      expect(outer.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+      expect(inner.status).toBe(200);expect(inner.headers.get('x-frame-options')).toBe('SAMEORIGIN')
+      expect(inner.headers.get('content-security-policy')).toContain("frame-ancestors 'self'")
+
+  })
+})
+
+describe('private round 2: read-only standard retrieval, private search and deletion', () => {
+  it('FTS excludes hidden and cron noise by default; hidden opt-in supports probes; read is bounded', () => {
+    const path = join(box(),'standard.db'); historyFixture(path)
+    expect(searchHistory(path,'roundtwo').map((r: any)=>r.session_id)).toEqual(['standard'])
+    expect(searchHistory(path,'roundtwo',{include_hidden:true}).map((r: any)=>r.session_id).sort()).toEqual(['hidden_probe','standard'])
+    expect(searchHistory(path,'" OR content:*')).toEqual([])
+    expect(() => searchHistory(path,'x'.repeat(301))).toThrow()
+    expect(readHistory(path,'standard',{limit:1}).messages[0].content).toContain('lighthouse')
+    expect(() => readHistory(path,'cron_noise')).toThrow()
+    expect(() => readHistory(path,'../../private')).toThrow()
+  })
+  it('rejects owner, standard agents, and private agents without the explicit permission', () => {
+    const rpc={jsonrpc:'2.0',id:1,method:'tools/list'}
+    const agent={id:'private',privacy:'private',permissions:{read_standard_chats:true}}
+    expect(() => standardChatRpc(agent,{kind:'owner'},rpc,'')).toThrow()
+    expect(() => standardChatRpc({...agent,privacy:'standard'},{kind:'agent',agentId:'private'},rpc,'')).toThrow()
+    expect(() => standardChatRpc({...agent,permissions:{}},{kind:'agent',agentId:'private'},rpc,'')).toThrow()
+    expect(() => standardChatRpc(agent,{kind:'agent',agentId:'other'},rpc,'')).toThrow()
+    const result: any=standardChatRpc(agent,{kind:'agent',agentId:'private'},rpc,'')
+    expect(result.result.tools.map((t: any)=>t.name)).toEqual(['standard_chats_search','standard_chat_read','standard_memory_read'])
+    expect(result.result.tools.every((t: any)=>!t.name.includes('write'))).toBe(true)
+  })
+  it('owner switch generates a stock MCP config; agent token reads; immediate revocation blocks cached calls', async () => {
+    const dir=box(), main=await fakeHermes('main'), path=join(dir,'standard.db'); historyFixture(path)
+    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {agent}=await withPrivate(dir,base)
+    const call=(headers: Record<string,string>={})=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'standard_chats_search',arguments:{query:'lighthouse'}}},headers))
+    expect((await call()).status).toBe(403)
+    const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
+    expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
+    const patchAccess=(enabled: unknown)=>fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:enabled}}),method:'PATCH'})
+    expect((await patchAccess('true')).status).toBe(400)
+    expect((await patchAccess(true)).status).toBe(200)
+    const config=readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')
+    expect(config).toContain('standard_chats:')
+    expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
+    expect(config).not.toContain(token)
+    expect(config).not.toContain('  wizard:')
+    const reply=await call({Authorization:`Bearer ${token}`})
+    expect(reply.status).toBe(200)
+    expect(JSON.stringify(await reply.json())).toContain('lighthouse')
+    expect((await patchAccess(false)).status).toBe(200)
+    expect((await call({Authorization:`Bearer ${token}`})).status).toBe(403)
+    expect(readFileSync(join(dir,'agents',agent.id,'home','config.yaml'),'utf8')).not.toContain('standard_chats:')
+  })
+  it('guards standard history and memory against service and agent credential disclosure', async () => {
+    const dir=box(),main=await fakeHermes('main'),path=join(dir,'state.db');historyFixture(path)
+    const {base}=await start(dir,main,{hermesStatePath:path,agentGatewayUrl:'http://gateway:8923/wizard/mcp'})
+    const {agent}=await withPrivate(dir,base)
+    const token=readFileSync(join(dir,'agents',agent.id,'gateway.key'),'utf8').trim()
+    await fetch(`${base}/wizard/v1/agents/${agent.id}`,{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
+    const db=new DatabaseSync(path);db.prepare("UPDATE messages SET content=? WHERE session_id='standard'").run('lighthouse '+token+' fixture-key');db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");db.close()
+    mkdirSync(join(dir,'memories'));writeFileSync(join(dir,'memories','MEMORY.md'),'fixture-key')
+    const call=(name: string,args: any)=>fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:`Bearer ${token}`}))
+    for(const [name,args] of [['standard_chats_search',{query:'lighthouse'}],['standard_chat_read',{session_id:'standard'}],['standard_memory_read',{name:'MEMORY.md'}]] as const) {
+      const result=await(await call(name,args)).json();expect(result.result.isError).toBe(false);expect(JSON.stringify(result)).not.toContain(token);expect(JSON.stringify(result)).not.toContain('fixture-key')
+      const payload=JSON.parse(result.result.content[0].text)
+      if(name==='standard_chats_search')expect(payload.results).toEqual([])
+      else expect(JSON.stringify(payload)).toContain('[redacted')
+    }
+    // A full credential spanning the 8k read / 24k memory boundary cannot leak a prefix.
+    const alter=new DatabaseSync(path);alter.prepare("UPDATE messages SET content=? WHERE session_id='standard'").run('x'.repeat(7980)+token+' lighthouse');alter.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");alter.close()
+    writeFileSync(join(dir,'memories','MEMORY.md'),'x'.repeat(23980)+token+' tail')
+    const readResult=await(await call('standard_chat_read',{session_id:'standard'})).json()
+    expect(JSON.stringify(readResult)).not.toContain(token.slice(0,16))
+    const memoryResult=await(await call('standard_memory_read',{name:'MEMORY.md'})).json()
+    expect(JSON.stringify(memoryResult)).not.toContain(token.slice(0,16))
+    // Multibyte input must not expose an unfinished key in the overread tail.
+    writeFileSync(join(dir,'memories','MEMORY.md'),'€'.repeat(8000)+'x'.repeat(Buffer.byteLength(token)-10)+token)
+    const unicodeResult=await(await call('standard_memory_read',{name:'MEMORY.md'})).json()
+    expect(JSON.stringify(unicodeResult)).not.toContain(token.slice(0,8))
+    expect(JSON.parse(unicodeResult.result.content[0].text).text).toBe('€'.repeat(8000))
+    const prefixResult=await(await call('standard_chats_search',{query:token.slice(0,8)+'*'})).json()
+    expect(JSON.parse(prefixResult.result.content[0].text).results).toEqual([])
+    const malformed=await fetch(base+'/wizard/standard-chats/mcp',json({jsonrpc:'2.0',id:1,method:7},{Authorization:`Bearer ${token}`}))
+    expect((await malformed.json()).error.code).toBe(-32600)
+  })
+  it('dedicated read-only transport works with app gateway entirely unset',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main,{standardChatsUrl:'http://readonly-relay:18986/wizard/standard-chats/mcp'})
+    const created=await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private',read_standard_chats:true}}))
+    expect(created.status).toBe(201)
+    const config=readFileSync(join(dir,'agents','private','home','config.yaml'),'utf8')
+    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
+    expect(readFileSync(join(dir,'agents','private','home','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
+    const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
+    expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')
+    expect(readFileSync(join(dir,'agents',standard.agent.id,'home','config.yaml'),'utf8')).not.toContain('readonly-relay')
+  })
+  it('refuses a nonfunctional grant before persisting when no retrieval transport is configured',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main);await withPrivate(dir,base)
+    const result=await fetch(base+'/wizard/v1/agents/private',{...json({permissions:{read_standard_chats:true}}),method:'PATCH'})
+    expect(result.status).toBe(409);expect((await result.json()).error).toBe('standard_chats_unconfigured')
+    expect(JSON.parse(readFileSync(join(dir,'agents','private','agent.json'),'utf8')).permissions.read_standard_chats).toBe(false)
+  })
+  it('never enables the permission for a standard agent', async () => {
+    const main=await fakeHermes('main'),{base}=await start(box(),main)
+    const r=await fetch(base+'/wizard/v1/agents',json({label:'Standard',model:{provider:'anthropic',model:'claude-opus-5-5'},permissions:{preset:'standard',read_standard_chats:true}}))
+    expect(r.status).toBe(409)
+    expect((await r.json()).check).toBe('agent.permissions.read_standard_chats')
+  })
+  it('owner deletes an explicitly named private thread without reading it; subsequent GET is 404', async () => {
+    const dir=box(),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_delete'])
+    const {base}=await start(dir,main);await withPrivate(dir,base,privateApi.port)
+    const path='/wizard/hermes/api/sessions/private_delete?agent=private'
+    for(const method of ['GET','HEAD','DELETE','PATCH','POST']) {
+      const init: RequestInit = ['PATCH','POST'].includes(method) ? {...json({title:'not applied'}),method} : {method}
+      expect((await fetch(base+path.replace('?agent=private',''),init)).status).toBe(409)
+    }
+    expect((await fetch(base+path,{method:'DELETE'})).status).toBe(200)
+    expect((await fetch(base+path)).status).toBe(404)
+    expect(privateApi.seen.filter(r=>r.method==='DELETE')).toHaveLength(1)
+    expect(main.seen.filter(r=>r.method==='DELETE')).toHaveLength(0)
+    const token=readFileSync(join(dir,'agents','private','gateway.key'),'utf8').trim()
+    expect((await fetch(base+path,{method:'DELETE',headers:{Authorization:`Bearer ${token}`}})).status).toBe(403)
+  })
+  it('never persists a private transcript-derived fingerprint, even from an older owner client',async()=>{
+    const dir=box(),file=join(dir,'seen.json'),main=await fakeHermes('main'),privateApi=await fakeHermes('private',['private_seen'])
+    const {base}=await start(dir,main,{threadSeenStatePath:file});await withPrivate(dir,base,privateApi.port)
+    const key='agent/private/direct:private_seen',now=Date.now()
+    const result=await fetch(base+'/wizard/thread-seen',{...json({schema:1,initializedAt:now,threads:{[key]:{seenAt:now,assistantActivityAt:new Date(now).toISOString(),messageCount:2,updatedAt:new Date(now).toISOString(),previewFingerprint:'transcript-derived-hash',agent_id:'private',session_id:'private_seen'}}}),method:'PUT'})
+    expect(result.status).toBe(200);expect((await result.json()).state.threads[key].previewFingerprint).toBe('private')
+    expect(readFileSync(file,'utf8')).not.toContain('transcript-derived-hash')
+    expect((await(await fetch(base+'/wizard/thread-seen')).json()).state.threads[key].previewFingerprint).toBe('private')
+  })
+  it('private FTS uses only its own database and excludes hidden probes', () => {
+    const dir=box(),home=join(dir,'agents','private','home');mkdirSync(home,{recursive:true});historyFixture(join(home,'state.db'))
+    const matches=privateChatMatches(join(dir,'agents'),'private','mango lighthouse')
+    expect([...matches.keys()]).toEqual(['standard'])
+    expect(matches.has('hidden_probe')).toBe(false)
+    expect(privateChatMatches(join(dir,'agents'),'missing','mango')).toBe(null)
   })
 })

@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def render(granted=False, hosts=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith(('AGENT_', 'EDGE_', 'EGRESS_', 'COMPOSE_', 'CLAUDE_'))}
     env.update(AGENT_API_KEY='synthetic-api-key', EDGE_TOKEN_SHA256='0' * 64,
-               CLAUDE_TOKEN_FILE='/synthetic/agent/claude.token')
+               CLAUDE_TOKEN_FILE='/synthetic/agent/claude.token',
+               AGENT_GATEWAY_DIR='/synthetic/agent/gateway', AGENT_EDGE_UID='1000', AGENT_EDGE_GID='1000')
     args = ['docker', 'compose', '--project-name', 'claude-grant-fixture', '-f', str(ROOT / 'compose.yml')]
     if granted:
         args += ['-f', str(ROOT / 'compose.claude-token.yml')]
@@ -77,6 +78,22 @@ class ClaudeComposeTest(unittest.TestCase):
         self.assertTrue(aliases <= set(egress['environment']['EGRESS_ALLOWLIST_HOSTS'].split()))
         self.assertNotIn('ports', egress)
         self.assertNotIn('statsig.anthropic.com', egress['environment']['EGRESS_ALLOWLIST_HOSTS'])
+
+    def test_socket_ingress_and_provider_alias_egress_are_independent(self):
+        for granted in (False, True):
+            with self.subTest(granted=granted):
+                services = render(granted)['services']
+                edge, egress = services['edge'], services['egress']
+                self.assertEqual(set(edge['networks']), {'sandbox'})
+                self.assertEqual(set(egress['networks']), {'sandbox', 'uplink'})
+                self.assertNotIn('ports', edge)
+                self.assertNotIn('ports', egress)
+                self.assertEqual(edge['environment']['EDGE_UPSTREAM_SOCKET'], '/run/agent-gateway/gateway.sock')
+                self.assertEqual([v['target'] for v in edge['volumes']], ['/run/agent-gateway'])
+                self.assertFalse(edge['volumes'][0]['bind']['create_host_path'])
+                self.assertNotIn('volumes', egress)
+                self.assertEqual(set(egress['networks']['sandbox']['aliases']),
+                                 {'api.anthropic.com', 'platform.claude.com'})
 
     def test_custom_aliases_replace_not_merge(self):
         egress = render(hosts='platform.claude.com')['services']['egress']

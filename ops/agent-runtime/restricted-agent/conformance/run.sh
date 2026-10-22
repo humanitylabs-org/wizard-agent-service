@@ -28,12 +28,13 @@ export CONF_CANARY="$CANARY"
 export CONF_HOST_PORT="${CONF_HOST_PORT:-18923}"
 export AGENT_API_KEY="$(rand)$(rand)"
 export EDGE_TOKEN_SHA256="$(printf '%s' "$TOKEN" | python3 -c 'import sys,hashlib;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest())')"
-export EDGE_UPSTREAM_HOST=fake-service EDGE_UPSTREAM_PORT=8923
-export AGENT_INGRESS_BIND="${AGENT_INGRESS_BIND:-127.0.0.1:18642}"
+# Placeholders for the base file; the test overlay replaces the bind mount with Docker-local volumes.
+export AGENT_GATEWAY_DIR=/unused AGENT_EDGE_UID=65534 AGENT_EDGE_GID=65534
+INGRESS_SOCKET=/gate-one/ingress.sock
 
-# On colima the Mac home is shared into the VM, so these sit exactly where a careless bind mount
-# would expose them. Removed on exit.
-HOST_CANARY_DIR="$HOME/.restricted-agent-conformance"
+# Synthetic host-only files stay beside receipts, never in an owner home or a Docker bind.
+# The mount validator independently rejects host-home and root-directory binds. Removed on exit.
+HOST_CANARY_DIR="$OUT/host-canary"
 mkdir -p "$HOST_CANARY_DIR/.ssh"
 printf 'synthetic host-home file %s\n' "$CANARY" > "$HOST_CANARY_DIR/canary.txt"
 printf -- '-----BEGIN SYNTHETIC TEST KEY-----\n%s\n-----END SYNTHETIC TEST KEY-----\n' "$CANARY" > "$HOST_CANARY_DIR/.ssh/id_ed25519"
@@ -50,8 +51,8 @@ trap cleanup EXIT
 
 wait_ready() {
   for _ in $(seq 1 90); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$AGENT_INGRESS_BIND/health" || true)
-    [ "$code" = "200" ] && return 0
+    code=$("${DC[@]}" exec -T fake-service python3 - "$INGRESS_SOCKET" --health < "$HERE/conformance/ingress_probe.py" 2>/dev/null || true)
+    if [ "$code" = "200" ]; then echo "agent API healthy over ingress socket (200)"; return 0; fi
     sleep 2
   done
   echo "agent API not ready" >&2; return 1
@@ -65,7 +66,7 @@ phase() {
   "${DC[@]}" exec -T -e CONF_CANARY_REV="$(printf '%s' "$CANARY" | rev)" -e CONF_TOKEN="$TOKEN" -e CONF_HOST_PATHS="$HOST_PATHS" \
       -e CONF_PHASE="$name" -e CONF_HOST_PORT="$CONF_HOST_PORT" \
       agent /opt/hermes/.venv/bin/python - < "$HERE/conformance/in_agent.py" > "$OUT/$name.json"
-  python3 "$HERE/conformance/inspect_check.py" "$AGENT_PROJECT" "$AGENT_INGRESS_BIND" "$AGENT_API_KEY" > "$OUT/$name-inspect.json"
+  python3 "$HERE/conformance/inspect_check.py" "$AGENT_PROJECT" "$INGRESS_SOCKET" "$AGENT_API_KEY" > "$OUT/$name-inspect.json"
   # The stand-in service's log lives in its tmpfs: capture it now, before restart/recreate wipes it.
   "${DC[@]}" exec -T fake-service cat /tmp/requests.jsonl > "$OUT/$name-service-requests.jsonl"
   "${DC[@]}" logs --no-color > "$OUT/$name-compose-logs.txt" 2>&1

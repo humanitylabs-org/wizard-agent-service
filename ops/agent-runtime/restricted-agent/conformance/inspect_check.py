@@ -2,7 +2,7 @@
 """Outside-in checks of what Docker actually applied to the restricted agent's containers.
 
 Usage:
-  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-token] [--claude-token-file <owner secret path>]
+  inspect_check.py <compose-project> <ingress socket inside fake-service> <agent api key> [expected home bind source] [--claude-token] [--claude-token-file <owner secret path>]
   inspect_check.py --selftest     # proves the mount and environment rules reject bad layouts
 
 Without a home bind source the home must be the project's own named volume `<project>_agent-home`.
@@ -12,8 +12,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sidecars"))
 from hostname_policy import valid_public_hostname
@@ -169,13 +167,13 @@ def selftest():
     cases = {
         "good named volume": (good, None, True),
         "good dedicated dir": ([home_bind("/srv/wizard/agents/npa/home"), skills], "/srv/wizard/agents/npa/home", True),
-        "whole host home, no expected source": ([home_bind("/home/owner"), skills], None, False),
-        "whole host home declared as expected": ([home_bind("/home/owner"), skills], "/home/owner", False),
-        "mac home declared as expected": ([home_bind("/Users/owner"), skills], "/Users/owner", False),
+        "whole host home, no expected source": ([home_bind("/home/fixture"), skills], None, False),
+        "whole host home declared as expected": ([home_bind("/home/fixture"), skills], "/home/fixture", False),
+        "mac home declared as expected": ([home_bind("/Users/fixture"), skills], "/Users/fixture", False),
         "root bind": ([home_bind("/"), skills], "/", False),
         "bind differs from expected": ([home_bind("/srv/wizard/agents/other/home"), skills], "/srv/wizard/agents/npa/home", False),
         "foreign volume as home": ([dict(good[0], src="other_agent-home"), skills], None, False),
-        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/owner/.ssh"}], None, False),
+        "extra nested mount": (good + [{"type": "bind", "dest": "/opt/data/.ssh", "rw": False, "src": "/home/fixture/.ssh"}], None, False),
         "docker socket": (good + [{"type": "bind", "dest": "/var/run/docker.sock", "rw": True, "src": "/var/run/docker.sock"}], None, False),
         "skills writable": ([good[0], dict(skills, rw=True)], None, False),
         "home missing": ([skills], None, False),
@@ -218,11 +216,11 @@ def selftest():
     init_cases = {
         "init: same home volume": ([dict(home)], home, True),
         "init: same dedicated dir": ([home_bind("/srv/wizard/agents/npa/home")], home_bind("/srv/wizard/agents/npa/home"), True),
-        "init: host home bind": ([home_bind("/home/owner")], home, False),
+        "init: host home bind": ([home_bind("/home/fixture")], home, False),
         "init: root bind": ([home_bind("/")], home, False),
         "init: foreign volume": ([dict(home, src="other_agent-home")], home, False),
         "init: different dedicated dir": ([home_bind("/srv/wizard/agents/other/home")], home_bind("/srv/wizard/agents/npa/home"), False),
-        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/owner"}], home, False),
+        "init: extra mount": ([dict(home), {"type": "bind", "dest": "/host", "rw": True, "src": "/home/fixture"}], home, False),
         "init: read-only home": ([dict(home, rw=False)], home, False),
         "init: login forbidden": ([dict(home), login], home, False),
     }
@@ -384,18 +382,27 @@ for svc in ("egress", "edge"):
     s = inspect(svc)
     shc = s[0]["HostConfig"] if s else {}
     check(f"I15-{svc}", f"{svc} sidecar: non-root, ALL capabilities dropped, read-only, no-new-privileges, limits",
-          bool(s) and s[0]["Config"].get("User") == "65534:65534" and shc.get("ReadonlyRootfs") is True
+          bool(s) and s[0]["Config"].get("User") == ("65534:65534" if svc == "egress" else os.environ.get("AGENT_EDGE_UID", "65534") + ":" + os.environ.get("AGENT_EDGE_GID", "65534")) and shc.get("ReadonlyRootfs") is True
           and drops_all(shc) and not shc.get("CapAdd") and no_new_privs(shc) and not shc.get("Privileged")
           and shc.get("Memory", 0) > 0 and (shc.get("PidsLimit") or 0) > 0
-          and not [m for m in s[0].get("Mounts", []) if m["Type"] == "bind"],
+          and (svc == "edge" or not s[0].get("Mounts")),
           {"user": s[0]["Config"].get("User") if s else None, "ro": shc.get("ReadonlyRootfs"), "drop": shc.get("CapDrop"),
            "mounts": [m["Destination"] for m in s[0].get("Mounts", [])] if s else None})
     login_bad = sidecar_login_problems(s[0].get("Mounts", []) if s else [], project, expected_secret, session_source)
     if s and any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in s[0]["Config"].get("Env", [])):
         login_bad.append("Claude token must never reach a sidecar")
     check(f"I20-{svc}", f"{svc} never gets the Claude login", not login_bad, login_bad)
+    if svc == "edge":
+        edge_nets = list(s[0]["NetworkSettings"]["Networks"]) if s else []
+        edge_mounts = s[0].get("Mounts", []) if s else []
+        expected_source = os.environ.get("AGENT_GATEWAY_DIR", "")
+        check("I24-edge", "edge has sandbox only, no host-gateway alias, exactly its own socket directory",
+              edge_nets == [f"{project}_sandbox"] and not shc.get("ExtraHosts") and len(edge_mounts) == 1
+              and edge_mounts[0]["Destination"] == "/run/agent-gateway" and edge_mounts[0]["RW"]
+              and ((edge_mounts[0]["Type"] == "volume" and edge_mounts[0].get("Name") == f"{project}_gateway-one")
+                   or (edge_mounts[0]["Type"] == "bind" and edge_mounts[0]["Source"] == expected_source)),
+              {"networks": edge_nets, "mounts": edge_mounts, "extra_hosts": shc.get("ExtraHosts")})
     bindings = shc.get("PortBindings") or {}
-    host_ips = [b.get("HostIp") for v in bindings.values() for b in (v or [])]
     if svc == "egress":
         check("I18-egress", "egress publishes no ports", not bindings, bindings)
         env = dict(e.split("=", 1) for e in s[0]["Config"].get("Env", []) if "=" in e) if s else {}
@@ -405,9 +412,7 @@ for svc in ("egress", "edge"):
         check("I21-egress", "passthrough aliases exactly match allowed hosts", not alias_bad,
               {"aliases": aliases, "problems": alias_bad})
     else:
-        check("I18-edge", "edge publishes only the inbound relay, on host loopback only",
-              set(bindings) == {"8642/tcp"} and bool(host_ips) and all(ip in ("127.0.0.1", "::1") for ip in host_ips),
-              bindings)
+        check("I18-edge", "edge publishes no TCP ports", not bindings, bindings)
 
 seeders = inspect("claude-init", all_states=True)
 seed_bad = []
@@ -453,21 +458,18 @@ for container in project_containers:
         other_bad.extend(sidecar_login_problems(container.get("Mounts", []), project, expected_secret, session_source))
 check("I23", "no other project container receives Claude credential sources", not other_bad, other_bad)
 
-# The service side can still reach the agent's API (through the edge relay) and the key is enforced.
-def get(key):
-    req = urllib.request.Request(f"http://{ingress}/v1/models", headers={"Authorization": f"Bearer {key}"} if key else {})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception as e:
-        return repr(e)
-
-
-with_key, without_key = get(api_key), get(None)
-check("I16", "service reaches agent API with key (200) and is refused without it (401)",
-      with_key == 200 and without_key == 401, {"with_key": with_key, "without_key": without_key})
+# The probe runs in the Service namespace, not on the macOS host across a VM boundary.
+try:
+    service = inspect("fake-service")[0]["Id"]
+    probe = subprocess.run(["docker", "exec", "-i", "-e", f"CONF_API_KEY={api_key}", service,
+                            "python3", "-", ingress],
+                           input=Path(__file__).with_name("ingress_probe.py").read_text(),
+                           capture_output=True, text=True, timeout=30)
+    evidence = json.loads(probe.stdout)
+    ok = probe.returncode == 0
+except Exception as e:
+    ok, evidence = False, repr(e)
+check("I16", "Service socket: health 200, authenticated API 200, wrong/missing keys 401, private inode", ok, evidence)
 
 print(json.dumps({"summary": {"total": len(CHECKS), "passed": sum(c["pass"] for c in CHECKS),
                               "failed": [c["id"] for c in CHECKS if not c["pass"]]}, "checks": CHECKS}, indent=1))

@@ -10,8 +10,8 @@
 #               the inbound relay that lets the service reach the agent's API server.
 #   home-init - one-shot: gives the home to uid 10000 and seeds config on first start. No network.
 #
-# No service bind-mounts a host path; all config arrives by environment, so the same file runs on
-# Linux Docker (VPS) and colima (Thales). See README.md for the environment contract.
+# Only edge mounts its own gateway directory; the agent and egress never see a service socket.
+# Paths must be visible to the Docker daemon in the same Linux kernel as the service. See README.md.
 name: ${AGENT_PROJECT:-restricted-agent}
 
 x-hardening: &hardening
@@ -107,21 +107,25 @@ services:
 
   edge:
     <<: [*hardening, *sidecar-image]
-    user: "65534:65534"
+    # Match the unprivileged Service owner: socket 0600, dedicated directory 0700. No chown/sudo.
+    user: "${AGENT_EDGE_UID:?set AGENT_EDGE_UID}:${AGENT_EDGE_GID:?set AGENT_EDGE_GID}"
     command: ["python3", "-u", "/srv/edge.py"]
     environment:
-      EDGE_UPSTREAM_HOST: ${EDGE_UPSTREAM_HOST:-agent-service-host}
-      EDGE_UPSTREAM_PORT: ${EDGE_UPSTREAM_PORT:-8923}
+      EDGE_UPSTREAM_SOCKET: /run/agent-gateway/gateway.sock
+      EDGE_INGRESS_SOCKET: /run/agent-gateway/ingress.sock
       # sha256 of this agent's gateway token, written by the trusted side. The edge never sees the token.
       EDGE_TOKEN_SHA256: ${EDGE_TOKEN_SHA256:?set EDGE_TOKEN_SHA256}
-    ports:
-      - ${AGENT_INGRESS_BIND:-127.0.0.1:18642}:8642
-    extra_hosts:
-      - agent-service-host:host-gateway
+    volumes:
+      - type: bind
+        source: ${AGENT_GATEWAY_DIR:?set AGENT_GATEWAY_DIR}
+        target: /run/agent-gateway
+        read_only: false
+        bind:
+          create_host_path: false
     mem_limit: 128m
     cpus: 0.5
     pids_limit: 64
-    networks: [sandbox, uplink]
+    networks: [sandbox]
 
 networks:
   sandbox:
@@ -130,14 +134,14 @@ networks:
     # bridge gateway; `internal` alone does not stop that. Sidecars still reach the agent over the
     # bridge (layer 2). Pinned per agent (from 10.251.0.0/16) so the conformance scan is exhaustive.
     internal: true
+    enable_ipv6: false
     driver_opts:
       com.docker.network.bridge.inhibit_ipv4: "true"
     ipam:
       config:
         - subnet: ${AGENT_SANDBOX_SUBNET:-10.251.0.0/28}
   uplink:
-    # Fixed per agent so the Agent Service can bind its agent-only listener to the gateway address
-    # (first host of the subnet) and nothing else. The driver assigns a unique /28 per agent from
+    # Egress only: no Service listener is reachable here. The driver assigns a unique /28 per agent from
     # 10.250.0.0/16, outside Docker's default pools (172.17-31.x, 192.168.x), so it never collides.
     ipam:
       config:

@@ -23,7 +23,7 @@ class ClaudeTokenTest(unittest.TestCase):
         self.agent['privacy'] = 'standard'
         self.folder = self.root / 'daily'
         self.agents = ar.Agents(self.root, None)
-        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, '', 8929)
+        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, '')
         self.calls = []
         self.patch = mock.patch.object(ar, 'docker', side_effect=self.fake)
         self.patch.start()
@@ -85,6 +85,7 @@ class ClaudeTokenTest(unittest.TestCase):
         self.assertLess(stopping, removal)
         self.assertLess(removal, sync)
         self.assertLess(sync, up)
+        self.assertIn('--force-recreate', commands[up])
         selected = next(a for a in commands if a[0] == 'ps')
         self.assertIn('label=com.docker.compose.project=agent-daily', selected)
         self.assertIn('label=com.docker.compose.service=claude-init', selected)
@@ -115,7 +116,7 @@ class ClaudeTokenTest(unittest.TestCase):
     def test_start_removes_orphans_on_grant_revocation(self):
         with mock.patch.object(self.driver, '_prepare'):
             self.driver.start(self.agent)
-        self.assertEqual(self.calls[-1][0][-3:], ['up', '-d', '--remove-orphans'])
+        self.assertEqual(self.calls[-1][0][-4:], ['up', '-d', '--force-recreate', '--remove-orphans'])
 
     def test_reserved_custom_aliases_never_reach_compose(self):
         for host in ('agent', 'edge', 'egress', 'localhost', 'agent-service-host', 'bad-.example.com'):
@@ -220,26 +221,52 @@ class ClaudeTokenTest(unittest.TestCase):
     def test_service_keeps_missing_token_warning_and_clears_after_start(self):
         script = r'''
 import { createAgentRegistry } from './server/agents.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-let missing = true;
-const result = () => ({ok: true, last_error: missing ? 'claude_token_missing' : ''});
+let missing = true, prepared = 0, starts = 0;
+const servers = new Map();
+const result = () => {
+  assert.equal(prepared, ++starts, 'socket reconciliation must precede runtime apply/start');
+  return {ok: true, last_error: missing ? 'claude_token_missing' : ''};
+};
 const registry = createAgentRegistry({
   agentsDir: process.argv[1], isolation: 'restricted',
-  mainProviders: async () => [{id: 'anthropic', models: ['claude-sonnet-4-6']}],
+  mainProviders: async () => [{id: 'anthropic', models: ['claude-sonnet-4-6', 'claude-opus-4-6']}],
+  beforeRestrictedStart: async id => {
+    prepared++;
+    if (servers.has(id)) return;
+    const gateway = join(process.argv[1], id, 'gateway');
+    mkdirSync(gateway, {recursive: true, mode: 0o700});
+    const server = createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(req.url === '/health' ? {status: 'ok'} : {data: [], has_more: false}));
+    });
+    servers.set(id, server);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(join(gateway, 'ingress.sock'), resolve); });
+    chmodSync(join(gateway, 'ingress.sock'), 0o600);
+  },
   runtime: {apply: async () => result(), start: async () => result(), stop: async () => ({ok: true})},
   fetchImpl: async () => new Response('{}', {status: 200})
 });
+try {
 const {agent} = await registry.create({label: 'Token fixture', model: {provider: 'anthropic', model: 'claude-sonnet-4-6'}});
 assert.equal(JSON.parse(readFileSync(join(process.argv[1], agent.id, 'service-state.json'))).last_error, 'claude_token_missing');
 assert.deepEqual(await registry.status(agent, {fresh: true}), {status: 'running', status_detail: 'claude_token_missing'});
+await registry.update(agent.id, {model: {provider: 'anthropic', model: 'claude-opus-4-6'}});
+assert.equal(prepared, 2);
+assert.equal(JSON.parse(readFileSync(join(process.argv[1], agent.id, 'service-state.json'))).last_error, 'claude_token_missing');
 missing = false;
 await registry.setRunning(agent.id, true);
 assert.deepEqual(await registry.status(agent, {fresh: true}), {status: 'running', status_detail: ''});
 assert.equal(JSON.parse(readFileSync(join(process.argv[1], agent.id, 'service-state.json'))).last_error, '');
+assert.equal(prepared, 3);
+} finally {
+  await Promise.all([...servers.values()].map(server => new Promise(resolve => server.close(resolve))));
+}
 '''
-        run = subprocess.run(['node', '--input-type=module', '-e', script, str(self.root / 'service-fixture')],
+        run = subprocess.run(['node', '--input-type=module', '-e', script, str(self.root / 's')],
                              cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=15)
         self.assertEqual(run.returncode, 0, run.stderr)
 

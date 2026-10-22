@@ -33,8 +33,8 @@ import os
 import re
 import secrets
 import shlex
-import subprocess
 import stat
+import subprocess
 import tempfile
 import importlib.util
 import sys
@@ -371,8 +371,8 @@ class RestrictedDriver:
     """Runs the pinned restricted runtime, optionally with its reviewed Claude grant override.
     Kept off Runtipi's shared network; the project holds the agent and its sidecars."""
 
-    def __init__(self, agents: Agents, runtime_dir: Path, image: str, listener_port: int):
-        self.agents, self.image, self.listener_port = agents, image, listener_port
+    def __init__(self, agents: Agents, runtime_dir: Path, image: str):
+        self.agents, self.image = agents, image
         self.runtime_dir = runtime_dir.resolve()
         self.compose_file = self.runtime_dir / "compose.yml"
         verify_vendored(self.runtime_dir)
@@ -393,9 +393,9 @@ class RestrictedDriver:
             "EDGE_TOKEN_SHA256": hashlib.sha256(gateway_key.encode()).hexdigest(),
             "AGENT_UPLINK_SUBNET": str(uplink),
             "AGENT_SANDBOX_SUBNET": str(sandbox),
-            "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
-            "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
-            "EDGE_UPSTREAM_PORT": str(self.listener_port),
+            "AGENT_GATEWAY_DIR": str(self.agents.root / agent["id"] / "gateway"),
+            "AGENT_EDGE_UID": str(os.getuid()),
+            "AGENT_EDGE_GID": str(os.getgid()),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         # Clear ambient helper credentials; only the independently authorized path
@@ -472,6 +472,17 @@ class RestrictedDriver:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
+        # The Service must create the socket before Docker; never let bind-mount auto-create a directory.
+        gateway = self.agents.root / agent["id"] / "gateway"
+        try:
+            st = gateway.lstat()
+            sock = (gateway / "gateway.sock").lstat()
+            safe = (stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+                    and stat.S_ISSOCK(sock.st_mode) and sock.st_uid == os.getuid() and stat.S_IMODE(sock.st_mode) == 0o600)
+        except OSError:
+            safe = False
+        if not safe:
+            raise RuntimeFailure("agent_socket_not_ready", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
@@ -483,7 +494,10 @@ class RestrictedDriver:
     def apply(self, agent: dict) -> dict:
         self._prepare(agent)
         project = self.project(agent["id"])
-        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
+        # Reconcile actual endpoints/mounts, not only Compose's saved config hash. Legacy
+        # projects can retain an endpoint without the `agent` alias after network migration,
+        # leaving a healthy agent unreachable through the new socket relay.
+        self._compose(agent, "up", "-d", "--force-recreate", "--remove-orphans", timeout=1800)
         return {"ok": True, "driver": "restricted", "project": project, **self.claude_status(agent)}
 
     def claude_status(self, agent: dict) -> dict:
@@ -491,9 +505,8 @@ class RestrictedDriver:
         return {"status_detail": detail, "last_error": detail}
 
     def start(self, agent: dict) -> dict:
-        self._prepare(agent)
-        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
-        return {"ok": True, **self.claude_status(agent)}
+        result = self.apply(agent)
+        return {"ok": True, "status_detail": result["status_detail"], "last_error": result["last_error"]}
 
     def stop(self, agent: dict) -> dict:
         # Preserve the original stop boundary (including SQLite's last close)
@@ -513,7 +526,8 @@ def verify_vendored(runtime_dir: Path) -> None:
     listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
     for required in ("./compose.yml", "./compose.claude-token.yml", "./passthrough.py", "./sidecars/egress.py",
                      "./sidecars/upstream_dns.py", "./sidecars/hostname_policy.py", "./sidecars/claude-init.py",
-                     "./sidecars/Dockerfile", "./conformance/in_agent.py", "./conformance/docker_credentials.py"):
+                     "./sidecars/Dockerfile", "./sidecars/edge.py", "./conformance/inspect_check.py",
+                     "./conformance/ingress_probe.py", "./conformance/in_agent.py", "./conformance/docker_credentials.py"):
         if not any(name == required for _, name in listed):
             raise SystemExit(f"restricted runtime: {required[2:]} is not listed in SOURCE.txt")
     for digest, name in listed:
@@ -941,7 +955,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
-    ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
     if args.command == "set-secret":
         if not args.agent or args.secret_name != "claude.token" or sys.stdin.isatty():
@@ -966,8 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
-        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
-                                             args.agent_listener_port)
+        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
