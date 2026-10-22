@@ -11,7 +11,7 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 | Privileges | `cap_drop: ALL`, `no-new-privileges`, not privileged, no devices, private IPC/PID/UTS. |
 | Filesystem | Read-only root. Writable: its home volume (`/opt/data`) and a 1 GB `/tmp` tmpfs. System skills read-only at `/opt/wizard-skills`. No host path, socket or secret mounted. |
 | Network | Only `sandbox` (Docker `internal: true`: no route out, no DNS for outside names). Two sidecars sit on it. |
-| Internet | Via `egress`: HTTPS CONNECT to port 443 of allowlisted hostnames only; no plain HTTP, IP literals, other ports, or names resolving to private/loopback/link-local/CGNAT addresses. |
+| Internet | Via `egress`: HTTPS CONNECT, plus exact-host SNI TLS passthrough on port 443; no plain HTTP, IP literals, other ports, or names resolving to private/loopback/link-local/CGNAT addresses. |
 | Agent Service | Via `edge`: requests with this agent's bearer token (checked against a sha256 the edge holds) to `/wizard/mcp` and `GET /wizard/v1/agent-context` only. Owner/identity headers are dropped, paths are strict (no `..`, `%`, `//`), one request per connection. Everything else is answered 401/403/400 at the edge. |
 | Inbound | The service reaches the agent API through the edge relay published on host loopback (`AGENT_INGRESS_BIND`), with the agent's `API_SERVER_KEY`. |
 | Limits | 4 GB memory (no swap), 2 CPUs, 512 pids, 8192 open files. Sidecars 128 MB / 0.5 CPU / 64 pids each. |
@@ -35,41 +35,48 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 docker compose -f compose.yml -p agent-<id> up -d --build
 ```
 
-## Optional box Claude login grant
+## Per-agent Claude token grant
 
-The trusted driver may add `-f compose.claude-login.yml` **only** when the agent record has
-`privacy: standard` and `model.provider: anthropic`. Missing/unknown privacy does not grant access.
-Private agents and other providers use the base compose file only. Never infer authorization from an
-agent-controlled environment variable, label, or a volume already present on the host.
+The trusted driver loads `compose.claude-token.yml` only for owner-managed records with
+`privacy: standard`, `model.provider: anthropic`, and an agent-scoped `claude.token` secret.
+It passes that secret only as `CLAUDE_CODE_OAUTH_TOKEN` in `agent`. This is the long-lived
+`claude setup-token` token supported by the unmodified DirectSDK plugin, not shared refresh state.
+No shared login directory is mounted, no refresh file is written, and uid 10000 stays unchanged.
+Private/unknown privacy and other providers receive no token, including from the helper's ambient env.
+The shared-volume override has been removed: uid-1000 0700/0600 writers are incompatible with uid 10000.
+Missing tokens do not prevent startup: the helper reports `claude_token_missing` without restart loops.
 
-This override mounts the external `wizard-ai-accounts-claude` volume **only in `agent`**, at `/claude`,
-and sets `CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/claude`. Neither `home-init`, `edge`, nor `egress`
-gets the login. The base runtime remains credential-free. The grant intentionally gives this agent
-access to the box Claude account and all data in that login directory; it is not a per-agent token.
+`inspect_check.py --claude-token` is an independent owner grant, never inferred from container env.
+I14 rejects absent/empty/ungranted token env; helpers/sidecars must never receive it. Receipts scrub
+Claude env values in `redact.py`; `in_agent.py` removes the token before importing tools/snapshotting env.
+Do not print `docker compose config`, raw inspect, or helper env in production. Docker administrators
+can still inspect container env; the agent intentionally has its own model credential.
 
-**Read-write, not read-only:** Claude Code refreshes single-use OAuth tokens and atomically replaces
-its credential file. A read-only mount can consume a refresh token without persisting its successor.
-The directory and credential files must therefore be privately owned by uid 10000, and **every writer
-of this shared login, including the Claude app, must run as the same uid**. A one-time chmod/group/ACL
-workaround is not sufficient: a writer replacing a file with mode 0600 can lock the other uid out.
-Do not relax modes, add capabilities, run the restricted agent as root/uid 1000, copy credentials into
-its home, or chown the live shared volume automatically. The Service driver checks compatibility
-before stopping an existing agent, returns `claude_login_permissions` on failure, and does not migrate
-the provider's ownership. Provisioning/migrating all login writers needs a separate approved rollout.
-A missing external volume returns `claude_login_missing`; it is never created by the preflight.
+## Direct TLS passthrough
 
-The override adds only `platform.claude.com` to default egress for token refresh. Evidence: the shipped
-Claude Code binary uses `https://platform.claude.com/v1/oauth/token`; the official
-[network requirements](https://code.claude.com/docs/en/network-config) list this host for refresh.
-`api.anthropic.com` was already allowed for inference. No need to allow `claude.ai` (interactive login),
-`console.anthropic.com` (not used by this installed CLI), Statsig, telemetry, or download hosts. The
-DirectSDK plugin disables nonessential traffic. A trusted `EGRESS_ALLOWLIST_HOSTS` override still
-replaces the default and must include the refresh host if this grant is used.
+The unchanged DirectSDK admission relay uses `http.client.HTTPSConnection`, ignoring HTTPS_PROXY.
+Egress now also listens on sandbox port 443; Docker aliases for **exactly** `api.anthropic.com` and
+`platform.claude.com` route those names to its sandbox IP. It reassembles a bounded ClientHello,
+requires a valid SNI in both `EGRESS_PASSTHROUGH_HOSTS` and the independently declared aliases and
+allowlist, and verifies that Docker DNS maps it to the receiving interface. Missing SNI, ECH,
+IP literals, malformed/oversized hellos, and mismatched names are refused before upstream connect.
+It resolves the real upstream with explicit public IPv4 DNS resolvers (`EGRESS_UPSTREAM_DNS`, default
+`1.1.1.1 8.8.8.8`) over its uplink, **never Docker alias DNS**, vets all returned addresses as public,
+then splices TCP. TLS/certificates remain end-to-end; there is no plaintext proxy or MITM on 443.
+The CONNECT listener remains on 3128. Both share a 64-connection cap, 300s idle/drain timeout and
+64 KiB ClientHello cap (10s total handshake deadline). No port is published; binding 443 as uid 65534 uses a namespaced unprivileged
+port sysctl, not an added capability. No Statsig, telemetry, interactive login or download hosts added.
 
-For outside-in checks, pass `--claude-login` to `inspect_check.py` only after independently verifying
-the owner grant. I6 rejects the login by default, or a wrong source/type/mode/duplicate even when
-granted. I14 requires the matching config environment; I19 and I20 deny login mounts in helpers and
-sidecars. Never derive the expected grant from the inspected container itself.
+For custom `EGRESS_PASSTHROUGH_HOSTS`, render `python3 passthrough.py > aliases.yml` and pass
+`-f aliases.yml` **after** `-f compose.yml`. Compose 2.24.4+ `!override` replaces aliases rather than
+merging them. The Service does this automatically. Each custom host must also be in
+`EGRESS_ALLOWLIST_HOSTS`; alias/allowlist mismatch fails closed. The renderer contains no credentials.
+
+Focused checks: `conformance/test_claude_login.py` (Compose rendering), `test_passthrough.py`
+(parser/fuzz/DNS/bounds/redaction), `egress_selftest.py`, and `inspect_check.py --selftest`.
+`conformance/docker_passthrough.py` uses labelled, disposable --rm containers/networks with an internal
+sandbox, real getent/DNS comparison, certificate-validating credential-free HTTPS GET (any status),
+and a distinctive TLS access-denied alert for example.com SNI aimed at egress:443. Cleanup is in finally.
 
 ## Conformance (acceptance test 6)
 

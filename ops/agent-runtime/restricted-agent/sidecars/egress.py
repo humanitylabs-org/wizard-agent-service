@@ -13,6 +13,8 @@ import ipaddress
 import json
 import os
 import socket
+import re
+import struct
 import sys
 import time
 
@@ -20,6 +22,7 @@ ALLOWLIST_FILE = os.environ.get("EGRESS_ALLOWLIST", "/etc/egress/allowlist.txt")
 LISTEN_PORT = int(os.environ.get("EGRESS_PORT", "3128"))
 MAX_HEAD = 8192
 IDLE_TIMEOUT = 300
+HELLO_TIMEOUT = 10
 
 
 def load_allowlist(path):
@@ -74,10 +77,24 @@ def is_ip_literal(host):
         return False
 
 
+PASSTHROUGH_HOSTS = set(os.environ.get(
+    "EGRESS_PASSTHROUGH_HOSTS", "api.anthropic.com platform.claude.com").replace(",", " ").split())
+PASSTHROUGH_ALIASES = set(os.environ.get(
+    "EGRESS_PASSTHROUGH_ALIASES", "api.anthropic.com platform.claude.com").replace(",", " ").split())
+MAX_CONNECTIONS = int(os.environ.get("EGRESS_MAX_CONNECTIONS", "64"))
+ACTIVE_CONNECTIONS = 0
+
+
 def public_addresses(host):
-    """Resolve host; return its addresses only if every one is globally routable."""
-    infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    addrs = sorted({info[4][0] for info in infos})
+    """Resolve host; return its addresses only if every one is globally routable.
+    Alias hosts MUST bypass Docker DNS, including for CONNECT requests.
+    """
+    if host in PASSTHROUGH_HOSTS:
+        from upstream_dns import resolve
+        addrs = resolve(host)
+    else:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        addrs = sorted({info[4][0] for info in infos})
     for addr in addrs:
         ip = ipaddress.ip_address(addr)
         if not ip.is_global or ip.is_multicast:
@@ -92,7 +109,7 @@ async def pipe(reader, writer):
             if not data:
                 break
             writer.write(data)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), IDLE_TIMEOUT)
     except (asyncio.TimeoutError, ConnectionError, OSError):
         pass
     finally:
@@ -117,39 +134,65 @@ MAX_HELLO = 64 * 1024
 DENY_ALERT = bytes([0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31])
 
 
+def valid_hostname(host):
+    return (0 < len(host) <= 253 and not is_ip_literal(host)
+            and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in host.split(".")))
+
+
 def client_hello_sni(handshake):
-    """SNI host name from a complete ClientHello handshake message (4-byte header included); '' when it
-    carries none. Raises ValueError when the message is malformed."""
-    try:
-        if handshake[0] != 0x01:
-            raise ValueError("not a ClientHello")
-        body = handshake[4:4 + int.from_bytes(handshake[1:4], "big")]
-        i = 2 + 32                      # client version, random
-        i += 1 + body[i]                # session id
-        i += 2 + int.from_bytes(body[i:i + 2], "big")   # cipher suites
-        i += 1 + body[i]                # compression methods
-        if i > len(body):
-            raise ValueError("truncated ClientHello")
-        if i + 2 > len(body):
-            return ""
-        ext_end = i + 2 + int.from_bytes(body[i:i + 2], "big")
-        if ext_end > len(body):
-            raise ValueError("truncated extensions")
-        i += 2
-        while i + 4 <= ext_end:
-            ext_type, ext_len = int.from_bytes(body[i:i + 2], "big"), int.from_bytes(body[i + 2:i + 4], "big")
-            ext = body[i + 4:i + 4 + ext_len]
-            if len(ext) != ext_len:
-                raise ValueError("truncated extension")
-            if ext_type == 0:           # server_name: list length, then (type 0 = host_name, length, name)
-                if len(ext) < 5 or ext[2] != 0:
-                    raise ValueError("bad server_name")
-                name = ext[5:5 + int.from_bytes(ext[3:5], "big")]
-                return name.decode("ascii", "strict").lower().rstrip(".")
-            i += 4 + ext_len
+    """Strict, bounded ClientHello parser. ECH is refused (the inner SNI is unknowable)."""
+    if len(handshake) < 4 or len(handshake) > MAX_HELLO or handshake[0] != 1:
+        raise ValueError("not a bounded ClientHello")
+    size = int.from_bytes(handshake[1:4], "big")
+    if size > len(handshake) - 4:
+        raise ValueError("truncated ClientHello")
+    body, i = handshake[4:4 + size], 0
+
+    def take(n):
+        nonlocal i
+        if i + n > len(body):
+            raise ValueError("truncated ClientHello field")
+        result = body[i:i + n]
+        i += n
+        return result
+
+    def vector(width):
+        return take(int.from_bytes(take(width), "big"))
+
+    take(34)
+    if len(vector(1)) > 32:
+        raise ValueError("bad session id")
+    suites = vector(2)
+    if not suites or len(suites) % 2 or not vector(1):
+        raise ValueError("bad ciphers or compression")
+    if i == len(body):
         return ""
-    except IndexError as exc:
-        raise ValueError("truncated ClientHello") from exc
+    extensions = vector(2)
+    if i != len(body):
+        raise ValueError("trailing ClientHello bytes")
+    j, seen, sni = 0, set(), ""
+    while j < len(extensions):
+        if j + 4 > len(extensions):
+            raise ValueError("truncated extension header")
+        kind, length = struct.unpack("!HH", extensions[j:j + 4])
+        j += 4
+        ext = extensions[j:j + length]
+        j += length
+        if len(ext) != length or kind in seen or kind == 0xfe0d:
+            raise ValueError("truncated, duplicate or ECH extension")
+        seen.add(kind)
+        if kind == 0:
+            if (len(ext) < 6 or int.from_bytes(ext[:2], "big") != len(ext) - 2
+                    or ext[2] != 0 or int.from_bytes(ext[3:5], "big") != len(ext) - 5):
+                raise ValueError("bad server_name")
+            try:
+                sni = ext[5:].decode("ascii").lower()
+            except UnicodeDecodeError:
+                raise ValueError("non-ASCII SNI") from None
+            if not valid_hostname(sni):
+                raise ValueError("invalid SNI hostname")
+    return sni
 
 
 async def read_client_hello(reader):
@@ -208,7 +251,7 @@ async def handle(reader, writer):
     # This stops raw non-TLS tunnels and asking a shared IP/CDN for a different (unlisted) site. The
     # upstream connection is only opened after this check, so a refused tunnel never reaches it.
     try:
-        hello, handshake = await read_client_hello(reader)
+        hello, handshake = await asyncio.wait_for(read_client_hello(reader), HELLO_TIMEOUT)
         sni = client_hello_sni(handshake) if handshake is not None else None
     except (ValueError, UnicodeDecodeError, asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError):
         sni, hello, handshake = None, b"", None
@@ -234,11 +277,79 @@ async def handle(reader, writer):
     await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
 
 
+def validate_passthrough():
+    if (not PASSTHROUGH_HOSTS or PASSTHROUGH_HOSTS != PASSTHROUGH_ALIASES or MAX_CONNECTIONS < 1
+            or any(not valid_hostname(h) or h not in EXACT for h in PASSTHROUGH_HOSTS)):
+        raise ValueError("passthrough hosts must equal aliases and be allowlisted exact DNS names")
+
+
+def passthrough_allowed(sni):
+    return bool(sni and valid_hostname(sni) and sni in PASSTHROUGH_HOSTS
+                and sni in PASSTHROUGH_ALIASES and sni in EXACT)
+
+
+async def handle_passthrough(reader, writer):
+    """Port 443: inspect only ClientHello, then splice encrypted bytes unchanged."""
+    up_writer = None
+    try:
+        hello, handshake = await asyncio.wait_for(read_client_hello(reader), HELLO_TIMEOUT)
+        sni = client_hello_sni(handshake) if handshake else ""
+        if not passthrough_allowed(sni):
+            raise ValueError("SNI not a passthrough alias")
+        # Defense against a missing/wrong Docker alias; this name must resolve to the
+        # local interface receiving the connection. Real upstream lookup is separate.
+        local_ip = writer.get_extra_info("sockname")[0]
+        aliases = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(sni, 443, type=socket.SOCK_STREAM), 10)
+        if {a[4][0] for a in aliases} != {local_ip}:
+            raise ValueError("SNI does not resolve to receiving alias")
+        addrs = await asyncio.wait_for(asyncio.to_thread(public_addresses, sni), 10)
+        up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(str(addrs[0]), 443), 15)
+        up_writer.write(hello)
+        await asyncio.wait_for(up_writer.drain(), IDLE_TIMEOUT)
+        log(decision="allow", mode="passthrough", host=sni)
+        await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+    except (ValueError, OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+        # No HTTP/plaintext on this port, and never log raw TLS/application bytes.
+        log(decision="deny", mode="passthrough", reason="TLS alias gate refused or upstream unavailable")
+        try:
+            writer.write(DENY_ALERT)
+            await asyncio.wait_for(writer.drain(), 2)
+        except (OSError, asyncio.TimeoutError):
+            pass
+    finally:
+        writer.close()
+        if up_writer:
+            up_writer.close()
+
+
+async def bounded(handler, reader, writer):
+    global ACTIVE_CONNECTIONS
+    if ACTIVE_CONNECTIONS >= MAX_CONNECTIONS:
+        writer.close()
+        return
+    ACTIVE_CONNECTIONS += 1
+    try:
+        await handler(reader, writer)
+    finally:
+        ACTIVE_CONNECTIONS -= 1
+        writer.close()
+
+
 async def main():
-    server = await asyncio.start_server(handle, "0.0.0.0", LISTEN_PORT, limit=MAX_HEAD * 2)
-    log(event="listening", port=LISTEN_PORT, exact=sorted(EXACT), suffixes=sorted(SUFFIXES))
-    async with server:
-        await server.serve_forever()
+    validate_passthrough()
+    # Docker's unprivileged-port-start=0 allows uid 65534 to bind 443 without caps.
+    proxy = await asyncio.start_server(lambda r, w: bounded(handle, r, w), "0.0.0.0", LISTEN_PORT, limit=MAX_HEAD * 2)
+    # Bind only the sandbox alias IP, never the uplink listener address.
+    addresses = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
+        sorted(PASSTHROUGH_HOSTS)[0], 443, family=socket.AF_INET, type=socket.SOCK_STREAM), 10)
+    bind_ips = {a[4][0] for a in addresses}
+    if len(bind_ips) != 1 or ipaddress.ip_address(next(iter(bind_ips))).is_global:
+        raise ValueError("passthrough alias must identify one sandbox IPv4 address")
+    tls = await asyncio.start_server(lambda r, w: bounded(handle_passthrough, r, w),
+                                     str(next(iter(bind_ips))), 443, limit=MAX_HELLO)
+    log(event="listening", ports=[LISTEN_PORT, 443], passthrough=sorted(PASSTHROUGH_HOSTS))
+    async with proxy, tls:
+        await asyncio.gather(proxy.serve_forever(), tls.serve_forever())
 
 
 if __name__ == "__main__":

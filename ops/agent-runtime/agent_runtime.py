@@ -34,6 +34,9 @@ import re
 import secrets
 import shlex
 import subprocess
+import stat
+import tempfile
+import importlib.util
 import sys
 import threading
 import time
@@ -89,7 +92,7 @@ def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900
     run = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout,
                          env={**os.environ, **env} if env else None)
     if check and run.returncode:
-        sys.stderr.write(f"[agent-runtime] docker {' '.join(args[:3])} failed: {run.stderr[-400:]}\n")
+        sys.stderr.write(f"[agent-runtime] docker {' '.join(args[:3])} failed\n")
         raise RuntimeFailure("docker_failed")
     return run
 
@@ -170,10 +173,44 @@ class Agents:
         tmp.replace(env_path)
 
 
+    def set_secret(self, agent_id: str, name: str, value: str) -> None:
+        """Owner CLI only; never exposed through HTTP or copied into the agent home."""
+        if name != "claude.token" or not value or len(value) > 16384 or any(not 33 <= ord(c) <= 126 for c in value):
+            raise RuntimeFailure("invalid_secret", 400)
+        if not ID_RE.fullmatch(agent_id) or agent_id == "hermes":
+            raise RuntimeFailure("agent_not_found", 404)
+        folder = self.root / agent_id
+        if folder.is_symlink() or folder.resolve().parent != self.root:
+            raise RuntimeFailure("agent_invalid", 400)
+        self.read(agent_id)
+        fd, tmp = tempfile.mkstemp(prefix=".claude.token-", dir=folder)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(value + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, folder / name)  # replace a symlink; never follow it
+            directory = os.open(folder, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
     def secret(self, agent_id: str, name: str) -> str:
         try:
+            if name == "claude.token":
+                fd = os.open(self.root / agent_id / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd) as stream:
+                    st = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.geteuid():
+                        return ""
+                    value = stream.read(16385).strip()
+                    return value if len(value) <= 16384 and not any(not 33 <= ord(c) <= 126 for c in value) else ""
             return (self.root / agent_id / name).read_text().strip()
-        except OSError:
+        except (OSError, UnicodeError):
             return ""
 
 
@@ -203,25 +240,6 @@ def service_names(agent: dict) -> tuple[str, str]:
 
 
 CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
-# Metadata only: no reads, writes, token refreshes, permissions changes, or credential output.
-CLAUDE_LOGIN_CHECK = """import os, stat, sys
-
-def private(path, directory=False):
-    st = os.lstat(path)
-    kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
-    access = os.R_OK | os.W_OK | (os.X_OK if directory else 0)
-    return kind and st.st_uid == os.geteuid() and not (st.st_mode & 0o077) and os.access(path, access)
-
-try:
-    ok = private('/claude', directory=True) and private('/claude/.credentials.json')
-    if os.path.lexists('/claude/.claude.json'):
-        ok = ok and private('/claude/.claude.json')
-except OSError:
-    ok = False
-sys.exit(0 if ok else 1)
-"""
-
-
 def uses_claude_login(agent: dict) -> bool:
     return agent.get("privacy") == "standard" and (agent.get("model") or {}).get("provider") == "anthropic"
 
@@ -380,42 +398,31 @@ class RestrictedDriver:
             "EDGE_UPSTREAM_PORT": str(self.listener_port),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = (self.agents.secret(agent["id"], "claude.token")
+                                           if uses_claude_login(agent) else "")
         if self.image:
             env["AGENT_IMAGE"] = self.image
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
+        env = self.env(agent)
         files = ["-f", str(self.compose_file)]
-        if uses_claude_login(agent):
-            # Authorization comes from the owner-managed record, never an agent env/label.
-            files += ["-f", str(self.runtime_dir / "compose.claude-login.yml")]
+        if env["CLAUDE_CODE_OAUTH_TOKEN"]:
+            # Independent owner record + per-agent secret, never ambient credentials.
+            files += ["-f", str(self.runtime_dir / "compose.claude-token.yml")]
+        hosts = os.environ.get("EGRESS_PASSTHROUGH_HOSTS")
+        if hosts:
+            spec = importlib.util.spec_from_file_location("runtime_passthrough", self.runtime_dir / "passthrough.py")
+            if spec is None or spec.loader is None:
+                raise RuntimeFailure("passthrough_renderer_missing", 500)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            path = self.agents.root / agent["id"] / "runtime" / "passthrough.yml"
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.write_text(module.compose_override(hosts))  # aliases only; never a secret
+            files += ["-f", str(path)]
         return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
-                      timeout=timeout, env=self.env(agent))
-
-    def check_claude_login(self, agent: dict) -> None:
-        """Metadata-only, no-network check as the exact restricted uid. Never repair a live login.
-        Every writer must use uid 10000: chmod/ACL alone breaks on atomic 0600 replacement.
-        The trusted operator must separately verify the Claude app uses this uid before rollout.
-        """
-        if not uses_claude_login(agent):
-            return
-        if docker(["volume", "inspect", CLAUDE_LOGIN_VOLUME, "--format", "{{.Name}}"],
-                  timeout=60, check=False).returncode:
-            raise RuntimeFailure("claude_login_missing", 409)
-        name = f"{self.project(agent['id'])}-login-check-{secrets.token_hex(4)}"
-        try:
-            result = docker(["run", "--rm", "--name", name, "--network", "none", "--read-only",
-                             "--user", f"{AGENT_UID}:{AGENT_UID}", "--cap-drop", "ALL",
-                             "--security-opt", "no-new-privileges:true",
-                             "--mount", f"type=volume,src={CLAUDE_LOGIN_VOLUME},dst=/claude",
-                             "--entrypoint", "python3", SIDECAR_IMAGE, "-c", CLAUDE_LOGIN_CHECK],
-                            timeout=60, check=False)
-        except subprocess.TimeoutExpired:
-            docker(["rm", "-f", name], timeout=60, check=False)
-            raise RuntimeFailure("claude_login_check_timeout", 504) from None
-        if result.returncode:
-            # Do not log probe stdout/stderr or inspect any credential contents.
-            raise RuntimeFailure("claude_login_permissions", 409)
+                      timeout=timeout, env=env)
 
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
@@ -452,7 +459,6 @@ class RestrictedDriver:
             raise RuntimeFailure("restricted_provider_unsupported", 409)
         self.agents.add_provider_keys(agent)
         self._compose(agent, "build", timeout=1800)
-        self.check_claude_login(agent)   # refuse before stopping an existing agent or syncing its home
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -462,12 +468,16 @@ class RestrictedDriver:
         self._prepare(agent)
         project = self.project(agent["id"])
         self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
-        return {"ok": True, "driver": "restricted", "project": project}
+        return {"ok": True, "driver": "restricted", "project": project, **self.claude_status(agent)}
+
+    def claude_status(self, agent: dict) -> dict:
+        detail = "claude_token_missing" if uses_claude_login(agent) and not self.agents.secret(agent["id"], "claude.token") else ""
+        return {"status_detail": detail, "last_error": detail}
 
     def start(self, agent: dict) -> dict:
         self._prepare(agent)
         self._compose(agent, "up", "-d", timeout=1800)
-        return {"ok": True}
+        return {"ok": True, **self.claude_status(agent)}
 
     def stop(self, agent: dict) -> dict:
         self._compose(agent, "stop", timeout=300)
@@ -481,7 +491,7 @@ def verify_vendored(runtime_dir: Path) -> None:
     except OSError:
         raise SystemExit("restricted runtime: SOURCE.txt missing") from None
     listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
-    for required in ("./compose.yml", "./compose.claude-login.yml"):
+    for required in ("./compose.yml", "./compose.claude-token.yml", "./passthrough.py", "./sidecars/egress.py", "./sidecars/upstream_dns.py"):
         if not any(name == required for _, name in listed):
             raise SystemExit(f"restricted runtime: {required[2:]} is not listed in SOURCE.txt")
     for digest, name in listed:
@@ -886,7 +896,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})
             except Exception as error:  # noqa: BLE001
-                sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}: {str(error)[:300]}\n")
+                sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}\n")
                 self._json(502, {"error": "runtime_failed"})
 
     return Handler
@@ -895,7 +905,10 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--agents-dir", required=True, type=Path)
-    ap.add_argument("--token-file", required=True, type=Path)
+    ap.add_argument("--token-file", type=Path)
+    ap.add_argument("command", nargs="?", choices=["set-secret"])
+    ap.add_argument("agent", nargs="?")
+    ap.add_argument("secret_name", nargs="?")
     ap.add_argument("--port", type=int, default=7795)
     ap.add_argument("--driver", choices=["runtipi", "compose"], default="runtipi")
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
@@ -908,6 +921,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
     ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
+    if args.command == "set-secret":
+        if not args.agent or args.secret_name != "claude.token" or sys.stdin.isatty():
+            ap.error("set-secret requires <agent> claude.token and piped stdin")
+        try:
+            value = sys.stdin.read(16386).rstrip("\r\n")
+            Agents(args.agents_dir, None).set_secret(args.agent, args.secret_name, value)
+        except RuntimeFailure as error:
+            raise SystemExit(error.code) from None
+        return 0
+    if not args.token_file:
+        ap.error("--token-file is required for the HTTP helper")
     token = args.token_file.read_text().strip()
     if len(token) < 24:
         raise SystemExit("token file must hold a random token of at least 24 characters")

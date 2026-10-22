@@ -1,0 +1,5 @@
+# Owner-authorized standard/anthropic grant. No shared login volume or refresh writes.
+services:
+  agent:
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set the agent-scoped token}

@@ -17,6 +17,7 @@ import os
 import sys
 import time
 
+CLAUDE_TOKEN = os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", "")  # never snapshot it through terminal
 os.environ["HERMES_YOLO_MODE"] = "1"
 sys.path.insert(0, "/opt/hermes")
 
@@ -45,7 +46,8 @@ def call(tool, args):
 
 
 def text(result):
-    return json.dumps(result, sort_keys=True)
+    value = json.dumps(result, sort_keys=True)
+    return value.replace(CLAUDE_TOKEN, "<redacted>") if CLAUDE_TOKEN else value
 
 
 def sh(command, timeout=30):
@@ -162,6 +164,15 @@ def check(cid, resource, expect, tool_desc, fn, judge):
 
 reached = lambda r: REACHED in out(r)  # noqa: E731
 ok_write = lambda r: bool(r) and not r.get("error") and "denied" not in text(r).lower()  # noqa: E731
+
+# --- passthrough transport (credential-free; real end-to-end certificate validation) -----------------
+check("E11", "egress", "allowed", "terminal: provider DNS alias equals egress sandbox address",
+      lambda: sh("python3 -c \"import socket; assert socket.gethostbyname('api.anthropic.com') == socket.gethostbyname('egress'); print('PROBE_REACHED')\""), reached)
+check("E12", "egress", "allowed", "terminal: direct HTTPSConnection to api.anthropic.com, verified TLS",
+      lambda: sh("python3 -c \"import http.client; c=http.client.HTTPSConnection('api.anthropic.com',443,timeout=20); c.request('GET','/'); print(c.getresponse().status); print('PROBE_REACHED')\"", 30), reached)
+check("E13", "egress", "denied", "terminal: example.com SNI aimed at egress port 443",
+      lambda: sh("python3 -c \"import socket,ssl; s=socket.create_connection(('egress',443),timeout=5); ssl.create_default_context().wrap_socket(s,server_hostname='example.com'); print('PROBE_REACHED')\""),
+      lambda r: True if REACHED in out(r) else False if "TLSV1_ALERT_ACCESS_DENIED" in out(r) else None)
 
 # --- privilege -----------------------------------------------------------------------------------
 check("P1", "privilege", "denied", "terminal: id -u is not 0",

@@ -2,7 +2,7 @@
 """Outside-in checks of what Docker actually applied to the restricted agent's containers.
 
 Usage:
-  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-login]
+  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-token]
   inspect_check.py --selftest     # proves the mount and environment rules reject bad layouts
 
 Without a home bind source the home must be the project's own named volume `<project>_agent-home`.
@@ -37,7 +37,9 @@ def mount_problems(mounts, project, home_source=None, claude_login=False):
     for dest, ms in by_dest.items():
         if len(ms) > 1:
             problems.append(f"{dest} mounted {len(ms)} times")
-    allowed = {"/opt/data", "/opt/wizard-skills"} | ({"/claude"} if claude_login else set())
+    allowed = {"/opt/data", "/opt/wizard-skills"}
+    if claude_login:
+        problems.append("legacy shared-login grant removed; use an agent token")
     extra = sorted(set(by_dest) - allowed)
     if extra:
         problems.append(f"unexpected mounts: {extra}")
@@ -82,13 +84,27 @@ def init_problems(init_mounts, agent_home):
     return [] if same else [f"home-init mount {m} differs from agent home {agent_home}"]
 
 
-def env_problems(env_names, image_env_names, claude_login=False):
-    allowed = COMPOSE_ENV | ({CLAUDE_CONFIG_ENV} if claude_login else set())
+CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def env_problems(env_names, image_env_names, claude_login=False, claude_token=False):
+    allowed = COMPOSE_ENV | ({CLAUDE_CONFIG_ENV} if claude_login else set()) | ({CLAUDE_TOKEN_ENV} if claude_token else set())
     extra = sorted(set(env_names) - set(image_env_names) - allowed)
     problems = [f"environment not granted by image or compose: {extra}"] if extra else []
-    if (CLAUDE_CONFIG_ENV in env_names) != claude_login:
-        problems.append("Claude config environment must match the explicit login grant")
+    if claude_login or CLAUDE_CONFIG_ENV in env_names:
+        problems.append("legacy shared-login grant removed; use an agent token")
+    if (CLAUDE_TOKEN_ENV in env_names) != claude_token:
+        problems.append("Claude token environment must match the explicit token grant")
     return problems
+
+
+def passthrough_problems(env, aliases):
+    hosts = set(env.get("EGRESS_PASSTHROUGH_HOSTS", "").replace(",", " ").split())
+    declared = set(env.get("EGRESS_PASSTHROUGH_ALIASES", "").replace(",", " ").split())
+    allowed = set(env.get("EGRESS_ALLOWLIST_HOSTS", "").replace(",", " ").split())
+    # Docker supplies service/container aliases too; only dotted DNS aliases are provider aliases.
+    actual = {a for a in aliases if "." in a}
+    return [] if hosts and hosts == declared == actual and hosts <= allowed else ["passthrough hosts/aliases/allowlist mismatch"]
 
 
 def sidecar_login_problems(mounts):
@@ -125,7 +141,7 @@ def selftest():
         results.append({"case": name, "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
     login = {"type": "volume", "dest": "/claude", "rw": True, "src": CLAUDE_LOGIN_VOLUME}
     grant_cases = {
-        "login: explicit grant": (good + [login], True, True),
+        "login: legacy grant refused": (good + [login], True, False),
         "login: ungranted": (good + [login], False, False),
         "login: missing when granted": (good, True, False),
         "login: wrong volume": (good + [dict(login, src="other-login")], True, False),
@@ -161,11 +177,24 @@ def selftest():
     for names, image, expect_ok in env_cases:
         ok = not env_problems(names, image)
         results.append({"case": f"env {names}", "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
-    for granted, present, image_present, expect_ok in ((True, True, False, True), (False, True, False, False),
+    for granted, present, image_present, expect_ok in ((True, True, False, False), (False, True, False, False),
                                                       (True, False, False, False), (False, True, True, False)):
         ok = not env_problems([CLAUDE_CONFIG_ENV] if present else [],
                               [CLAUDE_CONFIG_ENV] if image_present else [], granted)
         results.append({"case": f"login env {granted}/{present}/{image_present}", "pass": ok == expect_ok})
+    for granted, present, image_present, expect_ok in ((True, True, False, True), (False, True, False, False),
+                                                      (True, False, False, False), (False, True, True, False)):
+        ok = not env_problems([CLAUDE_TOKEN_ENV] if present else [],
+                              [CLAUDE_TOKEN_ENV] if image_present else [], claude_token=granted)
+        results.append({"case": f"token env {granted}/{present}/{image_present}", "pass": ok == expect_ok})
+    env = {"EGRESS_PASSTHROUGH_HOSTS": "api.anthropic.com platform.claude.com",
+           "EGRESS_PASSTHROUGH_ALIASES": "api.anthropic.com platform.claude.com",
+           "EGRESS_ALLOWLIST_HOSTS": "api.anthropic.com platform.claude.com"}
+    for aliases, expected in ((["egress", "api.anthropic.com", "platform.claude.com"], True),
+                              (["api.anthropic.com"], False),
+                              (["api.anthropic.com", "platform.claude.com", "example.com"], False)):
+        results.append({"case": f"passthrough aliases {aliases}",
+                        "pass": (not passthrough_problems(env, aliases)) == expected})
     print(json.dumps({"summary": {"total": len(results), "passed": sum(r["pass"] for r in results),
                                   "failed": [r["case"] for r in results if not r["pass"]]}, "checks": results}, indent=1))
     sys.exit(0 if all(r["pass"] for r in results) else 1)
@@ -178,6 +207,9 @@ args = sys.argv[1:]
 claude_login = "--claude-login" in args
 if claude_login:
     args.remove("--claude-login")
+claude_token = "--claude-token" in args
+if claude_token:
+    args.remove("--claude-token")
 project, ingress, api_key = args[:3]
 home_source = args[3] if len(args) > 3 else None
 CHECKS = []
@@ -240,9 +272,11 @@ image_env = []
 if cfg.get("Image"):
     image_env = [e.split("=", 1)[0] for e in json.loads(subprocess.check_output(
         ["docker", "image", "inspect", cfg["Image"]], text=True))[0]["Config"].get("Env") or []]
-env_bad = env_problems(env_names, image_env, claude_login)
+env_bad = env_problems(env_names, image_env, claude_login, claude_token)
 if claude_login and f"{CLAUDE_CONFIG_ENV}=/claude" not in (cfg.get("Env") or []):
     env_bad.append("Claude config directory must be /claude")
+if claude_token and not any(e.startswith(CLAUDE_TOKEN_ENV + "=") and e.split("=", 1)[1] for e in cfg.get("Env", [])):
+    env_bad.append("Claude token grant must not be empty")
 check("I14", "environment is exactly image defaults plus the compose grants", not env_bad and bool(image_env),
       {"env": env_names, "problems": env_bad})
 tmpfs = hc.get("Tmpfs") or {}
@@ -261,11 +295,19 @@ for svc in ("egress", "edge"):
           {"user": s[0]["Config"].get("User") if s else None, "ro": shc.get("ReadonlyRootfs"), "drop": shc.get("CapDrop"),
            "mounts": [m["Destination"] for m in s[0].get("Mounts", [])] if s else None})
     login_bad = sidecar_login_problems(s[0].get("Mounts", []) if s else [])
+    if s and any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in s[0]["Config"].get("Env", [])):
+        login_bad.append("Claude token must never reach a sidecar")
     check(f"I20-{svc}", f"{svc} never gets the Claude login", not login_bad, login_bad)
     bindings = shc.get("PortBindings") or {}
     host_ips = [b.get("HostIp") for v in bindings.values() for b in (v or [])]
     if svc == "egress":
         check("I18-egress", "egress publishes no ports", not bindings, bindings)
+        env = dict(e.split("=", 1) for e in s[0]["Config"].get("Env", []) if "=" in e) if s else {}
+        networks = s[0].get("NetworkSettings", {}).get("Networks", {}) if s else {}
+        aliases = [alias for name, net in networks.items() if name.endswith("_sandbox") for alias in net.get("Aliases", [])]
+        alias_bad = passthrough_problems(env, aliases)
+        check("I21-egress", "passthrough aliases exactly match allowed hosts", not alias_bad,
+              {"aliases": aliases, "problems": alias_bad})
     else:
         check("I18-edge", "edge publishes only the inbound relay, on host loopback only",
               set(bindings) == {"8642/tcp"} and bool(host_ips) and all(ip in ("127.0.0.1", "::1") for ip in host_ips),
@@ -277,6 +319,8 @@ agent_home = next((m for m in mounts if m["dest"] == "/opt/data"), None) if not 
 init_mounts = [{"type": m["Type"], "dest": m["Destination"], "rw": m["RW"], "src": m.get("Name") or m.get("Source")}
                for m in (init[0].get("Mounts", []) if init else [])]
 init_bad = init_problems(init_mounts, agent_home)
+if init and any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in init[0]["Config"].get("Env", [])):
+    init_bad.append("Claude token must never reach home-init")
 check("I19", "exactly one home-init: exited 0, no network, only CHOWN/FOWNER/DAC_OVERRIDE, read-only, "
              "no-new-privileges, sole mount = the agent's validated home",
       len(init) == 1 and not init_bad and init[0]["State"].get("Status") == "exited" and init[0]["State"].get("ExitCode") == 0

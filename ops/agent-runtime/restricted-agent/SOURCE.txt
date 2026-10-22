@@ -1,26 +1,30 @@
-Vendored exact bytes from humanitylabs-org/wizard-app-store @ 84fe907a91824851c172c367a1b2ed48423a988a
+Vendored exact bytes from humanitylabs-org/wizard-app-store @ 453b5b0b049002e9fffcd83e1c754e848c5711e7
 Branch: feature/restricted-claude-login; path: runtimes/restricted-agent.
 Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21
-Receipts: inspect_check.py --selftest 39/39; test_claude_login.py 4/4 (offline Compose rendering).
-Full container conformance and real OAuth refresh not rerun. Live uid 1000 login is incompatible with uid 10000;
-no ownership/mode changes or deployment performed. See README.md for the fail-closed grant contract.
+Receipts: inspect selftest 46/46; Compose 5/5; passthrough unit 25/25; CONNECT gate 12/12;
+Docker internal-network proof 4/4 (real verified TLS, HTTP 404, distinctive mismatched-SNI refusal);
+store bun test 78/78. No real credentials, model calls, merge or deployment.
 Do not edit here; change upstream and re-vendor.
 
-06bf7b7e3bc6e33a8afb25f3ad8f4dfcb3a9fefdb18326faf057d61f2ea5d4aa  ./README.md
-b07ca83f98239e730c3888552e20ba3339d2d4b15037499eb616e96c3c4e2fdb  ./compose.claude-login.yml
-7f1c6136830373078ace647c9bbf424dc49e09d1a986cb26a24362a422ab9c52  ./compose.yml
+ec7759d8e2fea5237238c9dc12ee49ca2a30ca7365a17d722bc6ba41cedd5f5f  ./README.md
+933176bbf414cca20d4a4dda446e22744a71a45c83c107672343932a39433770  ./compose.claude-token.yml
+a33cc3460618858f2d269f51e2cd65709d425949d366af89cfc0cb62d9123659  ./compose.yml
 39658033c644cafe1ab3282a645b923b918627aa9c899b50e88388fcbe6c3021  ./conformance/Dockerfile
 9255327432c32186589b2d7c0d0394f0d3c3ae49d0749e2ed1aaf1f0e8a4fa8e  ./conformance/compose.test.yml
+e1409275b7f683e250ce690e1de34c63e9085e4128a2276b8da1037f493a22bb  ./conformance/docker_passthrough.py
 fac12ff62d85bef160b3f9fbd5faedc8c62a4b6009367fa4b39f641744ea9e86  ./conformance/egress_selftest.py
 9fcacfb8f8fa1f93aae1f02166a75ee9a638eb7a96f79fa515f302f3b1eebf86  ./conformance/fake_service.py
-916dbefe8b5c831022a232b8073d4a8a00f7c0f90cdf52316c0763b8a42ffe00  ./conformance/in_agent.py
-e9efe49d2e9afd2f0cd454d899722c4a8fcd715824fff6a7e24cd33c35391beb  ./conformance/inspect_check.py
-a482bf79608dcdbd45b3d7a36bd19d7430a0593a098271612b674ed8629c5be4  ./conformance/redact.py
+2661958277ea14f34808e103800f87614082c70a18c0628bb339927a44022451  ./conformance/in_agent.py
+031195b304eb09fc480c4fc58cd10dfbc78580e48868940176b818d429d25561  ./conformance/inspect_check.py
+7ddd4f1c83b5041fbc8210d893260321d418c68db3f2d5f298ae0863fd97f2dc  ./conformance/redact.py
 f6b6e244ef30a62dd85b550ecd5c5972629ef4077c0ee8e185c329550f9c3b24  ./conformance/run.sh
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
-4b8c8fe80185e305630cf6021905928e5424a1fe0491f7938702e21c4cdb466a  ./conformance/test_claude_login.py
+b27718287e33c4da9fad276fbd01a65c138d240ac1e453d1706b12035c089c34  ./conformance/test_claude_login.py
 ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
-07c3281f07daf116aa5e687d44ca228dd226fa29496c00b94be65809b8d95b58  ./sidecars/Dockerfile
+465350d3e4a46d3dfdb0f7614d949b8b907bc607333fc503e82b8fecfcc81fe8  ./conformance/test_passthrough.py
+dfe53e203f8c0cc77c57a81bbd422cfd676e62fc36d1edfaad195721d4c00508  ./passthrough.py
+70a1986217d91bd62c8df5708cc561c63bba0ec678e5b651076448a7fe0cd5a6  ./sidecars/Dockerfile
 7f7561c1b6c2be5baa9a32c75da154d1327e88a9ae5129dfe39041508180193d  ./sidecars/edge.py
-32aa5f8126b842566d8afd82bce591256bc97b68f52c8c424ec8321ae37e89a6  ./sidecars/egress.py
+7d3e514d35b44527f38a6b731b13c1e7e0ccadd4427264427a632018cab5f712  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh
+c295c5c8547d00844b474b7f4586847d04816da0eedb3b66181bf50a5e31ba1d  ./sidecars/upstream_dns.py

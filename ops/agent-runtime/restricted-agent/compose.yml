@@ -89,13 +89,21 @@ services:
     command: ["python3", "-u", "/srv/egress.py"]
     environment:
       EGRESS_ALLOWLIST_HOSTS: >-
-        ${EGRESS_ALLOWLIST_HOSTS:-api.anthropic.com api.openai.com openrouter.ai inference.tinfoil.sh
+        ${EGRESS_ALLOWLIST_HOSTS:-api.anthropic.com platform.claude.com api.openai.com openrouter.ai inference.tinfoil.sh
         api.github.com github.com codeload.github.com objects.githubusercontent.com
         raw.githubusercontent.com pypi.org files.pythonhosted.org registry.npmjs.org en.wikipedia.org}
+      EGRESS_PASSTHROUGH_HOSTS: ${EGRESS_PASSTHROUGH_HOSTS:-api.anthropic.com platform.claude.com}
+      EGRESS_PASSTHROUGH_ALIASES: api.anthropic.com platform.claude.com
+      EGRESS_UPSTREAM_DNS: ${EGRESS_UPSTREAM_DNS:-1.1.1.1 8.8.8.8}
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
     mem_limit: 128m
     cpus: 0.5
     pids_limit: 64
-    networks: [sandbox, uplink]
+    networks:
+      sandbox:
+        aliases: [api.anthropic.com, platform.claude.com]
+      uplink: {}
 
   edge:
     <<: [*hardening, *sidecar-image]

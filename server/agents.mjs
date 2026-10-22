@@ -597,7 +597,7 @@ export function createAgentRegistry(options = {}) {
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
-    if (healthy) value = { status: 'running', status_detail: '' }
+    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' }
     else if (state.desired === 'stopped') value = { status: 'stopped', status_detail: '' }
     else if (state.last_error) value = { status: 'error', status_detail: String(state.last_error).slice(0, 200) }
     else if (Number(state.started_at) && now() - Number(state.started_at) < startingGraceMs) value = { status: 'starting', status_detail: '' }
@@ -773,7 +773,10 @@ export function createAgentRegistry(options = {}) {
       writeJsonAtomic(idempotencyPath, map)
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
-    try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    try {
+      const result = await runtime.apply(id)
+      writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+    } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
@@ -850,7 +853,10 @@ export function createAgentRegistry(options = {}) {
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
-      try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      try {
+        const result = await runtime.apply(id)
+        writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
@@ -868,6 +874,7 @@ export function createAgentRegistry(options = {}) {
     let stoppedCensus
     try {
       const result = await (running ? runtime.start(id) : runtime.stop(id))
+      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)

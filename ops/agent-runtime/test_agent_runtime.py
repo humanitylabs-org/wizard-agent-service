@@ -70,87 +70,17 @@ class RestrictedDriverTest(unittest.TestCase):
         agent["privacy"] = "standard"
         return agent
 
-    def test_restricted_claude_grant_uses_only_the_reviewed_override(self):
-        agent = self.claude_agent()
-        self.driver._compose(agent, "config", timeout=10)
-        args, _ = self.calls[-1]
-        self.assertEqual(args[3:], ["-f", str(ar.RESTRICTED_DIR / "compose.yml"), "-f",
-                                   str(ar.RESTRICTED_DIR / "compose.claude-login.yml"), "config"])
-        self.assertNotIn(ar.CLAUDE_LOGIN_VOLUME, json.dumps(self.driver.env(agent)))
-
-    def test_private_missing_privacy_or_other_provider_never_get_grant_or_probe(self):
-        agent = self.claude_agent()
-        for privacy, provider in (("private", "anthropic"), ("private", "openai-codex"),
-                                  ("standard", "openai-codex"), (None, "anthropic"), ("unknown", "anthropic")):
-            agent["privacy"], agent["model"]["provider"] = privacy, provider
-            self.calls.clear()
-            self.driver.check_claude_login(agent)
-            self.assertEqual(self.calls, [])
-            self.driver._compose(agent, "config", timeout=10)
-            self.assertNotIn(str(ar.RESTRICTED_DIR / "compose.claude-login.yml"), self.calls[-1][0])
-
-    def test_claude_probe_is_metadata_only_unprivileged_and_no_network(self):
-        self.driver.check_claude_login(self.claude_agent())
-        self.assertEqual(self.calls[0][0], ["volume", "inspect", ar.CLAUDE_LOGIN_VOLUME, "--format", "{{.Name}}"])
-        args = self.calls[1][0]
-        for flag in (["--network", "none"], ["--read-only"], ["--cap-drop", "ALL"],
-                     ["--user", "10000:10000"], ["--security-opt", "no-new-privileges:true"]):
-            self.assertTrue(any(args[i:i + len(flag)] == flag for i in range(len(args))), flag)
-        self.assertEqual(args.count("--mount"), 1)
-        self.assertIn(f"type=volume,src={ar.CLAUDE_LOGIN_VOLUME},dst=/claude", args)
-        self.assertEqual(args[-1], ar.CLAUDE_LOGIN_CHECK)
-        self.assertNotIn("--cap-add", args)
-
-    def test_missing_claude_volume_refuses_before_mount_or_stop(self):
-        agent = self.claude_agent()
-        ar.docker = lambda args, **kw: (self.calls.append((args, kw.get("env"))),
-                                       type("R", (), {"returncode": 1 if args[0] == "volume" else 0})())[1]
-        with self.assertRaises(ar.RuntimeFailure) as raised:
-            self.driver.apply(agent)
-        self.assertEqual(raised.exception.code, "claude_login_missing")
-        self.assertFalse(any(args[0] == "run" or "stop" in args or "up" in args for args, _ in self.calls))
-
-    def test_incompatible_claude_permissions_refuse_before_stop_or_home_sync(self):
-        agent = self.claude_agent()
-        ar.docker = lambda args, **kw: (self.calls.append((args, kw.get("env"))),
-                                       type("R", (), {"returncode": 1 if args[0] == "run" else 0})())[1]
-        with self.assertRaises(ar.RuntimeFailure) as raised:
-            self.driver.apply(agent)
-        self.assertEqual((raised.exception.code, raised.exception.status), ("claude_login_permissions", 409))
-        self.assertFalse(any("stop" in args or "up" in args or "/managed:ro" in str(args) for args, _ in self.calls))
-
-    def test_claude_preflight_timeout_cleans_up(self):
-        def fake(args, **kw):
-            self.calls.append((args, None))
-            if args[0] == "run":
-                raise subprocess.TimeoutExpired(args, 60)
-            return type("R", (), {"returncode": 0})()
-        ar.docker = fake
-        with self.assertRaises(ar.RuntimeFailure) as raised:
-            self.driver.check_claude_login(self.claude_agent())
-        self.assertEqual(raised.exception.code, "claude_login_check_timeout")
-        name = self.calls[-2][0][3]
-        self.assertEqual(self.calls[-1][0], ["rm", "-f", name])
-
-    def test_granted_lifecycle_probes_before_stop_and_never_mounts_login_in_home_sync(self):
-        self.driver.apply(self.claude_agent())
-        actions = [(args[0], args[-1] if args[0] == "compose" else "") for args, _ in self.calls]
-        self.assertEqual(actions[0], ("compose", "build"))
-        self.assertEqual([a[0] for a in actions[:4]], ["compose", "volume", "run", "compose"])
-        sync = [args for args, _ in self.calls if args[0] == "run"][1]
-        self.assertNotIn(ar.CLAUDE_LOGIN_VOLUME, str(sync))
-
     def test_grant_override_digest_is_required_and_verified(self):
         copy = self.tmp / "runtime-grant"
         shutil.copytree(ar.RESTRICTED_DIR, copy)
-        with (copy / "compose.claude-login.yml").open("a") as fh:
+        with (copy / "compose.claude-token.yml").open("a") as fh:
             fh.write("\n# changed\n")
-        with self.assertRaisesRegex(SystemExit, "compose.claude-login.yml differs"):
+        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml differs"):
             ar.verify_vendored(copy)
         manifest = copy / "SOURCE.txt"
         manifest.write_text("\n".join(line for line in manifest.read_text().splitlines()
-                                      if not line.endswith("  ./compose.claude-login.yml")))
-        with self.assertRaisesRegex(SystemExit, "compose.claude-login.yml is not listed"):
+                                      if not line.endswith("  ./compose.claude-token.yml")))
+        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml is not listed"):
             ar.verify_vendored(copy)
 
     def test_env_contract(self):
@@ -298,39 +228,6 @@ class RestrictedDriverTest(unittest.TestCase):
             fh.write("\n# changed\n")
         with self.assertRaises(SystemExit):
             ar.verify_vendored(copy)
-
-
-class ClaudeLoginMetadataTest(unittest.TestCase):
-    def probe(self, owner=10000, file_mode=0o100600, accessible=True, optional=False):
-        directory = type("Stat", (), {"st_uid": owner, "st_mode": 0o40700})()
-        credential = type("Stat", (), {"st_uid": owner, "st_mode": file_mode})()
-        with mock.patch("os.geteuid", return_value=10000), mock.patch("os.lstat", side_effect=[directory, credential, credential]), \
-                mock.patch("os.access", return_value=accessible), mock.patch("os.path.lexists", return_value=optional), \
-                mock.patch("builtins.open", side_effect=AssertionError("must not read credential contents")), \
-                mock.patch("os.open", side_effect=AssertionError("must not open credential files")):
-            with self.assertRaises(SystemExit) as raised:
-                exec(ar.CLAUDE_LOGIN_CHECK, {})
-        return raised.exception.code
-
-    def test_private_same_uid_login_is_accepted_without_reading(self):
-        self.assertEqual(self.probe(optional=True), 0)
-
-    def test_owner_mismatch_is_refused_even_if_accessible(self):
-        self.assertEqual(self.probe(owner=1000), 1)
-
-    def test_readable_by_others_is_refused(self):
-        self.assertEqual(self.probe(file_mode=0o100644), 1)
-
-    def test_symlink_credential_is_refused(self):
-        self.assertEqual(self.probe(file_mode=0o120600), 1)
-
-    def test_inaccessible_login_is_refused(self):
-        self.assertEqual(self.probe(accessible=False), 1)
-
-    def test_missing_login_fails_closed(self):
-        with mock.patch("os.lstat", side_effect=FileNotFoundError), self.assertRaises(SystemExit) as raised:
-            exec(ar.CLAUDE_LOGIN_CHECK, {})
-        self.assertEqual(raised.exception.code, 1)
 
 
 if __name__ == "__main__":

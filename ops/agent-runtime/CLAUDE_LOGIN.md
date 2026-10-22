@@ -1,90 +1,116 @@
-# Restricted agents: box Claude login grant
+# Restricted agents: per-agent Claude token and direct TLS grant
 
-## Scope and authorization
+## Authorization and storage
 
-`RestrictedDriver` adds the pinned `compose.claude-login.yml` override only when
-`uses_claude_login()` sees exactly `privacy=standard` and `model.provider=anthropic` in the
-owner-managed agent record. Private, missing/unknown privacy, and other providers receive no
-login override and no login permission probe. There is no environment-variable opt-in.
+`RestrictedDriver` grants `CLAUDE_CODE_OAUTH_TOKEN` only for exactly `privacy=standard` and
+`model.provider=anthropic` in the owner-managed record, and only when that agent has a valid
+`claude.token`. Private/unknown privacy and other providers never receive it. Ambient helper
+tokens are cleared, not inherited as authorization.
 
-Only the agent service mounts `wizard-ai-accounts-claude` at `/claude`. Its environment points
-DirectSDK there. Edge, egress, home-init and home-sync never get the volume. The existing uid
-10000, cap-drop ALL, no-new-privileges, read-only root and internal-only sandbox remain unchanged.
-The metadata-only preflight is a separate short-lived container running as the same uid, with
-no network, no capabilities, no credential reads/writes and no output returned to the caller.
+The secret uses `Agents.secret`, beside `runtime.key`/`gateway.key` in the agent folder, **not**
+its home. The reader requires a regular, non-symlink, helper-owner-owned mode-0600 file. No host
+secret file is mounted into the container or copied by home-sync. Only the agent's Compose env
+gets the token; edge/egress/home-init receive none. This is the long-lived `claude setup-token`
+credential supported by unmodified DirectSDK: no automatic refresh and no credential-file writes.
 
-## Why rw and why the uid prerequisite is a rollout blocker
+Owner-side CLI (no HTTP route, stdin only; do not put credentials in argv, shell history or chat):
 
-Claude Code rotates single-use OAuth refresh tokens and atomically replaces 0600 files. A read-only
-mount is not safe for durable refresh. A shared rw grant intentionally allows use/modification of
-the box login and grants the whole login directory, not just a scoped per-agent credential.
+```sh
+secure-token-source | python3 agent_runtime.py --agents-dir "$AGENTS_DIR" set-secret "$AGENT_ID" claude.token
+```
 
-Before stopping an existing agent, the helper checks that the external volume exists and its
-private directory and credential files belong to uid 10000 and are accessible/writable as that uid.
-Symlinks, foreign owners and group/world-readable credentials fail closed. Missing login returns
-`claude_login_missing` (409); incompatible metadata returns `claude_login_permissions` (409).
-A timed-out probe is removed and returns `claude_login_check_timeout` (504).
+`secure-token-source` denotes the owner's private input mechanism, not a bundled command. The CLI
+validates the agent, bounds input, atomically replaces a 0600 file, fsyncs the file and directory,
+and emits no secret. Reapplying/recreating the agent is required after setting/rotating a token.
+Only synthetic fixtures were used for testing; no real token was created, requested, read or printed.
 
-Every writer of the shared login (including the Claude app and existing standard agents) must use
-the same effective uid. Simply adding a group or ACL does not survive atomic mode-0600 replacement.
-The helper does not chown/chmod, relax capabilities, copy credentials, change provider identity or
-migrate the Claude app. Operator verification of writer identity is still required: directory
-metadata alone cannot prove how another application will write its next replacement.
+The incompatible shared-volume override and uid-permission probe have been removed from the restricted
+path. The normal/nonrestricted runtime's pre-existing shared login behavior is unchanged. No ownership,
+mode, image/core, upstream DirectSDK plugin or provider-identity migration is performed.
 
-A read-only metadata inspection of the existing box login found directory uid/gid 1000:1000 mode
-0700 and credential files mode 0600 owned by 1000. A no-network uid-10000 readability-only probe
-returned inaccessible. No credential contents were read/printed and no live volume was changed.
-**This branch therefore intentionally refuses on that existing volume until a separately approved
-shared-writer identity migration is complete. It is not a drop-in live fix.**
+## Missing-token behavior
 
-## Egress and remaining inference question
+Absent/invalid tokens do **not** prevent startup. `apply`/`start` return success with
+`status_detail=last_error=claude_token_missing`; no credential preflight failure or crash loop.
+The Service persists that warning and exposes it even when the agent health probe succeeds.
+A later owner-provisioned token followed by apply/start clears it. Other runtime failures keep their
+existing handling. Private agents never receive this Claude-specific warning.
 
-The installed Claude Code binary names `https://platform.claude.com/v1/oauth/token` as its refresh
-endpoint; the [official network documentation](https://code.claude.com/docs/en/network-config)
-confirms it. The optional override adds only `platform.claude.com`. Inference host
-`api.anthropic.com` was already allowed. No Statsig, telemetry, downloads or interactive login
-hosts are added. A trusted custom `EGRESS_ALLOWLIST_HOSTS` must include the refresh host itself.
+## Direct TLS without modifying the plugin
 
-A separate static audit of the installed DirectSDK plugin found that its admission relay constructs
-`http.client.HTTPSConnection(target.hostname, ...)` directly and does not consult `HTTPS_PROXY`.
-That may block inference on the internal-only sandbox even after this login grant is provisioned.
-No Hermes/core/provider-plugin changes were authorized or made here. A proxy-aware provider path
-and an approved isolated inference canary are required before claiming end-to-end Claude works.
-No real OAuth refresh or model request was attempted.
+DirectSDK admission uses `http.client.HTTPSConnection`, ignoring HTTPS_PROXY. The pinned upstream
+egress now accepts port 443 on its **sandbox alias IP only**, beside the existing CONNECT listener.
+Docker's exact aliases default to `api.anthropic.com platform.claude.com`, so `getent hosts
+api.anthropic.com` in the internal-only sandbox returns egress's sandbox IP, not the public IP.
 
-## Provenance and verification
+The gate reassembles/validates ClientHello and accepts only a hostname present in the passthrough
+list, its declared/receiving Docker aliases and the exact allowlist. It rejects missing/malformed SNI,
+IP literals, ECH, oversized/truncated hellos, alias mismatch and plaintext before upstream connect.
+An SNI cannot reveal which same-IP alias the client originally looked up; membership plus receiving-IP
+validation is the enforceable boundary. TLS remains end-to-end with the real host certificate.
 
-Upstream: https://github.com/humanitylabs-org/wizard-app-store/pull/21,
-branch `feature/restricted-claude-login`, commit `84fe907a91824851c172c367a1b2ed48423a988a`.
-All 18 vendored runtime files match this commit byte-for-byte; `SOURCE.txt` records their SHA-256s.
-`verify_vendored()` now requires the override to be listed as well as matching all listed digests.
+To avoid resolving its own aliases, egress queries explicit public IPv4 DNS resolvers over its uplink
+(default `1.1.1.1 8.8.8.8`, configurable `EGRESS_UPSTREAM_DNS`), validates bounded replies and all
+returned IPs as globally routable, then splices encrypted TCP to port 443. Both listeners share a
+64-connection cap, 300s idle/drain timeout and 64KiB/10s ClientHello limits. No MITM, TLS termination,
+other destination ports or new public port bindings. Existing uid10000, cap-drop ALL, ro agent root,
+internal/inhibit-ipv4 sandbox and loopback-only edge publication remain intact.
 
-- `python3 -m unittest ops/agent-runtime/test_agent_runtime.py ops/agent-runtime/test_offline_census.py`:
-  49 passed, with per-command isolated HOME/HERMES_HOME.
-- `python3 ops/agent-runtime/restricted-agent/conformance/test_claude_login.py`: 4 passed;
-  real Docker Compose rendering only, no application containers.
-- `inspect_check.py --selftest`: 39/39 passed. I6 requires an independently supplied
-  `--claude-login`; I14 checks the matching config directory; I19/I20 reject helper/sidecar leakage.
-- Disposable no-network Docker volume proof: 6/6 passed (private uid10000 accepted, uid1000 denied,
-  ro mount denied, non-private mode denied, symlink denied, atomic 0600 replacement remains usable).
-  The volume held synthetic fixtures only and was removed afterward.
-- `verify_vendored()` and `git diff --check`: passed.
+Custom `EGRESS_PASSTHROUGH_HOSTS` are rendered by upstream `passthrough.py` into an exact `!override`
+Compose alias list (requires Compose 2.24.4+). The helper writes only that secret-free override in
+`agent/runtime/passthrough.yml`; custom hosts must also appear in `EGRESS_ALLOWLIST_HOSTS`. The two
+default aliases remain the only default passthrough hosts. No Statsig, telemetry, login UI or downloads.
 
-Full container conformance, refresh concurrency and actual inference remain rollout gates.
+## Redaction and conformance
 
-## Future deployment steps — not executed
+I14 needs an independently supplied owner `--claude-token` grant; ungranted/image-baked/empty token env
+is denied. Shared-login grants are now always refused. I19/I20 reject home-init/sidecar secret leakage;
+I21 checks exact passthrough aliases and allowlist. `redact.py` scrubs token env/key values without
+requiring a real token in argv. `in_agent.py` removes the token before importing tools, redacts evidence,
+and adds credential-free alias/direct-TLS/wrong-SNI probes. The helper's inspect route returns only
+lifecycle metadata, not container env, and errors never log Compose stderr or raw exception messages.
+Never publish raw Docker inspect/Compose config from a provisioned agent. Docker administrators can
+inspect env, and this deliberately grants the model credential to the agent; it is not an exfiltration-
+proof credential enclave. Allowed Anthropic endpoints can still be used to send agent-visible data.
 
-1. Resolve shared-writer uid compatibility and the DirectSDK proxy question in separately approved
-   changes. Do not work around either by relaxing the restricted agent boundary.
-2. Review the upstream and Service PRs; obtain deployment authorization. Neither is merged here.
-3. Prepare an immutable helper release from the pushed Service commit, including the entire pinned
-   restricted runtime directory; validate hashes before activation. Updating only agent_runtime.py
-   is insufficient. Preserve the previous helper release as the rollback target.
-4. Release/activate that helper through the normal operator release procedure, then request `apply`
-   for `archimedes-new` from the owner control plane so Compose recreates the agent with the override.
-   Do not use a bare container restart: mount configuration must change.
-5. Read back exact mounts/environment/hardening; pass `--claude-login` only after confirming the
-   owner record is standard/anthropic. Verify private agents still have no login mount. Run a short
-   approved Claude chat and durable refresh check without logging any credentials.
-6. On failure, stop rollout and restore the previous helper release/configuration; do not force
-   permissions or widen egress. No live endpoints, containers or services were changed in this task.
+## Provenance and evidence
+
+Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21,
+branch `feature/restricted-claude-login`, commit `453b5b0b049002e9fffcd83e1c754e848c5711e7`.
+All 22 upstream files are vendored byte-for-byte with hashes in `restricted-agent/SOURCE.txt`.
+The helper requires the base/token Compose files, alias renderer and both egress/DNS sources in that manifest.
+
+- Focused runtime/offline census/token unittest suite: **53 passed** with per-command isolated HOME/HERMES_HOME.
+  Includes synthetic atomic CLI, private/ambient denial, missing-token start/apply, no HTTP secret route,
+  secret-free sync/errors, exact custom aliases and an in-process fake-network Service status regression.
+- Compose rendering: **5 passed**. Passthrough parser/fuzz/DNS/bounds/redaction unit suite: **25 passed**,
+  including 4,000 deterministic random/structured mutations and every truncation of a real ClientHello.
+- CONNECT gate selftest: **12/12**. Inspect selftest: **46/46**.
+- Disposable Docker internal-network probe: **4/4**: DNS alias, getent, verified real TLS certificate with
+  credential-free `HTTPSConnection('api.anthropic.com',443)` GET returning **404**, and distinctive
+  `TLSV1_ALERT_ACCESS_DENIED` for example.com SNI aimed at the egress IP. Labelled --rm containers/networks
+  are removed in finally; label-filtered readback found no leftovers.
+- Upstream `bun test`: **78 passed** after installing the lockfile's missing dependencies.
+- Vendored hash/full-byte comparison, Python/Service syntax and `git diff --check`: passed.
+
+No model request, real token provisioning, full agent tool-dispatch conformance or production deployment
+is claimed. The real TLS proof covers transport, not DirectSDK's complete inference/admission path.
+
+## Deployment order — not executed; no merge/deploy authorized
+
+1. Owner reviews/merges **Store PR #21**, then **Service draft PR #92** (keep draft until review).
+2. Prepare/release an immutable helper from the pushed Service commit, including the exact vendored
+   runtime and SOURCE.txt; validate digests before activation. Preserve the previous release for rollback.
+3. Owner privately sets `claude.token` using the CLI above; no HTTP credential route is introduced.
+4. Owner applies `archimedes-new` through the normal lifecycle control plane. Compose must recreate the
+   agent for env/network changes; a bare container restart is insufficient.
+5. Verify status/mounts/alias IP/hardening with redacted receipts and independently authorize `--claude-token`;
+   verify a private agent still has no token, then run a separately authorized short Claude inference canary.
+6. If anything fails, stop rollout and restore the prior helper/runtime configuration. Never repair by
+   changing uid/capabilities, mounting shared credentials, widening SNI hosts or modifying the plugin.
+
+Residuals: token expiry/revocation needs manual replacement+apply; public UDP DNS must be reachable
+(configure approved public resolvers if not); A-only DNS intentionally fails closed without an IPv4
+answer or on truncated replies; ECH is unsupported/refused; custom aliases need current Compose;
+production inference and the full agent conformance run remain owner rollout gates. No live agent,
+service endpoint, systemd or runtime release state was touched.
