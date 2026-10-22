@@ -1183,7 +1183,7 @@ export function createAgentRegistry(options = {}) {
     if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
     if (!sessionId || !readRaw(agentId)) return
     const next = new Map(runs)
-    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), idempotency_key: String(idempotencyKey || ''), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(idempotencyKey ? { idempotency_key: String(idempotencyKey) } : {}), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
     const nextLatest = new Map(latestRuns)
     const nextAll = new Map(latestAllRuns)
     nextAll.set(JSON.stringify([agentId, sessionId]), runId)
