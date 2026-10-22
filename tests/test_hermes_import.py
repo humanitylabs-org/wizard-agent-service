@@ -339,6 +339,26 @@ class ImportTests(unittest.TestCase):
         m.approve(p)
         with self.assertRaisesRegex(m.ImportFailure, 'writer_units'):
             self.apply(p)
+    def test_approved_heavy_grant_exposes_plugin_in_explicit_api_toolsets_only(self):
+        cfg = m.load_yaml((self.home / 'config.yaml').read_text())
+        cfg['platform_toolsets'] = {'api_server': ['terminal', 'memory'], 'telegram': ['memory']}
+        original = m.yaml.safe_dump(cfg)
+        (self.home / 'config.yaml').write_text(original)
+        p = self.plan()
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        unchanged = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertEqual(unchanged['platform_toolsets']['api_server'], ['terminal', 'memory'])
+        (self.home / 'config.yaml').write_text(original)
+        p['grants'] = {'heavy': True}
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        granted = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertIn('wizard-agent-heavy', granted['plugins']['enabled'])
+        self.assertEqual(granted['platform_toolsets']['api_server'], ['terminal', 'memory', 'wizard-agent-heavy'])
+        self.assertEqual(granted['platform_toolsets']['telegram'], ['memory'])
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        twice = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertEqual(twice['platform_toolsets']['api_server'].count('wizard-agent-heavy'), 1)
+
     def test_takeover_wiring_keeps_own_cron_messaging(self):
         p = self.plan()
         p['mode'] = 'take-over'
