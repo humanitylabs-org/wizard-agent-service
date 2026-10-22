@@ -153,7 +153,11 @@ function idList(value, check) {
 /** Merge a permissions patch onto a base, validating every field. */
 export function normalizePermissions(base, patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) fail(400, 'invalid_permissions', 'agent.permissions')
-  const out = { ...base }
+  const out = { read_standard_chats: false, ...base }
+  if (patch.read_standard_chats !== undefined) {
+    if (typeof patch.read_standard_chats !== 'boolean') fail(400, 'invalid_permissions', 'agent.permissions.read_standard_chats')
+    out.read_standard_chats = patch.read_standard_chats
+  }
   const outside = idList(patch.outside_tools, 'agent.permissions.outside_tools')
   if (outside) {
     const unknown = outside.filter((id) => !OUTSIDE_IDS.has(id))
@@ -177,6 +181,7 @@ export function normalizePermissions(base, patch = {}) {
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
 function assertPrivateWalls(agent) {
+  if (agent.permissions.read_standard_chats && agent.privacy !== 'private') fail(409, 'private_permission_required', 'agent.permissions.read_standard_chats')
   if (agent.privacy !== 'private') return
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   if (agent.model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
@@ -290,11 +295,21 @@ export function assertIsolationSupports(agent) {
 
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
-  return agent.privacy === 'standard' || agentAppIds(agent).size > 0
+  return agent.privacy === 'standard' || agentAppIds(agent).size > 0 || agent.permissions.read_standard_chats === true
+}
+
+const standardChatsEndpoint = (gatewayUrl, explicit = '') => {
+  if (explicit) {
+    const url = new URL(explicit)
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/wizard/standard-chats/mcp' || url.search || url.hash) fail(500,'invalid_standard_chats_transport','agent.standard_chats_url')
+    return url.href
+  }
+  if (!gatewayUrl) return ''
+  const url = new URL(gatewayUrl); url.pathname = '/wizard/standard-chats/mcp'; url.search = ''; url.hash = ''; return url.href
 }
 
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
-export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '' } = {}) {
+export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '', standardChatsUrl = '' } = {}) {
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
@@ -327,8 +342,13 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // agent.disabled_toolsets is applied last for every platform, the API server included (hermes_cli/tools_config).
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
   // No gateway and no shared skills for an agent without one: nothing outside its own home is reachable.
-  if (wantsGateway(agent, gatewayUrl)) {
-    lines.push('mcp_servers:', '  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+  const standardUrl = standardChatsEndpoint(gatewayUrl,standardChatsUrl)
+  if (wantsGateway(agent, gatewayUrl) || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
+    lines.push('mcp_servers:')
+    if (gatewayUrl && (agent.privacy === 'standard' || agentAppIds(agent).size)) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
+      lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    }
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
   if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)
@@ -389,6 +409,8 @@ export function createAgentRegistry(options = {}) {
   const isolation = options.isolation === 'restricted' ? 'restricted' : ''
   const restricted = (agent) => agent?.runtime?.isolation === 'restricted'
   const gatewayUrlFor = (agent) => (restricted(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
+  const standardUrlFor = agent => standardChatsEndpoint(gatewayUrlFor(agent),restricted(agent) ? '' : options.standardChatsUrl || '')
+  const assertStandardTransport = agent => { if (agent.permissions.read_standard_chats && !standardUrlFor(agent)) fail(409,'standard_chats_unconfigured','agent.permissions.read_standard_chats') }
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
 
@@ -747,8 +769,8 @@ export function createAgentRegistry(options = {}) {
     }
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
     const agentGateway = gatewayUrlFor(agent)
-    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway }))
+    writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
+    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) }))
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
@@ -793,6 +815,7 @@ export function createAgentRegistry(options = {}) {
       created_at: Math.floor(now() / 1000),
     }
     assertPrivateWalls(agent)
+    assertStandardTransport(agent)
     assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
     try {
@@ -878,6 +901,7 @@ export function createAgentRegistry(options = {}) {
       }
     }
     assertPrivateWalls(next)
+    assertStandardTransport(next)
     assertIsolationSupports(next)
     const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
@@ -1104,6 +1128,7 @@ export function createAgentRegistry(options = {}) {
       return current ?? null
     },
     agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
+    credentialValues: () => folderIds().flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
