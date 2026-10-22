@@ -33,7 +33,10 @@ describe('browser owner boundary', () => {
     expect(gate.allows(req({ 'x-wizard-shell-token': TOKEN }), owner)).toBe(true)
     expect(gate.allows(req({ 'x-wizard-shell-token': TOKEN, origin: 'null' }), owner)).toBe(false)
     expect(gate.allows(req({ 'x-wizard-shell-token': TOKEN, 'sec-fetch-site': 'cross-site' }), owner)).toBe(false)
-    for (const kind of ['agent', 'service']) expect(gate.allows(req(), { kind })).toBe(true)
+    for (const kind of ['agent', 'service']) {
+      expect(gate.allows(req(), { kind })).toBe(true)
+      for (const headers of [{ origin: 'null' }, { 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-mode': 'cors' }, { 'sec-fetch-dest': 'empty' }]) expect(gate.allows(req(headers), { kind })).toBe(false)
+    }
   })
 
   async function service(enabled: boolean, requireAccess = false) {
