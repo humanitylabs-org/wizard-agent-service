@@ -51,6 +51,9 @@ class OfflineCensusTest(unittest.TestCase):
     def docker(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == 'ps':
+            if 'label=com.docker.compose.service=claude-init' in argv:
+                self.assertIn('label=com.docker.compose.project=agent-fixture', argv)
+                return SimpleNamespace(stdout='', returncode=0)  # no Claude grant in census fixtures
             self.assertIn('-aq', argv)
             return SimpleNamespace(stdout=self.container, returncode=0)
         if argv[0] == 'run':
@@ -97,6 +100,38 @@ class OfflineCensusTest(unittest.TestCase):
         finally:
             os.chmod(self.home, 0o700)
         self.assertNotIn('must never read', json.dumps(result))
+
+    def test_restricted_stop_keeps_pregrant_seal_bytes_with_or_without_grant(self):
+        driver = self.make_driver(ar.RestrictedDriver)
+        self.agent['runtime']['isolation'] = 'restricted'
+        self.agent.update(privacy='standard', model={'provider': 'anthropic'})
+        (self.home.parent / 'agent.json').write_text(json.dumps(self.agent))
+        def pregrant_stop(agent):  # d49037d stop boundary, no credential cleanup
+            driver._compose(agent, "stop", timeout=300)
+            return {'ok': True}
+        for granted in (False, True):
+            removed = []
+            def docker(argv, **kwargs):
+                if argv[0] == 'ps' and 'label=com.docker.compose.service=claude-init' in argv:
+                    self.assertIn('label=com.docker.compose.project=agent-fixture', argv)
+                    return SimpleNamespace(stdout='fixture-seeder' if granted else '')
+                if argv[0] == 'rm':
+                    self.assertEqual(argv, ['rm', '-f', 'fixture-seeder'])
+                    removed.append(argv)
+                    return SimpleNamespace(returncode=0)
+                return self.docker(argv, **kwargs)
+            if granted:
+                self.agents.set_secret('fixture', 'claude.token', 'synthetic-not-a-real-token')
+            before = self._home_files()
+            with self.subTest(granted=granted), patch.object(ar, 'docker', docker):
+                with patch.object(driver, 'stop', pregrant_stop):
+                    baseline = ar.lifecycle_action(driver, self.agent, 'stop')
+                current = ar.lifecycle_action(driver, self.agent, 'stop')
+                self.assertEqual(json.dumps(current, sort_keys=True).encode(),
+                                 json.dumps(baseline, sort_keys=True).encode())
+                self.assertEqual(current['census']['ids'], ['private-id'])
+                self.assertEqual(len(removed), int(granted))
+            self.assertEqual(self._home_files(), before)
 
     def test_compose_absent_and_exited_are_both_sealable(self):
         for container in ('', 'fixture-container'):
