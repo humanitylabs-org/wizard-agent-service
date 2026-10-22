@@ -65,6 +65,18 @@ def access_only(value):
     return value
 
 
+def effective_call(call):
+    fn = call.get('function', call)
+    args = fn.get('arguments') or {}
+    if isinstance(args, str):
+        args = json.loads(args)
+    if fn.get('name') == 'tool_call':
+        entries = args.get('calls', [args] if args.get('name') else [])
+        if isinstance(entries, list) and len(entries) == 1 and entries[0].get('name') == 'wizard_heavy_submit':
+            return entries[0]['name'], entries[0]['arguments']
+    return fn.get('name'), args
+
+
 def model_exercise(service, cid, model, fact):
     session = 'wizard_import_restricted_' + secrets.token_hex(6)
     # This helper does POST, PATCH hidden, GET and asserts true before returning.
@@ -131,18 +143,15 @@ finally: db.close()
                 results[msg.get('tool_call_id')] = {'text': msg.get('content')}
     terminals, fact_ok, submissions = [], False, []
     for call in calls:
-        fn = call.get('function', call)
-        args = fn.get('arguments') or {}
-        if isinstance(args, str):
-            args = json.loads(args)
+        tool_name, args = effective_call(call)
         result = results.get(call.get('id'), {})
-        if fn.get('name') == 'terminal':
+        if tool_name == 'terminal':
             out = str(result.get('output') or '') if isinstance(result, dict) else ''
             out = '\n'.join(x for x in out.splitlines() if not re.search(r'token\s*:', x, re.I))
             terminals.append({'command': args.get('command'), 'exit_code': result.get('exit_code'), 'output': out[:2500]})
-        if fn.get('name') == 'wizard_heavy_submit':
+        if tool_name == 'wizard_heavy_submit':
             submissions.append({'arguments': args, 'receipt': result})
-        if fn.get('name') == 'fact_store' and args.get('action') == 'search':
+        if tool_name == 'fact_store' and args.get('action') == 'search':
             fact_ok = fact in json.dumps(result, ensure_ascii=False)
     reply = '\n'.join(str(x.get('content', '')) for x in messages if x['role'] == 'assistant')
     model_config = row.get('model_config') or {}
