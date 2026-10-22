@@ -3972,7 +3972,7 @@ function buildWizardServer(options, lifetime) {
       const body = prepared.body
       const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote)
       if (await helperSessionActive(sessionId)) {
-        throw Object.assign(new Error('Agent already active'), { status: 410 })
+        throw Object.assign(new Error('Agent already active'), { status: 409, code: 'helper_session_busy' })
       }
       await requireHelperContinuation(continuation)
       if (runQueue) {
@@ -5820,6 +5820,7 @@ function buildWizardServer(options, lifetime) {
         if (joinedDelegation === 'off') return true
         try { return !(await runContract()).join } catch { return false }
       },
+      busySession: helperSessionActive,
       admit: admitHelperContinuation,
       log: (line) => process.stdout.write(`[follow-through] ${line}\n`),
     })
