@@ -229,6 +229,15 @@ class RestrictedDriverTest(unittest.TestCase):
             ar.container_for = real
         self.assertEqual(seen, [("agent-daily", "agent")])
 
+    def test_actual_vendored_tree_is_pinned_including_edge(self):
+        ar.verify_vendored(ar.RESTRICTED_DIR)
+        copy = self.tmp / "stale-edge"
+        shutil.copytree(ar.RESTRICTED_DIR, copy)
+        with (copy / "sidecars" / "edge.py").open("a") as fh:
+            fh.write("\n# stale pin\n")
+        with self.assertRaisesRegex(SystemExit, "edge.py differs"):
+            ar.verify_vendored(copy)
+
     def test_vendored_runtime_is_checked(self):
         copy = self.tmp / "runtime"
         shutil.copytree(ar.RESTRICTED_DIR, copy)
