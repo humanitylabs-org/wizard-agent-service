@@ -10,6 +10,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { join, resolve } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readSettings } from './wizard-os-settings.mjs'
+import { fetchAgentIngress } from './agent-ingress.mjs'
 import { migrateJson, atomicStoreWrite, threadKey, threadReference, validAgentId } from './thread-reference.mjs'
 
 export const AGENT_SCHEMA = 1
@@ -274,9 +275,8 @@ export function agentAppIds(agent) {
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
  * later appear without a restart); a private agent only once the owner ticks an app for it.
  */
-/** What a restricted agent's harness calls: its edge sidecar, which forwards to the Service's agent-only listener. */
+/** What a restricted agent's harness calls: its edge sidecar, forwarding only to its own Service socket. */
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
-const UPLINK_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/28$/u
 
 /**
  * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
@@ -603,8 +603,8 @@ export function createAgentRegistry(options = {}) {
       if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
       return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
     }
-    // A restricted agent is reached only through its edge relay, published on host loopback at its port.
-    if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
+    // Restricted agents have no TCP origin. Every caller must use fetchAgent.
+    if (restricted(agent)) return null
     if (upstreamMode === 'network') {
       const url = new URL(String(agent.runtime.api || ''))
       if (url.protocol !== 'http:' || url.hostname !== agent.runtime.app_id || url.username || url.password || url.pathname !== '/') {
@@ -615,6 +615,15 @@ export function createAgentRegistry(options = {}) {
     return `http://${upstreamHost}:${agent.runtime.port}`
   }
 
+  function fetchAgent(agent, path, init = {}) {
+    if (restricted(agent)) {
+      const socketPath = join(folder(agent.id), 'gateway', 'ingress.sock')
+      if (agent.runtime.ingress_socket && agent.runtime.ingress_socket !== socketPath) throw new Error('agent ingress path mismatch')
+      return fetchAgentIngress(socketPath, path, init)
+    }
+    return fetchImpl(`${upstream(agent)}${path}`, init)
+  }
+
   async function probe(agent, { fresh = false } = {}) {
     const cached = statusCache.get(agent.id)
     if (!fresh && cached && now() - cached.at < 3000) return cached.value
@@ -623,7 +632,7 @@ export function createAgentRegistry(options = {}) {
     let healthy = false
     try {
       const headers = agent.runtime.kind === 'profile' ? { Authorization: `Bearer ${apiKey(agent.id)}` } : {}
-      const response = await fetchImpl(`${upstream(agent)}/health`, { headers, redirect: 'error', signal: AbortSignal.timeout(1500) })
+      const response = await fetchAgent(agent, '/health', { headers, redirect: 'error', signal: AbortSignal.timeout(1500) })
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
@@ -705,14 +714,7 @@ export function createAgentRegistry(options = {}) {
     fail(503, 'network_exhausted', 'agent.runtime.network')
   }
 
-  /** The uplink subnet an agent's edge connects from ('' = this agent has no agent-only network). */
-  function agentUplink(id) {
-    const agent = read(id)
-    const uplink = restricted(agent) ? agent.runtime?.network?.uplink : ''
-    return typeof uplink === 'string' && UPLINK_RE.test(uplink) ? uplink : ''
-  }
-
-  /** Whether an agent runs in the restricted runtime (its key is then bound to the agent-only listener). */
+  /** Whether an agent runs in the restricted runtime (its key is then bound to its own Unix socket). */
   function agentRestricted(id) {
     try { return restricted(read(id)) } catch { return false }
   }
@@ -785,7 +787,8 @@ export function createAgentRegistry(options = {}) {
       ...(normalizeMemory(body.memory) ? { memory: normalizeMemory(body.memory) } : {}),
       runtime: {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
-        ...(isolation ? { isolation, network: nextNetwork() } : {}),
+        // port is retained for schema/old records, but restricted agents never publish or use it.
+        ...(isolation ? { isolation, network: nextNetwork(), ingress_socket: join(folder(id), 'gateway', 'ingress.sock') } : {}),
       },
       created_at: Math.floor(now() / 1000),
     }
@@ -805,7 +808,7 @@ export function createAgentRegistry(options = {}) {
       writeJsonAtomic(idempotencyPath, map)
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
-    try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    try { if (restricted(agent)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
@@ -883,7 +886,7 @@ export function createAgentRegistry(options = {}) {
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
-      try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      try { if (restricted(next)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
@@ -901,6 +904,7 @@ export function createAgentRegistry(options = {}) {
     const epoch = catalogEpochs.get(id) ?? 0
     let stoppedCensus
     try {
+      if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -1013,10 +1017,12 @@ export function createAgentRegistry(options = {}) {
     if (!agent) throw new Error('Unknown catalog agent')
     const origin = agentId === MAIN_AGENT_ID ? options.mainOrigin : upstream(agent)
     const key = agentId === MAIN_AGENT_ID ? options.mainKey : apiKey(agentId)
-    if (!origin || !key) throw new Error('Catalog runtime credentials unavailable')
+    if ((!origin && !restricted(agent)) || !key) throw new Error('Catalog runtime credentials unavailable')
     const ids = [], seen = new Set(), epoch = catalogEpochs.get(agentId) ?? 0
     for (let offset = 0; offset <= 100000;) {
-      const response = await fetchImpl(`${origin}/api/sessions?limit=100&offset=${offset}&include_children=true`, { headers: { Authorization: `Bearer ${key}` }, redirect: 'error', signal: AbortSignal.timeout(4000) })
+      const path = `/api/sessions?limit=100&offset=${offset}&include_children=true`
+      const init = { headers: { Authorization: `Bearer ${key}` }, redirect: 'error', signal: AbortSignal.timeout(4000) }
+      const response = await (agentId === MAIN_AGENT_ID ? fetchImpl(`${origin}${path}`, init) : fetchAgent(agent, path, init))
       if (!response.ok) throw new Error('Catalog runtime unavailable')
       const value = await response.json(), rows = value.data ?? value.sessions ?? value.items
       const hasMore = value.has_more ?? value.pagination?.has_more
@@ -1097,11 +1103,11 @@ export function createAgentRegistry(options = {}) {
       }
       return current ?? null
     },
-    agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
+    agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentUplink, agentRestricted,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
     grants, addGrant, removeGrant, readableSources,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
