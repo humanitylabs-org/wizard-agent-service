@@ -1,8 +1,9 @@
 // Agents (wizard-os spec/AGENTS.md): more than one agent on a box.
 //
 // The registry is the folder `<agentsDir>/<id>/agent.json` (schema 1). The main agent is the host Hermes the
-// Service already talks to and is always listed as `hermes`. Every other agent runs in its own container with its
-// own Hermes home (`<id>/home`, its HERMES_HOME), its own API key (`<id>/runtime.key`) and its own model route.
+// Service already talks to and is always listed as `hermes`. Container agents have their own Hermes home and
+// runtime driver; file-provisioned profile agents share the host gateway under /p/<profile> with their own key.
+// Each non-main agent's API key is stored at `<id>/runtime.key`.
 // The Service never touches Docker: a runtime driver (agent-runtime helper on the host, see ops/agent-runtime)
 // installs, starts and stops the container.
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -48,6 +49,25 @@ export const TINFOIL_NO_REASONING = new Set(['deepseek-v4-1-flash'])
 export const LOCAL = { id: 'local', label: 'This box (local model)', confidential: true, models: [] }
 // Providers that the AI Accounts app signs in. Offered for standard agents only.
 const AI_ACCOUNTS = new Map([['anthropic', 'Claude (AI Accounts)'], ['openai-codex', 'ChatGPT (AI Accounts)']])
+// An agent container reaches Claude through the box's one Claude sign-in (the Claude app's shared login volume,
+// mounted at /claude by the agent runtime) and the Hermes image's Claude Code subscription provider; it never gets
+// an Anthropic API key. Model ids use that provider's catalogue spelling (claude-fable-5-1, not claude-fable-5.1).
+export const CLAUDE_AGENT_PROVIDER = 'claude-subscription-directsdk-experimental'
+export const claudeModelId = (id) => (/^claude-/u.test(id) ? id.replace(/\./gu, '-') : id)
+// Hermes' always-loaded memory files: an agent may raise their budgets (e.g. a long user profile), within bounds.
+export const MEMORY_LIMITS = { user_chars: [500, 12000], notes_chars: [500, 12000] }
+export function normalizeMemory(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) fail(400, 'invalid_memory', 'agent.memory')
+  const out = {}
+  for (const [key, [min, max]] of Object.entries(MEMORY_LIMITS)) {
+    if (value[key] === undefined) continue
+    if (!Number.isInteger(value[key]) || value[key] < min || value[key] > max) fail(400, 'invalid_memory', `agent.memory.${key}`)
+    out[key] = value[key]
+  }
+  for (const key of Object.keys(value)) if (!(key in MEMORY_LIMITS)) fail(400, 'invalid_memory', `agent.memory.${key}`)
+  return Object.keys(out).length ? out : undefined
+}
 export const PRESETS = [
   {
     id: 'private', label: 'Private',
@@ -83,8 +103,20 @@ function cleanLabel(value, fallback = '') {
   return text || fallback
 }
 
+// Agent/app files are read for every thread in a Chats list (several reads per row). Parse each
+// file once per on-disk version (inode, size, mtime) and hand out copies, so callers that edit the
+// result never touch the cache.
+const jsonCache = new Map()
 function readJson(path) {
-  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+  let stamp
+  try { const st = statSync(path); stamp = `${st.ino}:${st.size}:${st.mtimeMs}` } catch { jsonCache.delete(path); return null }
+  const hit = jsonCache.get(path)
+  if (hit && hit.stamp === stamp) return hit.value === null ? null : structuredClone(hit.value)
+  let value = null
+  try { value = JSON.parse(readFileSync(path, 'utf8')) } catch { value = null }
+  if (jsonCache.size > 512) jsonCache.delete(jsonCache.keys().next().value)
+  jsonCache.set(path, { stamp, value })
+  return value === null ? null : structuredClone(value)
 }
 
 function writeJsonAtomic(path, value, mode = 0o600) {
@@ -213,7 +245,9 @@ export function parseAgentFile(value, id) {
   const permissions = value.permissions
   if (!permissions || typeof permissions !== 'object') return null
   const runtime = value.runtime
-  if (!runtime || runtime.kind !== 'container' || typeof runtime.app_id !== 'string' || !Number.isInteger(runtime.port)) return null
+  if (!runtime || !['container', 'profile'].includes(runtime.kind)) return null
+  if (runtime.kind === 'container' && (typeof runtime.app_id !== 'string' || !Number.isInteger(runtime.port))) return null
+  if (runtime.kind === 'profile' && (typeof runtime.profile !== 'string' || !ID_RE.test(runtime.profile))) return null
   try {
     const { preset, ...fields } = permissions
     return {
@@ -277,6 +311,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     if (contextLength > 0) lines.push(`  context_length: ${Math.floor(contextLength)}`)
   } else if (agent.model.provider === LOCAL.id) {
     lines.push('  provider: custom', '  base_url: ${WIZARD_LOCAL_MODEL_URL}', '  api_key: ${WIZARD_LOCAL_MODEL_KEY}')
+  } else if (agent.model.provider === 'anthropic') {
+    lines.push(`  provider: ${yamlString(CLAUDE_AGENT_PROVIDER)}`)
   } else {
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
@@ -295,6 +331,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     lines.push('mcp_servers:', '  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
   lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
+  if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)
+  if (agent.memory?.notes_chars) lines.push(`  memory_char_limit: ${agent.memory.notes_chars}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -329,6 +367,8 @@ export function createAgentRegistry(options = {}) {
   const runtime = options.runtime ?? null
   const upstreamMode = options.upstreamMode === 'network' ? 'network' : 'host'
   const upstreamHost = options.upstreamHost || '127.0.0.1'
+  // Host profiles share the main gateway, not the container transport/port allocator.
+  const mainUpstreamOrigin = options.mainUpstreamOrigin || ''
   const basePort = Number.isInteger(options.basePort) ? options.basePort : 18650
   const mainLabel = cleanLabel(options.mainLabel, 'Hermes')
   const mainProviders = options.mainProviders ?? (async () => [])
@@ -360,7 +400,15 @@ export function createAgentRegistry(options = {}) {
     const { wizardApps, agentApps } = installedApps()
     return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
   }
-  const mainAgent = () => ({
+  // Resolved for every thread in a Chats list: rebuild only when .main-agent.json or apps.json changes.
+  let mainMemo = { key: null, value: null }
+  const fileStamp = (path) => { try { const st = statSync(path); return `${st.ino}:${st.size}:${st.mtimeMs}` } catch { return '-' } }
+  const mainAgent = () => {
+    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${mainLabel}`
+    if (mainMemo.key !== key) mainMemo = { key, value: buildMainAgent() }
+    return structuredClone(mainMemo.value)
+  }
+  const buildMainAgent = () => ({
     schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
@@ -414,7 +462,7 @@ export function createAgentRegistry(options = {}) {
       if (fresh.length) {
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard') continue
+          if (!agent || agent.privacy !== 'standard' || agent.runtime.kind === 'profile') continue
           const next = structuredClone(agent)
           for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
@@ -551,6 +599,10 @@ export function createAgentRegistry(options = {}) {
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
+    if (agent.runtime.kind === 'profile') {
+      if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
+      return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
+    }
     // A restricted agent is reached only through its edge relay, published on host loopback at its port.
     if (restricted(agent)) return `http://${upstreamHost}:${agent.runtime.port}`
     if (upstreamMode === 'network') {
@@ -566,11 +618,12 @@ export function createAgentRegistry(options = {}) {
   async function probe(agent, { fresh = false } = {}) {
     const cached = statusCache.get(agent.id)
     if (!fresh && cached && now() - cached.at < 3000) return cached.value
-    const state = serviceState(agent.id)
+    const state = agent.runtime.kind === 'profile' ? {} : serviceState(agent.id)
     let value
     let healthy = false
     try {
-      const response = await fetchImpl(`${upstream(agent)}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+      const headers = agent.runtime.kind === 'profile' ? { Authorization: `Bearer ${apiKey(agent.id)}` } : {}
+      const response = await fetchImpl(`${upstream(agent)}/health`, { headers, redirect: 'error', signal: AbortSignal.timeout(1500) })
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
@@ -596,7 +649,8 @@ export function createAgentRegistry(options = {}) {
     for (const item of Array.isArray(main) ? main : []) {
       const id = item?.slug ?? item?.id
       if (!AI_ACCOUNTS.has(id) || item.authenticated === false) continue
-      const models = (Array.isArray(item.models) ? item.models : []).map((m) => (typeof m === 'string' ? m : m?.id)).filter((m) => typeof m === 'string' && m.length < 120).slice(0, 12)
+      let models = (Array.isArray(item.models) ? item.models : []).map((m) => (typeof m === 'string' ? m : m?.id)).filter((m) => typeof m === 'string' && m.length < 120).slice(0, 12)
+      if (id === 'anthropic') models = [...new Set(models.map(claudeModelId))]
       if (models.length) out.push({ id, label: AI_ACCOUNTS.get(id), confidential: false, models: models.map((m) => ({ id: m, label: m })) })
     }
     return out
@@ -671,6 +725,7 @@ export function createAgentRegistry(options = {}) {
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
     const dir = folder(agent.id)
     // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
@@ -699,6 +754,7 @@ export function createAgentRegistry(options = {}) {
   async function create(body, { idempotencyKey = '' } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
+    if (body.runtime !== undefined && body.runtime?.kind !== 'container') fail(400, 'invalid_runtime', 'agent.runtime', 'only container agents may be created through the API')
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
     if (idempotencyKey) {
       if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(idempotencyKey)) fail(400, 'invalid_idempotency_key', 'agent.idempotency_key')
@@ -726,6 +782,7 @@ export function createAgentRegistry(options = {}) {
       schema: AGENT_SCHEMA, id, label, harness: 'hermes', privacy: preset.privacy,
       appearance: normalizeAppearance(body.appearance, preset.privacy),
       model, permissions,
+      ...(normalizeMemory(body.memory) ? { memory: normalizeMemory(body.memory) } : {}),
       runtime: {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
         ...(isolation ? { isolation, network: nextNetwork() } : {}),
@@ -757,6 +814,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are provisioned from files and configured in Hermes')
     if (id === MAIN_AGENT_ID) {
       if (body.role !== undefined) {
         if (!['standard', 'recovery'].includes(body.role)) fail(400, 'invalid_agent_role', 'agent.role')
@@ -797,6 +855,11 @@ export function createAgentRegistry(options = {}) {
       if (!next.label) fail(400, 'label_required', 'agent.label')
     }
     if (body.appearance !== undefined) next.appearance = normalizeAppearance(body.appearance, next.privacy)
+    if (body.memory !== undefined) {
+      const memory = normalizeMemory(body.memory)
+      if (memory) next.memory = memory
+      else delete next.memory
+    }
     if (body.permissions !== undefined) {
       const { preset, ...rest } = body.permissions ?? {}
       if (preset !== undefined && preset !== agent.permissions.preset) fail(409, 'preset_fixed', 'agent.permissions.preset', 'adjust fields instead of switching preset')
@@ -830,6 +893,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
+    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are always on with the main gateway')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)

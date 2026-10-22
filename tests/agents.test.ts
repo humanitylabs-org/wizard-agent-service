@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { hermesConfigYaml, parseAgentFile } from '../server/agents.mjs'
+import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -403,11 +403,23 @@ describe('agent folder parsing and harness config', () => {
   it('standard agents keep outside tools; files none turns file tools off', () => {
     const base = { id: 'a', model: { provider: 'anthropic', model: 'claude-opus-5-5', allowed_models: ['claude-opus-5-5'], fallback: true }, permissions: { outside_tools: ['web', 'browser'], files: 'none', wizard_apps: ['meditate'], agent_apps: [] } }
     const text = hermesConfigYaml(base)
-    expect(text).toContain('provider: "anthropic"')
+    expect(text).toContain('provider: "claude-subscription-directsdk-experimental"')
     expect(text).not.toContain('fallback_providers')
     expect(text).toMatch(/disabled_toolsets: \[[^\]]*"terminal"/)
     expect(text).not.toMatch(/disabled_toolsets: \[[^\]]*"web"/)
     expect(text).not.toContain('mcp_servers: {}')
+  })
+
+  it('raised memory budgets reach the harness config; out-of-range budgets are refused', () => {
+    const base = { id: 'a', memory: { user_chars: 6000 }, model: { provider: 'anthropic', model: 'claude-fable-5-1', allowed_models: ['claude-fable-5-1'], fallback: false }, permissions: { outside_tools: [], files: 'none', wizard_apps: [], agent_apps: [] } }
+    const text = hermesConfigYaml(base)
+    expect(text).toContain('user_char_limit: 6000')
+    expect(text).not.toContain('memory_char_limit')
+    expect(text).toContain('fallback_providers: []')
+    expect(normalizeMemory({ user_chars: 6000 })).toEqual({ user_chars: 6000 })
+    expect(() => normalizeMemory({ user_chars: 99999 })).toThrow()
+    expect(() => normalizeMemory({ other: 1 })).toThrow()
+    expect(claudeModelId('claude-fable-5.1')).toBe('claude-fable-5-1')
   })
 
   it('agent containers never get a launcher tile', () => {
