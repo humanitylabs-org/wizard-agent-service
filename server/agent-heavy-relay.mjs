@@ -99,7 +99,10 @@ export function createAgentHeavyRelay({ options, registry, queue, fetchAgent = (
     allowed, current, observeOrigin,
     async continuation(job) {
       // Wait for the original mutation owner; a heavy receipt cannot release its slot.
-      job = await observeOrigin(job)
+      job = queue().get(job.job_id)
+      // The queue's single observation phase alone binds pending rows. Never
+      // take a second snapshot here and confuse newly completed with no route.
+      if (job.route_state === 'pending_origin') throw fail('origin still owns session', 503)
       // Binding durably proves completed-origin authority. Run records can be
       // evicted while a long build runs; frozen admissions must also replay.
       let origin = { status: 'completed' }

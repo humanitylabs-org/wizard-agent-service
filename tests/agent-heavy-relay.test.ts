@@ -172,6 +172,24 @@ it('accepts a running origin without runtime, binds only its completed route, an
   expect(s.posts[0].body).toMatchObject(bound)
   expect(restored.queue.get(receipt.job_id).resume).toBe('alpha-run-1')
 })
+it('waits for the next observation if origin completes between observation and continuation', async () => {
+  const s = await scene()
+  s.states.runtimeWhileRunning = false
+  const receipt = await s.submit()
+  s.states.workerDone = true
+  const observe = (s.heavy.queue as any).observe
+  ;(s.heavy.queue as any).observe = async (job: any) => {
+    await observe(job) // running snapshot, no runtime to bind yet
+    s.states.originDone = true // completion occurs before continuation gate
+  }
+  await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(receipt.job_id)).toMatchObject({ route_state: 'pending_origin', resume: '', continuation_invalidated: false })
+  expect(s.posts).toEqual([])
+  await s.heavy.queue.tick(); await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(receipt.job_id).route_state).toBe('bound')
+  expect(s.posts).toHaveLength(1)
+  expect(s.posts[0].body).toMatchObject({ model: 'model-a', provider: 'fixture', require_model_lock: true })
+})
 it('retires a confirmed lost origin and stops observing fenced rows', async () => {
   const s = await scene()
   s.states.runtimeWhileRunning = false
