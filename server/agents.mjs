@@ -1042,7 +1042,7 @@ export function createAgentRegistry(options = {}) {
     if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
     if (!sessionId || !readRaw(agentId)) return
     const next = new Map(runs)
-    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), idempotency_key: String(idempotencyKey || '') }])
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(idempotencyKey ? { idempotency_key: String(idempotencyKey) } : {}) }])
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
     writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next) })
     runs.set(runId, next.get(runId))
