@@ -3195,7 +3195,7 @@ function buildWizardServer(options, lifetime) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
@@ -4134,7 +4134,7 @@ function buildWizardServer(options, lifetime) {
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
-      if (principal.kind === 'refused') { sendJson(response, principal.status, { error: principal.error, check: principal.check }); return }
+      if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
@@ -4448,6 +4448,13 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname === '/wizard/mcp') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         await bridge.handle(request, response)
+        return
+      }
+      if (url.pathname.startsWith('/wizard/v1/agent-heavy/')) {
+        if (!heavyWork) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
+        sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {
@@ -5008,6 +5015,15 @@ function buildWizardServer(options, lifetime) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
           if (principalOf(request).kind === 'agent' && (operator || agentResolution.agentId !== principalOf(request).agentId)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
+            if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
+              const input = parseJsonBody(agentResolution.body)
+              heavyWork?.stopAgentSession(agentResolution.agentId, input?.session_id, false)
+            }
+            const mutation = upstreamPath.match(/^\/v1\/runs\/([^/]+)\/(steer|stop)$/u)
+            if (request.method === 'POST' && mutation) {
+              const pair = agents.runThread?.(agentResolution.agentId, mutation[1])
+              if (pair) heavyWork?.stopAgentSession(pair.agent_id, pair.session_id, mutation[2] === 'stop')
+            }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
               request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
@@ -5464,9 +5480,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 409, { error: { code: error.code, message: error.message } })
         return
       }
-      if ([400, 404, 409, 413, 415, 503].includes(error?.status) && !response.headersSent) {
-        const names = { 400: 'invalid_request', 404: 'not_found', 409: 'conflict', 413: 'body_too_large', 415: 'unsupported_media_type', 503: 'service_unavailable' }
-        sendJson(response, error.status, { error: names[error.status] })
+      if (error instanceof SyntaxError && request.url?.startsWith('/wizard/v1/agent-heavy/')) error.status = 400
+      if ([400, 403, 404, 409, 410, 413, 415, 429, 503].includes(error?.status) && !response.headersSent) {
+        const names = { 400: 'invalid_request', 403: 'forbidden', 404: 'not_found', 409: 'conflict', 410: 'gone', 413: 'body_too_large', 415: 'unsupported_media_type', 429: 'rate_limited', 503: 'service_unavailable' }
+        sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
     } finally { requestDone() }

@@ -1041,23 +1041,62 @@ export function createAgentRegistry(options = {}) {
     for (const [id, rows] of Object.entries(value.runs)) {
       if (!Array.isArray(rows) || rows.some(row => !row || row.run_id !== id || !validAgentId(row.agent_id) || typeof row.session_id !== 'string' || !row.session_id)) throw new Error('Invalid run pair rows')
     }
+    for (const field of ['latest_runs', 'latest_all_runs']) if (value[field] !== undefined) {
+      if (!value[field] || typeof value[field] !== 'object' || Array.isArray(value[field])) throw new Error('Invalid latest run index')
+      for (const [key, id] of Object.entries(value[field])) {
+        let pair
+        try { pair = JSON.parse(key) } catch { throw new Error('Invalid latest run pair') }
+        if (!Array.isArray(pair) || pair.length !== 2 || !validAgentId(pair[0]) || typeof pair[1] !== 'string' || !pair[1]
+          || typeof id !== 'string' || !value.runs[id]?.some(row => row.agent_id === pair[0] && row.session_id === pair[1] && (field === 'latest_all_runs' || !row.heavy_origin))) throw new Error('Invalid latest run authority')
+      }
+    }
     return value
   })
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
-  function noteRun(runId, agentId, sessionId = '') {
+  const latestRuns = new Map(Object.entries(readJson(runsPath)?.latest_runs ?? {}))
+  const latestAllRuns = new Map(Object.entries(readJson(runsPath)?.latest_all_runs ?? {}))
+  function noteRun(runId, agentId, sessionId = '', { heavyOrigin } = {}) {
     if (typeof runId !== 'string' || !runId) return
     const rows = runs.get(runId) ?? []
     if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
     if (!sessionId || !readRaw(agentId)) return
     const next = new Map(runs)
-    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId) }])
+    next.set(runId, [...rows.filter(row => row.agent_id !== agentId), { run_id: runId, ...threadReference(sessionId, agentId), ...(heavyOrigin ? { heavy_origin: heavyOrigin } : {}) }])
+    const nextLatest = new Map(latestRuns)
+    const nextAll = new Map(latestAllRuns)
+    nextAll.set(JSON.stringify([agentId, sessionId]), runId)
+    if (!heavyOrigin) nextLatest.set(JSON.stringify([agentId, sessionId]), runId)
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next) })
+    writeJsonAtomic(runsPath, { schema: 1, runs: Object.fromEntries(next), latest_runs: Object.fromEntries(nextLatest), latest_all_runs: Object.fromEntries(nextAll) })
     runs.set(runId, next.get(runId))
+    if (!heavyOrigin) latestRuns.set(JSON.stringify([agentId, sessionId]), runId)
+    latestAllRuns.set(JSON.stringify([agentId, sessionId]), runId)
   }
   const runAgents = runId => (runs.get(runId) ?? []).map(row => row.agent_id)
 
   return {
+    runThread: (agentId, runId) => (runs.get(runId) ?? []).find(row => row.agent_id === agentId) ?? null,
+    latestRunForSession: (agentId, sessionId, { includeHeavy = false } = {}) => {
+      const pair = JSON.stringify([agentId, sessionId])
+      const latest = (includeHeavy ? latestAllRuns : latestRuns).get(pair)
+      const rows = latest ? (runs.get(latest) ?? []) : [...runs.values()].flat()
+      if (latest || !includeHeavy) return rows.filter(row => row.agent_id === agentId && row.session_id === sessionId && (includeHeavy || !row.heavy_origin)).at(-1) ?? null
+      // Pre-index stores have no cross-agent chronology. Follow only an
+      // unambiguous heavy lineage from the authoritative non-heavy head;
+      // never infer order from the run-id map when sibling branches collide.
+      const candidates = rows.filter(row => row.agent_id === agentId && row.session_id === sessionId)
+      let current = latestRuns.has(pair)
+        ? candidates.find(row => row.run_id === latestRuns.get(pair))
+        : candidates.filter(row => !row.heavy_origin).at(-1)
+      const seen = new Set()
+      while (current && !seen.has(current.run_id)) {
+        seen.add(current.run_id)
+        const children = candidates.filter(row => row.heavy_origin === current.run_id && !seen.has(row.run_id))
+        if (children.length !== 1) break
+        current = children[0]
+      }
+      return current ?? null
+    },
     agentsDir, list, read, status, upstream, apiKey, agentOptions, providers, create, update, setRunning,
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,

@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { DurableHeavyQueue, heavySshTransport, heavyRpcTransport } from './heavy-queue.mjs'
 import { queueRequestHash } from './run-queue.mjs'
+import { createAgentHeavyRelay } from './agent-heavy-relay.mjs'
+import { isAgentIngress, principalOf } from './principals.mjs'
 import { isHumanRequest } from './helper-continuation.mjs'
 
 export const HEAVY_KIND = 'external-heavy'
@@ -49,7 +51,7 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true }) {
+export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -60,10 +62,12 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
   }
   const watermark = sessionId => heavyRequestWatermark(request, sessionId)
   let heavy
+  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy })
   const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
-    if ((job.agent_id ?? 'hermes') !== 'hermes' || !isAutomaticAgentAllowed('hermes')) return false
+    if ((job.agent_id ?? 'hermes') !== 'hermes') return agentRelay.current(job)
+    if (!isAutomaticAgentAllowed('hermes')) return false
     const fresh = heavy.get(job.job_id)
     if (!fresh || fresh.cancel_requested || fresh.continuation_invalidated || ['suppressed', 'superseded'].includes(fresh.resume)) return false
     const latest = queue.latestForSession(job.sessionId)
@@ -79,7 +83,9 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     transport: options.heavyTransport ?? (options.heavyRpcOrigin
       ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavySshTransport(options.heavyWorker)),
     intervalMs: options.heavyPollIntervalMs ?? 1500, current,
+    canDispatch: job => (job.agent_id ?? 'hermes') === 'hermes' || agentRelay.allowed(job.agent_id),
     continuation: async job => {
+      if ((job.agent_id ?? 'hermes') !== 'hermes') return agentRelay.continuation(job)
       if (!job.route) {
         const origin = queue.get(job.origin)
         // Stock Hermes may expose the effective runtime only on the terminal run.
@@ -105,23 +111,26 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
       'Submission is durable. End this turn with the job receipt; do not wait or poll in a loop. The service resumes this thread when the worker finishes.' })
   return {
     queue: heavy,
+    handleAgent: (req, path, value) => agentRelay.handle(req, path, value),
+    stopAgentSession: (id, session, cancel) => agentRelay.stopSession(id, session, cancel),
     start: () => heavy.start(),
     close: () => heavy.close(),
     summary: () => heavy.summary(),
     supersede: id => heavy.supersede(id),
     stopSession: id => {
       heavy.supersede(id)
-      for (const job of heavy.rows()) if (job.sessionId === id && !terminal.has(job.state)) heavy.cancel(job.job_id, id)
+      for (const job of heavy.rows()) if ((job.agent_id ?? 'hermes') === 'hermes' && job.sessionId === id && !terminal.has(job.state)) heavy.cancel(job.job_id, id)
     },
     async validate(record) {
       const job = heavy.get(record.continuation?.job_id)
-      if (!job || record.runtime !== 'direct' || job.sessionId !== record.sessionId || !terminal.has(job.state)
+      if (!job || (job.agent_id ?? 'hermes') !== (record.agent_id ?? 'hermes') || record.runtime !== 'direct' || job.sessionId !== record.sessionId || !terminal.has(job.state)
         || record.idempotencyKey !== `wizard-heavy-${job.job_id}` || !await current(job)) throw fail('heavy request superseded', 410)
       // Origin must have finished; do not release a mutation owner by declaring it external.
       const origin = queue.get(job.origin)
       if (!origin || !terminal.has(origin.status)) throw fail('origin still owns session', 503)
     },
     async handle(req, path, value) {
+      if (isAgentIngress(req) || principalOf(req).kind === 'agent' || (value?.agent_id !== undefined && value.agent_id !== 'hermes')) throw fail('heavy access denied', 403)
       const supplied = String(req.headers.authorization || '').replace(/^Bearer /, '')
       if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))
         || req.headers.origin || req.headers['sec-fetch-site']) throw fail('heavy access denied', 403)
@@ -143,7 +152,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
         return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))
       }
       const job = heavy.get(value.job_id)
-      if (!job || job.sessionId !== sessionId) throw fail('job not found', 404)
+      if (!job || (job.agent_id ?? 'hermes') !== 'hermes' || job.sessionId !== sessionId) throw fail('job not found', 404)
       if (path === '/wizard/internal/heavy/cancel') return view(heavy.cancel(job.job_id, sessionId))
       if (path !== '/wizard/internal/heavy/status') throw fail('not found', 404)
       return view(job)
