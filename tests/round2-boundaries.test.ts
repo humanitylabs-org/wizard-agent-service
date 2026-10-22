@@ -44,6 +44,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     const method = init.method || 'GET', body = init.body ? JSON.parse(String(init.body)) : null
     calls.push({ agent, method, path: u.pathname, body })
     if (status.get(agent) === 'stopped') return json({ error: 'offline' }, 503)
+    if (u.pathname === '/api/model/options') return json({ providers: [{ id: 'anthropic', authenticated: true, models: ['claude-fixture'] }] })
     if (u.pathname === '/v1/capabilities') return json({ features: {} })
     if (u.pathname === '/health') return json({ status: 'ok' })
     if (u.pathname === '/api/sessions' && method === 'POST') { const id = body.id || 'wizard_generated'; histories.get(agent)!.add(id); return json({ session: { id, source: 'wizard-mobile', title: 'Chat' } }, 201) }
