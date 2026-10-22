@@ -66,7 +66,10 @@ agent's Unix socket without starting a runtime or rewriting the imported harness
 `GET /wizard/v1/agent-options` reports `import_capabilities` for fail-before-copy
 rehearsal preflight. Enable the existing `WIZARD_AGENT_HEAVY=on` and
 `WIZARD_AGENT_HEAVY_SANDBOX=on` only in a separately authorized Service release;
-this task does not restart or reconfigure it. Health uses the agent's ingress Unix
+this task does not restart or reconfigure it. If strict owner proof is configured,
+set `WIZARD_IMPORT_OWNER_PROOF_FILE` only in the owner CLI environment; the proof
+is used for owner-loopback admission requests, never copied into the plan/home
+or printed. Health uses the agent's ingress Unix
 socket; no TCP port is published.
 
 The scanner reports `ssh`/`scp`/`rsync` references to Thales in skills, cron and

@@ -114,6 +114,29 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('prepares only the reserved import socket through an owner-only API, without runtime calls', async () => {
+    const dir = box(), main = await fakeHermes('main')
+    const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), isolation: 'restricted',
+      mainProviders: async () => [{ slug: 'anthropic', models: ['claude-opus-5-5'], authenticated: true }],
+      runtime: { apply() { throw new Error('must not start') } } })
+    const { agent } = await registry.create({ label: 'Reserve', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }, { deferStart: true })
+    const proof = 'synthetic-owner-proof-01234567890123456789'
+    const { base, calls } = await start(dir, main, { agentIsolation: 'restricted', ownerProof: proof })
+    const route = base + '/wizard/v1/agents/' + agent.id + '/prepare-import'
+    expect((await fetch(route, json({}))).status).toBe(403)
+    const headers = { 'x-wizard-owner-proof': proof }
+    expect((await fetch(route, json({}, headers))).status).toBe(202)
+    expect(calls).toEqual([])
+    expect(existsSync(join(dir, 'agents', agent.id, 'home', 'config.yaml'))).toBe(false)
+    const options = await (await fetch(base + '/wizard/v1/agent-options', { headers })).json()
+    expect(options.import_capabilities).toEqual({ socket_prepare: true, heavy_enabled: false, heavy_sandbox: false })
+    const recordPath = join(dir, 'agents', agent.id, 'agent.json')
+    const record = JSON.parse(readFileSync(recordPath, 'utf8'))
+    delete record.runtime.admission
+    writeFileSync(recordPath, JSON.stringify(record))
+    expect((await fetch(route, json({}, headers))).status).toBe(409)
+    expect(calls).toEqual([])
+  })
   it('reserves imports stopped through the restricted allocator and refuses future sensitive app grants', async () => {
     const dir = box()
     const calls: string[] = []

@@ -82,6 +82,17 @@ now. Stage/test/build jobs may map to scoped heavy jobs; source staging, logs,
 artifact retrieval, disk checks and machine administration require explicit job
 contracts or the future Machines component, not a backdoor SSH route.
 
+## Current rehearsal result
+
+Rework tests pass in an isolated HOME/HERMES_HOME/WIZARD_OS_HOME/TMPDIR. The actual
+live attempt fails before copying: the unchanged live Service has no
+`import_capabilities`/socket-only preparation API, and agent-heavy enable/sandbox
+flags are absent (relay defaults off). Existing main sidecar image contents match
+the updated main source after PR #92 merged. No new image or pending build submit
+is needed. No apply/undo was run; all live execution gates remain open. Evidence
+records the literal failing code and baseline/cleanup readbacks. Do not deploy or
+reconfigure the Service within this rehearsal to make the test green.
+
 ## Production remains NO-GO
 
 A reduced-copy pass does not authorize a live move, default change, messaging or
