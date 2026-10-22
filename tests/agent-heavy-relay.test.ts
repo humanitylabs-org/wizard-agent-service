@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -82,6 +82,7 @@ async function serveFakeAgents(root: string, runtime: ReturnType<typeof fakeRunt
       res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(await response.text())
     })
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(join(dir, 'ingress.sock'), resolve) })
+    chmodSync(join(dir, 'ingress.sock'), 0o600)
     clean.push(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
   }
 }
