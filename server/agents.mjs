@@ -1085,8 +1085,10 @@ export function createAgentRegistry(options = {}) {
   const runs = new Map(Object.entries(readJson(runsPath)?.runs ?? {}))
   const latestRuns = new Map(Object.entries(readJson(runsPath)?.latest_runs ?? {}))
   const latestAllRuns = new Map(Object.entries(readJson(runsPath)?.latest_all_runs ?? {}))
-  function noteRun(runId, agentId, sessionId = '', idempotencyKey = '', { heavyOrigin } = {}) {
-    if (idempotencyKey && typeof idempotencyKey === 'object') { heavyOrigin = idempotencyKey.heavyOrigin; idempotencyKey = '' }
+  function noteRun(runId, agentId, sessionId = '', options = {}) {
+    // Callers pass either the request idempotency key (direct turns) or
+    // { heavyOrigin, idempotencyKey } (heavy relay continuations).
+    const { heavyOrigin = '', idempotencyKey = '' } = typeof options === 'string' ? { idempotencyKey: options } : (options ?? {})
     if (typeof runId !== 'string' || !runId) return
     const rows = runs.get(runId) ?? []
     if (rows.some(row => row.agent_id === agentId && row.session_id === sessionId)) return
