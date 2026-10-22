@@ -40,7 +40,7 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
     if (!key) throw fail('agent unavailable', 503)
     let response
     try {
-      response = await (options.fetchImpl ?? fetch)(`${registry.upstream(agent)}${path}`, {
+      response = await registry.fetchAgent(agent, path, {
         ...init, headers: { ...init.headers, Authorization: `Bearer ${key}` },
         redirect: 'error', signal: AbortSignal.timeout(4000),
       })

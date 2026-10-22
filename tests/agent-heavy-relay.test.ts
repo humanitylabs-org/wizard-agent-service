@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
+import { createServer } from 'node:http'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { createHeavyIntegration } from '../server/heavy-integration.mjs'
 import { DurableHeavyQueue } from '../server/heavy-queue.mjs'
@@ -70,20 +71,35 @@ function fakeRuntime() {
   }
   return { fetchImpl, transport, states, posts, reads, remote }
 }
+async function serveFakeAgents(root: string, runtime: ReturnType<typeof fakeRuntime>) {
+  for (const [id, port] of [['alpha', 47131], ['beta', 47132]] as const) {
+    const dir = join(root, 'agents', id, 'gateway'); mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const server = createServer(async (req, res) => {
+      let body = ''; for await (const chunk of req) body += chunk
+      const response = await runtime.fetchImpl(`http://127.0.0.1:${port}${req.url}`, {
+        method: req.method, headers: req.headers, ...(body ? { body } : {}),
+      })
+      res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(await response.text())
+    })
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(join(dir, 'ingress.sock'), resolve) })
+    clean.push(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
+  }
+}
 async function scene(enabled: string | undefined = 'on') {
   const root = home(); records(root)
   const runtime = fakeRuntime()
+  await serveFakeAgents(root, runtime)
   const registry = createAgentRegistry({ agentsDir: join(root, 'agents'), appsJsonPath: join(root, 'apps.json'), fetchImpl: runtime.fetchImpl })
   registry.noteRun('origin', 'alpha', 'shared'); registry.noteRun('origin', 'beta', 'shared')
   const resolver = createPrincipalResolver({ ownerProof: proof, agentForToken: (key: string) => registry.agentForGatewayToken(key),
-    agentRestricted: (id: string) => registry.agentRestricted(id), agentSubnet: (id: string) => registry.agentUplink(id) })
+    agentRestricted: (id: string) => registry.agentRestricted(id) })
   const options: any = { heavyStatePath: join(root, 'heavy.db'), heavyToken: token, heavyTransport: runtime.transport, fetchImpl: runtime.fetchImpl, agentHeavy: enabled }
   const hostQueue = { latestForSession: () => ({ publicRunId: 'host-origin', runtime: 'direct', status: 'running', body: JSON.stringify({ model: 'host-model', provider: 'host-provider' }) }) }
   const heavy = createHeavyIntegration({ options, registry, queue: hostQueue, request: async () => ({ data: [{ id: 1, role: 'user', content: 'Host instruction' }] }) })!
   clean.push(() => heavy.close())
   async function req(id = 'alpha', ingress = true, credential = gateway(id)) {
     const r: any = { headers: { authorization: `Bearer ${credential}` }, socket: { remoteAddress: '127.0.0.1' } }
-    if (ingress) markAgentIngress(r)
+    if (ingress) markAgentIngress(r, id)
     await resolver.attach(r); return r
   }
   const spec = (id = 'alpha') => ({ cwd: join(root, 'staging', 'agents', id, 'project'), argv: ['true'], timeout_seconds: 10 })
@@ -377,15 +393,16 @@ print('edge allowlist passed')`
 })
 it.each(['on', undefined])('wires the real Service agent-only listener and credential boundaries (flag=%s)', async flag => {
   const root = home(); records(root); const fake = fakeRuntime()
+  await serveFakeAgents(root, fake)
   const service = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:47130', hermesKey: 'fixture-main-key', fetchImpl: fake.fetchImpl,
     wizardOsHome: root, appsJsonPath: join(root, 'apps.json'), settingsPath: join(root, 'settings.json'),
     ownerProof: proof, requireAccess: false, agentBridge: false, joinedDelegation: 'off', followThrough: false,
     runQueueStatePath: join(root, 'runs.db'), heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
     heavyTransport: fake.transport, heavyPollIntervalMs: 10, agentHeavy: flag })
-  const ingress = createAgentIngress(service)
-  clean.push(async () => { for (const server of [ingress, service]) { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) } })
-  const addr = await listen(service) as any, edge = await listen(ingress) as any
-  const base = `http://127.0.0.1:${addr.port}`, agent = `http://127.0.0.1:${edge.port}`
+  const ingress = createAgentIngress(service, 'alpha'), betaIngress = createAgentIngress(service, 'beta')
+  clean.push(async () => { for (const server of [ingress, betaIngress, service]) { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) } })
+  const addr = await listen(service) as any, edge = await listen(ingress) as any, betaEdge = await listen(betaIngress) as any
+  const base = `http://127.0.0.1:${addr.port}`, agent = `http://127.0.0.1:${edge.port}`, betaAgent = `http://127.0.0.1:${betaEdge.port}`
   const post = (origin: string, url: string, credential: string, body: any, owner = false) => fetch(origin + url, {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-wizard-owner-proof': proof } : { Authorization: `Bearer ${credential}` }) }, body: JSON.stringify(body) })
   const body = { session_id: 'shared', key: 'http', spec: { cwd: join(root, 'staging', 'agents', 'alpha'), argv: ['true'], timeout_seconds: 10 } }
@@ -417,7 +434,8 @@ it.each(['on', undefined])('wires the real Service agent-only listener and crede
   const job = await submitted.json()
   expect(job.agent_id).toBe('alpha')
   expect((await post(base, path('status'), '', { job_id: job.job_id }, true)).status).toBe(200)
-  expect((await post(agent, path('status'), gateway('beta'), { session_id: 'shared', job_id: job.job_id })).status).toBe(404)
+  expect((await post(agent, path('status'), gateway('beta'), { session_id: 'shared', job_id: job.job_id })).status).toBe(403)
+  expect((await post(betaAgent, path('status'), gateway('beta'), { session_id: 'shared', job_id: job.job_id })).status).toBe(404)
   fake.states.workerDone = true; fake.states.originDone = true
   await vi.waitFor(() => expect(fake.posts.filter(row => row.body.input?.startsWith('[Wizard heavy-work completion]'))).toHaveLength(1))
   expect(fake.posts.at(-1).id).toBe('alpha')
