@@ -26,6 +26,8 @@ import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, m
 import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { createRoutedPresentation } from './routed-presentation.mjs'
+import { createRoutedQueues } from './routed-run-queue.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
@@ -59,6 +61,8 @@ import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, schedul
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
+import { AgentChatInputs } from './agent-chat-inputs.mjs'
+import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -127,7 +131,7 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. Pictures and files: to show one in the chat, put MEDIA:/absolute/path on its own line (never a data: URL or a markdown image). Wizard shows it as a tappable thumbnail or file card only when the file sits in the agent's cache/images, cache/audio, cache/videos or cache/screenshots folder or in the owner's Files folder; anything elsewhere (scratch, /tmp) shows as "file unavailable", so copy it there first. Images over 5 MB do not show; send a smaller JPEG. Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
+export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
 
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
@@ -143,6 +147,7 @@ const allowed = [
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
+  { method: 'DELETE', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}/messages$`), query: new Set(['order', 'limit', 'offset', 'include_compacted', 'view']) },
   { method: 'POST', pattern: new RegExp(`^/api/sessions/${ID}/model$`), query: new Set() },
   { method: 'POST', pattern: /^\/v1\/runs$/, query: new Set() },
@@ -2438,6 +2443,8 @@ function buildWizardServer(options, lifetime) {
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
     : null
+  const agentChatInputs = agents ? new AgentChatInputs(bridgeOsHome ? join(bridgeOsHome, 'agent-chat-inputs.sqlite3') : ':memory:') : null
+  if (agentChatInputs) lifetime.own(() => agentChatInputs.close())
   // Each routed agent's sent files live in its own folder, so a private agent's bytes never join the
   // main agent's shared artifact store. Container homes are mounted at /opt/data; host profiles are read in place.
   const routedAgentMedia = (agent) => {
@@ -2483,10 +2490,24 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
   const agentCtx = agents ? {
+    routedPresentation,
+    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    clientViewContext,
+    noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
+      const body = JSON.stringify({ input: value.input })
+      const candidate = durableScreenshotCandidate({ body, createdAt: createdAt || Date.now() / 1000 })
+      if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
+    },
+    forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
-    projectAgentHistory: async (result, agent) => {
+    projectAgentHistory: async (result, agent, sessionId = '') => {
+      // Restore from this exact pair's accepted input receipts, not main history.
+      result = restoreDurableScreenshots(result, { admittedForSession: (_runtime, id) => agentChatInputs.forSession(agent.id, id) }, sessionId)
+      result = projectWizardFileMarkers(result, true)
       // The agent's own MEDIA:/path lines become openable chat attachments before paths are redacted.
       const media = routedAgentMedia(agent)
       if (media) {
@@ -5213,6 +5234,7 @@ function buildWizardServer(options, lifetime) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !(!operator && internalCall(request)) && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        if (request.method === 'DELETE' && principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
         // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
         let agentResolution = null
         if (agentCtx) {

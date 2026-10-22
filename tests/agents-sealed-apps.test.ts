@@ -276,13 +276,16 @@ describe('#59 private agents are sealed', () => {
     expect(sources.map((s: any) => s.source)).not.toContain('private')
     // The reader's own gateway token is no key to the private agent's threads (pinned once its own Chats listed them).
     await fetch(`${base}/wizard/hermes/api/sessions?agent=private`)
+    // The preceding owner-authorized list may hydrate presentation from history.
+    // Only the subsequent agent-credential request must perform no history read.
+    const seenBeforeDeniedRead = priv.seen.length
     const token = gatewayKey(dir, reader.id)
     const viaToken = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_1/messages`, { headers: { Authorization: `Bearer ${token}` } })
     // Refused at the principal check: an agent credential never opens another agent's (private) work. By id
     // alone the thread is not routed to the private agent at all, so the reader's credential meets the scope check.
     expect(viaToken.status).toBe(403)
     expect(await viaToken.json()).toMatchObject({ check: 'principal.agent_scope' })
-    expect(JSON.stringify(priv.seen)).not.toContain('/messages')
+    expect(JSON.stringify(priv.seen.slice(seenBeforeDeniedRead))).not.toContain('/messages')
   })
 
   it('thread reads for a private agent only through its own Chats (agent named); operator and id-only reads refused', async () => {
