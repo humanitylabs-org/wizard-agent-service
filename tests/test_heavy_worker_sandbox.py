@@ -43,6 +43,7 @@ class SandboxTest(unittest.TestCase):
             'WIZARD_HEAVY_AGENT_IMAGE': IMAGE, 'WIZARD_HEAVY_DOCKER_BIN': '/fixture/docker',
             'HOME': str(self.home), 'WORKER_FIXTURE_SECRET': 'fixture-host-only-secret'})
         self.env.start()
+        os.environ.pop('WIZARD_HEAVY_DOCKER_HOST', None)
         self.addCleanup(self.env.stop)
 
     def test_unix_socket_only_client_environment_never_container_env(self):
@@ -81,6 +82,28 @@ class SandboxTest(unittest.TestCase):
             with patch.object(worker, 'spawn_dispatcher'):
                 readback = worker.rpc(spool, lock, {'action': 'status', 'job_id': job})
             self.assertEqual(readback, result)
+
+    def test_first_agent_light_dispatch_works_without_a_host_light_database(self):
+        spool = self.root / 'fresh-spool'
+        lock = self.root / 'heavy.lock'
+        with patch.object(worker, 'spawn_dispatcher'):
+            worker.rpc(spool, lock, {'action': 'submit', 'job_id': JOB,
+                                    'spec': {**self.spec, 'lane': 'light'}})
+        self.assertTrue(worker.light_lock(spool).parent.is_dir())
+        self.assertFalse((worker.light_root(spool) / 'jobs.sqlite3').exists())
+        target = worker.light_root(worker.agent_spool(spool))
+        process = Mock(pid=os.getpid())
+        process.poll.return_value = 0
+        with patch.object(worker, 'resource_wait', return_value=''), \
+                patch.object(worker.subprocess, 'Popen', return_value=process) as popen, \
+                patch.object(worker, 'kill_agent_container'):
+            worker.dispatch(target, worker.light_lock(spool))
+        popen.assert_called_once()
+        db = worker.connect(target)
+        row = db.execute('SELECT state, reason FROM jobs WHERE id=?', (JOB,)).fetchone()
+        db.close()
+        self.assertEqual((row['state'], row['reason']), ('interrupted', 'worker_restarted_no_retry'))
+        self.assertIn(str(worker.light_lock(spool)), popen.call_args.args[0])
 
     def test_traversal_and_foreign_absolute_cwd(self):
         for cwd in (str(self.project / '../../beta/project'), str(self.beta), str(self.home), 'relative'):

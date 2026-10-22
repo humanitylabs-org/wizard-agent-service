@@ -446,6 +446,7 @@ def rpc(root, lock_path, value):
     if (agent_spool(root) / 'jobs.sqlite3').exists():
         spawn_dispatcher(agent_spool(root), lock_path)
     if (light_root(agent_spool(root)) / 'jobs.sqlite3').exists():
+        light_root(root).mkdir(mode=0o700, exist_ok=True)
         spawn_dispatcher(light_root(agent_spool(root)), light_lock(root))
     return public(row)
 
