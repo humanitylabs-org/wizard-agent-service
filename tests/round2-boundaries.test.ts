@@ -67,8 +67,8 @@ async function scene({ queued = false, manifest = null as any } = {}) {
   cleanup.push(() => new Promise<void>(resolve => { service.close(() => resolve()); service.closeAllConnections() }))
   const base = `http://127.0.0.1:${(service.address() as any).port}`
   const call = async (path: string, method = 'GET', body?: any, headers: any = owner) => fetch(`${base}${path}`, { method, headers: { ...headers, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
-  const create = async (label: string, privacy = 'standard') => {
-    const r = await call('/wizard/v1/agents', 'POST', { label, harness: 'hermes', permissions: { preset: privacy }, model: { provider: 'tinfoil', model: 'glm-5-3' } })
+  const create = async (label: string, privacy = 'standard', provider = 'tinfoil') => {
+    const r = await call('/wizard/v1/agents', 'POST', { label, harness: 'hermes', permissions: { preset: privacy }, model: { provider, model: provider === 'anthropic' ? 'claude-fixture' : 'glm-5-3' } })
     const value = await r.json(); expect([r.status, value.error]).toEqual([201, undefined]); return value.agent
   }
   return { dir, settingsPath, agentsDir, base, call, create, calls, histories, status, dispatch, manifestPath, serverOptions, service }
@@ -116,7 +116,8 @@ it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserve
   for (const baseline of archivedMainDir() ? [archivedMainDir()!, ''] : ['']) {
     if (baseline) process.env.WAS_S2C_BASELINE = baseline; else delete process.env.WAS_S2C_BASELINE
     try {
-      const s = await scene(), secondary = await s.create('Offline')
+      // Compare unchanged public-provider behavior; private-provider identity migration is covered separately.
+      const s = await scene(), secondary = await s.create('Offline', 'standard', 'anthropic')
       await s.call('/wizard/hermes/api/sessions?agent=' + secondary.id) // authenticated listing before stop
       await s.call('/wizard/v1/agents/' + secondary.id + '/stop', 'POST', {})
       // created_at is wall-clock seconds from each run's own create, so it is not part of the comparison.
