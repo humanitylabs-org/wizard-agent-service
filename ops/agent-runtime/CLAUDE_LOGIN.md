@@ -2,7 +2,7 @@
 
 ## Authorization and storage
 
-`RestrictedDriver` grants `CLAUDE_CODE_OAUTH_TOKEN` only for exactly `privacy=standard` and
+`RestrictedDriver` grants a memory-only Claude config only for exactly `privacy=standard` and
 `model.provider=anthropic` in the owner-managed record, and only when that agent has a valid
 `claude.token`. Private/unknown privacy and other providers never receive it. Ambient helper
 tokens are cleared, not inherited as authorization.
@@ -10,9 +10,17 @@ tokens are cleared, not inherited as authorization.
 The secret uses `Agents.secret`, beside `runtime.key`/`gateway.key` in the agent folder, **not**
 its home. The reader requires a readable regular, non-symlink mode-0600 file. Host-side ownership need not
 match the helper uid (for example, a root helper can read an owner-provisioned secret). No host
-secret file is mounted into the container or copied by home-sync. Only the agent's Compose env
-gets the token; edge/egress/home-init receive none. This is the long-lived `claude setup-token`
-credential supported by unmodified DirectSDK: no automatic refresh and no credential-file writes.
+secret is copied by home-sync. Compose gets only `CLAUDE_TOKEN_FILE` (the validated owner path),
+never its contents; ambient helper token env is explicitly cleared. The no-network, ro-root seeder
+`claude-init` alone binds that file read-only and atomically seeds `.credentials.json` into the
+per-agent local-driver **tmpfs** `claude-session` volume, owned uid10000 with 0700/0600 modes.
+The agent gets only this memory volume, using the plugin's supported
+`CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login`; edge/egress/home-init receive none.
+The seeder uses root with only CHOWN/FOWNER/DAC_OVERRIDE and never mounts the agent home. It must
+remain running to retain the tmpfs mount (a one-shot loses it at last unmount before agent startup).
+No shared login, refresh token or automatic refresh flow is granted. Local expiry is a non-refresh
+sentinel; server expiry/revocation remains authoritative, so replace owner setup-tokens explicitly.
+The model credential is still intentionally readable by this agent; it is not a credential enclave.
 
 Owner-side CLI (no HTTP route, stdin only; do not put credentials in argv, shell history or chat):
 
@@ -27,7 +35,10 @@ Only synthetic fixtures were used for testing; no real token was created, reques
 
 The incompatible shared-volume override and uid-permission probe have been removed from the restricted
 path. The normal/nonrestricted runtime's pre-existing shared login behavior is unchanged. No ownership,
-mode, image/core, upstream DirectSDK plugin or provider-identity migration is performed.
+mode of the owner secret, image/core, upstream DirectSDK plugin or provider-identity migration is performed.
+On every apply/start, stop the agent before home sync and remove its exact-project `claude-init`
+container so a replaced owner file is rebound by the next seeder. Start/apply remove orphans;
+stop removes seeders even if the record/token has since revoked the grant.
 
 ## Missing-token behavior
 
@@ -60,28 +71,35 @@ internal/inhibit-ipv4 sandbox and loopback-only edge publication remain intact.
 Custom `EGRESS_PASSTHROUGH_HOSTS` are rendered by upstream `passthrough.py` into an exact `!override`
 Compose alias list (requires Compose 2.24.4+). The helper writes only that secret-free override in
 `agent/runtime/passthrough.yml`; custom hosts must also appear in `EGRESS_ALLOWLIST_HOSTS`. The two
-default aliases remain the only default passthrough hosts. No Statsig, telemetry, login UI or downloads.
+default aliases remain the only default passthrough hosts. Both renderer and runtime reject reserved
+service names, all single-label aliases, invalid label syntax and special-use local/reserved suffixes;
+all names must be multi-label public DNS syntax, and real destinations must independently resolve
+only to globally routable IPs. No Statsig, telemetry, login UI or downloads.
 
 ## Redaction and conformance
 
-I14 needs an independently supplied owner `--claude-token` grant; ungranted/image-baked/empty token env
-is denied. Shared-login grants are now always refused. I19/I20 reject home-init/sidecar secret leakage;
-I21 checks exact passthrough aliases and allowlist. `redact.py` scrubs token env/key values without
-requiring a real token in argv. `in_agent.py` removes the token before importing tools, redacts evidence,
-and adds credential-free alias/direct-TLS/wrong-SNI probes. The helper's inspect route returns only
-lifecycle metadata, not container env, and errors never log Compose stderr or raw exception messages.
-Never publish raw Docker inspect/Compose config from a provisioned agent. Docker administrators can
-inspect env, and this deliberately grants the model credential to the agent; it is not an exfiltration-
-proof credential enclave. Allowed Anthropic endpoints can still be used to send agent-visible data.
+I14 needs an independently supplied owner `--claude-token` grant for the config path and **always**
+rejects gateway token env. I6 checks the actual session volume is size-capped local-driver tmpfs;
+I22 checks the no-network seeder, exact mounts and independently supplied source path (the home bind's
+sibling `claude.token`, or `--claude-token-file "$SECRET_FILE"` for named homes). I19/I20 reject
+home-init/edge/egress leakage; I21 checks exact public-DNS passthrough aliases and allowlist.
+`in_agent.py` no longer removes the Claude token before tools: it fails immediately if the unsafe env
+is present. Ordinary production dispatch is covered separately in `conformance/docker_credentials.py`.
+The helper's inspect route returns only lifecycle metadata, never container env; errors omit Compose
+stderr/raw exception strings. Never publish raw production inspect/Compose config or secrets.
+Docker admins and the agent can read the intended credential. A malicious agent can explicitly copy
+it; the fix prevents implicit persistence by ordinary tools/auth-status. Host swap/hibernation policy
+is separate from tmpfs memory backing. Allowed Anthropic endpoints can send agent-visible data.
 
 ## Provenance and evidence
 
 Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21,
-branch `feature/restricted-claude-login`, commit `453b5b0b049002e9fffcd83e1c754e848c5711e7`.
-All 22 upstream files are vendored byte-for-byte with hashes in `restricted-agent/SOURCE.txt`.
-The helper requires the base/token Compose files, alias renderer and both egress/DNS sources in that manifest.
+branch `feature/restricted-claude-login`, commit `f46d1bbcb6f6cce8ad45e41ca59b2cb12cb23a52`.
+All 26 upstream files are vendored byte-for-byte with hashes in `restricted-agent/SOURCE.txt`.
+The helper requires the base/token Compose files, alias/policy renderer, egress/DNS, seeder/Dockerfile,
+and conformance masking guard/real-image credential regression in that manifest.
 
-- Focused runtime/offline census/token unittest suite: **53 passed** with per-command isolated HOME/HERMES_HOME.
+- Round 2 baseline (historical): focused runtime/offline census/token unittest suite **53 passed** with per-command isolated HOME/HERMES_HOME.
   Includes synthetic atomic CLI, private/ambient denial, missing-token start/apply, no HTTP secret route,
   secret-free sync/errors, exact custom aliases and an in-process fake-network Service status regression.
 - Compose rendering: **5 passed**. Passthrough parser/fuzz/DNS/bounds/redaction unit suite: **25 passed**,
@@ -94,8 +112,28 @@ The helper requires the base/token Compose files, alias renderer and both egress
 - Upstream `bun test`: **78 passed** after installing the lockfile's missing dependencies.
 - Vendored hash/full-byte comparison, Python/Service syntax and `git diff --check`: passed.
 
-No model request, real token provisioning, full agent tool-dispatch conformance or production deployment
-is claimed. The real TLS proof covers transport, not DirectSDK's complete inference/admission path.
+### Round 3 review fixes (current source)
+
+- Stock image read-only audit: local terminal treats `CLAUDE_CODE_OAUTH_TOKEN` as first-party and retains
+  it in subprocess/snapshot env. No supported terminal named-var blocklist was found; a config-only
+  sanitize list is not available in this pinned image. Selected supported file-config approach instead.
+- Compose/seed/conformance guard unit: **13 passed**; passthrough unit: **27 passed**, including both
+  alias gates rejecting reserved/single-label/bad-label names. Inspect selftest **65/65**; CONNECT **12/12**.
+- Real stock image, no network, synthetic credential: ordinary `model_tools.handle_function_call`
+  terminal invocation creates a snapshot. Legacy env positive control leaks into that snapshot; fixed
+  grant has **zero matching files under `/opt/data`**, with no gateway token env. DirectSDK's unchanged
+  offline setup-status sees usable login; uncredentialed negative control does not. Agent uid10000,
+  cap-drop ALL and ro root are exercised. Production seeder script + real tmpfs volume, all fixture
+  resources labelled/--rm and removed in finally with label-filtered absence verified.
+- Credential-free internal-network transport rechecked **4/4**, verified TLS GET **404**, wrong-SNI denied.
+- Service focused runtime/token/offline-census suite **58 passed** in isolated HOME/HERMES_HOME.
+  New coverage includes secret-free path delivery, exact-project seeder rebinding/stop/revocation,
+  public-DNS alias denial before Compose, and mandatory security manifest entries.
+- All **26/26** upstream tracked files are byte-identical, SOURCE hashes valid; Service syntax and
+  `git diff --check` pass.
+
+No model request, real token provisioning, full agent conformance or production deployment is claimed.
+The dispatcher and offline readiness proofs do not claim complete DirectSDK inference/admission.
 
 ## Deployment order — not executed; no merge/deploy authorized
 
@@ -104,7 +142,7 @@ is claimed. The real TLS proof covers transport, not DirectSDK's complete infere
    runtime and SOURCE.txt; validate digests before activation. Preserve the previous release for rollback.
 3. Owner privately sets `claude.token` using the CLI above; no HTTP credential route is introduced.
 4. Owner applies `archimedes-new` through the normal lifecycle control plane. Compose must recreate the
-   agent for env/network changes; a bare container restart is insufficient.
+   agent/seeder for config/network changes; a bare container restart is insufficient.
 5. Verify status/mounts/alias IP/hardening with redacted receipts and independently authorize `--claude-token`;
    verify a private agent still has no token, then run a separately authorized short Claude inference canary.
 6. If anything fails, stop rollout and restore the prior helper/runtime configuration. Never repair by

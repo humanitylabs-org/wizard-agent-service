@@ -2,7 +2,7 @@
 """Outside-in checks of what Docker actually applied to the restricted agent's containers.
 
 Usage:
-  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-token]
+  inspect_check.py <compose-project> <ingress host:port> <agent api key> [expected home bind source] [--claude-token] [--claude-token-file <owner secret path>]
   inspect_check.py --selftest     # proves the mount and environment rules reject bad layouts
 
 Without a home bind source the home must be the project's own named volume `<project>_agent-home`.
@@ -14,6 +14,9 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sidecars"))
+from hostname_policy import valid_public_hostname
 
 FORBIDDEN_HOME_SOURCES = {"/", "/home", "/Users", "/root", "/var", "/etc", "/opt", "/srv", "/Volumes", "/mnt",
                           "/var/lib/docker", "/run", "/var/run", "/tmp"}
@@ -27,8 +30,8 @@ CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"
 CLAUDE_CONFIG_ENV = "CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"
 
 
-def mount_problems(mounts, project, home_source=None, claude_login=False):
-    """Exact mounts, with the shared login only when independently granted by the checker caller."""
+def mount_problems(mounts, project, home_source=None, claude_login=False, claude_token=False):
+    """Exact mounts; memory-only Claude config requires an independent owner grant."""
     problems = []
     home_volume, skills_volume = f"{project}_agent-home", f"{project}_system-skills"
     by_dest = {}
@@ -40,6 +43,11 @@ def mount_problems(mounts, project, home_source=None, claude_login=False):
     allowed = {"/opt/data", "/opt/wizard-skills"}
     if claude_login:
         problems.append("legacy shared-login grant removed; use an agent token")
+    if claude_token:
+        allowed.add("/run/claude-login")
+        login = (by_dest.get("/run/claude-login") or [None])[0]
+        if not login or login["type"] != "volume" or login["src"] != f"{project}_claude-session" or not login["rw"]:
+            problems.append("Claude config must be this agent's memory-only session volume")
     extra = sorted(set(by_dest) - allowed)
     if extra:
         problems.append(f"unexpected mounts: {extra}")
@@ -88,13 +96,15 @@ CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def env_problems(env_names, image_env_names, claude_login=False, claude_token=False):
-    allowed = COMPOSE_ENV | ({CLAUDE_CONFIG_ENV} if claude_login else set()) | ({CLAUDE_TOKEN_ENV} if claude_token else set())
+    allowed = COMPOSE_ENV | ({CLAUDE_CONFIG_ENV} if claude_token else set())
     extra = sorted(set(env_names) - set(image_env_names) - allowed)
     problems = [f"environment not granted by image or compose: {extra}"] if extra else []
-    if claude_login or CLAUDE_CONFIG_ENV in env_names:
+    if claude_login:
         problems.append("legacy shared-login grant removed; use an agent token")
-    if (CLAUDE_TOKEN_ENV in env_names) != claude_token:
-        problems.append("Claude token environment must match the explicit token grant")
+    if CLAUDE_TOKEN_ENV in env_names:
+        problems.append("Claude token in gateway env would persist in terminal snapshots")
+    if (CLAUDE_CONFIG_ENV in env_names) != claude_token:
+        problems.append("Claude config must match the independent token grant")
     return problems
 
 
@@ -104,12 +114,41 @@ def passthrough_problems(env, aliases):
     allowed = set(env.get("EGRESS_ALLOWLIST_HOSTS", "").replace(",", " ").split())
     # Docker supplies service/container aliases too; only dotted DNS aliases are provider aliases.
     actual = {a for a in aliases if "." in a}
-    return [] if hosts and hosts == declared == actual and hosts <= allowed else ["passthrough hosts/aliases/allowlist mismatch"]
+    return [] if (hosts and hosts == declared == actual and hosts <= allowed
+                  and all(valid_public_hostname(h) for h in hosts)) else ["passthrough hosts/aliases/allowlist mismatch"]
 
 
 def sidecar_login_problems(mounts):
     return ["Claude login must never be mounted in a sidecar"] if any(
-        m.get("Name") == CLAUDE_LOGIN_VOLUME or m.get("Destination") == "/claude" for m in mounts) else []
+        m.get("Name") == CLAUDE_LOGIN_VOLUME or m.get("Destination") in ("/claude", "/run/claude-login", "/run/secrets/claude.token") for m in mounts) else []
+
+
+def claude_seed_problems(container, project, expected_source):
+    problems = []
+    cfg, host = container.get("Config", {}), container.get("HostConfig", {})
+    if cfg.get("User") != "0:0" or host.get("NetworkMode") != "none" or not host.get("ReadonlyRootfs"):
+        problems.append("Claude seeder must be ro-root, no-network root initializer")
+    if (set(host.get("CapDrop") or []) != {"ALL"}
+            or set(host.get("CapAdd") or []) != {"CHOWN", "FOWNER", "DAC_OVERRIDE"}
+            or host.get("Privileged")
+            or "no-new-privileges:true" not in (host.get("SecurityOpt") or [])
+            or host.get("PidMode") == "host" or host.get("IpcMode") == "host"):
+        problems.append("Claude seeder hardening mismatch")
+    if container.get("State", {}).get("Status") != "running":
+        problems.append("Claude seeder must retain the tmpfs mount")
+    if any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in cfg.get("Env", [])):
+        problems.append("Claude token must not be in seeder env")
+    mounts = container.get("Mounts", [])
+    by_dest = {m.get("Destination"): m for m in mounts}
+    if len(mounts) != 2 or set(by_dest) != {"/run/secrets/claude.token", "/run/claude-login"}:
+        problems.append("Claude seeder must mount only the secret and session tmpfs")
+    secret, session = by_dest.get("/run/secrets/claude.token", {}), by_dest.get("/run/claude-login", {})
+    if (not expected_source or secret.get("Type") != "bind" or secret.get("RW")
+            or secret.get("Source") != expected_source):
+        problems.append("Claude seeder secret must match independent owner path, read-only")
+    if session.get("Type") != "volume" or session.get("Name") != f"{project}_claude-session" or not session.get("RW"):
+        problems.append("Claude seeder must use this agent's session volume")
+    return problems
 
 
 def selftest():
@@ -182,7 +221,7 @@ def selftest():
         ok = not env_problems([CLAUDE_CONFIG_ENV] if present else [],
                               [CLAUDE_CONFIG_ENV] if image_present else [], granted)
         results.append({"case": f"login env {granted}/{present}/{image_present}", "pass": ok == expect_ok})
-    for granted, present, image_present, expect_ok in ((True, True, False, True), (False, True, False, False),
+    for granted, present, image_present, expect_ok in ((True, True, False, False), (False, True, False, False),
                                                       (True, False, False, False), (False, True, True, False)):
         ok = not env_problems([CLAUDE_TOKEN_ENV] if present else [],
                               [CLAUDE_TOKEN_ENV] if image_present else [], claude_token=granted)
@@ -195,6 +234,30 @@ def selftest():
                               (["api.anthropic.com", "platform.claude.com", "example.com"], False)):
         results.append({"case": f"passthrough aliases {aliases}",
                         "pass": (not passthrough_problems(env, aliases)) == expected})
+    for granted, present, expected in ((True, True, True), (False, True, False), (True, False, False)):
+        ok = not env_problems([CLAUDE_CONFIG_ENV] if present else [], [], claude_token=granted)
+        results.append({"case": f"config env {granted}/{present}", "pass": ok == expected})
+    session = {"type": "volume", "src": f"{p}_claude-session", "dest": "/run/claude-login", "rw": True}
+    for granted, present, expected in ((True, True, True), (False, True, False), (True, False, False)):
+        ok = not mount_problems([*good, *([session] if present else [])], p, claude_token=granted)
+        results.append({"case": f"config mount {granted}/{present}", "pass": ok == expected})
+    for name in ("agent", "edge", "egress", "localhost", "agent-service-host", "foo.localhost", "bad-.example.com"):
+        reserved = {"EGRESS_PASSTHROUGH_HOSTS": name, "EGRESS_PASSTHROUGH_ALIASES": name, "EGRESS_ALLOWLIST_HOSTS": name}
+        results.append({"case": f"reserved alias {name}", "pass": bool(passthrough_problems(reserved, [name]))})
+    seed = {"Config": {"User": "0:0", "Env": []}, "State": {"Status": "running"},
+            "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "CapDrop": ["ALL"],
+                           "CapAdd": ["CHOWN", "FOWNER", "DAC_OVERRIDE"], "SecurityOpt": ["no-new-privileges:true"]},
+            "Mounts": [{"Type": "bind", "Source": "/srv/agents/fixture/claude.token", "Destination": "/run/secrets/claude.token", "RW": False},
+                       {"Type": "volume", "Name": "proj_claude-session", "Destination": "/run/claude-login", "RW": True}]}
+    import copy
+    mutations = [({}, True), ({"State": {"Status": "exited"}}, False),
+                 ({"Config": {"User": "10000:10000"}}, False),
+                 ({"Mounts": seed["Mounts"][:1]}, False)]
+    for i, (update, expected) in enumerate(mutations):
+        changed = copy.deepcopy(seed); changed.update(update)
+        results.append({"case": f"seeder layout {i}", "pass": (not claude_seed_problems(changed, p, "/srv/agents/fixture/claude.token")) == expected})
+    for source in (None, "/other/claude.token"):
+        results.append({"case": f"seeder wrong source {source}", "pass": bool(claude_seed_problems(seed, p, source))})
     print(json.dumps({"summary": {"total": len(results), "passed": sum(r["pass"] for r in results),
                                   "failed": [r["case"] for r in results if not r["pass"]]}, "checks": results}, indent=1))
     sys.exit(0 if all(r["pass"] for r in results) else 1)
@@ -207,6 +270,11 @@ args = sys.argv[1:]
 claude_login = "--claude-login" in args
 if claude_login:
     args.remove("--claude-login")
+claude_token_file = None
+if "--claude-token-file" in args:
+    pos = args.index("--claude-token-file")
+    claude_token_file = args[pos + 1]
+    del args[pos:pos + 2]
 claude_token = "--claude-token" in args
 if claude_token:
     args.remove("--claude-token")
@@ -246,7 +314,14 @@ check("I4", "no-new-privileges", no_new_privs(hc), hc.get("SecurityOpt"))
 check("I5", "read-only root filesystem", hc.get("ReadonlyRootfs") is True, hc.get("ReadonlyRootfs"))
 mounts = [{"type": m["Type"], "dest": m["Destination"], "rw": m["RW"], "src": m.get("Name") or m.get("Source")}
           for m in a.get("Mounts", [])]
-problems = mount_problems(mounts, project, home_source, claude_login)
+problems = mount_problems(mounts, project, home_source, claude_login, claude_token)
+if claude_token:
+    volume = json.loads(subprocess.check_output(["docker", "volume", "inspect", f"{project}_claude-session"], text=True))[0]
+    options = volume.get("Options") or {}
+    if volume.get("Driver") != "local" or options.get("type") != "tmpfs" or options.get("device") != "tmpfs":
+        problems.append("Claude session volume is not memory-only tmpfs")
+    if not all(x in options.get("o", "").split(",") for x in ("size=4m", "uid=10000", "gid=10000", "mode=0700", "nosuid", "nodev", "noexec")):
+        problems.append("Claude tmpfs volume hardening mismatch")
 check("I6", "exactly the intended mounts: own home, system skills and explicitly granted login only", not problems,
       {"mounts": mounts, "problems": problems, "expected_home_source": home_source, "claude_login": claude_login})
 check("I7", "no socket or other host path mounted", not any("sock" in p or "unexpected" in p for p in problems), problems)
@@ -273,10 +348,8 @@ if cfg.get("Image"):
     image_env = [e.split("=", 1)[0] for e in json.loads(subprocess.check_output(
         ["docker", "image", "inspect", cfg["Image"]], text=True))[0]["Config"].get("Env") or []]
 env_bad = env_problems(env_names, image_env, claude_login, claude_token)
-if claude_login and f"{CLAUDE_CONFIG_ENV}=/claude" not in (cfg.get("Env") or []):
-    env_bad.append("Claude config directory must be /claude")
-if claude_token and not any(e.startswith(CLAUDE_TOKEN_ENV + "=") and e.split("=", 1)[1] for e in cfg.get("Env", [])):
-    env_bad.append("Claude token grant must not be empty")
+if claude_token and f"{CLAUDE_CONFIG_ENV}=/run/claude-login" not in (cfg.get("Env") or []):
+    env_bad.append("Claude config directory must be /run/claude-login")
 check("I14", "environment is exactly image defaults plus the compose grants", not env_bad and bool(image_env),
       {"env": env_names, "problems": env_bad})
 tmpfs = hc.get("Tmpfs") or {}
@@ -312,6 +385,19 @@ for svc in ("egress", "edge"):
         check("I18-edge", "edge publishes only the inbound relay, on host loopback only",
               set(bindings) == {"8642/tcp"} and bool(host_ips) and all(ip in ("127.0.0.1", "::1") for ip in host_ips),
               bindings)
+
+seeders = inspect("claude-init", all_states=True)
+seed_bad = []
+if claude_token:
+    if len(seeders) != 1:
+        seed_bad.append("expected exactly one Claude seeder")
+    else:
+        expected = claude_token_file or (str(Path(home_source).parent / "claude.token") if home_source else None)
+        seed_bad.extend(claude_seed_problems(seeders[0], project, expected))
+elif seeders:
+    seed_bad.append("ungranted Claude seeder")
+check("I22", "Claude seeder matches independently authorized, isolated memory-only grant", not seed_bad,
+      "; ".join(seed_bad) or "isolated seeder and secret path match owner grant")
 
 init = inspect("home-init", all_states=True)
 ihc = init[0]["HostConfig"] if init else {}

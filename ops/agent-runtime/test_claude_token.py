@@ -44,12 +44,14 @@ class ClaudeTokenTest(unittest.TestCase):
         self.driver._compose(self.agent, 'config', timeout=30)
         args, env = self.calls[-1]
         self.assertIn(str(ar.RESTRICTED_DIR / 'compose.claude-token.yml'), args)
-        self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-claude-value')
+        self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], '')
+        self.assertEqual(env['CLAUDE_TOKEN_FILE'], str(self.folder / 'claude.token'))
+        self.assertNotIn('fixture-claude-value', json.dumps(env))
         self.assertNotIn('fixture-claude-value', ' '.join(args))
         self.assertNotIn('claude-login', ' '.join(args))
         # Host-side readable owner secrets need not share the helper's effective uid.
         with mock.patch.object(ar.os, 'geteuid', return_value=-1):
-            self.assertEqual(self.driver.env(self.agent)['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-claude-value')
+            self.assertEqual(self.driver.env(self.agent)['CLAUDE_TOKEN_FILE'], str(self.folder / 'claude.token'))
 
     def test_private_unknown_and_other_provider_never_receive_token(self):
         self.set_token()
@@ -59,10 +61,59 @@ class ClaudeTokenTest(unittest.TestCase):
             args, env = self.calls[-1]
             self.assertNotIn(str(ar.RESTRICTED_DIR / 'compose.claude-token.yml'), args)
             self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], '')
+            self.assertEqual(env['CLAUDE_TOKEN_FILE'], '')
 
     def test_ambient_token_does_not_authorize(self):
-        with mock.patch.dict(os.environ, {'CLAUDE_CODE_OAUTH_TOKEN': 'fixture-ambient'}):
+        with mock.patch.dict(os.environ, {'CLAUDE_CODE_OAUTH_TOKEN': 'fixture-ambient',
+                                          'CLAUDE_TOKEN_FILE': '/ungranted/claude.token'}):
             self.assertEqual(self.driver.env(self.agent)['CLAUDE_CODE_OAUTH_TOKEN'], '')
+            self.assertEqual(self.driver.env(self.agent)['CLAUDE_TOKEN_FILE'], '')
+
+    def test_apply_recreates_seeder_before_home_sync_and_up(self):
+        self.set_token()
+        def fake(args, **kw):
+            result = self.fake(args, **kw)
+            if args[0] == 'ps': result.stdout = 'synthetic-seeder-id\n'
+            return result
+        with mock.patch.object(ar, 'docker', side_effect=fake):
+            self.driver.apply(self.agent)
+        commands = [args for args, _ in self.calls]
+        removal = commands.index(['rm', '-f', 'synthetic-seeder-id'])
+        stopping = next(i for i, a in enumerate(commands) if 'stop' in a)
+        sync = next(i for i, a in enumerate(commands) if a[0] == 'run')
+        up = next(i for i, a in enumerate(commands) if 'up' in a)
+        self.assertLess(stopping, removal)
+        self.assertLess(removal, sync)
+        self.assertLess(sync, up)
+        selected = next(a for a in commands if a[0] == 'ps')
+        self.assertIn('label=com.docker.compose.project=agent-daily', selected)
+        self.assertIn('label=com.docker.compose.service=claude-init', selected)
+        self.assertNotIn('fixture-claude-value', json.dumps(self.calls))
+
+    def test_revoked_and_private_stop_remove_old_seeder(self):
+        for private in (False, True):
+            if private: self.agent['privacy'] = 'private'
+            def fake(args, **kw):
+                result = self.fake(args, **kw)
+                if args[0] == 'ps': result.stdout = 'synthetic-seeder-id\n'
+                return result
+            self.calls.clear()
+            with mock.patch.object(ar, 'docker', side_effect=fake):
+                self.driver.stop(self.agent)
+            self.assertIn(['rm', '-f', 'synthetic-seeder-id'], [a for a, _ in self.calls])
+            self.assertEqual(self.calls[-1][0][-1], 'stop')
+
+    def test_start_removes_orphans_on_grant_revocation(self):
+        with mock.patch.object(self.driver, '_prepare'):
+            self.driver.start(self.agent)
+        self.assertEqual(self.calls[-1][0][-3:], ['up', '-d', '--remove-orphans'])
+
+    def test_reserved_custom_aliases_never_reach_compose(self):
+        for host in ('agent', 'edge', 'egress', 'localhost', 'agent-service-host', 'bad-.example.com'):
+            self.calls.clear()
+            with mock.patch.dict(os.environ, {'EGRESS_PASSTHROUGH_HOSTS': host}), self.assertRaises(ValueError):
+                self.driver._compose(self.agent, 'config', timeout=30)
+            self.assertEqual(self.calls, [])
 
     def test_missing_token_starts_without_crash_loop(self):
         with mock.patch.object(self.driver, '_prepare'):

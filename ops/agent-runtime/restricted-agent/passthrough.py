@@ -5,15 +5,17 @@ The Service uses this renderer too. YAML !override prevents additive alias mergi
 """
 import json
 import os
-import re
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'sidecars'))
+from hostname_policy import valid_public_hostname
 
 DEFAULT_HOSTS = "api.anthropic.com platform.claude.com"
 
 
 def compose_override(value):
     hosts = sorted(set(value.replace(",", " ").split()))
-    if not hosts or any(len(h) > 253 or not re.fullmatch(r"[a-z][a-z0-9.-]*[a-z]", h)
-                        or any(not label or len(label) > 63 for label in h.split(".")) for h in hosts):
+    if not hosts or any(not valid_public_hostname(h) for h in hosts):
         raise ValueError("invalid passthrough hosts")
     text = " ".join(hosts)
     return ("services:\n  egress:\n    environment:\n      EGRESS_PASSTHROUGH_HOSTS: " + json.dumps(text)

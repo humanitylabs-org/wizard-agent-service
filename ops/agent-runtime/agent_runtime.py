@@ -398,8 +398,11 @@ class RestrictedDriver:
             "EDGE_UPSTREAM_PORT": str(self.listener_port),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = (self.agents.secret(agent["id"], "claude.token")
-                                           if uses_claude_login(agent) else "")
+        # Clear ambient helper credentials; only the independently authorized path
+        # reaches Compose. A gateway token env persists in Hermes terminal snapshots.
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
+        env["CLAUDE_TOKEN_FILE"] = (str(self.agents.root / agent["id"] / "claude.token")
+                                    if uses_claude_login(agent) and self.agents.secret(agent["id"], "claude.token") else "")
         if self.image:
             env["AGENT_IMAGE"] = self.image
         return env
@@ -407,7 +410,7 @@ class RestrictedDriver:
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
         env = self.env(agent)
         files = ["-f", str(self.compose_file)]
-        if env["CLAUDE_CODE_OAUTH_TOKEN"]:
+        if env["CLAUDE_TOKEN_FILE"]:
             # Independent owner record + per-agent secret, never ambient credentials.
             files += ["-f", str(self.runtime_dir / "compose.claude-token.yml")]
         hosts = os.environ.get("EGRESS_PASSTHROUGH_HOSTS")
@@ -453,6 +456,18 @@ class RestrictedDriver:
             docker(["rm", "-f", name], timeout=60, check=False)
             raise RuntimeFailure("agent_sync_timeout", 504)
 
+    def _remove_claude_seeder(self, agent: dict) -> None:
+        # An atomic owner-file replacement changes its inode: recreate the binder
+        # on every apply/start, even when Compose's path string has not changed.
+        # Select independently of the current grant so revocation/private changes
+        # also remove an old seeder (including on stop).
+        ids = docker(["ps", "-a", "-q", "--filter", f"label=com.docker.compose.project={self.project(agent['id'])}",
+                      "--filter", "label=com.docker.compose.service=claude-init"], timeout=60,
+                     env={"CLAUDE_CODE_OAUTH_TOKEN": "", "CLAUDE_TOKEN_FILE": ""}).stdout.split()
+        if ids:
+            docker(["rm", "-f", *ids], timeout=60,
+                   env={"CLAUDE_CODE_OAUTH_TOKEN": "", "CLAUDE_TOKEN_FILE": ""})
+
     def _prepare(self, agent: dict) -> None:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
@@ -462,6 +477,7 @@ class RestrictedDriver:
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
+        self._remove_claude_seeder(agent)
         self.sync_home(agent)
 
     def apply(self, agent: dict) -> dict:
@@ -476,10 +492,11 @@ class RestrictedDriver:
 
     def start(self, agent: dict) -> dict:
         self._prepare(agent)
-        self._compose(agent, "up", "-d", timeout=1800)
+        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
         return {"ok": True, **self.claude_status(agent)}
 
     def stop(self, agent: dict) -> dict:
+        self._remove_claude_seeder(agent)
         self._compose(agent, "stop", timeout=300)
         return {"ok": True}
 
@@ -491,7 +508,9 @@ def verify_vendored(runtime_dir: Path) -> None:
     except OSError:
         raise SystemExit("restricted runtime: SOURCE.txt missing") from None
     listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
-    for required in ("./compose.yml", "./compose.claude-token.yml", "./passthrough.py", "./sidecars/egress.py", "./sidecars/upstream_dns.py"):
+    for required in ("./compose.yml", "./compose.claude-token.yml", "./passthrough.py", "./sidecars/egress.py",
+                     "./sidecars/upstream_dns.py", "./sidecars/hostname_policy.py", "./sidecars/claude-init.py",
+                     "./sidecars/Dockerfile", "./conformance/in_agent.py", "./conformance/docker_credentials.py"):
         if not any(name == required for _, name in listed):
             raise SystemExit(f"restricted runtime: {required[2:]} is not listed in SOURCE.txt")
     for digest, name in listed:

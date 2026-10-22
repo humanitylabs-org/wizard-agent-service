@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def render(granted=False, hosts=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith(('AGENT_', 'EDGE_', 'EGRESS_', 'COMPOSE_', 'CLAUDE_'))}
     env.update(AGENT_API_KEY='synthetic-api-key', EDGE_TOKEN_SHA256='0' * 64,
-               CLAUDE_CODE_OAUTH_TOKEN='synthetic-claude-value')
+               CLAUDE_TOKEN_FILE='/synthetic/agent/claude.token')
     args = ['docker', 'compose', '--project-name', 'claude-grant-fixture', '-f', str(ROOT / 'compose.yml')]
     if granted:
         args += ['-f', str(ROOT / 'compose.claude-token.yml')]
@@ -38,13 +38,20 @@ class ClaudeComposeTest(unittest.TestCase):
             self.assertNotIn('CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR', service.get('environment', {}))
             self.assertFalse(any(v['target'] == '/claude' for v in service.get('volumes', [])))
 
-    def test_token_only_in_agent(self):
+    def test_token_only_in_memory_config(self):
         doc = render(True)
-        for name, service in doc['services'].items():
-            if name == 'agent':
-                self.assertEqual(service['environment']['CLAUDE_CODE_OAUTH_TOKEN'], 'synthetic-claude-value')
-            else:
-                self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', service.get('environment', {}))
+        for service in doc['services'].values():
+            self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', service.get('environment', {}))
+        agent = doc['services']['agent']
+        self.assertEqual(agent['environment']['CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR'], '/run/claude-login')
+        self.assertNotIn('/run/secrets/claude.token', [v['target'] for v in agent['volumes']])
+        init = doc['services']['claude-init']
+        self.assertEqual(init['network_mode'], 'none')
+        self.assertTrue(init['read_only'])
+        self.assertEqual(init['volumes'][0]['source'], '/synthetic/agent/claude.token')
+        self.assertTrue(init['volumes'][0]['read_only'])
+        self.assertFalse(init['volumes'][0]['bind']['create_host_path'])
+        self.assertEqual(doc['volumes']['claude-session']['driver_opts']['type'], 'tmpfs')
         self.assertNotIn('claude-login', doc.get('volumes', {}))
 
     def test_grant_preserves_hardening(self):
@@ -52,8 +59,10 @@ class ClaudeComposeTest(unittest.TestCase):
         for name in ('edge', 'egress', 'home-init'):
             self.assertEqual(base['services'][name], grant['services'][name])
         a, b = base['services']['agent'], grant['services']['agent']
-        for key in set(a) - {'environment'}:
+        for key in set(a) - {'environment', 'volumes', 'depends_on'}:
             self.assertEqual(a[key], b[key], key)
+        self.assertEqual(a['volumes'], [v for v in b['volumes'] if v['target'] != '/run/claude-login'])
+        self.assertEqual(a['depends_on'], {k: v for k, v in b['depends_on'].items() if k != 'claude-init'})
         self.assertEqual(b['user'], '10000:10000')
         self.assertEqual(b['cap_drop'], ['ALL'])
         self.assertTrue(b['read_only'])

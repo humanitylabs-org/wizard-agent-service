@@ -1,30 +1,36 @@
-Vendored exact bytes from humanitylabs-org/wizard-app-store @ 453b5b0b049002e9fffcd83e1c754e848c5711e7
+Vendored exact bytes from humanitylabs-org/wizard-app-store @ f46d1bbcb6f6cce8ad45e41ca59b2cb12cb23a52
 Branch: feature/restricted-claude-login; path: runtimes/restricted-agent.
 Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21
-Receipts: inspect selftest 46/46; Compose 5/5; passthrough unit 25/25; CONNECT gate 12/12;
-Docker internal-network proof 4/4 (real verified TLS, HTTP 404, distinctive mismatched-SNI refusal);
-store bun test 78/78. No real credentials, model calls, merge or deployment.
+Round 3 receipts: inspect selftest 65/65; Compose/seed/conformance unit 13/13;
+passthrough unit 27/27; CONNECT gate 12/12; real-image dispatcher legacy leak control
+and fixed tmpfs grant both verified, offline DirectSDK login positive/negative controls;
+Docker internal-network transport 4/4 (verified TLS, HTTP 404, wrong-SNI refusal).
+No real credentials, model calls, full-agent conformance, merge or deployment.
 Do not edit here; change upstream and re-vendor.
 
-ec7759d8e2fea5237238c9dc12ee49ca2a30ca7365a17d722bc6ba41cedd5f5f  ./README.md
-933176bbf414cca20d4a4dda446e22744a71a45c83c107672343932a39433770  ./compose.claude-token.yml
+c8dc4d4e34be93f9e4d3e21caaeba3efdd0068957b91f2c49e1fda6f1577b2b2  ./README.md
+5d22893afcf9a129af19a61d0e1ce63d5000c09beabac9e4500aa1f54656409b  ./compose.claude-token.yml
 a33cc3460618858f2d269f51e2cd65709d425949d366af89cfc0cb62d9123659  ./compose.yml
 39658033c644cafe1ab3282a645b923b918627aa9c899b50e88388fcbe6c3021  ./conformance/Dockerfile
 9255327432c32186589b2d7c0d0394f0d3c3ae49d0749e2ed1aaf1f0e8a4fa8e  ./conformance/compose.test.yml
+0487aa506929dad90a9b4eceee4680fb6746e5ea6b684ec3cf3a0b0ee768f0f5  ./conformance/docker_credentials.py
 e1409275b7f683e250ce690e1de34c63e9085e4128a2276b8da1037f493a22bb  ./conformance/docker_passthrough.py
 fac12ff62d85bef160b3f9fbd5faedc8c62a4b6009367fa4b39f641744ea9e86  ./conformance/egress_selftest.py
 9fcacfb8f8fa1f93aae1f02166a75ee9a638eb7a96f79fa515f302f3b1eebf86  ./conformance/fake_service.py
-2661958277ea14f34808e103800f87614082c70a18c0628bb339927a44022451  ./conformance/in_agent.py
-031195b304eb09fc480c4fc58cd10dfbc78580e48868940176b818d429d25561  ./conformance/inspect_check.py
+736ebfd6f4663499f5302665da4f3e4bb38b4e5d3605c21cf1c0604563179d56  ./conformance/in_agent.py
+dc370ba26155462b6b33863589e3c2638fb49fc9f495cd959ce1ad5e1fdd0e5a  ./conformance/inspect_check.py
 7ddd4f1c83b5041fbc8210d893260321d418c68db3f2d5f298ae0863fd97f2dc  ./conformance/redact.py
 f6b6e244ef30a62dd85b550ecd5c5972629ef4077c0ee8e185c329550f9c3b24  ./conformance/run.sh
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
-b27718287e33c4da9fad276fbd01a65c138d240ac1e453d1706b12035c089c34  ./conformance/test_claude_login.py
+591f94922f16b7272057e5b6f7ab06301d13ce652fe394bb8add485a51f043d0  ./conformance/test_claude_login.py
+38e15fe3906662f42706131dad4ef208d9d632203cdd0e79c3f62d08bee3af12  ./conformance/test_claude_seed.py
 ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
-465350d3e4a46d3dfdb0f7614d949b8b907bc607333fc503e82b8fecfcc81fe8  ./conformance/test_passthrough.py
-dfe53e203f8c0cc77c57a81bbd422cfd676e62fc36d1edfaad195721d4c00508  ./passthrough.py
-70a1986217d91bd62c8df5708cc561c63bba0ec678e5b651076448a7fe0cd5a6  ./sidecars/Dockerfile
+edc731730daffd878838d9f33b23fdb4a9547134680ba35a3970f7e8f979ba26  ./conformance/test_passthrough.py
+67a67ddd0243ad8fe5944ffb9e55a182f7ef11ba70aceb5acd919e67110303ff  ./passthrough.py
+5704656a3c8e8f15cc2eee2bd93bf6ff2fbf8cce96467e03f247037f90bf665c  ./sidecars/Dockerfile
+a93a231711cfdad2a50091f74215b2c536b4032eb11af8e96acc71e82e53790e  ./sidecars/claude-init.py
 7f7561c1b6c2be5baa9a32c75da154d1327e88a9ae5129dfe39041508180193d  ./sidecars/edge.py
-7d3e514d35b44527f38a6b731b13c1e7e0ccadd4427264427a632018cab5f712  ./sidecars/egress.py
+f4b0d531b683bba2ae114d811a8d526ea9d15d8fce7cdba54ca38ecd0c7739da  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh
+692526eec507e85fe7de07943d79b5db7c21fd18ded53e6f3db12ed45fe7785c  ./sidecars/hostname_policy.py
 c295c5c8547d00844b474b7f4586847d04816da0eedb3b66181bf50a5e31ba1d  ./sidecars/upstream_dns.py

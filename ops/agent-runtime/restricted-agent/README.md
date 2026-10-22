@@ -39,18 +39,44 @@ docker compose -f compose.yml -p agent-<id> up -d --build
 
 The trusted driver loads `compose.claude-token.yml` only for owner-managed records with
 `privacy: standard`, `model.provider: anthropic`, and an agent-scoped `claude.token` secret.
-It passes that secret only as `CLAUDE_CODE_OAUTH_TOKEN` in `agent`. This is the long-lived
-`claude setup-token` token supported by the unmodified DirectSDK plugin, not shared refresh state.
-No shared login directory is mounted, no refresh file is written, and uid 10000 stays unchanged.
+It passes only the **path** as `CLAUDE_TOKEN_FILE` to Compose. Never put the token in the gateway
+process environment: this stock image explicitly retains `CLAUDE_CODE_OAUTH_TOKEN` in terminal
+subprocesses and persists it in `cache/terminal/hermes-snap-*.sh`. There is no supported named-var
+blocklist in that image; editing core Hermes or the DirectSDK plugin is not part of this grant.
+
+The no-network `claude-init` seeder reads the owner file through a read-only bind mount (outside
+`/opt/data`), validates regular/non-symlink mode 0600 input, and atomically writes `.credentials.json`
+into a size-capped **local-driver tmpfs volume**. It uses root with only CHOWN/FOWNER/DAC_OVERRIDE,
+no-new-privileges and read-only root, just like the existing home initializer, but never mounts home.
+The seeder stays running to retain the tmpfs mount: a one-shot initializer would lose the memory
+volume at its last unmount before the agent starts. The agent gets only this per-agent memory volume,
+uid10000-owned 0700/0600, via supported `CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login`.
+No raw secret mount or token env reaches the agent, home-init, edge or egress. No shared login state
+or refresh token is granted. This is an owner setup-token, not a managed OAuth refresh flow;
+local expiry is a non-refresh sentinel, while server-side expiry/revocation remains authoritative.
+The helper must stop the agent, recreate the seeder to rebind an atomically rotated owner file,
+then recreate the agent on apply/start. Missing/revoked grants must remove orphan seeders.
+Agent uid10000/cap-drop ALL, ro root and network boundaries are unchanged.
 Private/unknown privacy and other providers receive no token, including from the helper's ambient env.
 The shared-volume override has been removed: uid-1000 0700/0600 writers are incompatible with uid 10000.
 Missing tokens do not prevent startup: the helper reports `claude_token_missing` without restart loops.
 
 `inspect_check.py --claude-token` is an independent owner grant, never inferred from container env.
-I14 rejects absent/empty/ungranted token env; helpers/sidecars must never receive it. Receipts scrub
-Claude env values in `redact.py`; `in_agent.py` removes the token before importing tools/snapshotting env.
-Do not print `docker compose config`, raw inspect, or helper env in production. Docker administrators
-can still inspect container env; the agent intentionally has its own model credential.
+I14 always rejects token env and requires the independently granted config path; I6 validates the
+per-agent tmpfs mount and its actual Docker volume driver/options; I22 validates the isolated seeder
+and independently supplied owner source. With named homes, pass `--claude-token-file "$SECRET_FILE"`;
+with a dedicated home bind, the default expected source is its sibling `claude.token`.
+`in_agent.py` no longer masks the flaw: it fails if a gateway token env would persist.
+`conformance/docker_credentials.py` uses the real stock image and ordinary `model_tools` terminal
+dispatcher (no pre-removal). The old env delivery must produce a matching home snapshot; the new
+grant must produce a snapshot but **zero** matching files anywhere under `/opt/data`, before/after
+DirectSDK's offline usable-login probe, with an uncredentialed negative control. Agent runs uid10000
+without capabilities; the seeder uses the production script and a real tmpfs volume. Finally cleanup
+verifies fixture-labelled containers, networks and volumes are absent. Only synthetic credentials.
+Never publish raw production inspect/Compose config or secret contents. Docker admins and the agent
+can read the intentionally granted credential; this is not a credential enclave. tmpfs is memory-backed
+but host swap/hibernation policy is separate. A malicious agent can deliberately copy its own credential;
+the regression proves ordinary dispatch/auth status no longer persists it implicitly.
 
 ## Direct TLS passthrough
 
@@ -70,10 +96,13 @@ port sysctl, not an added capability. No Statsig, telemetry, interactive login o
 For custom `EGRESS_PASSTHROUGH_HOSTS`, render `python3 passthrough.py > aliases.yml` and pass
 `-f aliases.yml` **after** `-f compose.yml`. Compose 2.24.4+ `!override` replaces aliases rather than
 merging them. The Service does this automatically. Each custom host must also be in
-`EGRESS_ALLOWLIST_HOSTS`; alias/allowlist mismatch fails closed. The renderer contains no credentials.
+`EGRESS_ALLOWLIST_HOSTS`; alias/allowlist mismatch fails closed. Both renderer and runtime reject
+single-label/reserved service names (`agent`, `edge`, `egress`, `localhost`, `agent-service-host`),
+invalid DNS labels and special-use local/reserved suffixes. Names must be multi-label public DNS
+syntax; resolved destinations must still independently be globally routable. The renderer contains no credentials.
 
 Focused checks: `conformance/test_claude_login.py` (Compose rendering), `test_passthrough.py`
-(parser/fuzz/DNS/bounds/redaction), `egress_selftest.py`, and `inspect_check.py --selftest`.
+(parser/fuzz/DNS/bounds/redaction), `test_claude_seed.py`, `egress_selftest.py`, and `inspect_check.py --selftest`.
 `conformance/docker_passthrough.py` uses labelled, disposable --rm containers/networks with an internal
 sandbox, real getent/DNS comparison, certificate-validating credential-free HTTPS GET (any status),
 and a distinctive TLS access-denied alert for example.com SNI aimed at egress:443. Cleanup is in finally.

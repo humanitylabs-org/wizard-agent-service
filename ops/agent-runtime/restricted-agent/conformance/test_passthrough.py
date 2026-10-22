@@ -118,6 +118,26 @@ class ParserTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 passthrough.compose_override(value)
 
+    def test_reserved_and_nonpublic_aliases_rejected_at_both_gates(self):
+        for host in ('agent', 'edge', 'egress', 'localhost', 'agent-service-host', 'api',
+                     'foo.localhost', 'foo.local', 'foo.internal', 'foo.test', 'foo.invalid',
+                     '-api.example.com', 'api-.example.com', 'a..com', 'a.123', 'a.com.',
+                     'API.example.com', '1.2.3.4', 'a' * 64 + '.com', 'a.example'):
+            with self.subTest(host=host):
+                with self.assertRaises(ValueError):
+                    passthrough.compose_override(host)
+                with mock.patch.object(eg, 'PASSTHROUGH_HOSTS', {host}), \
+                     mock.patch.object(eg, 'PASSTHROUGH_ALIASES', {host}), \
+                     mock.patch.object(eg, 'EXACT', {host}):
+                    with self.assertRaises(ValueError):
+                        eg.validate_passthrough()
+                    self.assertFalse(eg.passthrough_allowed(host))
+
+    def test_public_alias_labels(self):
+        for host in ('api.anthropic.com', 'platform.claude.com', 'a1.api-2.example.com'):
+            self.assertTrue(eg.valid_hostname(host))
+            self.assertIn(host, passthrough.compose_override(host))
+
     def test_redact_env_json_yaml(self):
         for text in ('CLAUDE_CODE_OAUTH_TOKEN=fixture-value',
                      '"CLAUDE_CODE_OAUTH_TOKEN": "fixture-value"',

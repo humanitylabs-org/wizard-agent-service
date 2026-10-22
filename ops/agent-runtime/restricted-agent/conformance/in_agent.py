@@ -17,7 +17,10 @@ import os
 import sys
 import time
 
-CLAUDE_TOKEN = os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", "")  # never snapshot it through terminal
+# Do not sanitize production credentials here: that masks terminal snapshot leaks.
+CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+if CLAUDE_TOKEN:
+    raise SystemExit("conformance refused: Claude token in gateway environment would persist")
 os.environ["HERMES_YOLO_MODE"] = "1"
 sys.path.insert(0, "/opt/hermes")
 

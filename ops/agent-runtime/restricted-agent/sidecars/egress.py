@@ -17,6 +17,9 @@ import re
 import struct
 import sys
 import time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hostname_policy import valid_public_hostname
 
 ALLOWLIST_FILE = os.environ.get("EGRESS_ALLOWLIST", "/etc/egress/allowlist.txt")
 LISTEN_PORT = int(os.environ.get("EGRESS_PORT", "3128"))
@@ -135,9 +138,7 @@ DENY_ALERT = bytes([0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31])
 
 
 def valid_hostname(host):
-    return (0 < len(host) <= 253 and not is_ip_literal(host)
-            and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-                    for label in host.split(".")))
+    return valid_public_hostname(host)
 
 
 def client_hello_sni(handshake):

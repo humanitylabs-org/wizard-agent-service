@@ -83,6 +83,20 @@ class RestrictedDriverTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml is not listed"):
             ar.verify_vendored(copy)
 
+    def test_memory_grant_security_sources_cannot_be_unlisted(self):
+        copy = self.tmp / "runtime-security"
+        shutil.copytree(ar.RESTRICTED_DIR, copy)
+        manifest = copy / "SOURCE.txt"
+        original = manifest.read_text()
+        for name in ("sidecars/claude-init.py", "sidecars/hostname_policy.py", "sidecars/Dockerfile",
+                     "conformance/in_agent.py", "conformance/docker_credentials.py"):
+            with self.subTest(name=name):
+                manifest.write_text("\n".join(line for line in original.splitlines() if not line.endswith("  ./" + name)))
+                with self.assertRaisesRegex(SystemExit, "is not listed"):
+                    ar.verify_vendored(copy)
+        manifest.write_text(original)
+        ar.verify_vendored(copy)
+
     def test_env_contract(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         env = self.driver.env(agent)

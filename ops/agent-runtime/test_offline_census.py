@@ -51,6 +51,9 @@ class OfflineCensusTest(unittest.TestCase):
     def docker(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == 'ps':
+            if 'label=com.docker.compose.service=claude-init' in argv:
+                self.assertIn('label=com.docker.compose.project=agent-fixture', argv)
+                return SimpleNamespace(stdout='', returncode=0)  # no Claude grant in census fixtures
             self.assertIn('-aq', argv)
             return SimpleNamespace(stdout=self.container, returncode=0)
         if argv[0] == 'run':
