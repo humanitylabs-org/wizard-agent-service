@@ -496,8 +496,11 @@ class RestrictedDriver:
         return {"ok": True, **self.claude_status(agent)}
 
     def stop(self, agent: dict) -> dict:
-        self._remove_claude_seeder(agent)
+        # Preserve the original stop boundary (including SQLite's last close)
+        # before removing the seeder. A failed stop must not revoke the config
+        # underneath an agent that is still running.
         self._compose(agent, "stop", timeout=300)
+        self._remove_claude_seeder(agent)
         return {"ok": True}
 
 

@@ -101,7 +101,16 @@ class ClaudeTokenTest(unittest.TestCase):
             with mock.patch.object(ar, 'docker', side_effect=fake):
                 self.driver.stop(self.agent)
             self.assertIn(['rm', '-f', 'synthetic-seeder-id'], [a for a, _ in self.calls])
-            self.assertEqual(self.calls[-1][0][-1], 'stop')
+            commands = [a for a, _ in self.calls]
+            self.assertLess(next(i for i, a in enumerate(commands) if a[-1] == 'stop'),
+                            commands.index(['rm', '-f', 'synthetic-seeder-id']))
+
+    def test_failed_stop_does_not_remove_a_running_agents_seeder(self):
+        self.set_token()
+        with mock.patch.object(self.driver, '_compose', side_effect=ar.RuntimeFailure('docker_failed')):
+            with self.assertRaises(ar.RuntimeFailure):
+                self.driver.stop(self.agent)
+        self.assertEqual(self.calls, [])
 
     def test_start_removes_orphans_on_grant_revocation(self):
         with mock.patch.object(self.driver, '_prepare'):

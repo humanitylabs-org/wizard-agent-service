@@ -192,8 +192,13 @@ class RestrictedDriverTest(unittest.TestCase):
             self.driver.apply(agent)
         self.assertEqual(raised.exception.code, "agent_not_prepared")
         self.assertFalse(any(args[0] == "run" or args[-2:] == ["-d", "--remove-orphans"] for args, _ in self.calls))
+        self.calls.clear()
         self.driver.stop(agent)
-        self.assertEqual(self.calls[-1][0][-1], "stop")
+        commands = [args for args, _ in self.calls]
+        self.assertEqual(commands[0][-1], "stop")
+        self.assertEqual(commands[1][0], "ps")
+        self.assertIn("label=com.docker.compose.service=claude-init", commands[1])
+        self.assertEqual(len(commands), 2)
 
     def test_bad_networks_are_refused(self):
         for network in (None, {"uplink": "10.250.0.16/27", "sandbox": "10.251.0.16/28"}, {"uplink": "172.17.0.0/28", "sandbox": "10.251.0.16/28"},

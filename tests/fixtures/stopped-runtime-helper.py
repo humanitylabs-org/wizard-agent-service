@@ -28,6 +28,12 @@ def stop(*args, **kwargs):
 
 def docker(argv, **kwargs):
     if argv[0] == 'ps':
+        # Docker filters are conjunctive. The old fixture returned the agent
+        # id for the new claude-init query, then rejected its attempted rm;
+        # stop never ran and the Service could not seal the still-running home.
+        if 'label=com.docker.compose.service=claude-init' in argv:
+            return SimpleNamespace(stdout='')  # these agents have no grant
+        assert f'label=com.docker.compose.service={ar.RESTRICTED_SERVICE if kind == "restricted" else ar.service_names(agent)[0]}' in argv
         return SimpleNamespace(stdout='' if state['container'] == 'absent' else 'fixture-cid')
     if argv[0] == 'inspect':
         return SimpleNamespace(stdout='\n'.join(map(json.dumps, ['fixture-cid', {
