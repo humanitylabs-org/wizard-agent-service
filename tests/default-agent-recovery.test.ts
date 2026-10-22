@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createWizardServer } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { normalizeSettings } from '../server/wizard-os-settings.mjs'
 import { ThreadSeenStore } from '../server/thread-seen.mjs'
@@ -16,7 +16,7 @@ const owner = { 'X-Wizard-Owner-Proof': proof }
 const cleanup: (() => any)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 const json = (value: any, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
-async function scene({ queued = false, manifest = null as any, badOptional = false } = {}) {
+async function scene({ queued = false, manifest = null as any, badOptional = false, cloud = false } = {}) {
   // Run only the fresh-box snapshot against an archived contract base to prove byte compatibility.
   const makeServer = process.env.WAS_S2C_BASELINE ? (await import(/* @vite-ignore */ `${process.env.WAS_S2C_BASELINE}/server/service.mjs`)).createWizardServer : createWizardServer
   const dir = mkdtempSync(join(tmpdir(), 'default-agent-'))
@@ -44,6 +44,7 @@ async function scene({ queued = false, manifest = null as any, badOptional = fal
     const method = init.method || 'GET', body = init.body ? JSON.parse(String(init.body)) : null
     calls.push({ agent, method, path: u.pathname, body })
     if (status.get(agent) === 'stopped') return json({ error: 'offline' }, 503)
+    if (cloud && u.pathname === '/api/model/options') return json({ providers: [{ id: 'anthropic', authenticated: true, models: ['claude-opus-5-5'] }] })
     if (u.pathname === '/v1/capabilities') return json({ features: {} })
     if (u.pathname === '/health') return json({ status: 'ok' })
     if (u.pathname === '/api/sessions' && method === 'POST') { const id = body.id || 'wizard_generated'; histories.get(agent)!.add(id); return json({ session: { id, source: 'wizard-mobile', title: 'Chat' } }, 201) }
@@ -69,7 +70,7 @@ async function scene({ queued = false, manifest = null as any, badOptional = fal
   const base = `http://127.0.0.1:${(service.address() as any).port}`
   const call = async (path: string, method = 'GET', body?: any, headers: any = owner) => fetch(`${base}${path}`, { method, headers: { ...headers, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
   const create = async (label: string, privacy = 'standard') => {
-    const r = await call('/wizard/v1/agents', 'POST', { label, harness: 'hermes', permissions: { preset: privacy }, model: { provider: 'tinfoil', model: 'glm-5-3' } })
+    const r = await call('/wizard/v1/agents', 'POST', { label, harness: 'hermes', permissions: { preset: privacy }, model: cloud ? { provider: 'anthropic', model: 'claude-opus-5-5' } : { provider: 'tinfoil', model: 'glm-5-3' } })
     const value = await r.json(); expect([r.status, value.error]).toEqual([201, undefined]); return value.agent
   }
   return { dir, settingsPath, agentsDir, base, call, create, calls, histories, status, dispatch, manifestPath }
@@ -361,7 +362,8 @@ describe('persisted default and recovery contract', () => {
   })
 
   it('agent credentials cannot change the default or name recovery, and recovery is not a grant/app target', async () => {
-    const s = await scene(), managed = await s.create('Managed')
+    // Exercise standard-agent scope, not the private provider's stronger network-bound denial.
+    const s = await scene({ cloud: true }), managed = await s.create('Managed')
     writeFileSync(join(s.agentsDir, managed.id, 'gateway.key'), 'fixture-agent-credential')
     const bearer = { Authorization: 'Bearer fixture-agent-credential' }
     const denied = await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } }, bearer)
@@ -376,7 +378,7 @@ describe('persisted default and recovery contract', () => {
     expect((await s.call('/wizard/v1/agent-grants', 'POST', { reader: managed.id, source: 'hermes', level: 'read' })).status).toBeGreaterThanOrEqual(400)
     expect((await s.call('/wizard/v1/apps/notes/agents', 'PUT', { agents: ['hermes'] })).status).toBeGreaterThanOrEqual(400)
     expect((await s.call('/wizard/background-results', 'GET', undefined, {})).status).toBe(404)
-    const run = await s.call('/wizard/hermes/v1/runs', 'POST', { input: 'model routing', session_id: 'wizard_model', provider: 'tinfoil', model: 'glm-5-3' })
+    const run = await s.call('/wizard/hermes/v1/runs', 'POST', { input: 'model routing', session_id: 'wizard_model', provider: 'anthropic', model: 'claude-opus-5-5' })
     expect(run.status).toBe(202)
     expect(s.calls.filter(c => c.method === 'POST').every(c => c.agent !== 'hermes')).toBe(true)
   })

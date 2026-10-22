@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { appThreadId, bindingDeclaration } from '../server/app-bindings.mjs'
 
 // App → agent binding (wizard-os spec/AGENTS.md "App → agent binding").

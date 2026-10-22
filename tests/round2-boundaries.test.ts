@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createWizardServer } from '../server/service.mjs'
+import { createWizardServer, fixtureModels } from './helpers/private-provider-fixture.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 
 import { threadKey } from '../server/thread-reference.mjs'
@@ -267,8 +267,8 @@ it('catalog census follows clamped short pages and validates every cursor', asyn
 it('old in-flight census cannot restore negative authority across a start transition', async () => {
   const s = await scene(), secondary = await s.create('Secondary')
   let finish: (value: Response) => void = () => {}; let reads = 0
-  const registry = createAgentRegistry({ agentsDir: s.agentsDir, upstreamHost: 'fixture', runtime: s.serverOptions.agentRuntime,
-    fetchImpl: async () => ++reads === 1 ? await new Promise<Response>(resolve => { finish = resolve }) : Response.json({ error: 'unavailable' }, { status: 503 }) })
+  const registry = createAgentRegistry({ agentsDir: s.agentsDir, appsJsonPath: s.serverOptions.appsJsonPath, upstreamHost: 'fixture', runtime: s.serverOptions.agentRuntime,
+    fetchImpl: async (url: string) => String(url) === 'http://127.0.0.1:1/api/connection' ? Response.json({ status: 'connected', models: fixtureModels }) : ++reads === 1 ? await new Promise<Response>(resolve => { finish = resolve }) : Response.json({ error: 'unavailable' }, { status: 503 }) })
   const old = registry.refreshCatalog(secondary.id)
   await registry.setRunning(secondary.id, true)
   finish(Response.json({ data: [], has_more: false }))

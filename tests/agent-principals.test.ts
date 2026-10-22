@@ -5,7 +5,8 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createAgentIngress, createWizardServer, listen } from '../server/service.mjs'
+import { createAgentIngress, listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 import { createPrincipalResolver, markAgentIngress, sameSecret } from '../server/principals.mjs'
 
 const servers: Server[] = []
@@ -273,9 +274,9 @@ describe('owner vs agent authentication', () => {
     }
     const pinned = await fetch(`${s.base}/wizard/hermes/v1/runs`, send('POST', { input: 'x', session_id: CANARY }, bearer))
     expect(pinned.status).toBe(404)
-    // The private agent's own credential reaches its own threads (its own runtime), and nothing else.
+    // Private-client credentials work only through their network-bound edge, not on the owner listener.
     const self = await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${s.privateId}`, { headers: { Authorization: `Bearer ${s.privateKey}` } })
-    expect(self.status).toBe(200)
+    expect(self.status).toBe(403)
     const other = await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${s.helperId}`, { headers: { Authorization: `Bearer ${s.privateKey}` } })
     expect(other.status).toBe(403)
   })
@@ -322,6 +323,10 @@ describe('review regressions', () => {
 
   it('a replayed private share and its upload ids give a non-owner nothing to read or write', async () => {
     const s = await scene(withUploads)
+    // Exercise replay authorization for the legacy host-managed inbox. Restricted inbox placement stays fail-closed.
+    const file = join(s.dir, 'agents', s.privateId, 'agent.json')
+    const legacy = JSON.parse(readFileSync(file, 'utf8')); delete legacy.runtime.isolation
+    writeFileSync(file, JSON.stringify(legacy))
     const body = { client_share_id: 'owner-share-1', agent: s.privateId, files: [{ filename: 'a.txt', bytes: 5 }] }
     const created = await fetch(`${s.base}/wizard/v1/shares`, send('POST', body, OWNER))
     expect(created.status).toBe(201)
