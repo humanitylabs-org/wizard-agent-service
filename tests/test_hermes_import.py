@@ -116,6 +116,19 @@ class ImportTests(unittest.TestCase):
         for rel, data in before.items():
             self.assertEqual((self.home / rel).read_bytes(), data)
 
+    def test_forbidden_nested_config_authority_cannot_be_approved(self):
+        config = m.load_yaml((self.home / 'config.yaml').read_text())
+        config['env'] = {'WIZARD_HEAVY_TOKEN': 'fixture-not-a-real-authority'}
+        (self.home / 'config.yaml').write_text(m.yaml.safe_dump(config))
+        plan = self.plan()
+        for entry in plan['credentials']:
+            if entry['kind'] == 'config-field': entry['approved'] = True
+        result = self.apply(m.approve(plan))
+        imported = m.load_yaml((self.wizard / 'agents/fixture-agent/home/config.yaml').read_text())
+        self.assertNotIn('WIZARD_HEAVY_TOKEN', imported.get('env', {}))
+        self.undo(result)
+        self.assertEqual(m.load_yaml((self.home / 'config.yaml').read_text()), config)
+
     def test_corrupt_backup_fails_before_any_rollback_mutation(self):
         result = self.apply()
         directory = self.wizard / 'agents/fixture-agent'

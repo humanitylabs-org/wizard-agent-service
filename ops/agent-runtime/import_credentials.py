@@ -26,7 +26,7 @@ def config_items(value, prefix=()):
     if isinstance(value, dict):
         for key, child in value.items():
             path = (*prefix, str(key))
-            if INLINE_SECRET.search(str(key)) and child not in (None, ''):
+            if (INLINE_SECRET.search(str(key)) or FORBIDDEN_ENV.match(str(key))) and child not in (None, ''):
                 yield '/'.join(path)
             else:
                 yield from config_items(child, path)
@@ -38,7 +38,9 @@ def config_items(value, prefix=()):
 def filter_config(value, plan, prefix=()):
     if isinstance(value, dict):
         return {k: filter_config(v, plan, (*prefix, str(k))) for k, v in value.items()
-                if not INLINE_SECRET.search(str(k)) or selected(plan, 'config.yaml', 'config-field', '/'.join((*prefix, str(k))))}
+                if not FORBIDDEN_ENV.match(str(k)) and (
+                    not INLINE_SECRET.search(str(k)) or
+                    selected(plan, 'config.yaml', 'config-field', '/'.join((*prefix, str(k)))))}
     if isinstance(value, list):
         return [filter_config(v, plan, (*prefix, str(i))) for i, v in enumerate(value)]
     return value
