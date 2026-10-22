@@ -40,7 +40,7 @@ function records(root: string) {
 function fakeRuntime() {
   const posts: any[] = [], reads: any[] = [], remote: any[] = []
   const receipts = new Map<string, any>()
-  const states = { originDone: false, workerDone: false, human: 'Run the checks', humanId: 1 }
+  const states = { originDone: false, workerDone: false, human: 'Run the checks', humanId: 1, originStatus: '', originMissing: false, runtime: { model: 'model-a', provider: 'fixture' } as any, runtimeWhileRunning: true }
   const fetchImpl = async (url: string, init: any = {}) => {
     const u = new URL(url), id = u.port === '47131' ? 'alpha' : u.port === '47132' ? 'beta' : 'hermes'
     reads.push({ id, path: u.pathname, init })
@@ -51,8 +51,9 @@ function fakeRuntime() {
     if (u.pathname === '/api/sessions/shared') return json({ session: { id: 'shared' } })
     if (u.pathname === '/api/sessions/shared/messages') return json({ data: [{ id: states.humanId, role: 'user', content: states.human }] })
     if (u.pathname.startsWith('/api/sessions/')) return json({ error: 'missing' }, 404)
+    if (states.originMissing && u.pathname.startsWith('/v1/runs/')) return json({ error: 'lost' }, 404)
     if (u.pathname.startsWith('/v1/runs/wizardq_')) return json({ error: 'public id is not a Hermes id' }, 404)
-    if (u.pathname.startsWith('/v1/runs/') && !u.pathname.endsWith('/events')) return json({ run_id: u.pathname.split('/').at(-1), status: states.originDone ? 'completed' : 'running', runtime: { model: 'model-a', provider: 'fixture' } })
+    if (u.pathname.startsWith('/v1/runs/') && !u.pathname.endsWith('/events')) return json({ run_id: u.pathname.split('/').at(-1), status: states.originStatus || (states.originDone ? 'completed' : 'running'), runtime: states.originDone || states.runtimeWhileRunning ? states.runtime : undefined })
     if (u.pathname === '/v1/runs' && init.method === 'POST') {
       const headers = new Headers(init.headers), key = `${id}:${headers.get('idempotency-key') || posts.length}`
       if (receipts.has(key)) return json(receipts.get(key), 202)
@@ -128,7 +129,7 @@ it('resolves public routed run ids for agent heavy admission and continuation wi
   }
   const receipt = await s.submit()
   expect(s.heavy.queue.get(receipt.job_id).origin).toBe(origin.run_id)
-  expect(s.heavy.queue.get(receipt.job_id).route).toEqual({ model: 'model-a', provider: 'fixture', require_model_lock: true })
+  expect(s.heavy.queue.get(receipt.job_id)).toMatchObject({ route: null, route_state: 'pending_origin' })
   s.states.originDone = true; s.states.workerDone = true
   await s.heavy.queue.tick()
   const continuation = s.heavy.queue.get(receipt.job_id).resume
@@ -142,6 +143,104 @@ it('resolves public routed run ids for agent heavy admission and continuation wi
   expect(s.reads.filter(r => r.path.startsWith('/v1/runs/')).every(r => r.id === 'alpha')).toBe(true)
 })
 
+it('accepts a running origin without runtime, binds only its completed route, and survives Service restart', async () => {
+  const s = await scene()
+  s.states.runtimeWhileRunning = false
+  const receipt = await s.submit()
+  expect(receipt.route_state).toBe('pending_origin')
+  expect(s.heavy.queue.get(receipt.job_id).route).toBeNull()
+  await s.heavy.queue.tick()
+  expect(s.remote.some(row => row.action === 'submit')).toBe(true)
+  expect(s.posts).toEqual([])
+  await s.heavy.close()
+  let restored = createHeavyIntegration({ options: s.options, registry: s.registry, queue: s.hostQueue, request: async () => ({}), fetchAgent: undefined })!
+  expect(restored.queue.get(receipt.job_id).route_state).toBe('pending_origin')
+  s.states.originDone = true
+  s.states.runtime = { model: 'completed-actual-model', provider: 'completed-actual-provider' }
+  await restored.queue.tick() // worker still queued: route must bind independently
+  const bound = { model: 'completed-actual-model', provider: 'completed-actual-provider', require_model_lock: true }
+  expect(restored.queue.get(receipt.job_id)).toMatchObject({ state: 'queued', route_state: 'bound', route: bound })
+  await restored.close()
+  restored = createHeavyIntegration({ options: s.options, registry: s.registry, queue: s.hostQueue, request: async () => ({}), fetchAgent: undefined })!
+  clean.push(() => restored.close())
+  expect(restored.queue.get(receipt.job_id).route).toEqual(bound)
+  s.states.runtime = { model: 'different-now', provider: 'custom' } // bound is immutable
+  s.states.originMissing = true // durable binding survives origin-record eviction too
+  s.states.workerDone = true
+  await restored.queue.tick(); await restored.queue.tick()
+  expect(s.posts).toHaveLength(1)
+  expect(s.posts[0].body).toMatchObject(bound)
+  expect(restored.queue.get(receipt.job_id).resume).toBe('alpha-run-1')
+})
+it('retires a confirmed lost origin and stops observing fenced rows', async () => {
+  const s = await scene()
+  s.states.runtimeWhileRunning = false
+  const receipt = await s.submit()
+  s.states.originMissing = true; s.states.workerDone = true
+  await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(receipt.job_id)).toMatchObject({ state: 'completed', route_state: 'unavailable', resume: 'suppressed', continuation_reason: 'origin_route_unavailable' })
+  const reads = s.reads.length
+  await s.heavy.queue.tick()
+  expect(s.reads).toHaveLength(reads)
+  expect(s.posts).toEqual([])
+})
+it('dispatches every worker before awaiting any pending-origin observation', async () => {
+  const s = await scene()
+  s.states.runtimeWhileRunning = false
+  await s.submit('alpha', { key: 'first' }); await s.submit('alpha', { key: 'second' })
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const counts: number[] = []
+  ;(s.heavy.queue as any).observe = async () => {
+    counts.push(s.remote.filter(row => row.action === 'submit').length)
+    await gate
+  }
+  const ticking = s.heavy.queue.tick()
+  await vi.waitFor(() => expect(s.remote.filter(row => row.action === 'submit')).toHaveLength(2))
+  release(); await ticking
+  expect(counts).toEqual([2, 2])
+})
+it('binds completed origins immediately without consulting requested or registry defaults', async () => {
+  const s = await scene()
+  s.states.originDone = true
+  const receipt = await s.submit()
+  expect(receipt.route_state).toBe('bound')
+  expect(s.heavy.queue.get(receipt.job_id).route).toEqual({ model: 'model-a', provider: 'fixture', require_model_lock: true })
+})
+it.each([
+  ['failed', { model: 'model-a', provider: 'fixture' }],
+  ['cancelled', { model: 'model-a', provider: 'fixture' }],
+  ['interrupted', { model: 'model-a', provider: 'fixture' }],
+  ['completed', { model: 'model-a', provider: 'custom' }],
+  ['completed', { model: 'model-a', provider: 'CUSTOM' }],
+  ['completed', { model: 'model-a', provider: ' custom ' }],
+  ['completed', { model: 'model-a' }],
+  ['completed', { provider: 'fixture' }],
+  ['completed', { model: 42, provider: 'fixture' }],
+  ['completed', { model: ' ', provider: 'fixture' }],
+  ['completed', null],
+])('runs the job but permanently refuses continuation for origin %s and runtime %j', async (status, runtime) => {
+  const s = await scene()
+  s.states.runtimeWhileRunning = false
+  const receipt = await s.submit()
+  s.states.originDone = true; s.states.originStatus = status; s.states.runtime = runtime
+  s.states.workerDone = true
+  await s.heavy.queue.tick(); await s.heavy.queue.tick()
+  expect(s.remote.filter(row => row.action === 'submit')).toHaveLength(1)
+  expect(s.posts).toEqual([])
+  const observed = await s.heavy.handleAgent(await s.req(), path('status'), { session_id: 'shared', job_id: receipt.job_id })
+  expect(observed).toMatchObject({ state: 'completed', receipt: { exit_code: 0 }, route_state: 'unavailable',
+    continuation: 'suppressed', continuation_reason: 'origin_route_unavailable', reason: 'origin_route_unavailable' })
+})
+it('admits a completed origin with unavailable route only for worker execution', async () => {
+  const s = await scene()
+  s.states.originDone = true; s.states.runtime = null; s.states.workerDone = true
+  const receipt = await s.submit()
+  expect(receipt).toMatchObject({ route_state: 'unavailable', reason: 'resource_queue', continuation_reason: 'origin_route_unavailable', continuation: 'suppressed' })
+  await s.heavy.queue.tick()
+  expect(s.heavy.queue.get(receipt.job_id).state).toBe('completed')
+  expect(s.posts).toEqual([])
+})
 it('refuses agent submits without an explicit sandbox operator assertion', async () => {
   const s = await scene()
   for (const value of ['', 'off', 'true']) {
@@ -373,8 +472,9 @@ it('replays ambiguous continuation after restart using the exact frozen body and
   expect(s.posts).toHaveLength(1)
   expect(s.heavy.queue.get(job.job_id).resume).toBe('')
   const frozen = s.heavy.queue.get(job.job_id).continuation_body
+  s.states.originStatus = 'failed' // upgrade must replay a previously frozen ambiguous admission
   await s.heavy.close()
-  const restored = createHeavyIntegration({ options: s.options, registry: s.registry, queue: s.hostQueue, request: async () => ({}) })!
+  const restored = createHeavyIntegration({ options: s.options, registry: s.registry, queue: s.hostQueue, request: async () => ({}), fetchAgent: undefined })!
   clean.push(() => restored.close())
   await restored.queue.tick()
   expect(s.posts).toHaveLength(1)
@@ -428,6 +528,7 @@ print('edge allowlist passed')`
 })
 it('wires routed origin observation through the real Service before agent-heavy submission', async () => {
   const root = home(); records(root); const fake = fakeRuntime()
+  fake.states.runtimeWhileRunning = false
   await serveFakeAgents(root, fake)
   const service = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:47130', hermesKey: 'fixture-main-key', fetchImpl: fake.fetchImpl,
     wizardOsHome: root, appsJsonPath: join(root, 'apps.json'), settingsPath: join(root, 'settings.json'),
@@ -446,7 +547,7 @@ it('wires routed origin observation through the real Service before agent-heavy 
   expect(origin.run_id).toMatch(/^wizardq_/)
   await vi.waitFor(async () => {
     const observed = await fetch(base + `/wizard/hermes/v1/runs/${origin.run_id}?agent=alpha`, { headers: ownerHeaders })
-    expect((await observed.json()).runtime?.provider).toBe('fixture')
+    expect((await observed.json()).status).toBe('running')
   })
   // Counterfactual: removing fetchAgent from Service's createHeavyIntegration
   // sends this public id straight to Hermes, whose fixture deliberately returns 404.
@@ -456,6 +557,8 @@ it('wires routed origin observation through the real Service before agent-heavy 
       spec: { cwd: join(root, 'staging', 'agents', 'alpha'), argv: ['true'], timeout_seconds: 10, lane: 'light' } }) })
   expect(submitted.status).toBe(200)
   const job = await submitted.json()
+  expect(job.route_state).toBe('pending_origin')
+  fake.states.runtime = { model: 'completed-actual-model', provider: 'completed-actual-provider' }
   fake.states.workerDone = true; fake.states.originDone = true
   await vi.waitFor(async () => {
     const response = await fetch(base + path('status'), { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ job_id: job.job_id }) })
@@ -464,7 +567,9 @@ it('wires routed origin observation through the real Service before agent-heavy 
     expect(status.receipt.exit_code).toBe(0)
     expect(status.continuation).toMatch(/^alpha-run-/)
   })
-  expect(fake.posts.filter(row => row.headers.get('idempotency-key') === `wizard-heavy-${job.job_id}`)).toHaveLength(1)
+  const continuations = fake.posts.filter(row => row.headers.get('idempotency-key') === `wizard-heavy-${job.job_id}`)
+  expect(continuations).toHaveLength(1)
+  expect(continuations[0].body).toMatchObject({ model: 'completed-actual-model', provider: 'completed-actual-provider', require_model_lock: true })
   expect(fake.reads.some(row => /^\/v1\/runs\/wizardq_/.test(row.path))).toBe(false)
 })
 

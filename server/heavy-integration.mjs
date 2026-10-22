@@ -83,6 +83,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     transport: options.heavyTransport ?? (options.heavyRpcOrigin
       ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavySshTransport(options.heavyWorker)),
     intervalMs: options.heavyPollIntervalMs ?? 1500, current,
+    observe: job => agentRelay.observeOrigin(job),
     canDispatch: job => (job.agent_id ?? 'hermes') === 'hermes' || agentRelay.allowed(job.agent_id),
     continuation: async job => {
       if ((job.agent_id ?? 'hermes') !== 'hermes') return agentRelay.continuation(job)
