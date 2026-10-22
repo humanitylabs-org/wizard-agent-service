@@ -330,8 +330,9 @@ it('replays ambiguous continuation after restart using the exact frozen body and
   const s = await scene(), job = await s.submit()
   s.states.workerDone = true; s.states.originDone = true
   let lose = true
-  s.options.fetchImpl = async (url: string, init: any) => {
-    const result = await s.fetchImpl(url, init)
+  const fetchAgent = s.registry.fetchAgent
+  s.registry.fetchAgent = async (agent: any, path: string, init: any) => {
+    const result = await fetchAgent(agent, path, init)
     if (init.method === 'POST' && lose) { lose = false; throw new Error('fixture lost response') }
     return result
   }
