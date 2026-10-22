@@ -331,6 +331,11 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   } else {
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
+  // Stock Hermes redacts sk-ant-oat... tool results before session/trajectory
+  // persistence. Pin its supported secure setting for the restricted grant.
+  if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
+    lines.push('security:', '  redact_secrets: true')
+  }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
   const overrides = agent.model.provider === TINFOIL.id
@@ -658,7 +663,7 @@ export function createAgentRegistry(options = {}) {
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
-    if (healthy) value = { status: 'running', status_detail: '' }
+    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' }
     else if (state.desired === 'stopped') value = { status: 'stopped', status_detail: '' }
     else if (state.last_error) value = { status: 'error', status_detail: String(state.last_error).slice(0, 200) }
     else if (Number(state.started_at) && now() - Number(state.started_at) < startingGraceMs) value = { status: 'starting', status_detail: '' }
@@ -831,7 +836,11 @@ export function createAgentRegistry(options = {}) {
       writeJsonAtomic(idempotencyPath, map)
     }
     writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
-    try { if (restricted(agent)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+    try {
+      if (restricted(agent)) await options.beforeRestrictedStart?.(id)
+      const result = await runtime.apply(id)
+      writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+    } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
   }
@@ -910,7 +919,11 @@ export function createAgentRegistry(options = {}) {
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
-      try { if (restricted(next)) await options.beforeRestrictedStart?.(id); await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      try {
+        if (restricted(next)) await options.beforeRestrictedStart?.(id)
+        const result = await runtime.apply(id)
+        writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
@@ -930,6 +943,7 @@ export function createAgentRegistry(options = {}) {
     try {
       if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
+      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)

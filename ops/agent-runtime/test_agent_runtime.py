@@ -72,6 +72,39 @@ class RestrictedDriverTest(unittest.TestCase):
         ar.docker = self.real_docker
         shutil.rmtree(self.tmp)
 
+    def claude_agent(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        agent["privacy"] = "standard"
+        return agent
+
+    def test_grant_override_digest_is_required_and_verified(self):
+        copy = self.tmp / "runtime-grant"
+        shutil.copytree(ar.RESTRICTED_DIR, copy)
+        with (copy / "compose.claude-token.yml").open("a") as fh:
+            fh.write("\n# changed\n")
+        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml differs"):
+            ar.verify_vendored(copy)
+        manifest = copy / "SOURCE.txt"
+        manifest.write_text("\n".join(line for line in manifest.read_text().splitlines()
+                                      if not line.endswith("  ./compose.claude-token.yml")))
+        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml is not listed"):
+            ar.verify_vendored(copy)
+
+    def test_memory_grant_security_sources_cannot_be_unlisted(self):
+        copy = self.tmp / "runtime-security"
+        shutil.copytree(ar.RESTRICTED_DIR, copy)
+        manifest = copy / "SOURCE.txt"
+        original = manifest.read_text()
+        for name in ("sidecars/claude-init.py", "sidecars/hostname_policy.py", "sidecars/Dockerfile",
+                     "conformance/in_agent.py", "conformance/docker_credentials.py", "sidecars/edge.py",
+                     "conformance/inspect_check.py", "conformance/ingress_probe.py"):
+            with self.subTest(name=name):
+                manifest.write_text("\n".join(line for line in original.splitlines() if not line.endswith("  ./" + name)))
+                with self.assertRaisesRegex(SystemExit, "is not listed"):
+                    ar.verify_vendored(copy)
+        manifest.write_text(original)
+        ar.verify_vendored(copy)
+
     def test_env_contract(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         env = self.driver.env(agent)
@@ -209,8 +242,13 @@ class RestrictedDriverTest(unittest.TestCase):
             self.driver.apply(agent)
         self.assertEqual(raised.exception.code, "agent_not_prepared")
         self.assertFalse(any(args[0] == "run" or args[-2:] == ["-d", "--remove-orphans"] for args, _ in self.calls))
+        self.calls.clear()
         self.driver.stop(agent)
-        self.assertEqual(self.calls[-1][0][-1], "stop")
+        commands = [args for args, _ in self.calls]
+        self.assertEqual(commands[0][-1], "stop")
+        self.assertEqual(commands[1][0], "ps")
+        self.assertIn("label=com.docker.compose.service=claude-init", commands[1])
+        self.assertEqual(len(commands), 2)
 
     def test_bad_networks_are_refused(self):
         for network in (None, {"uplink": "10.250.0.16/27", "sandbox": "10.251.0.16/28"}, {"uplink": "172.17.0.0/28", "sandbox": "10.251.0.16/28"},
