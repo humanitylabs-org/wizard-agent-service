@@ -118,9 +118,15 @@ def passthrough_problems(env, aliases):
                   and all(valid_public_hostname(h) for h in hosts)) else ["passthrough hosts/aliases/allowlist mismatch"]
 
 
-def sidecar_login_problems(mounts):
+def sidecar_login_problems(mounts, project, expected_secret, session_source=None):
+    # Source identity is authoritative: a different container destination is not
+    # a different credential. Also catch a bind of the volume's backing path.
+    sources = {CLAUDE_LOGIN_VOLUME, f"{project}_claude-session"}
+    sources.update(s for s in (expected_secret, session_source) if s)
     return ["Claude login must never be mounted in a sidecar"] if any(
-        m.get("Name") == CLAUDE_LOGIN_VOLUME or m.get("Destination") in ("/claude", "/run/claude-login", "/run/secrets/claude.token") for m in mounts) else []
+        m.get("Name") in sources or m.get("Source") in sources
+        or m.get("Destination") in ("/claude", "/run/claude-login", "/run/secrets/claude.token")
+        for m in mounts) else []
 
 
 def claude_seed_problems(container, project, expected_source):
@@ -194,8 +200,20 @@ def selftest():
         results.append({"case": name, "expected_ok": expect_ok, "ok": ok, "pass": ok == expect_ok})
     for mounts, expect_ok in (([], True), ([{"Name": CLAUDE_LOGIN_VOLUME, "Destination": "/alias"}], False),
                               ([{"Name": "other", "Destination": "/claude"}], False)):
-        ok = not sidecar_login_problems(mounts)
+        ok = not sidecar_login_problems(mounts, p, "/srv/agents/fixture/claude.token")
         results.append({"case": f"sidecar login {mounts}", "pass": ok == expect_ok})
+    for svc in ("edge", "egress", "home-init", "other-seeder"):
+        for mount in (
+            {"Type": "volume", "Name": "proj_claude-session", "Destination": "/alias", "RW": True},
+            {"Type": "volume", "Source": "proj_claude-session", "Destination": "/alias", "RW": False},
+            {"Type": "bind", "Source": "/docker/volumes/proj_claude-session/_data", "Destination": "/alias", "RW": False},
+            {"Type": "bind", "Source": "/srv/agents/fixture/claude.token", "Destination": "/alias", "RW": False},
+        ):
+            bad = sidecar_login_problems([mount], p, "/srv/agents/fixture/claude.token",
+                                        "/docker/volumes/proj_claude-session/_data")
+            results.append({"case": f"{svc} alternate credential source {mount}", "pass": bool(bad)})
+    results.append({"case": "unrelated sidecar volume allowed", "pass": not sidecar_login_problems(
+        [{"Name": "proj_unrelated", "Destination": "/alias"}], p, "/srv/agents/fixture/claude.token")})
     home = good[0]
     init_cases = {
         "init: same home volume": ([dict(home)], home, True),
@@ -315,8 +333,13 @@ check("I5", "read-only root filesystem", hc.get("ReadonlyRootfs") is True, hc.ge
 mounts = [{"type": m["Type"], "dest": m["Destination"], "rw": m["RW"], "src": m.get("Name") or m.get("Source")}
           for m in a.get("Mounts", [])]
 problems = mount_problems(mounts, project, home_source, claude_login, claude_token)
+expected_secret = claude_token_file or (str(Path(home_source).parent / "claude.token") if home_source else None)
+# Query even when ungranted, to detect stale/orphan credential mounts too.
+volume_result = subprocess.run(["docker", "volume", "inspect", f"{project}_claude-session"],
+                               capture_output=True, text=True, check=False)
+volume = json.loads(volume_result.stdout)[0] if volume_result.returncode == 0 else {}
+session_source = volume.get("Mountpoint")
 if claude_token:
-    volume = json.loads(subprocess.check_output(["docker", "volume", "inspect", f"{project}_claude-session"], text=True))[0]
     options = volume.get("Options") or {}
     if volume.get("Driver") != "local" or options.get("type") != "tmpfs" or options.get("device") != "tmpfs":
         problems.append("Claude session volume is not memory-only tmpfs")
@@ -367,7 +390,7 @@ for svc in ("egress", "edge"):
           and not [m for m in s[0].get("Mounts", []) if m["Type"] == "bind"],
           {"user": s[0]["Config"].get("User") if s else None, "ro": shc.get("ReadonlyRootfs"), "drop": shc.get("CapDrop"),
            "mounts": [m["Destination"] for m in s[0].get("Mounts", [])] if s else None})
-    login_bad = sidecar_login_problems(s[0].get("Mounts", []) if s else [])
+    login_bad = sidecar_login_problems(s[0].get("Mounts", []) if s else [], project, expected_secret, session_source)
     if s and any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in s[0]["Config"].get("Env", [])):
         login_bad.append("Claude token must never reach a sidecar")
     check(f"I20-{svc}", f"{svc} never gets the Claude login", not login_bad, login_bad)
@@ -392,8 +415,7 @@ if claude_token:
     if len(seeders) != 1:
         seed_bad.append("expected exactly one Claude seeder")
     else:
-        expected = claude_token_file or (str(Path(home_source).parent / "claude.token") if home_source else None)
-        seed_bad.extend(claude_seed_problems(seeders[0], project, expected))
+        seed_bad.extend(claude_seed_problems(seeders[0], project, expected_secret))
 elif seeders:
     seed_bad.append("ungranted Claude seeder")
 check("I22", "Claude seeder matches independently authorized, isolated memory-only grant", not seed_bad,
@@ -405,6 +427,7 @@ agent_home = next((m for m in mounts if m["dest"] == "/opt/data"), None) if not 
 init_mounts = [{"type": m["Type"], "dest": m["Destination"], "rw": m["RW"], "src": m.get("Name") or m.get("Source")}
                for m in (init[0].get("Mounts", []) if init else [])]
 init_bad = init_problems(init_mounts, agent_home)
+init_bad.extend(sidecar_login_problems(init[0].get("Mounts", []) if init else [], project, expected_secret, session_source))
 if init and any(e.split("=", 1)[0] == CLAUDE_TOKEN_ENV for e in init[0]["Config"].get("Env", [])):
     init_bad.append("Claude token must never reach home-init")
 check("I19", "exactly one home-init: exited 0, no network, only CHOWN/FOWNER/DAC_OVERRIDE, read-only, "
@@ -417,6 +440,18 @@ check("I19", "exactly one home-init: exited 0, no network, only CHOWN/FOWNER/DAC
        "network": ihc.get("NetworkMode"), "add": ihc.get("CapAdd"),
        "mounts": [m["Destination"] for m in init[0].get("Mounts", [])] if init else None})
 
+
+# Include unknown/orphan services: only the exact validated seeder and agent
+# may hold this grant, not another initializer with a different service label.
+project_ids = subprocess.check_output(["docker", "ps", "-aq", "--filter",
+    f"label=com.docker.compose.project={project}"], text=True).split()
+project_containers = json.loads(subprocess.check_output(["docker", "inspect", *project_ids], text=True)) if project_ids else []
+intended_ids = {c.get("Id") for c in agent + (seeders if claude_token and not seed_bad else [])}
+other_bad = []
+for container in project_containers:
+    if container.get("Id") not in intended_ids:
+        other_bad.extend(sidecar_login_problems(container.get("Mounts", []), project, expected_secret, session_source))
+check("I23", "no other project container receives Claude credential sources", not other_bad, other_bad)
 
 # The service side can still reach the agent's API (through the edge relay) and the key is enforced.
 def get(key):

@@ -301,6 +301,11 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   } else {
     lines.push(`  provider: ${yamlString(agent.model.provider)}`)
   }
+  // Stock Hermes redacts sk-ant-oat... tool results before session/trajectory
+  // persistence. Pin its supported secure setting for the restricted grant.
+  if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
+    lines.push('security:', '  redact_secrets: true')
+  }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
   const overrides = agent.model.provider === TINFOIL.id

@@ -116,6 +116,7 @@ describe('agents registry and API', () => {
     expect(stored(second.id).runtime).toMatchObject({ isolation: 'restricted', network: { uplink: '10.250.0.32/28', sandbox: '10.251.0.32/28' } })
     // Managed files go to managed/: the home belongs to the agent's container user and stays empty here.
     const config = readFileSync(join(dir, 'agents', first.id, 'managed', 'config.yaml'), 'utf8')
+    expect(config).toContain('security:\n  redact_secrets: true')
     expect(config).toContain('http://edge:8923/wizard/mcp')
     expect(config).not.toContain('wizard-agent-service:8923')
     expect(readFileSync(join(dir, 'agents', first.id, 'managed', '.env'), 'utf8')).toContain('WIZARD_MCP_TOKEN=')
@@ -408,6 +409,17 @@ describe('agent folder parsing and harness config', () => {
     expect(text).toMatch(/disabled_toolsets: \[[^\]]*"terminal"/)
     expect(text).not.toMatch(/disabled_toolsets: \[[^\]]*"web"/)
     expect(text).not.toContain('mcp_servers: {}')
+  })
+
+  it('pins supported secret redaction only in restricted standard Claude harnesses', () => {
+    const base = { id: 'a', privacy: 'standard', runtime: { isolation: 'restricted' },
+      model: { provider: 'anthropic', model: 'claude-opus-5-5', fallback: false },
+      permissions: { outside_tools: [], files: 'none', wizard_apps: [], agent_apps: [] } }
+    expect(hermesConfigYaml(base)).toContain('security:\n  redact_secrets: true')
+    for (const changes of [{ privacy: 'private' }, { privacy: 'unknown' }, { runtime: {} },
+      { model: { ...base.model, provider: 'local' } }]) {
+      expect(hermesConfigYaml({ ...base, ...changes })).not.toContain('redact_secrets:')
+    }
   })
 
   it('raised memory budgets reach the harness config; out-of-range budgets are refused', () => {

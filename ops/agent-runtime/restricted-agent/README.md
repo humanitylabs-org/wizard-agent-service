@@ -64,19 +64,31 @@ Missing tokens do not prevent startup: the helper reports `claude_token_missing`
 `inspect_check.py --claude-token` is an independent owner grant, never inferred from container env.
 I14 always rejects token env and requires the independently granted config path; I6 validates the
 per-agent tmpfs mount and its actual Docker volume driver/options; I22 validates the isolated seeder
-and independently supplied owner source. With named homes, pass `--claude-token-file "$SECRET_FILE"`;
+and independently supplied owner source. I19/I20/I23 reject the session volume by name/backing
+source and the owner secret by source at **any** destination in home-init, edge, egress and every
+other project container (including unknown/orphan seeders). Only the exact validated seeder is exempt. With named homes, pass `--claude-token-file "$SECRET_FILE"`;
 with a dedicated home bind, the default expected source is its sibling `claude.token`.
 `in_agent.py` no longer masks the flaw: it fails if a gateway token env would persist.
 `conformance/docker_credentials.py` uses the real stock image and ordinary `model_tools` terminal
 dispatcher (no pre-removal). The old env delivery must produce a matching home snapshot; the new
-grant must produce a snapshot but **zero** matching files anywhere under `/opt/data`, before/after
-DirectSDK's offline usable-login probe, with an uncredentialed negative control. Agent runs uid10000
+grant must produce a snapshot but **zero** matching files anywhere under `/opt/data`, including
+after `cat /run/claude-login/.credentials.json`, real `AIAgent._persist_session` / `_save_trajectory`,
+and database close/reopen. It uses a deliberately fake **OAuth-shaped** `sk-ant-oat01-...` token:
+stock `agent/redact.py`'s supported `security.redact_secrets: true` (already default) masks the
+`sk-` family in ordinary dispatcher output before persistence. The Service pins that setting in
+restricted standard/anthropic harness configs. A redaction-disabled positive control persists the
+same unchanged cat result in state.db and trajectory_samples.jsonl. An arbitrary non-token-shaped
+fixture string does not test the stock token pattern. DirectSDK's offline usable-login probe and
+an uncredentialed negative control are also required. Agent runs uid10000
 without capabilities; the seeder uses the production script and a real tmpfs volume. Finally cleanup
 verifies fixture-labelled containers, networks and volumes are absent. Only synthetic credentials.
 Never publish raw production inspect/Compose config or secret contents. Docker admins and the agent
 can read the intentionally granted credential; this is not a credential enclave. tmpfs is memory-backed
-but host swap/hibernation policy is separate. A malicious agent can deliberately copy its own credential;
-the regression proves ordinary dispatch/auth status no longer persists it implicitly.
+but host swap/hibernation policy is separate. Accepted residual: the agent can deliberately read,
+encode, copy or disable redaction for its own credential; encoded/unknown token shapes may still
+persist in state.db or trajectories. Pattern redaction is defense-in-depth, not a secret enclave.
+The grant is per-agent and revocable; network use remains restricted to allowlisted hosts, which
+can still receive agent-visible data. No stronger malicious-agent no-persistence claim is made.
 
 ## Direct TLS passthrough
 

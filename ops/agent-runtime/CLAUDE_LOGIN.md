@@ -87,14 +87,19 @@ home-init/edge/egress leakage; I21 checks exact public-DNS passthrough aliases a
 is present. Ordinary production dispatch is covered separately in `conformance/docker_credentials.py`.
 The helper's inspect route returns only lifecycle metadata, never container env; errors omit Compose
 stderr/raw exception strings. Never publish raw production inspect/Compose config or secrets.
-Docker admins and the agent can read the intended credential. A malicious agent can explicitly copy
-it; the fix prevents implicit persistence by ordinary tools/auth-status. Host swap/hibernation policy
-is separate from tmpfs memory backing. Allowed Anthropic endpoints can send agent-visible data.
+The Service explicitly writes the stock supported `security.redact_secrets: true` for restricted
+standard/anthropic harnesses. The pinned image's `agent/redact.py` sk- pattern covers OAuth tokens
+(`sk-ant-oat...`): ordinary dispatcher cat results are masked before state.db/trajectory persistence.
+This is defense-in-depth, not an enclave. Accepted residual: the agent can deliberately read, encode,
+copy, or disable redaction for its own credential; encoded/unknown token shapes may still persist.
+The token is agent-scoped and revocable, and network use remains limited to allowlisted hosts.
+Those hosts can receive agent-visible data. Docker admins can read the credential; host swap and
+hibernation policy are separate from tmpfs memory backing. No malicious-agent no-persistence claim.
 
 ## Provenance and evidence
 
 Upstream PR: https://github.com/humanitylabs-org/wizard-app-store/pull/21,
-branch `feature/restricted-claude-login`, commit `f46d1bbcb6f6cce8ad45e41ca59b2cb12cb23a52`.
+branch `feature/restricted-claude-login`, commit `4350ca9e9e026d67ef12f378d1feef6b8e454e33`.
 All 26 upstream files are vendored byte-for-byte with hashes in `restricted-agent/SOURCE.txt`.
 The helper requires the base/token Compose files, alias/policy renderer, egress/DNS, seeder/Dockerfile,
 and conformance masking guard/real-image credential regression in that manifest.
@@ -112,7 +117,7 @@ and conformance masking guard/real-image credential regression in that manifest.
 - Upstream `bun test`: **78 passed** after installing the lockfile's missing dependencies.
 - Vendored hash/full-byte comparison, Python/Service syntax and `git diff --check`: passed.
 
-### Round 3 review fixes (current source)
+### Round 3 review fixes (historical baseline)
 
 - Stock image read-only audit: local terminal treats `CLAUDE_CODE_OAUTH_TOKEN` as first-party and retains
   it in subprocess/snapshot env. No supported terminal named-var blocklist was found; a config-only
@@ -131,6 +136,32 @@ and conformance masking guard/real-image credential regression in that manifest.
   public-DNS alias denial before Compose, and mandatory security manifest entries.
 - All **26/26** upstream tracked files are byte-identical, SOURCE hashes valid; Service syntax and
   `git diff --check` pass.
+
+### Round 4 review fixes
+
+- The three stopped-census failures reproduced locally at the Round 3 starting revision. The
+  restricted fixture returned the **agent id for every Docker ps query**, including the new
+  `claude-init` filter. Seeder cleanup then attempted an unsupported rm and aborted stop, so the
+  Service could not seal the still-running home. The fixture now honors service filters; it does
+  not suppress cleanup errors or bypass the real helper's census. Production helper stop now
+  stops Compose first, then removes the exact-project seeder: failed stop never revokes a live
+  agent's config. Census JSON bytes match the pregrant d49037d stop boundary with and without a
+  synthetic grant, and the home file bytes/metadata are unchanged.
+- Both previously failing Vitest files: **13/13 passed**, archived-main rollback required, no skips.
+  Every Vitest file containing census/restricted/stop: **551/551 passed across 39 files**, no skips.
+  Entire `ops/agent-runtime` Python suite: **60/60 passed**, including verify_vendored and new
+  stop-failure / byte-identical census controls. All commands use isolated command-scoped homes.
+- S2: credential exclusions match volume name, actual volume backing source and independent owner
+  secret source at any destination, including home-init and unknown/orphan project services.
+  Only the intended validated seeder is exempt. Inspect selftests: **82/82**; Store conformance
+  Python tests: **43/43**. All **26/26** upstream files are byte-exact and SOURCE hashes valid.
+- B2: read-only stock-image audit found the supported secret-redaction knob and OAuth-covering
+  sk- regex (image build f97608f178d1ffeca59860195ab7da295f7c8e5f). Harness config now pins it on.
+  Real uid10000 stock dispatcher `cat`, unchanged tool result passed to real AIAgent session and
+  trajectory persistence, then database close/reopen: **zero token matches under /opt/data**.
+  Redaction-off control persists the same synthetic OAuth-shaped credential in both state.db and
+  trajectory_samples.jsonl; legacy env control still leaks to its terminal snapshot. No output
+  pre-scrubbing/core edits. Deliberate encoded copying remains the accepted residual above.
 
 No model request, real token provisioning, full agent conformance or production deployment is claimed.
 The dispatcher and offline readiness proofs do not claim complete DirectSDK inference/admission.

@@ -13,12 +13,15 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
-SYNTHETIC = 'SYNTHETIC-CLAUDE-ROUND3-NOT-A-CREDENTIAL'
+# Credential-shaped but intentionally fake; exercises stock sk- prefix matching.
+SYNTHETIC = 'sk-ant-oat01-SYNTHETIC-ROUND4-NOT-A-REAL-CREDENTIAL-0123456789'
 PROBE = r'''
 import json, os, pathlib, sys, time
 sys.path.insert(0, '/opt/hermes')
 sys.path.insert(0, '/opt/hermes/plugins/model-providers/claude-subscription-directsdk-experimental')
 import directsdk_setup
+# Same harness field the Service writes; no token/env/output pre-scrubbing.
+pathlib.Path('/opt/data/config.yaml').write_text('security:\n  redact_secrets: true\n')
 from model_tools import handle_function_call
 config = pathlib.Path('/run/claude-login/.credentials.json')
 for _ in range(100):
@@ -40,9 +43,38 @@ empty = pathlib.Path('/tmp/empty-claude-config'); empty.mkdir()
 negative_env = dict(os.environ, CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=str(empty))
 negative_env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
 assert not directsdk_setup.setup_status(env=negative_env)['logged_in'], 'login negative control failed'
-# Scan AFTER auth status as well, including all regular files in the durable home.
+# Persist the UNCHANGED ordinary dispatcher result, not a synthesized result.
+read_result = handle_function_call('terminal', {
+    'command': 'cat /run/claude-login/.credentials.json', 'timeout': 10}, task_id='claude-credential-regression')
+assert json.loads(read_result)['exit_code'] == 0
+redaction_enabled = os.getenv('HERMES_REDACT_SECRETS', 'true') != 'false'
+assert (token not in read_result.encode()) == redaction_enabled, 'stock OAuth redaction mismatch'
+from run_agent import AIAgent
+from hermes_state import SessionDB
+db = SessionDB()
+agent = AIAgent(model='offline-regression', provider='openai', base_url='https://offline.invalid/v1',
+    api_key='synthetic-no-network', session_db=db, session_id='claude-redaction-regression',
+    save_trajectories=True, skip_context_files=True, skip_background_review=True, quiet_mode=True)
+messages = [{'role': 'user', 'content': 'Run local auth diagnostics.'},
+    {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'credential-read', 'type': 'function',
+        'function': {'name': 'terminal', 'arguments': json.dumps({'command': 'cat /run/claude-login/.credentials.json'})}}]},
+    {'role': 'tool', 'name': 'terminal', 'tool_call_id': 'credential-read', 'content': read_result},
+    {'role': 'assistant', 'content': 'Diagnostics completed.'}]
+agent._persist_session(messages)
+agent._save_trajectory(messages, 'Run local auth diagnostics.', True)
+saved = [m for m in db.get_messages('claude-redaction-regression') if m['role'] == 'tool']
+assert len(saved) == 1 and saved[0]['content'] == read_result, 'session altered tool result'
+db.close()
+reopened = SessionDB()
+assert len([m for m in reopened.get_messages('claude-redaction-regression') if m['role'] == 'tool']) == 1
+reopened.close()
+assert pathlib.Path('/opt/data/state.db').is_file()
+assert pathlib.Path('/opt/data/trajectory_samples.jsonl').is_file()
+# Scan AFTER real session/trajectory writes and DB close/reopen, including snapshots.
 found = [str(p) for p in pathlib.Path('/opt/data').rglob('*') if p.is_file() and token in p.read_bytes()]
 print(json.dumps({'dispatcher_ok': True, 'snapshot_created': True,
+                 'redaction_enabled': redaction_enabled, 'cat_token_redacted': token not in read_result.encode(),
+                 'session_saved_reopened': True, 'trajectory_saved': True,
                  'token_in_gateway_env': 'CLAUDE_CODE_OAUTH_TOKEN' in os.environ,
                  'matching_home_files': found, 'plugin_login_usable': status['logged_in'],
                  'login_negative_control': True, 'uid10000_no_caps': True}))
@@ -60,7 +92,7 @@ def docker(*args, **kwargs):
 def main():
     tag = 'claude-grant-' + uuid.uuid4().hex[:12]
     volume = tag + '-config'
-    names = [tag + '-init', tag + '-legacy', tag + '-fixed']
+    names = [tag + '-init', tag + '-legacy', tag + '-redaction-off', tag + '-fixed']
     try:
         docker('volume', 'create', '--label', 'claude-grant-test', '--label', 'fixture=' + tag,
                '--driver', 'local', '--opt', 'type=tmpfs', '--opt', 'device=tmpfs', '--opt',
@@ -79,22 +111,27 @@ def main():
                    '-v', volume + ':/run/claude-login', '--entrypoint', '/opt/hermes/.venv/bin/python',
                    IMAGE, '-c', (ROOT / 'sidecars/claude-init.py').read_text())
             receipts = {}
-            for legacy, name in ((True, names[1]), (False, names[2])):
+            for mode, name in zip(('legacy', 'redaction-off', 'fixed'), names[1:]):
+                legacy = mode == 'legacy'
                 env_args = ['-e', 'CLAUDE_CODE_OAUTH_TOKEN=' + SYNTHETIC] if legacy else []
+                if mode == 'redaction-off': env_args += ['-e', 'HERMES_REDACT_SECRETS=false']
                 raw = docker('run', '--rm', '-i', '--name', name, '--label', 'claude-grant-test',
                     '--label', 'fixture=' + tag, '--network', 'none', '--read-only', '--user', '10000:10000',
                     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-                    '--memory', '512m', '--pids-limit', '64',
+                    '--memory', '768m', '--pids-limit', '128',
                     '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m,mode=1777',
                     '--tmpfs', '/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000,mode=700',
                     '-v', volume + ':/run/claude-login', '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data',
                     '-e', 'HERMES_YOLO_MODE=1', '-e', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login',
                     *env_args, '--workdir', '/opt/data', '--entrypoint', '/opt/hermes/.venv/bin/python',
                     IMAGE, '-', input=PROBE)
-                receipt = json.loads(raw)
-                assert bool(receipt['matching_home_files']) == legacy
+                receipt = json.loads(raw.splitlines()[-1])
+                assert bool(receipt['matching_home_files']) == (mode != 'fixed')
+                if mode == 'redaction-off':
+                    assert any('state.db' in p for p in receipt['matching_home_files'])
+                    assert any('trajectory_samples.jsonl' in p for p in receipt['matching_home_files'])
                 assert receipt['token_in_gateway_env'] == legacy
-                receipts['legacy_control' if legacy else 'fixed'] = receipt
+                receipts[mode] = receipt
             print(json.dumps(receipts, indent=2))
     finally:
         for name in reversed(names):
