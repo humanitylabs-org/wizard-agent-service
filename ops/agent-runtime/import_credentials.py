@@ -10,7 +10,7 @@ import yaml
 from pathlib import PurePosixPath
 from dotenv import dotenv_values
 
-CREDENTIAL_PATH = re.compile(r'(^|[/_.-])(auth|oauth|credentials?|secrets?|tokens?|id_rsa|id_ed25519|hosts\.yml|.*\.pem|.*\.key)([/_.-]|$)', re.I)
+CREDENTIAL_PATH = re.compile(r'^(?:(?:.*[._-])?(?:auth|oauth|credentials?|secrets?|tokens?)(?:\.(?:json|ya?ml|toml|ini|env))?|id_(?:rsa|ed25519)(?:\.pub)?|hosts\.yml|.*\.(?:pem|key))$', re.I)
 FORBIDDEN_ENV = re.compile(r'^(WIZARD_|COMPANY_|DOCKER_|BWS_|BW_|OP_|SSH_AUTH_SOCK$|HOME$|HERMES_HOME$|API_SERVER_|TERMINAL_|HERMES_GATEWAY_|HERMES_PROFILE)')
 PLATFORM = re.compile(r'^(TELEGRAM|DISCORD|SLACK|WHATSAPP|SIGNAL|MATRIX|EMAIL|SMS|FEISHU|DINGTALK|WECHAT|WEIXIN|NTFY|TEAMS|LINE|SIMPLEX|BLUEBUBBLES|PHOTON|WEBHOOK|MATTERMOST|GOOGLE_CHAT)_')
 
@@ -64,7 +64,7 @@ def inventory(entries, read):
                     for provider in sorted(mapping):
                         result.append({'path': path, 'kind': 'auth-provider', 'item': section + ':' + provider, 'approved': False})
             result.append({'path': path, 'kind': 'auth-envelope', 'item': '', 'approved': False})
-        elif CREDENTIAL_PATH.search(path) or '/.ssh/' in '/' + path or path.startswith('credentials/'):
+        elif CREDENTIAL_PATH.search(name) or any(part in {'.ssh', 'credentials', 'secrets'} for part in PurePosixPath(path).parts[:-1]):
             result.append({'path': path, 'kind': 'file', 'item': '', 'approved': False})
     return result
 

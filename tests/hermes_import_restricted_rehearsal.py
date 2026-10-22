@@ -100,11 +100,16 @@ def model_exercise(service, cid, model, fact):
     code = '''import sqlite3,json
 with sqlite3.connect('file:/opt/data/state.db?mode=ro',uri=True) as db:
  db.row_factory=sqlite3.Row
- session=dict(db.execute('select * from sessions where id=?',(__import__('sys').argv[1],)).fetchone())
+ row=db.execute('select * from sessions where id=?',(__import__('sys').argv[1],)).fetchone()
+ session=dict(row) if row else {}
  messages=[dict(r) for r in db.execute('select * from messages where session_id=? order by id',(__import__('sys').argv[1],))]
 print(json.dumps({'session':session,'messages':messages}))
 '''
-    raw = command(['docker', 'exec', cid, 'python3', '-c', code, session], check=True, log=False)
+    emit(service_run_terminal_status=status.get('status', (status.get('run') or {}).get('status')), status_keys=sorted(status))
+    raw = command(['docker', 'exec', cid, 'python3', '-c', code, session], log=False)
+    if raw.returncode:
+        emit(canonical_read_exit_code=raw.returncode, canonical_read_error=raw.stderr[-1800:])
+    h.require(raw.returncode == 0, 'canonical_read_failed')
     canonical = json.loads(raw.stdout)
     row = canonical['session']
     messages = canonical['messages']
@@ -140,6 +145,7 @@ print(json.dumps({'session':session,'messages':messages}))
          canonical_tool_results=terminals, fact_store_existing_fact_verified=fact_ok,
          reply_marker='IMPORT_RESTRICTED_CHECK' in reply, reply_fact_verified=fact in reply,
          model_gate_pass=bool(terminals) and all(t['exit_code'] == 0 for t in terminals) and fact_ok)
+    return bool(terminals) and all(t['exit_code'] == 0 for t in terminals) and fact_ok
 
 
 def main():
@@ -246,7 +252,8 @@ def main():
         probe(['sh', '-c', 'printf probe > "$1/.restricted-import-write-refused"', 'probe', str(context)])
         probe(['sh', '-c', 'test ! -e /var/run/docker.sock && test ! -e /run/docker.sock && test ! -e /home/telos/.wizard-os/agents/private && test ! -e /opt/data/.wizard-os/agents/private'])
         section('5. Live Service hidden session then one original-provider model turn')
-        model_exercise(service, cid, plan['summary']['model'], fact)
+        model_pass = model_exercise(service, cid, plan['summary']['model'], fact)
+        h.require(model_pass, 'restricted_acceptance_remaining_gates')
     finally:
         section('6. Undo, key removal, copy deletion and invariant readbacks')
         if journal.exists():

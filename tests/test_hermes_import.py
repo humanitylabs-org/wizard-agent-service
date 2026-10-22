@@ -75,6 +75,20 @@ class ImportTests(unittest.TestCase):
         return m.apply(p or self.plan(), 'fixture-agent', self.wizard, runtime_factory=FakeRuntime)
     def undo(self, result):
         return m.undo(result['journal'], runtime_factory=FakeRuntime)
+    def test_credential_named_documentation_is_not_a_secret_file(self):
+        d = self.home / 'skills/agent-credential-provisioning'
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text('Useful public procedures, no credentials.')
+        (self.home / 'scripts').mkdir()
+        (self.home / 'scripts/auth_watchdog.py').write_text('# Procedure, not a credential\n')
+        plan = self.plan()
+        self.assertFalse(any(c['path'].startswith(('skills/', 'scripts/')) for c in plan['credentials']))
+        result = self.apply(plan)
+        target = self.wizard / 'agents/fixture-agent/home'
+        self.assertTrue((target / 'skills/agent-credential-provisioning/SKILL.md').exists())
+        self.assertTrue((target / 'scripts/auth_watchdog.py').exists())
+        self.undo(result)
+
     def test_credentials_deny_by_default_and_multiline_no_tail(self):
         (self.home / 'credentials').mkdir()
         (self.home / 'credentials/host-authority.json').write_text('{"token":"fake-host"}')
