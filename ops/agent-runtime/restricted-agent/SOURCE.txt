@@ -1,6 +1,6 @@
 Source: https://github.com/humanitylabs-org/wizard-app-store
 Branch: fix/restricted-claude-app-login
-Commit: e9223f56af05efe938749dc27b5ddce7633c81cb
+Commit: 723e682ffcd1943eed89a8db2d0d3b6c90fc439c
 Path: runtimes/restricted-agent
 All runtime files are byte-identical to this upstream commit. The prior Service
 Unix-socket adaptation was moved upstream first (39ff02c); no local adaptation.
@@ -28,13 +28,13 @@ cc4a0adc72174dc97fd07ad11259eedd2880e197ea5eccfe6c117ece96937a5b  ./conformance/
 d3c85c842f2399f773c246996bb8dc1de7132207fdb494426a76bfd36e5dda74  ./conformance/socket_service.mjs
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
 34a5df44c9366268e902ad4a4836c01ae5b1a14864d79631c759a3ebaaf8efb2  ./conformance/test_claude_login.py
-94bcfbe2e9c4c10ddb3dc01c63ae586f67bfa89ca832db36b35f9089b26770ba  ./conformance/test_claude_seed.py
+0830c3eb81b014964b616fa96c559832bf44cb2ba98786a853331a7e02faa07a  ./conformance/test_claude_seed.py
 b1ea4c5ecd1a72cbb83a7a310d2c4be01784c7c61058c66b0271d75c7ce89208  ./conformance/test_claude_source.py
 ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
 edc731730daffd878838d9f33b23fdb4a9547134680ba35a3970f7e8f979ba26  ./conformance/test_passthrough.py
 67a67ddd0243ad8fe5944ffb9e55a182f7ef11ba70aceb5acd919e67110303ff  ./passthrough.py
 5704656a3c8e8f15cc2eee2bd93bf6ff2fbf8cce96467e03f247037f90bf665c  ./sidecars/Dockerfile
-dae79f75ec6581b6daa362a255944c9acf7a9aa24f16a7c892c9ce51cac8c085  ./sidecars/claude-init.py
+2856659ac8b1c42535f1e64f586d59463008151d960d6dfad4c5e76cb1a49d90  ./sidecars/claude-init.py
 27bf3847e3eb289aeaf25c05bff9269e099f0f1401a8744902ea01a68d50a454  ./sidecars/edge.py
 f4b0d531b683bba2ae114d811a8d526ea9d15d8fce7cdba54ca38ecd0c7739da  ./sidecars/egress.py
 e36eac2a6a666869323cb014cb2d43c1ac94b56847fbb96335205315c7b0855b  ./sidecars/home-init.sh

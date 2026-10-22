@@ -59,7 +59,7 @@ def credential(source=SOURCE):
 def seed(source=SOURCE, target=TARGET):
     try:
         value = credential(source)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         (target / '.credentials.json').unlink(missing_ok=True)
         return False
     os.chown(target, 10000, 10000)
@@ -90,6 +90,11 @@ def main():
             seed()
             (TARGET / '.initialized').touch(mode=0o600, exist_ok=True)
         except Exception:
+            # Fail closed: never leave a stale projection behind a dead projector.
+            try:
+                (TARGET / '.credentials.json').unlink(missing_ok=True)
+            except OSError:
+                pass
             raise SystemExit('Claude login projection failed') from None
         time.sleep(INTERVAL)
 

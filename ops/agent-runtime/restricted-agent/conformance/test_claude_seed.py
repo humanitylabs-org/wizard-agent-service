@@ -79,6 +79,16 @@ class SeedTest(unittest.TestCase):
         self.path.unlink(); self.write(); self.path.chmod(0o644)
         self.assertFalse(self.seed())
         self.write(); self.path.write_bytes(b'\xff'); self.assertFalse(self.seed())
+        self.write(); self.assertTrue(self.seed())
+        self.path.write_bytes(b'[' * 60001)  # size-valid but deeper than the JSON recursion limit
+        real_loads = seeder.json.loads
+        def deep(raw):  # interpreter-independent: force the RecursionError Python 3.12 raises here
+            raise RecursionError('maximum recursion depth exceeded')
+        seeder.json.loads = deep
+        try:
+            self.assertFalse(self.seed()); self.assertFalse((self.target / '.credentials.json').exists())
+        finally:
+            seeder.json.loads = real_loads
         link = self.root / 'directory-link'; link.symlink_to(self.source)
         with self.assertRaises(OSError): seeder.credential(link)
 
