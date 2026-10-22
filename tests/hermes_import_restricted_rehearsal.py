@@ -161,7 +161,7 @@ finally: db.close()
          reply_marker='IMPORT_RESTRICTED_CHECK' in reply, reply_fact_verified=fact in reply,
          model_gate_pass=passed, heavy_job_gate_pass=heavy_pass,
          model_tool_names=[x.get('function', x).get('name') for x in calls],
-         heavy_admission_reply_lines=[x for x in reply.splitlines() if any(w in x.lower() for w in ['heavy', 'unavailable', 'admission']) and 'token' not in x.lower()][:8])
+         heavy_tool_called=bool(submissions))
     return passed
 
 
@@ -340,6 +340,7 @@ def main():
             'print(json.dumps({"registered_agent_heavy_tools":registry.get_tool_names_for_toolset("wizard-agent-heavy")}))'],
             log=False, timeout=90)
         h.require(plugin_probe.returncode == 0, 'agent_heavy_plugin_probe_failed')
+        h.require(bool(plugin_probe.stdout.strip()), 'agent_heavy_plugin_probe_empty')
         tools = json.loads(plugin_probe.stdout.strip().splitlines()[-1])
         emit(**tools)
         h.require('wizard_heavy_submit' in tools['registered_agent_heavy_tools'], 'agent_heavy_tool_not_registered')

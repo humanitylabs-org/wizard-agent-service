@@ -358,6 +358,27 @@ class ImportTests(unittest.TestCase):
         m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
         twice = m.load_yaml((self.home / 'config.yaml').read_text())
         self.assertEqual(twice['platform_toolsets']['api_server'].count('wizard-agent-heavy'), 1)
+        p['grants'] = {'heavy': False}
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        revoked = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertNotIn('wizard-agent-heavy', revoked['platform_toolsets']['api_server'])
+        self.assertNotIn('wizard-agent-heavy', revoked['plugins']['enabled'])
+
+    def test_heavy_api_allowlist_shapes_fail_closed_or_preserve_defaults(self):
+        original = m.load_yaml((self.home / 'config.yaml').read_text())
+        for value in [None, [], ['terminal'], 'terminal']:
+            cfg = {**original, 'platform_toolsets': {'api_server': value, 'telegram': ['memory']}}
+            (self.home / 'config.yaml').write_text(m.yaml.safe_dump(cfg))
+            p = self.plan(); p['grants'] = {'heavy': True}
+            if isinstance(value, str):
+                with self.assertRaisesRegex(m.ImportFailure, 'api_toolsets_invalid'):
+                    m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+                continue
+            m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+            actual = m.load_yaml((self.home / 'config.yaml').read_text())
+            expected = None if value is None else [*value, 'wizard-agent-heavy']
+            self.assertEqual(actual['platform_toolsets']['api_server'], expected)
+            self.assertEqual(actual['platform_toolsets']['telegram'], ['memory'])
 
     def test_takeover_wiring_keeps_own_cron_messaging(self):
         p = self.plan()

@@ -634,12 +634,17 @@ def wire(home, plan, api_key, gateway_key):
     cfg['plugins'] = {'enabled': list(plan.get('approved_plugins', [])) + [a['name'] for a in plan.get('wizard_assets', []) if a['kind'] == 'plugins'], 'disabled': []}
     if plan.get('grants', {}).get('heavy'):
         cfg['plugins']['enabled'].append('wizard-agent-heavy')
-        # An imported explicit platform allowlist otherwise hides the enabled plugin.
-        # Grant only the imported API runtime, not the source or messaging platforms.
-        platforms = cfg.get('platform_toolsets') or {}
-        if 'api_server' in platforms:
-            platforms['api_server'] = list(dict.fromkeys([*platforms['api_server'], 'wizard-agent-heavy']))
-            cfg['platform_toolsets'] = platforms
+    # Explicit API lists hide enabled plugins. Only the imported API gets this grant.
+    platforms = cfg.get('platform_toolsets') or {}
+    require(isinstance(platforms, dict), 'platform_toolsets_invalid')
+    api_tools = platforms.get('api_server')
+    require(api_tools is None or isinstance(api_tools, list), 'api_toolsets_invalid')
+    if isinstance(api_tools, list):
+        api_tools = [name for name in api_tools if name != 'wizard-agent-heavy']
+        if plan.get('grants', {}).get('heavy'):
+            api_tools.append('wizard-agent-heavy')
+        platforms['api_server'] = list(dict.fromkeys(api_tools))
+        cfg['platform_toolsets'] = platforms
     if isinstance(memory_plugin, dict):
         cfg['plugins']['hermes-memory-store'] = memory_plugin
     (home / 'config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
