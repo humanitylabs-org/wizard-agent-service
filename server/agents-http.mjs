@@ -565,6 +565,16 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (!isModelChange && value.model === agent.model.model) delete value.model
     }
   }
+  // Owner file ids are a service capability, not something an agent's Hermes understands.
+  // Authorize before resolving anything (including ids in the agent's own thread).
+  if (method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath))) {
+    if (Object.hasOwn(value, 'wizard_file_ids')) {
+      if (principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'files.owner')
+      if (agent.permissions.files === 'none') throw new AgentError(409, 'agent_files_disabled', 'agent.permissions.files')
+      if (ctx.prepareAgentRun) value = JSON.parse((await ctx.prepareAgentRun(agent, Buffer.from(JSON.stringify(value)))).body.toString('utf8'))
+      else throw new AgentError(503, 'file_delivery_unavailable', 'agent.files')
+    }
+  }
   let pinAfter = ''
   // A thread is pinned only once its agent has accepted it, so a refused request never claims an id.
   let pinOnSuccess = ''
