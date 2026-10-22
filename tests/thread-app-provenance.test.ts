@@ -89,7 +89,9 @@ describe('explicit reply app provenance', () => {
     expect(catalog).toEqual([{ id: 'new-installed-app', name: 'New App' }, { id: 'topics', name: 'Topics' }, { id: 'usuals', name: 'Food' }])
     expect(appProvenanceRunNote(catalog)).toContain('new-installed-app')
     expect(appProvenanceRunNote(catalog)).toContain('actual work you performed')
-    expect(runInstructions({ join: false })).toContain('Never carry the previous reply\'s app_id forward automatically')
+    expect(appProvenanceRunNote(catalog)).toContain('Never carry the previous reply\'s app_id forward automatically')
+    // The run note carries the provenance rules once; the base instructions must not repeat them.
+    expect(runInstructions({ join: false })).not.toContain('App provenance is optional')
   })
 })
 
