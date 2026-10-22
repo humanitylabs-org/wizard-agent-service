@@ -2,6 +2,8 @@
 
 This is an **opt-in host relay**, not a worker credential inside an agent. The existing Hermes host plugin continues to use `POST /wizard/internal/heavy/{submit,status,cancel}` with the Service's heavy bearer. Its receipts and idempotency identities remain unchanged.
 
+During an in-place worker upgrade, agent jobs use a versioned sandbox spool that legacy dispatchers cannot see. Host jobs keep their original spools/receipts and drain without a restart. Both spool generations use the same heavy and light resource locks.
+
 ## Owner provisioning
 
 1. Provision the existing Service heavy lane (`WIZARD_HEAVY_STATE_PATH`, `WIZARD_HEAVY_TOKEN`, the host RPC/SSH transport and run queue) as before. Keep the worker SSH key and host heavy token exclusively on the Service/host.

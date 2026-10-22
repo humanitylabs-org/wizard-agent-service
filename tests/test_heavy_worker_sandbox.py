@@ -59,6 +59,29 @@ class SandboxTest(unittest.TestCase):
             with patch.dict(os.environ, {'WIZARD_HEAVY_DOCKER_HOST': bad}), self.assertRaises(ValueError):
                 worker.docker_environment()
 
+    def test_agent_specs_are_invisible_to_old_dispatchers_and_share_lane_locks(self):
+        spool = self.root / 'spool-upgrade'
+        lock = self.root / 'heavy.lock'
+        for lane in ('heavy', 'light'):
+            job = 'heavy_' + ('b' if lane == 'heavy' else 'c') * 32
+            spec = {**self.spec, 'lane': lane}
+            with patch.object(worker, 'spawn_dispatcher') as spawn:
+                result = worker.rpc(spool, lock, {'action': 'submit', 'job_id': job, 'spec': spec})
+            self.assertEqual(result['state'], 'queued')
+            target = worker.agent_spool(spool)
+            if lane == 'light':
+                target = worker.light_root(target)
+            self.assertEqual(worker.find(spool, job), target)
+            spawn.assert_any_call(target, worker.light_lock(spool) if lane == 'light' else lock)
+            for legacy in (spool, worker.light_root(spool)):
+                if (legacy / 'jobs.sqlite3').exists():
+                    db = worker.connect(legacy)
+                    self.assertEqual(db.execute('SELECT count(*) FROM jobs WHERE id=?', (job,)).fetchone()[0], 0)
+                    db.close()
+            with patch.object(worker, 'spawn_dispatcher'):
+                readback = worker.rpc(spool, lock, {'action': 'status', 'job_id': job})
+            self.assertEqual(readback, result)
+
     def test_traversal_and_foreign_absolute_cwd(self):
         for cwd in (str(self.project / '../../beta/project'), str(self.beta), str(self.home), 'relative'):
             with self.subTest(cwd=cwd), self.assertRaises(ValueError):

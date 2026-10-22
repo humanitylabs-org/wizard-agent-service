@@ -31,6 +31,12 @@ LANES = ('heavy', 'light')
 LIGHT_MAX_SECONDS = 900
 
 
+def agent_spool(root):
+    # A pre-sandbox dispatcher may still hold the legacy spool leadership lock.
+    # It must never see agent specs, even while its host jobs drain normally.
+    return Path(root) / 'agent-sandbox-v1'
+
+
 def light_root(root):
     return Path(root) / 'light'
 
@@ -393,7 +399,7 @@ def spawn_dispatcher(root, lock_path):
 
 def find(root, job_id):
     """Spool holding job_id: heavy (root) first, then light. Never creates a spool."""
-    for lane_root in (root, light_root(root)):
+    for lane_root in (root, light_root(root), agent_spool(root), light_root(agent_spool(root))):
         if (lane_root / 'jobs.sqlite3').exists():
             db = connect(lane_root)
             try:
@@ -414,7 +420,8 @@ def rpc(root, lock_path, value):
     target = find(root, job_id)
     if action == 'submit':
         validated = validate(value['spec'])
-        wanted = light_root(root) if validated.get('lane') == 'light' else root
+        base = agent_spool(root) if 'agent_id' in validated else root
+        wanted = light_root(base) if validated.get('lane') == 'light' else base
         if target is not None and target != wanted:
             raise ValueError('idempotency conflict')
         target = wanted
@@ -435,6 +442,11 @@ def rpc(root, lock_path, value):
     spawn_dispatcher(root, lock_path)
     if (light_root(root) / 'jobs.sqlite3').exists():
         spawn_dispatcher(light_root(root), light_lock(root))
+    # Separate storage, SAME resource locks: no extra heavy/light capacity.
+    if (agent_spool(root) / 'jobs.sqlite3').exists():
+        spawn_dispatcher(agent_spool(root), lock_path)
+    if (light_root(agent_spool(root)) / 'jobs.sqlite3').exists():
+        spawn_dispatcher(light_root(agent_spool(root)), light_lock(root))
     return public(row)
 
 
