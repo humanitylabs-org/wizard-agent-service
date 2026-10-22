@@ -47,6 +47,9 @@ class ClaudeTokenTest(unittest.TestCase):
         self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-claude-value')
         self.assertNotIn('fixture-claude-value', ' '.join(args))
         self.assertNotIn('claude-login', ' '.join(args))
+        # Host-side readable owner secrets need not share the helper's effective uid.
+        with mock.patch.object(ar.os, 'geteuid', return_value=-1):
+            self.assertEqual(self.driver.env(self.agent)['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-claude-value')
 
     def test_private_unknown_and_other_provider_never_receive_token(self):
         self.set_token()

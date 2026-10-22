@@ -205,7 +205,7 @@ class Agents:
                 fd = os.open(self.root / agent_id / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 with os.fdopen(fd) as stream:
                     st = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.geteuid():
+                    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:
                         return ""
                     value = stream.read(16385).strip()
                     return value if len(value) <= 16384 and not any(not 33 <= ord(c) <= 126 for c in value) else ""

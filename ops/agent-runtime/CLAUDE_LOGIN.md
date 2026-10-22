@@ -8,7 +8,8 @@
 tokens are cleared, not inherited as authorization.
 
 The secret uses `Agents.secret`, beside `runtime.key`/`gateway.key` in the agent folder, **not**
-its home. The reader requires a regular, non-symlink, helper-owner-owned mode-0600 file. No host
+its home. The reader requires a readable regular, non-symlink mode-0600 file. Host-side ownership need not
+match the helper uid (for example, a root helper can read an owner-provisioned secret). No host
 secret file is mounted into the container or copied by home-sync. Only the agent's Compose env
 gets the token; edge/egress/home-init receive none. This is the long-lived `claude setup-token`
 credential supported by unmodified DirectSDK: no automatic refresh and no credential-file writes.
