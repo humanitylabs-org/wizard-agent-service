@@ -8,7 +8,7 @@ const fail = (message, status) => Object.assign(new Error(message), { status })
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 export const AGENT_HEAVY_ROUTE = /^\/wizard\/v1\/agent-heavy\/(submit|status|cancel|artifacts)$/u
 
-export function createAgentHeavyRelay({ options, registry, queue }) {
+export function createAgentHeavyRelay({ options, registry, queue, fetchAgent = (agent, path, init) => registry.fetchAgent(agent, path, init) }) {
   const enabled = () => options.agentHeavy === 'on'
   const sandbox = () => process.env.WIZARD_AGENT_HEAVY_SANDBOX === 'on'
   const buckets = new Map()
@@ -40,7 +40,10 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
     if (!key) throw fail('agent unavailable', 503)
     let response
     try {
-      response = await registry.fetchAgent(agent, path, {
+      // Resolve public run IDs for reads only. Continuations retain the direct
+      // frozen POST and heavy-queue launch-time fence; never defer that mutation.
+      const transport = (init.method || 'GET') === 'GET' ? fetchAgent : (a, p, i) => registry.fetchAgent(a, p, i)
+      response = await transport(agent, path, {
         ...init, headers: { ...init.headers, Authorization: `Bearer ${key}` },
         redirect: 'error', signal: AbortSignal.timeout(4000),
       })

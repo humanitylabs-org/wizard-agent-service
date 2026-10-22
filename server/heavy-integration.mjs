@@ -51,7 +51,7 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry }) {
+export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry, fetchAgent }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -62,7 +62,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
   }
   const watermark = sessionId => heavyRequestWatermark(request, sessionId)
   let heavy
-  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy })
+  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy, fetchAgent })
   const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {

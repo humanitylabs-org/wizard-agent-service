@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { createHeavyIntegration } from '../server/heavy-integration.mjs'
 import { DurableHeavyQueue } from '../server/heavy-queue.mjs'
+import { createRoutedQueues } from '../server/routed-run-queue.mjs'
 import { createPrincipalResolver, markAgentIngress } from '../server/principals.mjs'
 import { createAgentIngress, createWizardServer, listen } from '../server/service.mjs'
 
@@ -50,6 +51,7 @@ function fakeRuntime() {
     if (u.pathname === '/api/sessions/shared') return json({ session: { id: 'shared' } })
     if (u.pathname === '/api/sessions/shared/messages') return json({ data: [{ id: states.humanId, role: 'user', content: states.human }] })
     if (u.pathname.startsWith('/api/sessions/')) return json({ error: 'missing' }, 404)
+    if (u.pathname.startsWith('/v1/runs/wizardq_')) return json({ error: 'public id is not a Hermes id' }, 404)
     if (u.pathname.startsWith('/v1/runs/') && !u.pathname.endsWith('/events')) return json({ run_id: u.pathname.split('/').at(-1), status: states.originDone ? 'completed' : 'running', runtime: { model: 'model-a', provider: 'fixture' } })
     if (u.pathname === '/v1/runs' && init.method === 'POST') {
       const headers = new Headers(init.headers), key = `${id}:${headers.get('idempotency-key') || posts.length}`
@@ -86,7 +88,7 @@ async function serveFakeAgents(root: string, runtime: ReturnType<typeof fakeRunt
     clean.push(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
   }
 }
-async function scene(enabled: string | undefined = 'on') {
+async function scene(enabled: string | undefined = 'on', routed = false) {
   const root = home(); records(root)
   const runtime = fakeRuntime()
   await serveFakeAgents(root, runtime)
@@ -96,7 +98,9 @@ async function scene(enabled: string | undefined = 'on') {
     agentRestricted: (id: string) => registry.agentRestricted(id) })
   const options: any = { heavyStatePath: join(root, 'heavy.db'), heavyToken: token, heavyTransport: runtime.transport, fetchImpl: runtime.fetchImpl, agentHeavy: enabled }
   const hostQueue = { latestForSession: () => ({ publicRunId: 'host-origin', runtime: 'direct', status: 'running', body: JSON.stringify({ model: 'host-model', provider: 'host-provider' }) }) }
-  const heavy = createHeavyIntegration({ options, registry, queue: hostQueue, request: async () => ({ data: [{ id: 1, role: 'user', content: 'Host instruction' }] }) })!
+  const routedQueues = routed ? createRoutedQueues({ registry, own: (fn: any) => clean.push(fn), pollIntervalMs: 60_000 }) : null
+  const heavy = createHeavyIntegration({ options, registry, queue: hostQueue,
+    fetchAgent: routedQueues ? (agent: any, path: string, init: any) => routedQueues.fetch(agent, path, init) : undefined, request: async () => ({ data: [{ id: 1, role: 'user', content: 'Host instruction' }] }) })!
   clean.push(() => heavy.close())
   async function req(id = 'alpha', ingress = true, credential = gateway(id)) {
     const r: any = { headers: { authorization: `Bearer ${credential}` }, socket: { remoteAddress: '127.0.0.1' } }
@@ -106,8 +110,37 @@ async function scene(enabled: string | undefined = 'on') {
   const spec = (id = 'alpha') => ({ cwd: join(root, 'staging', 'agents', id, 'project'), argv: ['true'], timeout_seconds: 10 })
   const submit = async (id = 'alpha', extra: any = {}) => heavy.handleAgent(await req(id), path('submit'), { session_id: 'shared', key: 'same', spec: spec(id), ...extra })
   const change = (id: string, fn: (value: any) => any) => { const file = join(root, 'agents', id, 'agent.json'); writeFileSync(file, JSON.stringify(fn(JSON.parse(readFileSync(file, 'utf8'))))) }
-  return { root, registry, heavy, hostQueue, options, req, spec, submit, change, ...runtime }
+  return { root, registry, heavy, hostQueue, options, req, spec, submit, change, routedQueues, ...runtime }
 }
+
+it('resolves public routed run ids for agent heavy admission and continuation without sending them to Hermes', async () => {
+  const s = await scene('on', true), agent = s.registry.read('alpha')
+  const admitted = await s.routedQueues!.fetch(agent, '/v1/runs', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'routed-origin' },
+    body: JSON.stringify({ session_id: 'shared', input: 'Run the checks', model: 'model-a', provider: 'fixture' }) })
+  const origin = await admitted.json()
+  expect(origin.run_id).toMatch(/^wizardq_/)
+  s.registry.noteRun(origin.run_id, 'alpha', 'shared')
+  for (let i = 0; i < 50; i++) {
+    const response = await s.routedQueues!.fetch(agent, `/v1/runs/${origin.run_id}`)
+    if ((await response.json()).runtime?.provider) break
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const receipt = await s.submit()
+  expect(s.heavy.queue.get(receipt.job_id).origin).toBe(origin.run_id)
+  expect(s.heavy.queue.get(receipt.job_id).route).toEqual({ model: 'model-a', provider: 'fixture', require_model_lock: true })
+  s.states.originDone = true; s.states.workerDone = true
+  await s.heavy.queue.tick()
+  const continuation = s.heavy.queue.get(receipt.job_id).resume
+  expect(continuation).toMatch(/^alpha-run-/)
+  expect(s.registry.runThread('alpha', continuation).heavy_origin).toBe(origin.run_id)
+  const job = s.heavy.queue.get(receipt.job_id)
+  const posted = s.posts.find(p => p.headers.get('idempotency-key') === `wizard-heavy-${receipt.job_id}`)!
+  expect(JSON.stringify(posted.body)).toBe(job.continuation_body)
+  expect(posted.body.provider).toBe('fixture')
+  expect(s.reads.some(r => /^\/v1\/runs\/wizardq_/.test(r.path))).toBe(false)
+  expect(s.reads.filter(r => r.path.startsWith('/v1/runs/')).every(r => r.id === 'alpha')).toBe(true)
+})
 
 it('refuses agent submits without an explicit sandbox operator assertion', async () => {
   const s = await scene()
