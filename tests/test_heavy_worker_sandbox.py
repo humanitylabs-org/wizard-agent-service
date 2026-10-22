@@ -45,6 +45,20 @@ class SandboxTest(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
+    def test_unix_socket_only_client_environment_never_container_env(self):
+        host = 'unix:///disk/colima/docker.sock'
+        with patch.dict(os.environ, {'WIZARD_HEAVY_DOCKER_HOST': host}), \
+                patch.object(worker.subprocess, 'run', return_value=Mock(stdout=json.dumps(IMAGE_CONFIG))) as inspect, \
+                patch.object(worker.subprocess, 'Popen') as popen:
+            self.assertEqual(worker.docker_environment(), {'DOCKER_HOST': host})
+            worker.launch_command(self.spec, JOB, 45, 'fixture-log')
+            self.assertEqual(inspect.call_args.kwargs['env'], {'DOCKER_HOST': host})
+            self.assertEqual(popen.call_args.kwargs['env'], {'DOCKER_HOST': host})
+            self.assertNotIn(host, popen.call_args.args[0])
+        for bad in ['', 'tcp://localhost:2375', 'unix:///disk/../socket', 'unix:///disk/sock\nBAD=1']:
+            with patch.dict(os.environ, {'WIZARD_HEAVY_DOCKER_HOST': bad}), self.assertRaises(ValueError):
+                worker.docker_environment()
+
     def test_traversal_and_foreign_absolute_cwd(self):
         for cwd in (str(self.project / '../../beta/project'), str(self.beta), str(self.home), 'relative'):
             with self.subTest(cwd=cwd), self.assertRaises(ValueError):
