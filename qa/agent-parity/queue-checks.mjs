@@ -25,7 +25,7 @@ async function exercise(s, restart=false, model=false) {
   for(let i=0;i<30;i++) { current=await (await s.request(`/v1/runs/${b.run_id}`)).json();if(s.runs.size===2)break;await new Promise(r=>setTimeout(r,20)) }
   assert.equal(s.runs.size,2,'completion must dispatch queued turn once')
   const sent=s.seen.filter(r=>r.method==='POST'&&r.path.endsWith('/v1/runs')).at(-1).body
-  assert.equal(sent.model,'fixture-other');if(s.kind==='main')assert.equal(sent.provider,'anthropic');else assert.ok(!sent.provider||sent.provider==='anthropic','routed runtime keeps its configured provider')
+  assert.equal(sent.model,'fixture-other');if(s.kind==='main')assert.equal(sent.provider,'anthropic');else assert.equal(sent.provider,undefined,'routed runtime keeps its configured provider, never the registry account id')
   assert.ok(JSON.stringify(sent.input).includes('Second queued synthetic turn'))
   if(model)assert.ok(JSON.stringify(sent.input).includes('Synthetic queued guidance'))
   await s.restart()

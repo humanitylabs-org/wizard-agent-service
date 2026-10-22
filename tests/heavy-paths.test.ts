@@ -9,7 +9,7 @@ vi.mock('node:child_process', () => ({ execFile: vi.fn((_file, _args, _options, 
   return { stdin: { on() {}, end() {} } }
 }) }))
 const queues: any[] = []
-afterEach(async () => { for (const q of queues.splice(0)) await q.close(); vi.clearAllMocks() })
+afterEach(async () => { for (const q of queues.splice(0)) await q.close(); vi.clearAllMocks(); vi.unstubAllEnvs() })
 function queue() {
   const q = new DurableHeavyQueue({ statePath: join(heavyRoot, `queue-${queues.length}.sqlite`),
     transport: async () => ({}), current: async () => true, continuation: async () => ({}) })
@@ -38,6 +38,39 @@ it('falls back to the work root, honors explicit heavy root, and rejects travers
   vi.stubEnv('WIZARD_HEAVY_ROOT', join(heavyRoot, 'dedicated'))
   expect(() => submit(q, join(heavyRoot, 'project'), 'outside')).toThrow('invalid heavy command')
   expect(submit(q, join(heavyRoot, 'dedicated/project'), 'inside').state).toBe('queued')
+})
+
+it('forwards only validated operator sandbox settings with shell-safe quoting', async () => {
+  vi.stubEnv('WIZARD_HEAVY_ROOT', '/worker')
+  vi.stubEnv('WIZARD_HEAVY_AGENT_IMAGE', 'python@sha256:' + 'a'.repeat(64))
+  vi.stubEnv('WIZARD_HEAVY_DOCKER_BIN', "/opt/tool's dir/docker")
+  vi.stubEnv('WIZARD_HEAVY_DOCKER_HOST', 'unix:///disk/colima/docker.sock')
+  vi.stubEnv('WIZARD_HEAVY_RPC_TOKEN', 'fixture-never-forward')
+  vi.stubEnv('DOCKER_HOST', 'tcp://never-forward:2375')
+  const rpc = heavySshTransport({ host: 'build-fixture', script: '/worker.py', root: '/spool', lock: '/worker.lock' })
+  await rpc({ action: 'status' })
+  const cmd = (vi.mocked(execFile).mock.calls[0][1] as string[]).at(-1)!
+  expect(cmd).toContain("'WIZARD_HEAVY_AGENT_IMAGE=python@sha256:" + 'a'.repeat(64) + "'")
+  expect(cmd).toContain("'WIZARD_HEAVY_DOCKER_BIN=/opt/tool'\\''s dir/docker'")
+  expect(cmd).toContain("'WIZARD_HEAVY_DOCKER_HOST=unix:///disk/colima/docker.sock'")
+  expect(cmd).not.toContain('fixture-never-forward')
+  expect(cmd).not.toContain('tcp://')
+})
+
+it.each([
+  ['WIZARD_HEAVY_AGENT_IMAGE', 'image;id'],
+  ['WIZARD_HEAVY_AGENT_IMAGE', ''],
+  ['WIZARD_HEAVY_DOCKER_BIN', 'docker'],
+  ['WIZARD_HEAVY_DOCKER_BIN', '/bin/../docker'],
+  ['WIZARD_HEAVY_DOCKER_BIN', '/bin/docker\nBAD=1'],
+  ['WIZARD_HEAVY_DOCKER_HOST', 'tcp://localhost:2375'],
+  ['WIZARD_HEAVY_DOCKER_HOST', 'unix:///disk/../docker.sock'],
+  ['WIZARD_HEAVY_DOCKER_HOST', 'unix:///disk/docker.sock\nBAD=1'],
+])('refuses malformed %s before SSH', async (name, value) => {
+  vi.stubEnv('WIZARD_HEAVY_ROOT', '/worker'); vi.stubEnv(name, value)
+  const rpc = heavySshTransport({ host: 'build-fixture', script: '/worker.py', root: '/spool', lock: '/worker.lock' })
+  await expect(rpc({ action: 'status' })).rejects.toThrow('invalid heavy worker setting: ' + name)
+  expect(execFile).not.toHaveBeenCalled()
 })
 
 it('forwards the configured remote root over SSH with shell-safe quoting', async () => {

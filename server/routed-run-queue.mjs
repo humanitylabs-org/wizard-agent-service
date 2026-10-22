@@ -22,7 +22,11 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         // this agent's queue is reconciled here, never another agent's state.db.
         activeSessionIds:async()=>[],canDispatch:async()=>true,
         launch:async record=>{
-          const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:record.body})
+          // Agent registry providers are owner-facing account ids (e.g. anthropic),
+          // not Hermes' configured transport (e.g. Claude subscription or custom).
+          // Never turn a pinned model into a provider switch, including recovered admissions.
+          const { provider: _displayProvider, ...input } = JSON.parse(record.body)
+          const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:JSON.stringify(input)})
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
         lookup:async record=>({payload:await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)}),
@@ -49,7 +53,6 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           let session = null
           try { const response = await direct(`/api/sessions/${encodeURIComponent(body.session_id)}`); if(response.ok) { const payload=await response.json();session=payload.session||payload } else await response.body?.cancel() } catch {}
           body.model = session?.model || agent.model?.model
-          body.provider = body.provider || session?.provider || agent.model?.provider
         }
         const requestHash=init.wizardRequestHash||createHash('sha256').update(init.body).digest('hex')
         try {

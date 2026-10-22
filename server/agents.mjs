@@ -197,6 +197,8 @@ export function normalizePermissions(base, patch = {}) {
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
 function assertPrivateWalls(agent) {
+  if (agent.imported && [...(agent.permissions.wizard_apps || []), ...(agent.permissions.agent_apps || [])]
+    .some((id) => /^privacy(?:[.-]?com)?$/iu.test(id))) fail(409, 'import_sensitive_app_denied', 'agent.permissions')
   if (agent.permissions.read_standard_chats && agent.privacy !== 'private') fail(409, 'private_permission_required', 'agent.permissions.read_standard_chats')
   if (agent.privacy !== 'private') return
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
@@ -512,7 +514,7 @@ export function createAgentRegistry(options = {}) {
       if (fresh.length) {
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard' || agent.runtime.kind === 'profile') continue
+          if (!agent || agent.privacy !== 'standard' || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
           const next = structuredClone(agent)
           for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
@@ -736,6 +738,7 @@ export function createAgentRegistry(options = {}) {
     const { wizardApps, agentApps } = installedApps()
     return {
       harnesses: HARNESSES,
+      import_capabilities: options.importCapabilities?.() ?? { socket_prepare: false, heavy_enabled: false, heavy_sandbox: false },
       providers: await providers(),
       presets: PRESETS.map((preset) => ({ id: preset.id, label: preset.label, summary: preset.summary, privacy: preset.privacy, permissions: preset.permissions })),
       wizard_apps: wizardApps,
@@ -788,6 +791,14 @@ export function createAgentRegistry(options = {}) {
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
+    // Imported agents keep their full memory/settings/auth. Their host driver merges
+    // only Wizard-owned fields on start/apply; a fresh generated config would erase
+    // their memory backend and provider login. Keys already exist from admission.
+    if (agent.imported?.schema === 1 && agent.imported?.format === 'hermes') {
+      if (rotateKey || !apiKey(agent.id) || !gatewayKey(agent.id)) fail(409, 'import_keys_unavailable', 'agent.import')
+      writeJsonAtomic(join(folder(agent.id), 'import-update.json'), { model: agent.model, permissions: agent.permissions })
+      return
+    }
     const dir = folder(agent.id)
     // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
@@ -815,7 +826,9 @@ export function createAgentRegistry(options = {}) {
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
-  async function create(body, { idempotencyKey = '' } = {}) {
+  async function create(body, { idempotencyKey = '', deferStart = false } = {}) {
+    // Library-only owner import reservation; HTTP callers cannot set this option.
+    if (deferStart && isolation !== 'restricted') fail(409, 'import_requires_restricted', 'agent.runtime')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     if (body.runtime !== undefined && body.runtime?.kind !== 'container') fail(400, 'invalid_runtime', 'agent.runtime', 'only container agents may be created through the API')
@@ -851,6 +864,7 @@ export function createAgentRegistry(options = {}) {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
         // port is retained for schema/old records, but restricted agents never publish or use it.
         ...(isolation ? { isolation, network: nextNetwork(), ingress_socket: join(folder(id), 'gateway', 'ingress.sock') } : {}),
+        ...(deferStart ? { admission: "importing" } : {}),
       },
       created_at: Math.floor(now() / 1000),
     }
@@ -870,7 +884,8 @@ export function createAgentRegistry(options = {}) {
       map[idempotencyKey] = { hash: requestHash, id, at: now() }
       writeJsonAtomic(idempotencyPath, map)
     }
-    writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
+    writeServiceState(id, { desired: deferStart ? 'stopped' : 'running', started_at: deferStart ? 0 : now(), last_error: '' })
+    if (deferStart) return { agent: read(id), replayed: false }
     try {
       if (restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await runtime.apply(id)
@@ -965,12 +980,24 @@ export function createAgentRegistry(options = {}) {
     return read(id)
   }
 
+  async function prepareImport(id) {
+    const agent = read(id)
+    if (!agent || !restricted(agent) || agent.privacy !== 'standard'
+      || agent.runtime.admission !== 'importing') fail(409, 'agent_not_importing', 'agent.import')
+    if (!options.beforeRestrictedStart) fail(503, 'agent_socket_unavailable', 'agent.import')
+    // Socket only: no runtime, harness rewrite, key rotation, home access or start.
+    await options.beforeRestrictedStart(id)
+    return agent
+  }
+
   async function setRunning(id, running) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are always on with the main gateway')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    // An imported Hermes keeps its keys from admission; never start it with a missing key (fail closed, nothing regenerated).
+    if (running && agent.imported?.schema === 1 && agent.imported?.format === 'hermes' && (!apiKey(id) || !gatewayKey(id))) fail(409, 'import_keys_unavailable', 'agent.import')
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
@@ -1186,7 +1213,7 @@ export function createAgentRegistry(options = {}) {
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
-    grants, addGrant, removeGrant, readableSources,
+    grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId

@@ -1,0 +1,7 @@
+name: wizard-agent-heavy
+version: 0.1.0
+description: Agent-key-only adapter to the restricted heavy relay.
+provides_tools:
+  - wizard_heavy_submit
+  - wizard_heavy_status
+  - wizard_heavy_cancel

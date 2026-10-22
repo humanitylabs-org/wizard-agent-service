@@ -2425,6 +2425,8 @@ function buildWizardServer(options, lifetime) {
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     beforeRestrictedStart: id => agentSockets.ensure(id),
+    importCapabilities: () => ({ socket_prepare: true, heavy_enabled: options.agentHeavy === 'on',
+      heavy_sandbox: process.env.WIZARD_AGENT_HEAVY_SANDBOX === 'on' }),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
       if (!result.ok) return []
@@ -4115,6 +4117,8 @@ function buildWizardServer(options, lifetime) {
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now,
     intervalMs: options.schedulerIntervalMs ?? 15_000,
+    ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
+    ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
@@ -4670,6 +4674,38 @@ function buildWizardServer(options, lifetime) {
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/schedules/')) {
+        // The main agent's schedule tools (Hermes plugin wizard-schedule). Same loopback token and
+        // refusal rules as heavy work; the thread is the calling session, injected by the plugin.
+        if (!scheduler || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'schedule access denied' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        const sessionId = typeof value?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value.session_id) ? value.session_id : ''
+        if (!sessionId) { sendJson(response, 400, { error: 'session required' }); return }
+        try {
+          const action = url.pathname.slice('/wizard/internal/schedules/'.length)
+          if (action === 'create') {
+            const job = scheduler.create({ name: value.name, when: value.when, kind: value.kind ?? 'run', prompt: value.text,
+              thread: sessionId, ...(value.model ? { model: value.model } : {}) })
+            sendJson(response, 201, scheduler.project(job))
+          } else if (action === 'list') {
+            await scheduler.refreshRuns()
+            const all = scheduler.list().filter(job => value.all === true || job.thread === sessionId).map(job => scheduler.project(job))
+            sendJson(response, 200, { schedules: all.filter(job => value.include_done === true || job.nextRun || job.lastRun?.outcome === 'running')
+              .map(({ id, name, kind, window, when, nextRun, lastRun, thread, enabled }) => ({ id, name, kind, window, when, nextRun, lastRun, thread, enabled })) })
+          } else if (action === 'cancel') {
+            const job = scheduler.get(String(value.schedule_id || ''))
+            if (job.thread !== sessionId && value.any_thread !== true) { sendJson(response, 409, { error: 'schedule belongs to another thread; pass any_thread' }); return }
+            scheduler.delete(job.id); sendJson(response, 200, { deleted: true, id: job.id, name: job.name })
+          } else sendJson(response, 404, { error: 'not_found' })
+        } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {

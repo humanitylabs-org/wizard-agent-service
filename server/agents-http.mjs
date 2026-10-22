@@ -78,7 +78,7 @@ ${WIZARD_CHAT_MEDIA_INSTRUCTIONS}
 
 ${STATUS_INSTRUCTIONS}`
 
-const AGENT_ROUTE = /^\/wizard\/v1\/agents(?:\/([a-z][a-z0-9-]{0,30})(?:\/(start|stop|deliveries))?)?$/u
+const AGENT_ROUTE = /^\/wizard\/v1\/agents(?:\/([a-z][a-z0-9-]{0,30})(?:\/(start|stop|deliveries|prepare-import))?)?$/u
 const GRANT_ROUTE = /^\/wizard\/v1\/agent-grants(?:\/(grant_[a-f0-9]{12}))?$/u
 
 /** True when the agent exists and is private. */
@@ -253,7 +253,8 @@ export async function handleAgentsApi(ctx, url, request, response) {
     if (action) {
       if (method !== 'POST') throw new AgentError(405, 'method_not_allowed', 'agent.route')
       requireJsonOrEmpty(request)
-      const agent = await registry.setRunning(id, action === 'start')
+      if (action === 'prepare-import' && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'agent.import')
+      const agent = action === 'prepare-import' ? await registry.prepareImport(id) : await registry.setRunning(id, action === 'start')
       sendJson(response, 202, { agent: await publicAgent(agent) })
       return true
     }

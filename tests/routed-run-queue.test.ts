@@ -4,6 +4,27 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DurableRunQueue } from '../server/run-queue.mjs'
+import { createRoutedQueues } from '../server/routed-run-queue.mjs'
+
+test.each(['anthropic', 'tinfoil', 'local'])('routed queue pins the model but never switches the runtime to registry provider %s', async provider => {
+  const root = mkdtempSync(join(tmpdir(), 'routed-provider-'))
+  const agent = { id: 'fixture-agent', model: { provider, model: 'fixture-model' } }
+  const disposers: Array<() => Promise<void>> = [], sent: any[] = []
+  const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+    fetchAgent: async (_agent: any, path: string, init: any = {}) => {
+      if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model', provider } })
+      if (init.method === 'POST') { sent.push(JSON.parse(init.body)); return Response.json({ run_id: 'fixture-run', status: 'running' }, { status: 202 }) }
+      return Response.json({ run_id: 'fixture-run', status: 'running' })
+    } }
+  try {
+    const queues = createRoutedQueues({ registry, own: (f: any) => disposers.push(f), pollIntervalMs: 0 })
+    const result = await queues.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': 'fixture-key' }, body: JSON.stringify({ session_id: 'wizard_fixture', input: 'synthetic' }) })
+    assert.equal(result.status, 202)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].model, 'fixture-model')
+    assert.equal(sent[0].provider, undefined)
+  } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
+})
 
 test('queue authority remains fixed across admission and restart', async () => {
   const root=mkdtempSync(join(tmpdir(),'routed-authority-'))
