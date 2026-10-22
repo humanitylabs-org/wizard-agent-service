@@ -2179,6 +2179,7 @@ function proxyShellStatic(request, response, shellOrigin, url, browserBoundary =
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
+      if (browserBoundary && reply.headers['cross-origin-opener-policy'] !== undefined) out['cross-origin-opener-policy'] = reply.headers['cross-origin-opener-policy']
       if (out.location && !/^\/(?![\/\\])/u.test(String(out.location))) { reply.resume(); sendJson(response, 502, { error: 'upstream_unavailable' }); resolvePromise(); return }
       response.writeHead(reply.statusCode || 502, out)
       reply.pipe(response)
