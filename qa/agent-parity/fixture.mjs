@@ -54,7 +54,7 @@ export async function scene(kind, serverOptions = {}) {
         const timer=setInterval(()=>{if(['completed','failed','cancelled','interrupted'].includes(run.status))res.end(`event: run.${run.status}\ndata: ${JSON.stringify(run)}\n\n`);else res.write(': synthetic heartbeat\n\n')},250)
         res.on('close',()=>clearInterval(timer));return
       }
-    if (path === '/health') return json(200, { status: 'ok' })
+    if (path === '/health') return json(200, { status: 'ok', provider: 'local', model: 'fixture-stt' })
     if (path === '/v1/models') return json(200, { data: [] })
     if (path === '/v1/audio/transcriptions') return json(200, { text: stt.text, model: 'fixture-stt' })
     if (path === '/v1/capabilities') return json(200, { features: {} })
