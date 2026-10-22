@@ -71,6 +71,7 @@ import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, hand
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
+import { createBrowserBoundary } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -2449,6 +2450,7 @@ function buildWizardServer(options, lifetime) {
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
+  const browserBoundary = createBrowserBoundary(options.browserBoundary)
   const baseRequireAccess = options.requireAccess ?? true
   const baseAccessVerifier = options.accessVerifier
   if (baseRequireAccess && typeof baseAccessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
@@ -4636,6 +4638,11 @@ function buildWizardServer(options, lifetime) {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
+      const staticRequest = ['GET', 'HEAD'].includes(request.method) && shellStaticPath(url.pathname, uxPrefix)
+      if (!browserBoundary.allows(request, principal, { staticRequest })) {
+        sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
+        return
+      }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
