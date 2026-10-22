@@ -746,14 +746,14 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         return JSON.parse(raw.toString('utf8'));
       });
       result=Buffer.from(JSON.stringify(payload));
-      if (ctx.projectAgentHistory) result=ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
+      if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
     if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
-    if (messageHistory && ctx.projectAgentHistory) result = ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
+    if (messageHistory && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
     // A finished run's output carries the same MEDIA lines the history will; project it identically.
-    else if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.projectAgentHistory) result = ctx.projectAgentHistory(result, agent)
+    else if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent)
   }
   response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
   response.end(result)

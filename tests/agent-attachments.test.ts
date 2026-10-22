@@ -14,7 +14,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 const json = (body: any, headers = owner) => ({ method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-async function scene(files = 'own', failPlacement = false) {
+async function scene(files = 'own', failPlacement = false, model: any = null) {
   const seen: any[] = [], placed: any[] = []
   const dir = mkdtempSync(join(tmpdir(), 'agent-attachments-')); roots.push(dir)
   const upstream = createServer(async (req, res) => {
@@ -47,7 +47,7 @@ async function scene(files = 'own', failPlacement = false) {
   expect(created.status).toBe(201)
   const id = (await created.json()).agent.id
   const path = join(dir, 'agents', id, 'agent.json'), agent = JSON.parse(readFileSync(path, 'utf8'))
-  agent.runtime.port = port; agent.permissions.files = files; writeFileSync(path, JSON.stringify(agent))
+  agent.runtime.port = port; agent.permissions.files = files; if (model) agent.model = model; writeFileSync(path, JSON.stringify(agent))
   const key = 'fixture-agent-gateway-0123456789abcdef0123456789'
   writeFileSync(join(dir, 'agents', id, 'gateway.key'), key)
   await fetch(`${base}/wizard/v1/agents/${id}/start`, json({}))
@@ -104,4 +104,23 @@ it('gives non-image files a durable tool-readable path', async () => {
   expect((await s.send('/v1/runs', owner, [file.id])).status).toBe(202)
   expect(s.seen.at(-1).input).toContain('trusted_path')
   expect(s.seen.at(-1).input).toContain('text/plain')
+})
+
+it('a text-only model gets the durable copy and a plain note, never an image part its provider rejects', async () => {
+  const s = await scene('own', false, { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false })
+  expect((await s.send()).status).toBe(202)
+  const body = s.seen.at(-1)
+  expect(JSON.stringify(body.input)).not.toContain('image_url')
+  const text = typeof body.input === 'string' ? body.input : body.input[0].content
+  expect(text).toContain('/opt/data/inbox/2026-10-22/fixture.png')
+  expect(text).toContain('vision_analyze')   // GLM's eyes: the allowed Tinfoil vision model
+  expect(text).toContain('Never guess what an image shows')
+  const blind = await scene('own', false, { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false })
+  expect((await blind.send()).status).toBe(202)
+  const blindText = typeof blind.seen.at(-1).input === 'string' ? blind.seen.at(-1).input : blind.seen.at(-1).input[0].content
+  expect(blindText).toContain('cannot see images')
+  expect(blindText).not.toContain('vision_analyze')
+  const vision = await scene('own', false, { provider: 'tinfoil', model: 'deepseek-v4-1-flash', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false })
+  expect((await vision.send()).status).toBe(202)
+  expect(vision.seen.at(-1).input[0].content[1].type).toBe('image_url')
 })

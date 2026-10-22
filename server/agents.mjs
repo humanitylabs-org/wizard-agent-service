@@ -42,7 +42,23 @@ const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
 // Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }],
+}
+/** False only for a model its provider rejects image input for (Tinfoil GLM 5.3: HTTP 400 "not a multimodal model"). */
+export function agentModelSeesImages(agent) {
+  if (agent?.model?.provider !== TINFOIL.id) return true
+  return TINFOIL.models.find((model) => model.id === agent.model.model)?.images !== false
+}
+/**
+ * A Tinfoil agent whose own model is text-only gets an image-capable Tinfoil model from its own allowed list as its
+ * eyes: Hermes' vision_analyze runs on it (auxiliary.vision) through the same attested proxy, so images never leave
+ * the confidential route. Null when the agent sees images itself or has no allowed vision model.
+ */
+export function agentVisionHelper(agent) {
+  if (agent?.model?.provider !== TINFOIL.id || agentModelSeesImages(agent)) return null
+  if (agent.permissions?.files === 'none') return null
+  const allowed = new Set(agent.model.allowed_models ?? [agent.model.model])
+  return TINFOIL.models.find((model) => model.images && allowed.has(model.id))?.id ?? null
 }
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
@@ -313,6 +329,9 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
+  const visionHelper = agentVisionHelper(agent)
+  // The Tinfoil vision helper is confidential, not a public model: its image tool stays on.
+  if (visionHelper) granted.add('vision')
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
   const lines = [
@@ -335,6 +354,10 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // persistence. Pin its supported secure setting for the restricted grant.
   if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
     lines.push('security:', '  redact_secrets: true')
+  }
+  if (visionHelper) {
+    lines.push('auxiliary:', '  vision:', '    provider: custom', `    model: ${yamlString(visionHelper)}`,
+      `    base_url: ${yamlString(tinfoilUrl)}`, '    key_env: TINFOIL_API_KEY')
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
@@ -753,6 +776,16 @@ export function createAgentRegistry(options = {}) {
     return port
   }
 
+  /** True when the agent's managed config.yaml is not what this release would write (a new release changed it). */
+  function harnessStale(agent) {
+    if (agent.runtime.kind === 'profile') return false
+    const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
+    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
+    // Compare against the stamp of what the Service last wrote: Hermes itself may normalise config.yaml on start.
+    const stamp = createHash('sha256').update(expected).digest('hex')
+    try { return readFileSync(join(folder(agent.id), 'config.sha256'), 'utf8').trim() !== stamp } catch { return existsSync(home) }
+  }
+
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
     const dir = folder(agent.id)
@@ -775,7 +808,9 @@ export function createAgentRegistry(options = {}) {
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) }))
+    const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) })
+    writeTextAtomic(join(home, 'config.yaml'), config)
+    writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
@@ -912,7 +947,8 @@ export function createAgentRegistry(options = {}) {
     assertPrivateWalls(next)
     assertStandardTransport(next)
     assertIsolationSupports(next)
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
+    // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
+    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
@@ -1195,5 +1231,6 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
     place: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/place`, payload),
+    fetch: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/fetch`, payload),
   }
 }

@@ -8,7 +8,8 @@ import { scene, kinds, post } from './fixture.mjs'
 import { checks } from './checks.mjs'
 const require=createRequire(import.meta.url),{chromium}=require(process.env.QA_PLAYWRIGHT||'playwright-core')
 const ux=resolve(process.env.QA_UX_ROOT||''),out=resolve(process.env.QA_OUT||'')
-if(process.platform!=='darwin'||!ux.startsWith('/Volumes/ThalesMedia/')||!out.startsWith('/Volumes/ThalesMedia/'))throw Error('Use Thales external volume')
+const externalRoot=process.env.QA_EXTERNAL_ROOT ? resolve(process.env.QA_EXTERNAL_ROOT)+'/' : ''
+if(process.platform!=='darwin'||!externalRoot||!ux.startsWith(externalRoot)||!out.startsWith(externalRoot))throw Error('Use the verified external volume via QA_EXTERNAL_ROOT')
 mkdirSync(out,{recursive:true})
 const selectedGroup=process.env.QA_GROUP||'';assert.ok(['','static','compose','working'].includes(selectedGroup))
 const selectedKinds=process.env.QA_KINDS?process.env.QA_KINDS.split(','):kinds;assert.ok(selectedKinds.every(k=>kinds.includes(k)))

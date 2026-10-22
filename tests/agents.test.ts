@@ -1,13 +1,14 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
+import { agentVisionHelper, claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -84,6 +85,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
+    ...(extra.runtimeFetch ? { fetch: extra.runtimeFetch } : {}),
   }
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
@@ -229,6 +231,49 @@ describe('agents registry and API', () => {
     expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
   })
 
+  it('reads a sandboxed agent\'s MEDIA file through the runtime as the agent and serves it', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_sandbox'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Report ready.\n\nMEDIA:/opt/data/cache/documents/report.md\nMEDIA:/opt/data/cache/documents/missing.md' },
+    ])
+    let report = Buffer.from('# SANDBOX_CANARY\n')
+    const fetched: string[] = []
+    const runtimeFetch = async (id: string, payload: any) => {
+      fetched.push(`${id} ${payload.path}`)
+      if (!payload.path.endsWith('report.md')) throw Object.assign(new Error('file_unavailable'), { code: 'file_unavailable' })
+      return { verified: true, bytes: report.length, sha256: createHash('sha256').update(report).digest('hex'), data_base64: report.toString('base64') }
+    }
+    const { base } = await start(dir, main, { runtimeFetch })
+    await withPrivate(dir, base, priv.port)
+    const home = join(dir, 'agents', 'private', 'home')
+    mkdirSync(home, { recursive: true })
+    chmodSync(home, 0o000)   // owned by the sandbox uid in production: unreadable to the service
+    try {
+      for (let pass = 0; pass < 2; pass++) {
+        const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+        expect(response.status).toBe(200)
+        const text = await response.text()
+        expect(text).not.toContain('/opt/data')
+        const content = JSON.parse(text).data[0].content
+        const envelope = JSON.parse(content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+        expect(envelope.items.map((i: any) => i.name)).toEqual(['report.md'])
+        expect(content).toContain('[file: missing.md unavailable]')
+        const file = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+        expect(await file.text()).toBe('# SANDBOX_CANARY\n')
+      }
+      // Fetched once, then served from the mirror; a miss is not retried on every poll.
+      expect(fetched).toEqual(['private /opt/data/cache/documents/report.md', 'private /opt/data/cache/documents/missing.md'])
+      // The agent rewrites the same file and sends it again: a stale mirror is read again.
+      report = Buffer.from('# SANDBOX_CANARY v2\n')
+      const mirrored = join(dir, 'agents', 'private', 'wizard-artifacts', 'mirror', 'cache', 'documents', 'report.md')
+      utimesSync(mirrored, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+      const again = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+      const envelope = JSON.parse(JSON.parse(await again.text()).data[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+      expect(await (await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)).text()).toBe('# SANDBOX_CANARY v2\n')
+    } finally { chmodSync(home, 0o700) }
+  })
+
   it('tells routed agents how to send files and projects a finished run\'s MEDIA output', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -241,6 +286,24 @@ describe('agents registry and API', () => {
     expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
     const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
     expect(status.status).toBe(200)
+  })
+
+  it('gives a text-only Tinfoil agent its allowed Tinfoil vision model as confidential eyes', () => {
+    const agent: any = { id: 'private', privacy: 'private', model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false },
+      permissions: { files: 'own', outside_tools: [], other_agents: 'none' }, apps: [], runtime: { kind: 'container' } }
+    expect(agentVisionHelper(agent)).toBe('deepseek-v4-1-flash')
+    const yaml = hermesConfigYaml(agent)
+    expect(yaml).toContain("auxiliary:\n  vision:\n    provider: custom\n    model: \"deepseek-v4-1-flash\"\n    base_url: \"http://agent-private-tinfoil:3301/v1\"\n    key_env: TINFOIL_API_KEY")
+    const disabled = yaml.match(/disabled_toolsets: \[(.*)\]/)[1]
+    expect(disabled).not.toContain('"vision"')
+    expect(disabled).toContain('"web"')
+    // No vision model allowed, files off, or a vision main model: no helper, the public vision tool stays off.
+    for (const change of [{ model: { ...agent.model, allowed_models: ['glm-5-3'] } }, { permissions: { ...agent.permissions, files: 'none' } }, { model: { ...agent.model, model: 'deepseek-v4-1-flash' } }]) {
+      const other = { ...agent, ...change }
+      expect(agentVisionHelper(other)).toBeNull()
+      expect(hermesConfigYaml(other)).not.toContain('auxiliary:')
+      expect(hermesConfigYaml(other).match(/disabled_toolsets: \[(.*)\]/)[1]).toContain('"vision"')
+    }
   })
 
   it('lists the main agent and only schema-1 agent folders', async () => {
@@ -337,6 +400,24 @@ describe('agents registry and API', () => {
     expect(calls.at(-1)).toBe('stop private')
   })
 
+  it('an unchanged update re-applies only a config an older release wrote, not one Hermes normalised', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base, calls } = await start(dir, main)
+    await withPrivate(dir, base)
+    const same = () => fetch(`${base}/wizard/v1/agents/private`, { ...json({ label: 'Private' }), method: 'PATCH' })
+    const applies = () => calls.filter((c: string) => c === 'apply private').length
+    const before = applies()
+    writeFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), '# normalised by Hermes on start\n')
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before)                     // Hermes rewriting its own file is not stale
+    rmSync(join(dir, 'agents', 'private', 'config.sha256'))   // a release before the stamp, or a changed generator
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
+  })
+
   it('agent options: harnesses, Tinfoil plus signed-in AI Accounts providers, presets, Wizard apps vs agent apps', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -344,7 +425,7 @@ describe('agents registry and API', () => {
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
     expect(options.harnesses).toEqual([{ id: 'hermes', label: 'Hermes' }])
     expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['tinfoil', true], ['anthropic', false], ['openai-codex', false]])
-    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }])
+    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }])
     expect(options.presets.map((p: any) => p.id)).toEqual(['private', 'standard'])
     expect(options.wizard_apps.map((a: any) => a.id)).toEqual(['meditate'])
     expect(options.agent_apps.map((a: any) => a.id)).toEqual(['transcriber'])

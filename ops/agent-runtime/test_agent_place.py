@@ -89,3 +89,52 @@ class PlaceTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FetchTest(unittest.TestCase):
+    def setUp(self):
+        self.agent = {'id': 'fixture', 'runtime': {'isolation': 'restricted'}, 'permissions': {'files': 'own'}}
+        self.driver = mock.Mock()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / 'data'
+        (self.root / 'cache' / 'documents').mkdir(parents=True)
+        (self.root / 'cache' / 'documents' / 'notes.md').write_bytes(b'# fetched\n')
+        (Path(self.tmp.name) / 'outside.md').write_bytes(b'outside')
+        (self.root / 'cache' / 'documents' / 'link.md').symlink_to(Path(self.tmp.name) / 'outside.md')
+        (self.root / 'linkdir').symlink_to(Path(self.tmp.name))
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def docker(self, argv, **kw):
+        self.calls.append(argv)
+        script = argv[-1].replace('"/opt/data"', repr(str(self.root)))
+        return subprocess.run([sys.executable, '-c', script], input=kw['input_text'], text=True, capture_output=True)
+
+    def fetch(self, path):
+        with mock.patch.object(ar, 'container_for', return_value='fixture-container'), mock.patch.object(ar, 'docker', side_effect=self.docker):
+            return ar.fetch(self.driver, self.agent, {'path': path})
+
+    def test_reads_regular_file_as_agent_uid(self):
+        result = self.fetch('/opt/data/cache/documents/notes.md')
+        self.assertTrue(result['verified'])
+        self.assertEqual(base64.b64decode(result['data_base64']), b'# fetched\n')
+        self.assertEqual(result['sha256'], hashlib.sha256(b'# fetched\n').hexdigest())
+        self.assertEqual(self.calls[0][:5], ['exec', '-i', '-u', f'{ar.AGENT_UID}:{ar.AGENT_UID}', 'fixture-container'])
+
+    def test_refuses_symlinks_traversal_missing_and_outside_paths(self):
+        for path in ('/opt/data/cache/documents/link.md', '/opt/data/linkdir/outside.md', '/opt/data/cache/documents/gone.md', '/opt/data/cache'):
+            with self.subTest(path=path), self.assertRaises(ar.RuntimeFailure):
+                self.fetch(path)
+        for path in ('/opt/data/../etc/passwd', '/etc/passwd', '/opt/data', '/opt/data/a/./b', 'relative'):
+            with self.subTest(path=path), mock.patch.object(ar, 'docker') as docker:
+                with self.assertRaises(ar.RuntimeFailure):
+                    ar.fetch(self.driver, self.agent, {'path': path})
+                docker.assert_not_called()
+
+    def test_files_none_fails_closed(self):
+        self.agent['permissions']['files'] = 'none'
+        with self.assertRaises(ar.RuntimeFailure) as cm:
+            self.fetch('/opt/data/cache/documents/notes.md')
+        self.assertEqual(cm.exception.status, 409)
