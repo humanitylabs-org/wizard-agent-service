@@ -14,13 +14,18 @@ def run(argv, **kw):
 
 
 def main():
-    if platform.system() != 'Darwin' or not Path.cwd().is_relative_to('/Volumes/ThalesMedia'):
-        raise SystemExit('Thales external-volume packaging required')
+    configured = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if not configured:
+        raise SystemExit('WIZARD_HEAVY_ROOT or WIZARD_WORK_ROOT required')
+    work_root = Path(configured).resolve()
+    if (platform.system() != 'Darwin' or not work_root.is_relative_to('/Volumes')
+            or len(work_root.parts) < 3 or not Path.cwd().is_relative_to(work_root)):
+        raise SystemExit('remote macOS external-volume packaging required')
     if len(sys.argv) != 4:
         raise SystemExit('usage: package-restricted-sidecars.py SOURCE_SHA IMAGE_TAG OUTPUT_DIR')
     sha, image, output = sys.argv[1:]
     out = Path(output).resolve()
-    if not out.is_relative_to('/Volumes/ThalesMedia') or out.exists():
+    if not out.is_relative_to(work_root) or out.exists():
         raise SystemExit('new external output directory required')
     source = run(['git', 'rev-parse', 'HEAD'], capture_output=True).stdout.strip()
     if source != sha or run(['git', 'status', '--porcelain', '--untracked-files=normal'], capture_output=True).stdout:
