@@ -382,7 +382,7 @@ describe('agents registry and API', () => {
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
     expect(options.harnesses).toEqual([{ id: 'hermes', label: 'Hermes' }])
     expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['tinfoil', true], ['anthropic', false], ['openai-codex', false]])
-    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }])
+    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }])
     expect(options.presets.map((p: any) => p.id)).toEqual(['private', 'standard'])
     expect(options.wizard_apps.map((a: any) => a.id)).toEqual(['meditate'])
     expect(options.agent_apps.map((a: any) => a.id)).toEqual(['transcriber'])
