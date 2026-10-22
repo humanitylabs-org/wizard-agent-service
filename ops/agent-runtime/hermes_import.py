@@ -27,6 +27,9 @@ import zipfile
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import import_credentials as credential_policy
+
 SCHEMA = 1
 IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
 OUTSIDE_TOOLS = 'web search browser x_search vision video image_gen video_gen tts delegation connections homeassistant spotify'.split()
@@ -216,13 +219,17 @@ def scan(source, *, owner_home=None):
                 if size < 2 * 1024**2 and (r in {'config.yaml', '.env', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json'} or r.startswith(('skills/', 'plugins/', 'memories/'))):
                     with contextlib.suppress(UnicodeError):
                         texts[r] = z.read(n).decode()
+        with zipfile.ZipFile(source) as z:
+            names = {r: n for n, r, _ in entries}
+            credential_items = credential_policy.inventory(names, lambda r: z.read(names[r]).decode())
         symlinks, skipped = [], [r for _, r, _ in entries if excluded(r)]
         identity = {'sha256': file_hash(source)}
     else:
         require(source.is_dir() and not source.is_symlink(), 'source_not_directory')
         rows, texts, symlinks, skipped = read_inventory(source)
+        credential_items = credential_policy.inventory([r for r, _, _ in rows], lambda r: (source / r).read_text())
         # No ever-changing sessions or WAL stamps in the approval identity. Critical inputs are hash-bound.
-        critical_names = {r for r in texts if r.startswith('plugins/')} | {'config.yaml', '.env', 'cron/jobs.json'}
+        critical_names = {r for r in texts if r.startswith('plugins/')} | {c['path'] for c in credential_items} | {'config.yaml', '.env', 'cron/jobs.json'}
         identity = {'device': source.stat().st_dev, 'inode': source.stat().st_ino,
                     'critical': {r: file_hash(source / r) if (source / r).is_file() else None for r in sorted(critical_names)}}
     require('config.yaml' in texts, 'source_no_regular_config')
@@ -289,9 +296,10 @@ def scan(source, *, owner_home=None):
             'owner_home': str(owner_home), 'source_identity': identity, 'approved': False,
             'path_preserving': not is_zip, 'logical_home': str(source) if not is_zip else '/opt/data',
             'mode': 'paused', 'move': False,
-            'image': IMAGE, 'network': '', 'port': 18720,
+            'image': IMAGE, 'network': 'restricted', 'port': 18720,
+            'credentials': credential_items, 'isolation': 'restricted',
             'gateway_url': '', 'approved_plugins': [], 'approved_mcp': [],
-            'approved_env_names': ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_OAUTH_TOKEN', 'OPENROUTER_API_KEY'],
+            'approved_env_names': [],  # deprecated; use per-path credentials entries
             'outside_tools': [],
             'wizard_assets': [], 'source_units': [],
             'dependencies': sorted(deps.values(), key=lambda d: (d['kind'], d['path'])),
@@ -505,6 +513,51 @@ class DockerRuntime:
         raise ImportFailure('agent_health_timeout')
 
 
+def atomic_backup(source, dest):
+    """Publish complete bytes only; an interrupted copy is never a rollback input."""
+    dest = Path(dest)
+    tmp = dest.with_name(dest.name + '.partial-' + secrets.token_hex(4))
+    shutil.copy2(source, tmp)
+    with tmp.open('rb') as fd:
+        os.fsync(fd.fileno())
+    checksum = file_hash(tmp)
+    marker = dest.with_name(dest.name + '.sha256')
+    marker.write_text(checksum)
+    with marker.open('rb') as fd:
+        os.fsync(fd.fileno())
+    os.replace(tmp, dest)
+    fd = os.open(dest.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sanitize_credentials(home, plan, directory, journal, journal_path):
+    current = credential_policy.inventory([r for _, r, _, link in files(home) if not link],
+                                          lambda r: managed_path(home, r).read_text())
+    # Fresh names discovered after scan cannot inherit a broad/default approval.
+    for rel in sorted({c['path'] for c in current} - {'.env'}):
+        path = managed_path(home, rel)
+        if not path.exists():
+            continue
+        items = [c for c in current if c['path'] == rel]
+        if all(c['kind'] == 'file' for c in items) and credential_policy.selected(plan, rel, 'file'):
+            continue
+        if rel not in journal['backups']:
+            journal['backups'].append(rel)
+            dump(journal_path, journal)
+            dest = directory / 'originals' / rel
+            dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            atomic_backup(path, dest)
+        if any(c['kind'] == 'auth-provider' or c['kind'] == 'auth-envelope' for c in items):
+            path.write_text(credential_policy.filtered_auth(path.read_text(), plan, rel))
+        elif any(c['kind'] == 'env' for c in items):
+            path.write_text(credential_policy.filtered_env(path.read_text(), plan, rel))
+        else:
+            path.unlink()
+
+
 def home_path(home, relative):
     home = Path(home)
     path = home / relative
@@ -556,7 +609,7 @@ def wire(home, plan, api_key, gateway_key):
     (home / 'config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
     os.chmod(home / 'config.yaml', 0o600)
     env_path = home / '.env'
-    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    lines = credential_policy.filtered_env(env_path.read_text() if env_path.exists() else '', plan).splitlines()
     # Keep provider credentials; remove ALL platform discovery and host/runtime authority.
     # Source credentials remain in originals/.env, outside every container mount.
     protected = ('API_SERVER_', 'WIZARD_', 'HERMES_HOME', 'HOME', 'DOCKER_', 'SSH_AUTH_SOCK',
@@ -569,7 +622,7 @@ def wire(home, plan, api_key, gateway_key):
         match = re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
         if match and (match[1].startswith(protected) or (plan['mode'] == 'paused' and match[1].startswith(platform))):
             continue
-        if match and SECRET_KEY.search(match[1]) and match[1] not in plan.get('approved_env_names', []) and not (plan['mode'] == 'take-over' and match[1].startswith(platform)):
+        if match and SECRET_KEY.search(match[1]) and not credential_policy.selected(plan, '.env', 'env', match[1]):
             continue
         kept.append(line)
     kept += ['API_SERVER_HOST=0.0.0.0', 'API_SERVER_PORT=8642', 'API_SERVER_KEY=' + api_key, 'WIZARD_MCP_TOKEN=' + gateway_key]
@@ -743,7 +796,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                 dump(journal_path, journal)
                 q = originals / name
                 q.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                shutil.copy2(p, q)
+                atomic_backup(p, q)
         # Remove every machine-specific/bootstrap input from the future runtime; rename, not copy.
         quarantine = directory / 'quarantine'
         quarantine.mkdir(mode=0o700)
@@ -769,6 +822,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
             p = directory / name
             p.write_text(value + '\n')
             p.chmod(0o600)
+        sanitize_credentials(home, plan, directory, journal, journal_path)
         wire(home, plan, api_key, gateway_key)
         for item in plan['dependencies']:
             if item.get('approved') and item.get('action', item['proposal']) == 'carry secret':
@@ -778,6 +832,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                 dest.parent.mkdir(mode=0o700, exist_ok=True)
                 if src.is_dir():
                     require(not any(p.is_symlink() for p in src.rglob('*')), 'credential_symlink')
+                    members = sorted(p.relative_to(src).as_posix() for p in src.rglob('*') if p.is_file())
+                    require(members == sorted(item.get('approved_files', [])), 'credential_files_require_individual_review')
                     shutil.copytree(src, dest)
                 else:
                     require(not src.is_symlink(), 'credential_symlink')
@@ -921,6 +977,11 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
                 dest.unlink(missing_ok=True)
         for rel in journal.get('managed_absent', []):
             managed_path(home, rel).unlink(missing_ok=True)
+        # Validate the entire completed backup set before restoring any bytes.
+        for name in journal['backups']:
+            original = directory / 'originals' / name
+            if original.exists():
+                require((original.with_name(original.name + '.sha256')).read_text() == file_hash(original), 'backup_corrupt')
         for name in journal['backups']:
             original = directory / 'originals' / name
             if original.exists():

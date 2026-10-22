@@ -67,11 +67,82 @@ class ImportTests(unittest.TestCase):
     def plan(self):
         p = m.scan(self.home, owner_home=self.owner)
         p.update(move=True, gateway_url='http://service:8923/wizard/mcp', network='fixture')
+        for grant in p['credentials']:
+            if grant['item'] in {'OPENAI_API_KEY', 'TELEGRAM_BOT_TOKEN'}:
+                grant['approved'] = True
         return m.approve(p)
     def apply(self, p=None):
         return m.apply(p or self.plan(), 'fixture-agent', self.wizard, runtime_factory=FakeRuntime)
     def undo(self, result):
         return m.undo(result['journal'], runtime_factory=FakeRuntime)
+    def test_credentials_deny_by_default_and_multiline_no_tail(self):
+        (self.home / 'credentials').mkdir()
+        (self.home / 'credentials/host-authority.json').write_text('{"token":"fake-host"}')
+        (self.home / '.anthropic_oauth.json').write_text('{"access_token":"fake-oauth"}')
+        (self.home / 'auth.json').write_text(json.dumps({'version': 1, 'providers': {'anthropic': {'token': 'fake-a'}, 'openai-codex': {'token': 'fake-b'}}, 'credentials': {'anthropic': [{'token': 'fake-pool'}]}}))
+        (self.home / '.env').write_text('ODD_NAME="first\nsecret-tail"\nOPENAI_API_KEY=fake-c\n')
+        p = m.scan(self.home, owner_home=self.owner)
+        p.update(move=True, gateway_url='http://service:8923/wizard/mcp', network='fixture')
+        self.assertTrue(all(c['approved'] is False for c in p['credentials']))
+        self.assertNotIn('secret-tail', json.dumps(p))
+        for c in p['credentials']:
+            if c['kind'] == 'auth-provider' and c['item'] == 'providers:anthropic':
+                c['approved'] = True
+        m.approve(p)
+        before = {str(x.relative_to(self.home)): x.read_bytes() for x in self.home.rglob('*') if x.is_file()}
+        result = self.apply(p)
+        target = self.wizard / 'agents/fixture-agent/home'
+        self.assertFalse((target / '.anthropic_oauth.json').exists())
+        self.assertFalse((target / 'credentials/host-authority.json').exists())
+        self.assertNotIn('secret-tail', (target / '.env').read_text())
+        auth = json.loads((target / 'auth.json').read_text())
+        self.assertEqual(set(auth['providers']), {'anthropic'})
+        self.assertEqual(auth['credentials'], {})
+        self.undo(result)
+        for rel, data in before.items():
+            self.assertEqual((self.home / rel).read_bytes(), data)
+
+    def test_crash_during_backup_never_publishes_partial(self):
+        before = (self.home / 'config.yaml').read_bytes()
+        real_copy = m.shutil.copy2
+        def broken(src, dst, *args, **kwargs):
+            if '.partial-' in str(dst):
+                Path(dst).write_bytes(b'bad')
+                raise SystemExit('simulated-crash')
+            return real_copy(src, dst, *args, **kwargs)
+        with patch.object(m.shutil, 'copy2', side_effect=broken):
+            with self.assertRaises(SystemExit):
+                self.apply()
+        self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+        self.assertEqual((self.home / 'config.yaml').read_bytes(), before)
+
+    def test_crash_at_each_apply_journal_write_restores_exact_files(self):
+        # Repeat a fresh fixture at every durable intent/completion boundary.
+        original_dump = m.dump
+        writes = []
+        def count(path, value):
+            original_dump(path, value)
+            if Path(path).name == 'import-journal.json':
+                writes.append(1)
+        with patch.object(m, 'dump', side_effect=count):
+            result = self.apply()
+        self.undo(result)
+        for step in range(1, len(writes) + 1):
+            with self.subTest(step=step):
+                before = {str(x.relative_to(self.home)): x.read_bytes() for x in self.home.rglob('*') if x.is_file()}
+                counter = [0]
+                def crash(path, value):
+                    original_dump(path, value)
+                    if Path(path).name == 'import-journal.json':
+                        counter[0] += 1
+                        if counter[0] == step:
+                            raise SystemExit('crash')
+                with patch.object(m, 'dump', side_effect=crash), self.assertRaises(SystemExit):
+                    self.apply()
+                self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+                after = {str(x.relative_to(self.home)): x.read_bytes() for x in self.home.rglob('*') if x.is_file()}
+                self.assertEqual(after, before)
+
     def test_scan_names_only_classifies_references(self):
         p = self.plan()
         self.assertNotIn('fixture-secret', json.dumps(p))
@@ -126,7 +197,7 @@ class ImportTests(unittest.TestCase):
         (scoped / 'config').write_text('Host build-only\n')
         p = self.plan()
         p['dependencies'] = [{'kind': 'credential', 'path': str(ssh), 'credential_source': str(scoped),
-                              'proposal': 'carry secret', 'action': 'carry secret', 'approved': True}]
+                              'proposal': 'carry secret', 'action': 'carry secret', 'approved': True, 'approved_files': ['config']}]
         m.approve(p)
         result = self.apply(p)
         carried = self.wizard / 'agents/fixture-agent/credentials' / m.digest(str(ssh))
@@ -205,7 +276,7 @@ class ImportTests(unittest.TestCase):
         env = (target / '.env').read_text()
         self.assertNotIn('TELEGRAM_BOT_TOKEN', env)
         self.assertNotIn('WIZARD_ADMIN_KEY', env)
-        self.assertIn('OPENAI_API_KEY=fixture-provider', env)
+        self.assertIn('OPENAI_API_KEY="fixture-provider"', env)
         job = json.loads((target / 'cron/jobs.json').read_text())['jobs'][0]
         self.assertEqual(job['state'], 'paused')
         self.assertFalse(job['enabled'])
@@ -235,7 +306,7 @@ class ImportTests(unittest.TestCase):
         p = self.plan()
         p['mode'] = 'take-over'
         m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
-        self.assertIn('TELEGRAM_BOT_TOKEN=fixture-secret', (self.home / '.env').read_text())
+        self.assertIn('TELEGRAM_BOT_TOKEN="fixture-secret"', (self.home / '.env').read_text())
         self.assertTrue(json.loads((self.home / 'cron/jobs.json').read_text())['jobs'][0]['enabled'])
         self.assertTrue(m.load_yaml((self.home / 'config.yaml').read_text())['gateway']['platforms']['telegram']['enabled'])
     def test_live_writable_fd_refuses_move(self):
