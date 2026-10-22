@@ -1,5 +1,5 @@
 # Test-only overlay.
-#   fake-service  - stand-in Agent Service on the uplink network (never on the agent's network). Plants
+#   fake-service  - stand-in Agent Service on two separate Unix sockets, no network. Plants
 #                   synthetic canaries in its own tmpfs; logs every request the edge forwards.
 #   host-listener - synthetic service on the Docker host's own network stack, all host addresses,
 #                   port CONF_HOST_PORT. Stands in for host-only services (sshd, Agent Service on
@@ -17,9 +17,14 @@ services:
     build: ./conformance
     environment:
       FAKE_CANARY: ${CONF_CANARY:?set CONF_CANARY}
+      FAKE_SOCKET: /gate-one/gateway.sock
+      FAKE_OTHER_SOCKET: /gate-two/gateway.sock
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=16m,uid=65534
-    networks: [uplink]
+    network_mode: none
+    volumes:
+      - gateway-one:/gate-one
+      - gateway-two:/gate-two
 
   host-listener:
     <<: *test-hardening
@@ -31,4 +36,12 @@ services:
     depends_on: [fake-service]
 
   edge:
+    environment:
+      EDGE_UPSTREAM_SOCKET: /run/agent-gateway/gateway.sock
+    volumes: !override
+      - gateway-one:/run/agent-gateway
     depends_on: [fake-service, host-listener]
+
+volumes:
+  gateway-one: {}
+  gateway-two: {}

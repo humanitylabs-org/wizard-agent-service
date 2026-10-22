@@ -4,7 +4,7 @@
 WIZARD_IMPORT_REHEARSAL_{SOURCE,ROOT,WIZARD_HOME,SERVICE,IMAGE,WORKSPACE,CONTEXT}
 plus WIZARD_IMPORT_RESTRICTED_EVIDENCE are required. The existing GitHub OAuth file
 is an explicit owner-approved per-file grant (2026-10-22), not a Private-seal grant.
-Declared TCP is fail-closed and requires a prebuilt matching sidecar image.
+No host TCP listener, SSH key, root command or firewall operation is permitted.
 """
 import contextlib
 import hashlib
@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import select
 import shlex
 import shutil
 import sqlite3
@@ -28,7 +27,6 @@ import hermes_import_rehearsal as legacy
 import hermes_import_canary as canary
 
 PREFIX = 'WIZARD_IMPORT_REHEARSAL_'
-COMMENT = 'wizard-import-archimedes-rehearsal'
 AGENT = 'archimedes-rehearsal'
 LOG = None
 
@@ -67,39 +65,7 @@ def access_only(value):
     return value
 
 
-def remote_key(host, public=None):
-    # Preserve unrelated authorized_keys bytes; the fresh grant is restrict-only.
-    code = '''import sys,pathlib,json,os,secrets
-p=pathlib.Path.home()/'.ssh/authorized_keys'
-comment=sys.argv[1]; new=sys.stdin.read().strip()
-original=p.read_text() if p.exists() else ''
-rows=original.splitlines(keepends=True)
-matching=[x for x in rows if x.rstrip().endswith(' '+comment)]
-if new:
- assert not matching and new.endswith(' '+comment)
- text=original+('' if not original or original.endswith('\\n') else '\\n')+'restrict '+new+'\\n'
-else:
- text=''.join(x for x in rows if not x.rstrip().endswith(' '+comment))
-tmp=p.with_name('.wizard-import-key-'+secrets.token_hex(8))
-try:
- fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
- with os.fdopen(fd,'w') as f: f.write(text); f.flush(); os.fsync(f.fileno())
- assert (p.read_text() if p.exists() else '')==original
- os.replace(tmp,p)
-finally:
- if tmp.exists(): tmp.unlink()
-readback=[x for x in p.read_text().splitlines() if x.endswith(' '+comment)]
-assert len(readback)==(1 if new else 0)
-if new: assert readback[0]=='restrict '+new
-print(json.dumps({'thales_rehearsal_key_lines':len(readback),'restrict':bool(new),'authorized_keys_readback':True}))
-'''
-    out = command(['ssh', '-o', 'BatchMode=yes', host, 'python3 -c ' + shlex.quote(code) + ' ' + shlex.quote(COMMENT)],
-                  input=public or '', timeout=30, check=True, log=False)
-    emit(remote_key=json.loads(out.stdout))
-
-
 def model_exercise(service, cid, model, fact):
-    host = os.environ[PREFIX + 'BUILD_HOST']
     session = 'wizard_import_restricted_' + secrets.token_hex(6)
     # This helper does POST, PATCH hidden, GET and asserts true before returning.
     canary.hidden_session(service, AGENT, session)
@@ -108,15 +74,17 @@ def model_exercise(service, cid, model, fact):
     h.require(hidden is True or hidden == 1, 'session_not_hidden_fail_closed')
     emit(session=session, hidden_readback=hidden, before_message=True,
          fact_sha256=hashlib.sha256(fact.encode()).hexdigest())
-    required_commands = ['gh auth status', 'ssh -o BatchMode=yes ' + shlex.quote(host) + ' true',
-                         'git -C ' + shlex.quote(os.environ[PREFIX + 'WORKSPACE'] + '/wizard-os') + ' fetch --dry-run']
+    required_commands = ['gh auth status']
+    heavy_cwd = os.environ[PREFIX + 'HEAVY_ROOT'].rstrip('/') + '/agents/' + AGENT
     prompt = ('This is a single authorized hidden restricted-agent import rehearsal. Do not load skills. '
-              'Run these as three separate terminal calls, exactly:\n' + '\n'.join(required_commands) + '\n'
-              'Do not join commands or add echo/pipe. A per-file GitHub credential and exactly one declared '
-              'TCP build-host grant are approved. Report failures honestly; never bypass the proxy/firewall or edit configuration. '
-              'Use fact_store action=search to recall this existing Thales fact: ' + fact + '\n'
-              'Reply IMPORT_RESTRICTED_CHECK with the literal terminal exit codes and the recalled fact. '
-              'Do not print credentials or do other work.')
+              'First run exactly gh auth status as one terminal call. '
+              'Then use fact_store action=search to recall this existing Thales fact: ' + fact + '\n'
+              'Finally call wizard_heavy_submit exactly once with key=hermes-import-rehearsal-heavy-probe, '
+              'cwd=' + heavy_cwd + ', argv=["/usr/bin/uname","-a"], lane=light, timeout_seconds=60. '
+              'This agent-bound job grant is approved by James 2026-10-22. No SSH, host token, configuration changes, '
+              'credential printing or other work. Report admission failure honestly; never use the host relay as fallback. '
+              'After the receipt end this turn without polling. Reply IMPORT_RESTRICTED_CHECK with the gh exit code, '
+              'recalled fact and job receipt. The Service handles continuation.')
     req = {'session_id': session, 'agent_id': AGENT, 'input': prompt, 'model': model['default'], 'provider': model['provider']}
     response = canary.call(service, '/wizard/hermes/v1/runs', 'POST', req, headers={'Idempotency-Key': session})
     run_id = response.get('run_id') or response.get('id') or (response.get('run') or {}).get('id')
@@ -161,7 +129,7 @@ finally: db.close()
                 results[msg.get('tool_call_id')] = json.loads(msg.get('content') or '{}')
             except ValueError:
                 results[msg.get('tool_call_id')] = {'text': msg.get('content')}
-    terminals, fact_ok = [], False
+    terminals, fact_ok, submissions = [], False, []
     for call in calls:
         fn = call.get('function', call)
         args = fn.get('arguments') or {}
@@ -172,6 +140,8 @@ finally: db.close()
             out = str(result.get('output') or '') if isinstance(result, dict) else ''
             out = '\n'.join(x for x in out.splitlines() if not re.search(r'token\s*:', x, re.I))
             terminals.append({'command': args.get('command'), 'exit_code': result.get('exit_code'), 'output': out[:2500]})
+        if fn.get('name') == 'wizard_heavy_submit':
+            submissions.append({'arguments': args, 'receipt': result})
         if fn.get('name') == 'fact_store' and args.get('action') == 'search':
             fact_ok = fact in json.dumps(result, ensure_ascii=False)
     reply = '\n'.join(str(x.get('content', '')) for x in messages if x['role'] == 'assistant')
@@ -179,16 +149,49 @@ finally: db.close()
     if isinstance(model_config, str):
         model_config = json.loads(model_config)
     observed_provider = row.get('billing_provider') or row.get('provider') or model_config.get('provider')
+    heavy_pass = verify_heavy(service, submissions, heavy_cwd)
     passed = (status.get('status', (status.get('run') or {}).get('status')) == 'completed'
               and row.get('model') == model['default'] and observed_provider == model['provider']
               and sorted(t['command'] for t in terminals) == sorted(required_commands)
-              and all(t['exit_code'] == 0 for t in terminals) and fact_ok
+              and all(t['exit_code'] == 0 for t in terminals) and fact_ok and heavy_pass
               and 'IMPORT_RESTRICTED_CHECK' in reply and fact in reply)
     emit(service_run_status=status.get('status', (status.get('run') or {}).get('status')),
          canonical_model=row.get('model'), canonical_provider=observed_provider,
          canonical_tool_results=terminals, fact_store_existing_fact_verified=fact_ok,
          reply_marker='IMPORT_RESTRICTED_CHECK' in reply, reply_fact_verified=fact in reply,
-         model_gate_pass=passed)
+         model_gate_pass=passed, heavy_job_gate_pass=heavy_pass)
+    return passed
+
+
+def verify_heavy(service, submissions, cwd):
+    if len(submissions) != 1:
+        emit(heavy_submit_count=len(submissions), heavy_job_gate_pass=False)
+        return False
+    item = submissions[0]
+    args = item['arguments']
+    expected = {'key': 'hermes-import-rehearsal-heavy-probe', 'cwd': cwd,
+                'argv': ['/usr/bin/uname', '-a'], 'lane': 'light', 'timeout_seconds': 60}
+    receipt = item['receipt']
+    # Tool content can be either a direct JSON object or MCP content blocks.
+    if isinstance(receipt, dict) and 'content' in receipt:
+        try:
+            receipt = json.loads(''.join(x.get('text', '') for x in receipt['content']))
+        except (ValueError, TypeError):
+            pass
+    job_id = receipt.get('job_id') if isinstance(receipt, dict) else None
+    emit(heavy_submit_arguments_match=args == expected, heavy_submit_receipt=receipt)
+    if args != expected or not job_id:
+        return False
+    end = time.monotonic() + 300
+    status = receipt
+    while time.monotonic() < end:
+        status = canary.call(service, '/wizard/v1/agent-heavy/status', 'POST', {'job_id': job_id})
+        if status.get('state') in {'completed', 'failed', 'cancelled', 'interrupted'}:
+            break
+        time.sleep(15)  # bounded owner observation, never agent polling or resubmission
+    result = status.get('receipt') or {}
+    passed = status.get('agent_id') == AGENT and status.get('state') == 'completed' and result.get('exit_code') == 0
+    emit(heavy_job_terminal_readback=status, heavy_job_gate_pass=passed)
     return passed
 
 
@@ -206,28 +209,26 @@ def main():
     h.require(not root.exists() and not (wizard / 'agents' / AGENT).exists(), 'rehearsal_target_exists')
     before_hash = h.file_hash(source / 'config.yaml')
     h.require(before_hash == get('CONFIG_SHA256'), 'live_config_hash_mismatch')
-    # Refuse an old image before any source copy, key installation or registry change.
+    emit(config_sha256_before=before_hash, free_bytes_before=shutil.disk_usage(source).free,
+         baseline_agents=sorted(a['id'] for a in canary.call(service, '/wizard/v1/agents')['agents']))
+    # Refuse an old image before any source copy or registry change.
     expected_egress = h.file_hash(restricted.rt.RESTRICTED_DIR / 'sidecars/egress.py')
     image_probe = command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
                            '--user', '65534:65534', '--security-opt', 'no-new-privileges:true',
                            '--entrypoint', 'python3', restricted.rt.SIDECAR_IMAGE, '-c',
                            'import hashlib; print(hashlib.sha256(open("/srv/egress.py","rb").read()).hexdigest())'], check=True)
-    h.require(image_probe.stdout.strip() == expected_egress, 'declared_tcp_image_mismatch')
-    declaration = {'alias': host, 'address': get('BUILD_ADDRESS'), 'port': 22,
-                   'relay_port': int(get('BUILD_RELAY_PORT'))}
-    restricted.declared_egress.validate([declaration])
-    firewall = Path(__file__).resolve().parents[1] / 'ops/agent-runtime/agent-firewall.sh'
-    # Read-only privilege/guard check before any reduced copy, key or registry write.
-    command(['sudo', '-n', 'sh', str(firewall), 'check'], check=True)
+    h.require(image_probe.stdout.strip() == expected_egress, 'main_sidecar_image_mismatch')
+    capabilities = canary.call(service, '/wizard/v1/agent-options').get('import_capabilities', {})
+    emit(live_service_import_capabilities=capabilities)
+    h.require(capabilities.get('socket_prepare') is True, 'live_service_socket_prepare_unavailable')
+    h.require(capabilities.get('heavy_enabled') is True and capabilities.get('heavy_sandbox') is True,
+              'live_service_agent_heavy_unavailable')
     before_free = shutil.disk_usage(source).free
     before_agents = sorted(a['id'] for a in canary.call(service, '/wizard/v1/agents')['agents'])
     root.mkdir(mode=0o700, parents=True)
     home = root / 'source-owner/.hermes'
     home.mkdir(mode=0o700, parents=True)
     journal = wizard / 'imports' / AGENT / 'journal.json'
-    key_added = False
-    relay = None
-    fw_scope = None
     try:
         section('1. Read-only source snapshot and reduced copy')
         emit(config_sha256_before=before_hash, free_bytes_before=before_free, baseline_agents=before_agents)
@@ -256,21 +257,7 @@ def main():
         h.require(copy_bytes < 2_000_000_000 and (home / 'state.db').stat().st_size < 500_000_000, 'reduced_copy_size_exceeded')
         emit(reduced_db=stats, copied_roots=names + ['cron/jobs.json', 'memory_store.db', 'shared-state.db'],
              small_copy_bytes=copy_bytes, full_home_acceptance=False, refresh_grants_removed=True)
-        section('2. Per-item owner-approved GitHub grant and fresh declared-host key')
-        scoped = root / 'scoped-ssh'; scoped.mkdir(mode=0o700)
-        command(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', COMMENT, '-f', str(scoped / 'id_ed25519')], check=True)
-        cfg = command(['ssh', '-G', host], check=True, log=False)
-        fields = dict(x.split(' ', 1) for x in cfg.stdout.splitlines() if ' ' in x)
-        address, user = fields['hostname'], fields['user']
-        h.require(address == declaration['address'] and fields.get('port') == '22', 'declared_build_host_mismatch')
-        known = command(['ssh-keygen', '-F', address, '-f', str(source.parent / '.ssh/known_hosts')], check=True, log=False)
-        line = next(x.split() for x in known.stdout.splitlines() if not x.startswith('#') and ' ssh-ed25519 ' in x)
-        (scoped / 'known_hosts').write_text(host + ' ' + ' '.join(line[1:]) + '\n')
-        shutil.copy2(Path(__file__).resolve().parents[1] / 'ops/agent-runtime/ssh_connect_proxy.py', scoped / 'connect_proxy.py')
-        (scoped / 'config').write_text(f'Host {host}\n  HostName {host}\n  Port 22\n  User {user}\n  ProxyCommand python3 /opt/data/.ssh/connect_proxy.py %h %p\n  IdentityFile /opt/data/.ssh/id_ed25519\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  HostKeyAlias {host}\n  UserKnownHostsFile /opt/data/.ssh/known_hosts\n  ConnectTimeout 8\n  ServerAliveInterval 30\n')
-        key_added = True
-        remote_key(host, (scoped / 'id_ed25519.pub').read_text())
-        emit(new_thales_key_added=True, key_comment=COMMENT, no_forwarding=True, scope_verified_readback=True)
+        section('2. Per-item owner-approved GitHub and heavy grants; no SSH key')
         claude = root / 'claude-access.json'
         h.dump(claude, access_only(json.loads((source.parent / '.claude/.credentials.json').read_text())))
         gitcfg = root / 'gitconfig'
@@ -278,16 +265,16 @@ def main():
         plan = h.scan(home, owner_home=home.parent)
         plan.update(move=True, image=image, port=18721, owner_home=str(source.parent), logical_home=str(source),
                     mode='paused', gateway_url='http://edge:8923/wizard/mcp', approved_plugins=['holographic'],
-                    supplemental_groups=[workspace.stat().st_gid], declared_tcp=[declaration])
+                    supplemental_groups=[workspace.stat().st_gid], service_url=service, grants={'heavy': True})
+        plan['grant_items'] = [{'item': 'grants.heavy', 'approved': True, 'owner': 'James', 'date': '2026-10-22'}]
         plan['owner_approvals'] = [{'owner': 'James', 'date': '2026-10-22',
             'item': 'GitHub OAuth hosts.yml', 'scopes': ['gist', 'read:org', 'repo', 'workflow'],
-            'rationale': 'Same GitHub authority as the main agent today; day-one GitHub and Thales build access required. Does not touch the Private seal.'},
-            {'owner': 'James', 'date': '2026-10-22', 'item': 'declared TCP', 'grant': declaration,
-             'rationale': 'Exactly one build host:port, enforced at egress and a fixed host relay; no agent Tailscale socket.'}]
+            'rationale': 'Same GitHub authority as the main agent today; no Private seal change.'},
+            {'owner': 'James', 'date': '2026-10-22', 'item': 'grants.heavy',
+             'rationale': 'Existing agent-bound heavy relay only; Machines/SSH deferred.'}]
         plan['dependencies'] = [{'kind': 'folder', 'path': str(p), 'proposal': a, 'action': a, 'approved': True}
                                 for p, a in [(workspace, 'mount rw'), (context, 'mount ro')]]
-        for dest, src, members in [(source.parent / '.ssh', scoped, ['config', 'connect_proxy.py', 'id_ed25519', 'id_ed25519.pub', 'known_hosts']),
-                                   (source.parent / '.config/gh/hosts.yml', source.parent / '.config/gh/hosts.yml', None),
+        for dest, src, members in [(source.parent / '.config/gh/hosts.yml', source.parent / '.config/gh/hosts.yml', None),
                                    (source.parent / '.claude/.credentials.json', claude, None), (source.parent / '.gitconfig', gitcfg, None)]:
             item = {'kind': 'credential', 'path': str(dest), 'credential_source': str(src), 'proposal': 'carry secret', 'action': 'carry secret', 'approved': True}
             if members is not None:
@@ -304,20 +291,9 @@ def main():
         section('3. Restricted apply and sealed uid-10000 home')
         result = h.apply(plan, AGENT, wizard)
         emit(apply=result)
-        record_path = wizard / 'agents' / AGENT / 'agent.json'
-        record = json.loads(record_path.read_text())
-        h.require(record['runtime']['declared_tcp'] == [declaration], 'declared_policy_readback_failed')
-        fw_scope = record['runtime']['network']['uplink']
-        command(['sudo', '-n', 'sh', str(firewall), 'declared-add', fw_scope, str(declaration['relay_port'])], check=True)
-        command(['sudo', '-n', 'sh', str(firewall), 'declared-check', fw_scope, str(declaration['relay_port'])], check=True)
-        relay = subprocess.Popen([sys.executable, str(firewall.with_name('declared_egress.py')),
-                    '--agent-json', str(record_path), '--alias', host,
-                    '--tailscale', get('TAILSCALE'), '--socket', get('TAILSCALE_SOCKET')],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        h.require(bool(select.select([relay.stdout], [], [], 8)[0]), 'declared_relay_start_timeout')
-        ready = json.loads(relay.stdout.readline())
-        h.require(ready.get('ready') is True and relay.poll() is None, 'declared_relay_start_failed')
-        emit(fixed_relay=ready, declared_tcp_readback=record['runtime']['declared_tcp'], tailscale_socket_in_agent=False)
+        record = json.loads((wizard / 'agents' / AGENT / 'agent.json').read_text())
+        h.require(record.get('grants', {}).get('heavy') is True, 'heavy_grant_readback_failed')
+        emit(agent_bound_heavy_grant_readback=True, ssh_key_carried=False, host_tcp_listener=False)
         cid = restricted.rt.container_for('agent-' + AGENT, 'agent')
         inspect = json.loads(command(['docker', 'inspect', cid], check=True, log=False).stdout)[0]
         emit(container_user=inspect['Config']['User'], image=inspect['Config']['Image'], read_only_root=inspect['HostConfig']['ReadonlyRootfs'],
@@ -339,28 +315,11 @@ def main():
         h.require(host_read.returncode != 0, 'sealed_home_host_readable')
         probe(['python3', '-c', 'import yaml,json; c=yaml.safe_load(open("/opt/data/config.yaml")); j=json.load(open("/opt/data/cron/jobs.json")); j=j if isinstance(j,list) else j["jobs"]; paused=all(x.get("enabled")==False and x.get("state")=="paused" for x in j); disabled=all(not v.get("enabled") for k,v in c["gateway"]["platforms"].items() if k!="api_server"); assert paused and disabled; print(json.dumps({"cron_paused":paused,"messaging_disabled":disabled,"memory_backend":c.get("memory",{}).get("provider"),"plugins":c["plugins"]["enabled"]}))'])
         section('4. Literal container tool exits and mount boundaries')
-        probe(['ssh', '-o', 'BatchMode=yes', host, 'true'])
+        probe(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', host, 'true'], expected=255)
+        probe(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', get('VPS_ADDRESS'), 'true'], expected=255)
         probe(['gh', 'auth', 'status'])
         probe(['git', '-C', str(workspace / 'wizard-os'), 'fetch', '--dry-run'])
         probe(['python3', '-c', 'import urllib.request,json; print(json.dumps({h:urllib.request.urlopen("https://"+h+"/",timeout=15).status for h in ["github.com","api.github.com"]}))'])
-        negative = '''import socket,json,ipaddress,sys
-alias,address,gateway=sys.argv[1:]
-other=str(ipaddress.ip_address(address)+1)
-checks=[]
-for host,port in [(alias,23),(other,22),(address,23),(gateway,22),('host.docker.internal',22)]:
- s=socket.create_connection(('egress',3128),5)
- s.settimeout(5)
- s.sendall(f'CONNECT {host}:{port} HTTP/1.1\\r\\n\\r\\n'.encode())
- reply=s.recv(512); s.close()
- assert reply.startswith(b'HTTP/1.1 403 '), (host,port)
- checks.append({'via':'egress','host':host,'port':port,'refused':True})
-for host,port in [(address,22),(other,22),(address,23),(gateway,22)]:
- try: s=socket.create_connection((host,port),2)
- except OSError: checks.append({'via':'direct','host':host,'port':port,'refused':True})
- else: s.close(); raise AssertionError('direct host/tailnet reachable')
-print(json.dumps({'negative_tcp_checks':checks}))
-'''
-        probe(['python3', '-c', negative, host, address, ready['bind']])
         probe(['sh', '-c', 'p="$1/.restricted-import-write-$$"; printf probe > "$p" && rm "$p" && test ! -e "$p"', 'probe', str(workspace)])
         probe(['sh', '-c', 'printf probe > "$1/.restricted-import-write-refused"', 'probe', str(context)], expected=2)
         probe(['sh', '-c', 'test ! -e /var/run/docker.sock && test ! -e /run/docker.sock && test ! -e "$1/.wizard-os/agents/private" && test ! -e /opt/data/.wizard-os/agents/private', 'probe', str(source.parent)])
@@ -369,7 +328,7 @@ print(json.dumps({'negative_tcp_checks':checks}))
         h.require(model_pass, 'restricted_acceptance_remaining_gates')
         emit(restricted_acceptance='PASS')
     finally:
-        section('6. Undo, key removal, copy deletion and invariant readbacks')
+        section('6. Undo, copy deletion and invariant readbacks')
         cleanup_errors = []
         def clean(name, fn):
             try:
@@ -377,28 +336,8 @@ print(json.dumps({'negative_tcp_checks':checks}))
             except BaseException as exc:
                 cleanup_errors.append(name)
                 emit(cleanup_step=name, error_type=type(exc).__name__)
-        if fw_scope:
-            clean('firewall-remove', lambda: command(['sudo', '-n', 'sh', str(firewall), 'declared-remove', fw_scope,
-                                                      str(declaration['relay_port'])], check=True))
-            check = clean('firewall-readback', lambda: command(['sudo', '-n', 'sh', str(firewall), 'declared-check', fw_scope,
-                                                               str(declaration['relay_port'])]))
-            if check is not None and check.returncode == 0:
-                cleanup_errors.append('firewall-rule-remains')
-            emit(scoped_firewall_rule_absent=check is not None and check.returncode != 0)
-        if relay:
-            def stop_relay():
-                relay.terminate()
-                try:
-                    relay.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    relay.kill(); relay.communicate(timeout=10)
-                emit(fixed_relay_stopped=relay.poll() is not None)
-            clean('relay-stop', stop_relay)
         if journal.exists():
             clean('undo', lambda: emit(undo=h.undo(journal)))
-        if key_added:
-            clean('key-remove-readback', lambda: remote_key(host))
-            emit(thales_key_removed_verified='key-remove-readback' not in cleanup_errors)
         if not (wizard / 'agents' / AGENT).exists():
             clean('copy-delete', lambda: shutil.rmtree(root))
             if journal.parent.exists():

@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs'
+import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
-import { replyAppId } from './thread-status.mjs'
+import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
@@ -12,6 +13,7 @@ const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hi
 export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
 export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
+  SCHEDULE_INPUT,
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
   '[System: The previous response was cut off by a network error mid-stream.',
@@ -55,6 +57,7 @@ export function visibleAssistantReply(content, displayKind, finishReason) {
   const kind = String(displayKind || '')
   const completion = String(finishReason || '')
   const completed = kind === 'final' || Boolean(completion && !['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(completion))
+  if (isSilentResult(text)) return false
   if (!text || text === '(empty)' || !completed || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
@@ -67,6 +70,7 @@ function visibleProvenanceReply(row) {
   if (visibleAssistantReply(row.content, row.display_kind, row.finish_reason)) return true
   const kind = String(row.display_kind || ''), finish = String(row.finish_reason || '')
   const text = typeof row.content === 'string' ? row.content.trim() : ''
+  if (isSilentResult(text)) return false
   if (!text || text === '(empty)' || INTERNAL_ASSISTANT_KINDS.has(kind) || kind.startsWith('process_wakeup')
     || ['tool_calls', 'function_call', 'cancelled', 'interrupted', 'error'].includes(finish)
     || INTERNAL_USER_PREFIXES.some(prefix => text.startsWith(prefix))) return false
@@ -205,6 +209,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         }
         if (!current.lastAssistantAt && visibleAssistant) {
           current.lastAssistantAt = timestamp
+          // The agent's own status line on its latest reply, while no newer request follows it.
+          // Lets the list show it for threads past the history-read preview window.
+          if (latestVisibleRole === 'assistant') {
+            const status = parseStatus(row.content)
+            if (status) current.status = status
+          }
         }
         if (current.lastUserAt && current.lastAssistantAt) break
       }

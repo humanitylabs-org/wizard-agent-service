@@ -1,113 +1,147 @@
 # Restricted agent runtime
 
-Off unless the box sets `WIZARD_AGENT_ISOLATION=restricted`, `WIZARD_AGENT_PORT` and `WIZARD_OWNER_PROOF_FILE`.
-Agents created while it is on run in `ops/agent-runtime/restricted-agent/` (vendored unchanged from
-wizard-app-store, digests in `SOURCE.txt`). Agents created before keep their runtime.
+Set `WIZARD_AGENT_ISOLATION=restricted` to create new agents in
+`ops/agent-runtime/restricted-agent/`. Existing restricted agents use the same socket transport after
+migration; other existing agents keep their runtime. `SOURCE.txt` records the upstream base and the
+local socket adaptation's integrity digests. Old TCP conformance receipts are historical, not socket evidence.
+
+## Service gateway: no privileged install
+
+The Service creates `agents/<id>/gateway/gateway.sock` under its data directory (`WIZARD_AGENTS_DIR`,
+else `$WIZARD_OS_HOME/agents`). The dedicated `gateway` directory is owned by the unprivileged Service
+user, mode **0700**; its Unix socket is **0600**. No key, home, parent agents directory, Docker socket or
+other agent's socket is mounted in edge. Edge runs as that same numeric uid/gid and mounts only its own
+`gateway` directory read-write at `/run/agent-gateway`. The directory, rather than a single socket inode,
+is mounted so a Service restart can replace its socket without recreating the edge container.
+
+Every request needs both the agent's gateway token and the identity of the receiving socket. A token
+for B on A's socket fails with `403 principal.agent_socket`, regardless of headers or peer IP. Socket
+requests never accept owner proof or anonymous/loopback ownership. Only `/wizard/mcp` and
+`GET /wizard/v1/agent-context` are served. Restricted tokens are refused on all TCP listeners.
+
+`WIZARD_AGENT_PORT` and `WIZARD_AGENT_HOST` are **removed**, not a compatibility flag. Setting either
+refuses startup before binding any port. There is no TCP agent-only listener, iptables call, sudo call,
+root installer or firewall prerequisite. The main owner-facing listener is unchanged; keep normal
+owner authentication/proxy configuration. Restricted agents publish no host TCP port in either direction.
+
+The Service opens sockets for stored restricted agents before accepting owner HTTP traffic and opens
+new ones before asking the runtime helper to start Docker. The helper requires private, correctly owned
+socket files and fails closed with `agent_socket_not_ready` if they are missing/unsafe. The Service and
+runtime helper must run as the same unprivileged numeric uid/gid. Live sockets are never unlinked by
+another instance; dead-process sockets can be recovered. A symlink, non-socket file or overly long Unix
+socket pathname refuses startup. Keep the data path short (socket path at most 103 bytes).
+
+## Docker / VM path requirement
+
+Unix sockets must be in **the Docker daemon's Linux kernel** and the directory must be bind-mountable
+by that daemon. Linux Docker on a VPS and the Linux guest in the Windows VM satisfy this when the
+Service and helper run there. For a containerized Service, expose the same per-agent data root to the
+trusted runtime helper/daemon with matching absolute paths and uid/gid.
+
+Colima/Lima normally shares only `$HOME`. A host directory outside its configured shares cannot be
+bind-mounted: choose a shared data directory or explicitly configure a share before running the Service.
+A Mac-native Unix socket does **not** become connectable inside Linux merely because virtiofs/SSHFS
+shows the file. Run the Service and runtime helper inside the Colima/Lima Linux VM (on a daemon-local
+data path), or run the Service in a Linux container with appropriately shared Linux storage. Do not add a
+TCP fallback. Conformance uses Docker named volumes for socket transport and streams source into
+containers, so it works even when the host checkout is outside Colima's shares.
+
+## Networks and ports
+
+- Each agent retains its allocated /28 uplink (`10.250.0.0/16`) and sandbox (`10.251.0.0/16`). Index 0 is
+  reserved for conformance; the first managed agent gets `.16/28`. Allocation is stored privately in
+  `agent.json`; it is no longer an authentication authority.
+- Agent and edge attach **only** to the internal sandbox with `inhibit_ipv4`; the host has no address
+  on it. Edge has no host-gateway alias and no uplink. Its only Service transport is its own Unix socket.
+- Egress is unchanged: sandbox + ordinary Docker uplink, HTTPS CONNECT with DNS/IP/SNI checks. It has
+  no sockets, secrets, published ports or privileged host access. Like any ordinary app container on a
+  bridge, egress itself may reach host addresses; the agent cannot use it to tunnel to private/host IPs.
+  This is not a promise to isolate arbitrary code execution in the trusted egress sidecar from the host.
+- Inbound is `agents/<id>/gateway/ingress.sock`: edge creates the second **0600** socket in its own
+  **0700** gateway directory, owned by the same uid as Service. The Service uses Node HTTP `socketPath`
+  (including streaming, catalogs and session checks); edge relays to `agent:8642` on the sandbox.
+  Health must return 200; authenticated calls still present this agent's API key. Wrong/missing keys
+  return 401. No TCP fallback exists. Socket paths are derived from agent identity; foreign stored paths
+  are rejected. `runtime.ingress_socket` records the canonical path on new records; older restricted
+  records without it derive the same path. `runtime.port` remains allocated/reserved for schema and
+  record compatibility only; it is unused by restricted runtimes. Standard agents still use their ports.
+- Docker does not publish ports for a container attached only to internal networks. A declared `ports:`
+  mapping is not evidence of working ingress. Probe both Unix directions from the same Linux kernel.
+
+## Existing installations / legacy firewall
+
+Migration is an explicit maintenance action, **not** something this source change does to a running box:
+
+1. Stop restricted agent projects using the old runtime. Leave any installed firewall guard in place.
+2. Update Service and runtime-helper source together; remove `WIZARD_AGENT_PORT`, `WIZARD_AGENT_HOST`
+   and the helper's retired `--agent-listener-port` argument from deployment configuration. Keep owner
+   proof/proxy authentication. Arrange the shared Linux socket path and matching user as above.
+3. Start the Service, then recreate each restricted project with the new Compose (not just `restart`):
+   it must lose edge's uplink/host-gateway alias and **all published ports**, gain only that agent's
+   dedicated socket directory mount, and create the inbound `ingress.sock` there. Retire
+   `AGENT_INGRESS_BIND`; it is no longer read. No host TCP port is needed per restricted agent.
+   Restricted start/apply force-recreates that project's containers to reconcile actual Docker
+   endpoints as well as Compose configuration. This restores the `agent` DNS alias if an old
+   endpoint lost it during migration; a matching config hash alone is not a health guarantee.
+   Agent homes and allocated networks are preserved; other projects are untouched.
+4. Verify socket health/authenticated API, wrong-key refusal, foreign-socket denial, correct agent
+   attribution, no published edge/agent ports and no TCP 8929 listener. Preserve
+   old receipts; do not treat them as proof for the new runtime.
+5. Only after **all** old restricted containers/listeners are gone, the administrator may optionally disable
+   `wizard-agent-firewall.service` and run the legacy script's `remove` operation. Stopping that legacy
+   unit alone deliberately leaves its rules installed. Leaving the guard installed is harmless and safer
+   during a mixed-version migration; never remove it automatically from an installer or Service startup.
+
+`ops/agent-runtime/agent-firewall.sh`, its unit and `test_agent_firewall.sh` remain for legacy/optional
+operation only. New installations do not install/run them. This PR does not change any running firewall.
 
 ## Agent home contract
 
 | | |
 |---|---|
-| Host path | `$WIZARD_OS_HOME/agents/<id>/home` (default `~/.wizard-os/agents/<id>/home`) |
-| Container path | `/opt/data` (`HOME` and `HERMES_HOME` in the agent container) |
-| Owner | uid:gid `10000:10000`, directory mode `0700`; the host user cannot read or write it |
-| Managed files | `.env` and `config.yaml`, written by the Service to `agents/<id>/managed/` and copied in before every start |
+| Host path | `$WIZARD_OS_HOME/agents/<id>/home` |
+| Container path | `/opt/data` (`HOME` and `HERMES_HOME`) |
+| Owner | uid:gid `10000:10000`, mode `0700` |
+| Managed files | `.env` and `config.yaml` staged by Service in `agents/<id>/managed/` |
 
-The home belongs to the agent's container user. The host never writes into it directly:
+`RestrictedDriver.sync_home` stops the agent and copies managed files using a one-shot, no-network,
+read-only-root container with CHOWN/FOWNER/DAC_OVERRIDE only. It writes into a fresh temporary directory
+and renames files to replace symlinks/FIFOs rather than follow them. Timeout removes the helper and
+reports `504 agent_sync_timeout`. Lifecycle locks are per restricted agent; legacy drivers retain one
+shared lock. Imports must run as uid 10000 inside the agent container. Shares still report
+`409 agent_unavailable` until in-container placement exists.
 
-- The runtime driver (`RestrictedDriver.sync_home`) copies the managed files in using a one-shot container. That
-  container has no network, a read-only root, and only the CHOWN, FOWNER and DAC_OVERRIDE capabilities. The agent
-  is stopped first, so nothing in the home moves while the helper works. Nothing there is trusted either: each
-  file is written into a fresh `mktemp -d` directory and renamed over its target, so a planted symlink or FIFO is
-  replaced rather than followed or opened. The helper is named per run and removed if it times out
-  (`504 agent_sync_timeout`). The runtime's own `home-init` then re-owns anything that is not `10000:10000`.
-- Restricted agents' lifecycle actions lock per agent, so one stuck agent never holds up the others. The other
-  drivers keep one global lock, because the Runtipi install patches shared module state.
-- Bring-your-Hermes admission uses the owner CLI in [hermes-import.md](hermes-import.md), not a raw unreviewed
-  archive injected into a running home. The registry reserves the stopped restricted record/network; per-item
-  credential policy runs in private staging; constrained helpers seal and place `/opt/data` without a database
-  copy. Only `RestrictedDriver` starts the uid-10000 agent. Staging/rollback never enter its mount namespace.
-  Any later in-home operation must run as uid 10000; no host chmod/read bypass or agent-root bootstrap is allowed.
-- Shares (files sent to an agent from the phone) answer `409 agent_unavailable` for restricted agents until
-  in-container placement exists.
+The restricted runtime has no Tinfoil attestation sidecar. Tinfoil restricted agents remain refused with
+`409 restricted_provider_unsupported`; private agents need a confidential provider or local model.
 
-## Model providers
+## Verification
 
-The restricted runtime has no Tinfoil attestation sidecar yet. Creating a restricted agent on Tinfoil, or moving
-one onto it, answers `409 restricted_provider_unsupported`; the runtime driver refuses it as well. Private agents
-need a confidential provider, so until that sidecar exists they stay on the existing runtime or use the local
-model.
+`conformance/run.sh <receipts-dir>` covers the real Hermes dispatcher, mount/network checks, socket
+visibility and host-port denial across fresh/restart/recreate phases. `test_agent_sockets.sh` is the
+unprivileged transport/isolation replacement for the old privileged firewall test. Run both on a disposable
+Docker host; never against live agent data. `tests/agent-sockets.test.ts` and `agent-principals.test.ts`
+exercise real Node Unix HTTP listeners, credential/socket mismatch and the owner/TCP boundary.
 
-## Networks and ports
 
-- Each agent gets a /28 uplink from `10.250.0.0/16` and a /28 sandbox from `10.251.0.0/16`. Index 0
-  (`10.250.0.0/28`, `10.251.0.0/28`) is reserved for conformance runs, so the first agent gets `.16/28`. The pair
-  is chosen as the lowest index free among registered agents and stored in `agent.json`. It is never shown in the
-  public agent shape.
-- The agent reaches the Service only through its edge sidecar, which connects to the agent-only listener
-  `WIZARD_AGENT_PORT` (default 8929; 8924 is often taken by wizard-link) at the uplink gateway address.
-- On that listener, an agent key is accepted only from that agent's own uplink /28. Only `/wizard/mcp` and
-  `GET /wizard/v1/agent-context` are served. A restricted agent's key is refused (`403 principal.agent_network`) on
-  every other listener, also when its stored network is missing or malformed (fail closed).
-- Host firewall: `ops/agent-runtime/agent-firewall.sh` and `wizard-agent-firewall.service`. Install them as root.
-  A refresh builds the new chains and hooks them in before the old ones go, so the guard never drops; an
-  interrupted refresh is settled by the next `apply`, chain by chain, from the hooks actually in place: a fully
-  hooked new chain replaces the old one, a partly hooked one is dropped while the old one still guards. The unit
-  runs before networking and Docker at boot, so restricted containers never start unguarded. Stopping the unit
-  leaves the rules in place; removal is `wizard-agent-firewall remove`. The functional test is
-  `test_agent_firewall.sh`, which runs in a privileged throwaway container. It checks after every single iptables
-  change that each guard is still hooked, for a normal refresh and for recovery from refreshes interrupted while
-  hooking in the new set, while dropping the old set, and before the rename.
+## Imported sealed Hermes: no new root surface
 
-## Declared TCP build-host egress
+An imported standard agent keeps the same uid-10000 seal and per-agent Unix socket
+transport as main. Import health uses `gateway/ingress.sock`, never a published
+agent API. The owner-only `prepare-import` action creates a reserved agent socket
+without invoking the runtime helper, building images, generating provider keys or
+accessing its home. It refuses agents not in the importing admission state.
 
-This is separate from the Private provider seal: no Private runtime, provider relay,
-Tailscale daemon or host gateway configuration changes. The empty default policy
-retains public, SNI-checked HTTPS only. For an explicitly approved non-private import:
+Use the unchanged main vendored sidecars and preloaded image. The import adds no
+firewall exception, privileged host operation, host TCP relay, SSH key/proxy,
+Tailscale socket or broad host mount. Raw SSH to the build host and VPS must fail.
+A per-item owner-approved `grants.heavy` enables only the existing agent-bound
+heavy relay. The agent plugin presents its own gateway key; host-heavy credentials
+remain exclusively in the Service. Day-one builds use bounded staged heavy jobs;
+source staging, log/artifact retrieval and machine administration remain explicit
+Machines/heavy-job design gaps, not implicit shell authority.
 
-1. Put `declared_tcp:[{alias,address,port,relay_port}]` in the approved plan. Each
-   address is one tailnet IPv4, not a CIDR or DNS pattern; each alias and high relay
-   port is unique. Port 443 cannot be used to bypass the TLS gate. The plan digest
-   covers the entire list. The admitted `agent.json` stores the exact list.
-2. Preload the source-matching sidecar image from the Thales light lane. Set
-   `WIZARD_AGENT_SIDECAR_IMAGE` only for the owner CLI invocation. For declared grants
-   the driver compares `/srv/egress.py` in that image to the vendored source before
-   starting anything. No on-box image build/pull or mutating shared image tags.
-3. The driver supplies `EGRESS_DECLARED_TCP` and this agent's /28 gateway through
-   Compose. Egress accepts only a literal `CONNECT alias:port` from that table and
-   connects to that gateway's fixed high relay port. It never resolves the alias,
-   connects directly to tailnet, or accepts numeric-IP CONNECT as a substitute.
-4. After the /28 exists, use **only** `agent-firewall.sh declared-add UPLINK/28 PORT`
-   and `declared-check`. They add one source-/28, gateway-/32, TCP-port rule within
-   the already-installed host guard. Other agents and tailnet/host ports stay closed.
-   The helper validates arguments before calling iptables. It does not create or
-   refresh global firewall hooks. A global firewall refresh drops these exceptions
-   (fail closed); the owner must explicitly re-apply a still-approved grant.
-5. Run `declared_egress.py --agent-json RECORD --alias ALIAS --tailscale BINARY
-   --socket HOST_SOCKET` on the trusted host. It reads the exact admitted declaration,
-   binds only that /28's gateway/high port, validates source peers, and launches
-   `tailscale --socket=HOST_SOCKET nc ADDRESS PORT` with **fixed argv** for every
-   stream. It parses no destination from the stream. No shell, SOCKS listener,
-   published sidecar port, Docker socket or Tailscale socket enters the agent.
-   This is an explicit owner-side process, not a new Service/daemon installation.
-   It has 16-client and idle-time bounds; SIGTERM closes its children/connections.
-6. Carry an agent-owned `ssh_connect_proxy.py` and a fresh build-host-only key/config
-   with a pinned host key. The ProxyCommand sends the declared tuple through egress;
-   it has no host-side privilege. The SSH key must not authorize SSH into the VPS.
-7. Verify uid-10000 SSH, gh and git success plus undeclared alias/port, another tailnet
-   IP/port and VPS SSH refusal **both through egress and directly**. Public
-   github.com/api.github.com TLS positive controls do not prove authentication.
-8. On undo, `declared-remove UPLINK/28 PORT`, read back its absence, stop/reap the
-   relay, undo the imported agent, revoke/read back the rehearsal key, delete copies,
-   verify no containers and the exact original agent list/config hash. Cleanup
-   attempts all steps even if one fails, and preserves journals if undo is incomplete.
-
-The restricted reduced-copy harness automates those steps and then requires one real
-hidden-session Service turn with exact successful gh, SSH and git terminal results
-plus an existing `fact_store` recall. It fails closed unless CREATE → PATCH hidden →
-GET true happens before any message. A passing unit/socket test is not this live
-acceptance. No production cutover is authorized by the rehearsal.
-
-Packaging is `scripts/package-restricted-sidecars.py SOURCE_SHA IMAGE_TAG OUTPUT_DIR`
-on Thales only. It refuses the VPS, dirty/wrong source, wrong architecture or source-
-image mismatch; it exports a tar and sha256 receipt without registry publication.
+Rehearsal preflight requires `import_capabilities.socket_prepare`, `heavy_enabled`
+and `heavy_sandbox` from the live Service, before any reduced copy or registration.
+A missing capability is a blocker requiring a separate authorized Service release,
+not a reason for this rehearsal to change production configuration. See
+[hermes-import.md](hermes-import.md) and `CUTOVER.md` for the current no-root gates.

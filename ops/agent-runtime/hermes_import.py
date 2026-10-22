@@ -198,7 +198,7 @@ def read_inventory(root):
                 continue
             rows.append((rel, s.st_size, s.st_mtime_ns))
             text_scope = (rel in {'config.yaml', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json', '.env'}
-                          or rel.startswith(('skills/', 'memories/', 'plugins/', 'profiles/')))
+                          or rel.startswith(('skills/', 'memories/', 'plugins/', 'profiles/', 'scripts/', 'cron/')))
             if text_scope and s.st_size < 2 * 1024**2 and p.suffix.lower() in {'.md', '.yaml', '.yml', '.json', '.toml', '.py', '.sh', '.txt', '.env', ''}:
                 try:
                     texts[rel] = p.read_text()
@@ -217,7 +217,7 @@ def scan(source, *, owner_home=None):
         texts = {}
         with zipfile.ZipFile(source) as z:
             for n, r, size in entries:
-                if size < 2 * 1024**2 and (r in {'config.yaml', '.env', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json'} or r.startswith(('skills/', 'plugins/', 'memories/'))):
+                if size < 2 * 1024**2 and (r in {'config.yaml', '.env', 'SOUL.md', 'AGENTS.md', 'cron/jobs.json'} or r.startswith(('skills/', 'plugins/', 'memories/', 'scripts/', 'cron/'))):
                     with contextlib.suppress(UnicodeError):
                         texts[r] = z.read(n).decode()
         with zipfile.ZipFile(source) as z:
@@ -236,6 +236,7 @@ def scan(source, *, owner_home=None):
     require('config.yaml' in texts, 'source_no_regular_config')
     cfg = load_yaml(texts.get('config.yaml', '{}'))
     deps = {}
+    warnings = []
     def add(path, kind, ref, proposal, **extra):
         path = str(path)
         key = (path, kind)
@@ -250,6 +251,11 @@ def scan(source, *, owner_home=None):
             fields = re.finditer(r'''(?<![\w.-])["']?([\w.-]*(?:token|secret|password|api[_-]?key|access[_-]?key|credential|authorization)[\w.-]*)["']?\s*[:=]''', line, re.I)
             if any(not match[1].lower().endswith(('_file', '_path', '-file', '-path')) for match in fields):
                 continue
+            # Report locations only: never include command/credential bytes.
+            if re.search(r'\b(?:ssh|scp|rsync)\b[^\n]*\bthales\b', line, re.I):
+                ref = f'{rel}:{line_no}'
+                warnings.append({'reference': ref, 'warning': 'needs Machines/heavy job'})
+                add('Thales remote execution', 'host-service', ref, 'leave behind', warning='needs Machines/heavy job')
             for m in PATH_RE.finditer(line):
                 raw = m.group().rstrip('/.,;')
                 path = str(owner_home / raw[2:]) if raw.startswith('~/') else raw
@@ -298,7 +304,11 @@ def scan(source, *, owner_home=None):
             'path_preserving': not is_zip, 'logical_home': str(source) if not is_zip else '/opt/data',
             'mode': 'paused', 'move': False,
             'image': IMAGE, 'network': 'restricted', 'port': 18720,
-            'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [], 'declared_tcp': [],
+            'service_url': 'http://127.0.0.1:8923',
+            'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [],
+            'grants': {'heavy': False},
+            'grant_items': [{'item': 'grants.heavy', 'approved': False, 'proposal': 'agent-bound heavy relay'}],
+            'warnings': warnings,
             'gateway_url': '', 'approved_plugins': [], 'approved_mcp': [],
             'approved_env_names': [],  # deprecated; use per-path credentials entries
             'outside_tools': [],
@@ -375,12 +385,11 @@ def validate_plan(plan, wizard_home):
     require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]+', plan.get('image', '')) is not None, 'image_invalid')
     require(re.fullmatch(r'https?://[a-zA-Z0-9_.:-]+/wizard/mcp', plan.get('gateway_url', '')) is not None, 'wizard_gateway_required')
     require(set(plan.get('outside_tools', [])) <= set(OUTSIDE_TOOLS), 'outside_tools_invalid')
-    import declared_egress
-    try:
-        declared_egress.validate(plan.get('declared_tcp', []))
-    except (ValueError, TypeError):
-        raise ImportFailure('declared_tcp_invalid') from None
-    require(not plan.get('declared_tcp') or plan.get('isolation') == 'restricted', 'declared_tcp_requires_restricted')
+    require(re.fullmatch(r'http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}', plan.get('service_url', 'http://127.0.0.1:8923')) is not None, 'service_url_invalid')
+    grants = plan.get('grants', {'heavy': False})
+    require(isinstance(grants, dict) and set(grants) <= {'heavy'} and type(grants.get('heavy', False)) is bool, 'grants_invalid')
+    require(not grants.get('heavy') or (plan.get('isolation') == 'restricted' and any(
+        i.get('item') == 'grants.heavy' and i.get('approved') is True for i in plan.get('grant_items', []))), 'heavy_grant_not_approved')
     for name in plan.get('approved_env_names', []):
         require(re.fullmatch(r'[A-Z_][A-Z0-9_]*', name) is not None, 'env_name_invalid')
     for name in plan.get('approved_plugins', []) + plan.get('approved_mcp', []):
@@ -619,6 +628,8 @@ def wire(home, plan, api_key, gateway_key):
     # Plugin activation is explicit; source host/Wizard bootstrap cannot win.
     memory_plugin = (cfg.get('plugins') or {}).get('hermes-memory-store')
     cfg['plugins'] = {'enabled': list(plan.get('approved_plugins', [])) + [a['name'] for a in plan.get('wizard_assets', []) if a['kind'] == 'plugins'], 'disabled': []}
+    if plan.get('grants', {}).get('heavy'):
+        cfg['plugins']['enabled'].append('wizard-agent-heavy')
     if isinstance(memory_plugin, dict):
         cfg['plugins']['hermes-memory-store'] = memory_plugin
     (home / 'config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))

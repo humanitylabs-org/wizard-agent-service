@@ -2,10 +2,12 @@
 import hashlib
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,6 +23,12 @@ def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str
     (managed / "config.yaml").write_text("model: {}\n")
     (folder / "runtime.key").write_text("api-key-0123456789\n")
     (folder / "gateway.key").write_text("gateway-key-abcdef\n")
+    gateway = folder / "gateway"
+    gateway.mkdir(mode=0o700)
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(str(gateway / "gateway.sock"))
+    (gateway / "gateway.sock").chmod(0o600)
+    sock.close()
     runtime = {"kind": "container", "app_id": f"agent-{agent_id}", "port": 18650}
     if isolation:
         runtime["isolation"] = isolation
@@ -31,11 +39,31 @@ def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str
     return agent
 
 
+class ClaudeLoginMountTest(unittest.TestCase):
+    def doc(self, privacy, provider):
+        agent = {"id": "phil", "privacy": privacy, "model": {"provider": provider},
+                 "runtime": {"app_id": "agent-phil", "port": 18651}}
+        return json.loads(ar.compose_doc(agent, image="img", proxy_image="proxy", home_source="/h", uid=1000, gid=1000, ports=False))
+
+    def test_standard_claude_agent_mounts_the_shared_login(self):
+        doc = self.doc("standard", "anthropic")
+        svc = doc["services"]["agent-phil"]
+        self.assertIn("claude-login:/claude", svc["volumes"])
+        self.assertEqual(svc["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"], "/claude")
+        self.assertEqual(doc["volumes"]["claude-login"], {"name": "wizard-ai-accounts-claude", "external": True})
+
+    def test_private_or_other_provider_never_gets_it(self):
+        for privacy, provider in (("private", "anthropic"), ("private", "tinfoil"), ("standard", "openai-codex")):
+            doc = self.doc(privacy, provider)
+            self.assertNotIn("volumes", doc)
+            self.assertFalse(any("/claude" in v for v in doc["services"]["agent-phil"]["volumes"]))
+
+
 class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
         self.agents = ar.Agents(self.tmp / "agents", None)
-        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "", 8929)
+        self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "")
         self.calls = []
         self.real_docker = ar.docker
         ar.docker = lambda args, **kw: (self.calls.append((args, kw.get("env"))), type("R", (), {"stdout": "", "returncode": 0})())[1]
@@ -52,8 +80,10 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertEqual(env["AGENT_API_KEY"], "api-key-0123456789")
         self.assertEqual(env["EDGE_TOKEN_SHA256"], hashlib.sha256(b"gateway-key-abcdef").hexdigest())
         self.assertEqual((env["AGENT_UPLINK_SUBNET"], env["AGENT_SANDBOX_SUBNET"]), ("10.250.0.16/28", "10.251.0.16/28"))
-        self.assertEqual(env["AGENT_INGRESS_BIND"], "127.0.0.1:18650")
-        self.assertEqual((env["EDGE_UPSTREAM_HOST"], env["EDGE_UPSTREAM_PORT"]), ("10.250.0.17", "8929"))
+        self.assertNotIn("AGENT_INGRESS_BIND", env)
+        self.assertEqual(env["AGENT_GATEWAY_DIR"], str(self.tmp / "agents" / "daily" / "gateway"))
+        self.assertNotIn("EDGE_UPSTREAM_HOST", env)
+        self.assertNotIn("EDGE_UPSTREAM_PORT", env)
         self.assertNotIn("gateway-key-abcdef", json.dumps(env))
 
     def test_lifecycle_uses_the_vendored_compose_and_the_agent_service(self):
@@ -76,6 +106,19 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertIn("chown 10000:10000", sync[-1])
         # Provider keys land in managed/.env, not in the home.
         self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
+
+    def test_start_and_apply_recreate_legacy_container_endpoints(self):
+        # Pre-socket projects can retain stale Docker endpoints without the `agent` DNS alias.
+        # Compose's config hash need not change; ordinary `up` leaves that drift untouched.
+        agent = agent_folder(self.tmp / "agents", "legacy", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        self.assertNotIn("ingress_socket", agent["runtime"])
+        for action in (self.driver.start, self.driver.apply):
+            self.calls.clear()
+            action(agent)
+            up = next(args for args, _ in self.calls if args[0] == "compose" and args[5] == "up")
+            self.assertIn("--force-recreate", up)
+            self.assertIn("--remove-orphans", up)
+            self.assertEqual(up[:3], ["compose", "-p", "agent-legacy"])
 
     def test_tinfoil_agents_are_refused_before_anything_runs(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
@@ -131,6 +174,33 @@ class RestrictedDriverTest(unittest.TestCase):
         with ar.agent_lock("a"):
             self.assertTrue(ar.agent_lock("b").acquire(timeout=1))
             ar.agent_lock("b").release()
+
+    def test_missing_socket_refused_before_docker(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        (self.tmp / "agents" / "daily" / "gateway" / "gateway.sock").unlink()
+        with mock.patch.object(ar, "docker") as docker:
+            with self.assertRaisesRegex(ar.RuntimeFailure, "agent_socket_not_ready"):
+                self.driver.start(agent)
+            docker.assert_not_called()
+
+    def test_gateway_symlink_refused_before_docker(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        gateway = self.tmp / "agents" / "daily" / "gateway"
+        moved = gateway.with_name("moved")
+        gateway.rename(moved)
+        gateway.symlink_to(moved, target_is_directory=True)
+        with mock.patch.object(ar, "docker") as docker:
+            with self.assertRaisesRegex(ar.RuntimeFailure, "agent_socket_not_ready"):
+                self.driver.start(agent)
+            docker.assert_not_called()
+
+    def test_nonprivate_socket_refused_before_docker(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        (self.tmp / "agents" / "daily" / "gateway" / "gateway.sock").chmod(0o666)
+        with mock.patch.object(ar, "docker") as docker:
+            with self.assertRaisesRegex(ar.RuntimeFailure, "agent_socket_not_ready"):
+                self.driver.start(agent)
+            docker.assert_not_called()
 
     def test_sync_refuses_without_managed_files(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})

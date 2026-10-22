@@ -18,7 +18,6 @@ import time
 import zipfile
 
 import agent_runtime as rt
-import declared_egress
 
 
 @contextmanager
@@ -135,7 +134,45 @@ def checkpoint(h, path, journal, step):
 
 def driver(h, root, plan):
     agents = rt.Agents(Path(root) / 'agents', None)
-    return rt.RestrictedDriver(agents, rt.RESTRICTED_DIR, plan['image'], int(plan.get('agent_listener_port', 8929)))
+    return rt.RestrictedDriver(agents, rt.RESTRICTED_DIR, plan['image'])
+
+
+def prepare_socket(h, plan, agent_id):
+    import urllib.request
+    # Owner-loopback API: provisions only this reserved agent's Unix socket.
+    headers = {'Content-Type': 'application/json'}
+    proof_file = os.environ.get('WIZARD_IMPORT_OWNER_PROOF_FILE')
+    if proof_file:
+        headers['x-wizard-owner-proof'] = Path(proof_file).read_text().strip()
+    req = urllib.request.Request(plan.get('service_url', 'http://127.0.0.1:8923') +
+        '/wizard/v1/agents/' + agent_id + '/prepare-import', data=b'{}',
+        headers=headers, method='POST')
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=15) as r:
+            h.require(r.status == 202, 'import_socket_prepare_failed')
+    except OSError:
+        raise h.ImportFailure('import_socket_prepare_unavailable') from None
+
+
+def health(h, d, record, key, timeout=120):
+    import socket
+    import http.client
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        conn = http.client.HTTPConnection('localhost', timeout=2)
+        try:
+            conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            conn.sock.settimeout(2)
+            conn.sock.connect(str(d.agents.root / record['id'] / 'gateway/ingress.sock'))
+            conn.request('GET', '/health', headers={'Authorization': 'Bearer ' + key})
+            if conn.getresponse().status == 200:
+                return
+        except OSError:
+            pass
+        finally:
+            conn.close()
+        time.sleep(1)
+    raise h.ImportFailure('agent_health_timeout')
 
 
 def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
@@ -171,6 +208,7 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
     record = d.agents.read(agent_id)
     h.require(record['runtime'].get('admission') == 'importing' and rt.restricted(record), 'reservation_not_restricted')
     checkpoint(h, path, journal, 'reserved')
+    prepare_socket(h, plan, agent_id)
     with lock(target):
         # An importing record is denied by every RestrictedDriver lifecycle even
         # if another owner CLI/UI tries to start it while staging is in progress.
@@ -191,6 +229,10 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
         h.require(not native.exists() and not native.is_symlink(), 'native_home_collision')
         inner_path = stage / 'import-journal.json'
         inner = json.loads(inner_path.read_text())
+        if plan.get('grants', {}).get('heavy'):
+            inner['assets_added'].append('plugins/wizard-agent-heavy')
+            h.dump(inner_path, inner)
+            shutil.copytree(Path(__file__).with_name('agent-heavy-plugin'), home / 'plugins/wizard-agent-heavy')
         inner['assets_added'].append('native-home')
         h.dump(inner_path, inner)
         native.mkdir(mode=0o700)
@@ -239,14 +281,13 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
                               'auto_app_grants': False, 'denied_apps': ['privacycom', 'privacy-com', 'privacy.com']}
         record['runtime'].pop('admission')
         record['runtime']['image'] = plan['image']
-        record['runtime']['declared_tcp'] = declared_egress.validate(plan.get('declared_tcp', []))
+        record['grants'] = {'heavy': plan.get('grants', {}).get('heavy', False)}
         h.dump(target / 'import-journal.json', {'restricted_import': True, 'journal': str(path)})
         h.dump(target / 'agent.json', record)
         checkpoint(h, path, journal, 'admitted')
         d.start(record)
-        # Only the edge's loopback relay is published, never the agent API itself.
-        health = h.DockerRuntime(dict(plan, port=record['runtime']['port']), target, agent_id)
-        health.healthy(d.agents.secret(agent_id, 'runtime.key'))
+        # No published TCP port: health goes through this agent's ingress Unix socket.
+        health(h, d, record, d.agents.secret(agent_id, 'runtime.key'))
         h.dump(target / 'service-state.json', {'desired': 'running', 'started_at': int(time.time() * 1000)})
         journal.update(state='applied', apply_seconds=round(time.monotonic() - started, 3))
         checkpoint(h, path, journal, 'running')

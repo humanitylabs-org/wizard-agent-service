@@ -38,7 +38,7 @@ class RestrictedImportTests(unittest.TestCase):
             return type('Result', (), {'stdout': '', 'returncode': 0})()
         self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown'), patch.object(r, 'helper'),
                       patch.object(r.rt.RestrictedDriver, 'start', return_value={'ok': True}),
-                      patch.object(h.DockerRuntime, 'healthy')]
+                      patch.object(r, 'health'), patch.object(r, 'prepare_socket')]
         for p in self.mocks:
             p.start()
     def tearDown(self):
@@ -119,7 +119,7 @@ class RestrictedImportTests(unittest.TestCase):
             h.apply(self.plan, 'restricted-fixture', self.root)
         h.undo(self.root / 'imports/restricted-fixture/journal.json')
 
-    def test_explicit_gh_file_only_and_declared_tcp_survive_admission(self):
+    def test_explicit_gh_file_only_and_heavy_grant_survive_admission(self):
         gh = self.owner / '.config/gh'
         gh.mkdir(parents=True)
         hosts = gh / 'hosts.yml'
@@ -127,31 +127,52 @@ class RestrictedImportTests(unittest.TestCase):
         (gh / 'unapproved').write_text('not granted')
         self.plan['dependencies'] = [{'kind': 'credential', 'path': str(hosts), 'credential_source': str(hosts),
                                       'proposal': 'carry secret', 'action': 'carry secret', 'approved': True}]
-        grant = {'alias': 'builder', 'address': '100.100.100.100', 'port': 22, 'relay_port': 18222}
-        self.plan['declared_tcp'] = [grant]
+        self.plan['grants'] = {'heavy': True}
+        self.plan['grant_items'] = [{'item': 'grants.heavy', 'approved': True}]
         h.approve(self.plan)
         result = h.apply(self.plan, 'restricted-fixture', self.root)
         folder = self.root / 'agents/restricted-fixture'
         self.assertEqual((folder / 'home/native-home/.config/gh/hosts.yml').read_text(), hosts.read_text())
         self.assertFalse((folder / 'home/native-home/.config/gh/unapproved').exists())
-        self.assertEqual(json.loads((folder / 'agent.json').read_text())['runtime']['declared_tcp'], [grant])
+        self.assertTrue(json.loads((folder / 'agent.json').read_text())['grants']['heavy'])
+        self.assertTrue((folder / 'home/plugins/wizard-agent-heavy/__init__.py').is_file())
+        self.assertFalse((folder / 'home/native-home/.ssh').exists())
         h.undo(result['journal'])
         self.assertTrue(hosts.is_file())
 
-    def test_declared_policy_is_covered_by_approval(self):
-        self.plan['declared_tcp'] = [{'alias': 'builder', 'address': '100.100.100.100', 'port': 22, 'relay_port': 18222}]
+    def test_heavy_grant_requires_explicit_item_and_approval_hash(self):
+        self.plan['grants']['heavy'] = True
         with self.assertRaisesRegex(h.ImportFailure, 'plan_not_approved'):
             h.validate_plan(self.plan, self.root)
         h.approve(self.plan)
-        self.plan['declared_tcp'][0]['port'] = 443
-        h.approve(self.plan)
-        with self.assertRaisesRegex(h.ImportFailure, 'declared_tcp_invalid'):
+        with self.assertRaisesRegex(h.ImportFailure, 'heavy_grant_not_approved'):
             h.validate_plan(self.plan, self.root)
+        self.plan['grant_items'][0]['approved'] = True
+        h.approve(self.plan)
+        h.validate_plan(self.plan, self.root)
+        self.plan['grants']['heavy'] = 'true'
+        h.approve(self.plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'grants_invalid'):
+            h.validate_plan(self.plan, self.root)
+
+    def test_scan_reports_thales_usages_without_command_bytes(self):
+        for rel, text in [('skills/build/SKILL.md', 'ssh ' + 'thales uname -a'),
+                          ('scripts/fetch.sh', 'scp thales:/work/artifact ./out'),
+                          ('cron/check.py', 'rsync -a thales:/work/logs ./logs')]:
+            dest = self.home / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text)
+        plan = h.scan(self.home, owner_home=self.owner)
+        self.assertFalse(plan['grants']['heavy'])
+        self.assertFalse(plan['grant_items'][0]['approved'])
+        self.assertEqual(len(plan['warnings']), 3)
+        self.assertTrue(all(x['warning'] == 'needs Machines/heavy job' for x in plan['warnings']))
+        self.assertNotIn('uname -a', json.dumps(plan))
 
     def test_reservation_start_is_denied_before_any_docker(self):
         agent = {'id': 'fixture', 'runtime': {'admission': 'importing'}, 'model': {}}
         with self.assertRaisesRegex(r.rt.RuntimeFailure, 'agent_import_in_progress'):
-            r.rt.RestrictedDriver(r.rt.Agents(self.root / 'agents', None), r.rt.RESTRICTED_DIR, 'fixture', 8929)._prepare(agent)
+            r.rt.RestrictedDriver(r.rt.Agents(self.root / 'agents', None), r.rt.RESTRICTED_DIR, 'fixture')._prepare(agent)
         r.rt.docker.assert_not_called()
 
 

@@ -16,26 +16,15 @@ import hermes_import as h
 
 
 class RehearsalTests(unittest.TestCase):
-    def test_restrict_key_exact_roundtrip(self):
-        with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            (home / '.ssh').mkdir()
-            authorized = home / '.ssh/authorized_keys'
-            original = '# preserve comment\nssh-ed25519 synthetic-other-key other-owner\n\n'
-            authorized.write_text(original)
-            def local_remote(argv, *, input=None, **kw):
-                command = shlex.split(argv[-1])
-                self.assertEqual(command[:2], ['python3', '-c'])
-                return subprocess.run([sys.executable, *command[1:]], input=input, capture_output=True, text=True,
-                                      env=dict(os.environ, HOME=str(home)), check=True)
-            with patch.object(r, 'command', side_effect=local_remote), patch.object(r, 'emit'):
-                public = 'ssh-ed25519 synthetic-not-a-real-key ' + r.COMMENT
-                r.remote_key('fixture', public)
-                self.assertEqual(authorized.read_text(), original + 'restrict ' + public + '\n')
-                self.assertEqual(authorized.stat().st_mode & 0o777, 0o600)
-                r.remote_key('fixture')
-            self.assertEqual(authorized.read_text(), original)
-            self.assertEqual(list((home / '.ssh').iterdir()), [authorized])
+    def test_no_root_tcp_or_ssh_key_path(self):
+        source = Path(r.__file__).read_text()
+        for forbidden in ['sudo', 'iptables', 'remote_key(', 'ProxyCommand', 'declared_' + 'tcp', 'ssh-keygen']:
+            self.assertNotIn(forbidden, source)
+
+    def test_heavy_failed_or_missing_submission_is_not_a_pass(self):
+        with patch.object(r, 'emit'):
+            self.assertFalse(r.verify_heavy('fixture', [], '/worker/agents/fixture'))
+            self.assertFalse(r.verify_heavy('fixture', [{'arguments': {}, 'receipt': {'error': 'refused', 'status': 404}}], '/worker/agents/fixture'))
 
     def test_hidden_false_stops_before_message(self):
         calls = []

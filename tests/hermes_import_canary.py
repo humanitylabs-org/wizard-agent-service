@@ -30,8 +30,12 @@ PREPARING_ROOT = None
 
 def call(origin, path, method='GET', body=None, *, headers=None):
     data = json.dumps(body).encode() if body is not None else None
+    owner_headers = {}
+    proof_file = os.environ.get('WIZARD_IMPORT_OWNER_PROOF_FILE')
+    if proof_file:
+        owner_headers['x-wizard-owner-proof'] = Path(proof_file).read_text().strip()
     req = urllib.request.Request(origin + path, data=data, method=method,
-                                 headers={'Content-Type': 'application/json', **(headers or {})})
+                                 headers={'Content-Type': 'application/json', **owner_headers, **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.load(r)

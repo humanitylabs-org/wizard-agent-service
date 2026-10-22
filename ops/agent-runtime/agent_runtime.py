@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import shlex
+import stat
 import subprocess
 import sys
 import threading
@@ -52,7 +53,7 @@ RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
 AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
 MANAGED_FILES = (".env", "config.yaml")
-SIDECAR_IMAGE = os.environ.get("WIZARD_AGENT_SIDECAR_IMAGE", "restricted-agent-sidecars:local")  # owner-selected, preloaded only
+SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # existing main image; never rebuilt for imports
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
@@ -216,6 +217,13 @@ def service_names(agent: dict) -> tuple[str, str]:
     return app_id, f"{app_id}-tinfoil"
 
 
+CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
+
+
+def uses_claude_login(agent: dict) -> bool:
+    return agent.get("privacy") == "standard" and (agent.get("model") or {}).get("provider") == "anthropic"
+
+
 def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
@@ -230,6 +238,13 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         "x-runtipi": {"is_main": True, "internal_port": 8642},
     }
     services = {main: hermes}
+    doc_volumes = {}
+    if uses_claude_login(agent):
+        # The box's one Claude sign-in (the Claude app's volume). Only a standard agent on Claude gets it: a private
+        # agent never sees a public provider's login.
+        hermes["volumes"].append("claude-login:/claude")   # the top-level key below, named after the real volume
+        hermes["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"] = "/claude"
+        doc_volumes["claude-login"] = {"name": CLAUDE_LOGIN_VOLUME, "external": True}
     if (agent.get("model") or {}).get("provider") == "tinfoil":
         hermes["depends_on"] = [proxy]
         services[proxy] = {
@@ -244,6 +259,8 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     if ports:
         hermes["ports"] = [f"127.0.0.1:{agent['runtime']['port']}:8642"]
     doc = {"services": services, "x-runtipi": {"schema_version": 2, "overrides": []}}
+    if doc_volumes:
+        doc["volumes"] = doc_volumes
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
 
 
@@ -335,8 +352,8 @@ class RestrictedDriver:
     (README environment contract). Kept off Runtipi's shared network; the compose project holds the agent and its
     sidecars, so stop/start act on all of them."""
 
-    def __init__(self, agents: Agents, runtime_dir: Path, image: str, listener_port: int):
-        self.agents, self.image, self.listener_port = agents, image, listener_port
+    def __init__(self, agents: Agents, runtime_dir: Path, image: str):
+        self.agents, self.image = agents, image
         self.runtime_dir = runtime_dir.resolve()
         self.compose_file = self.runtime_dir / "compose.yml"
         verify_vendored(self.runtime_dir)
@@ -346,13 +363,6 @@ class RestrictedDriver:
 
     def env(self, agent: dict) -> dict:
         uplink, sandbox = agent_networks(agent)
-        import declared_egress
-        try:
-            grants = declared_egress.validate(agent['runtime'].get('declared_tcp', []))
-        except (ValueError, TypeError):
-            raise RuntimeFailure('declared_tcp_invalid', 409) from None
-        if grants and not agent.get('imported'):
-            raise RuntimeFailure('declared_tcp_import_required', 409)
         api_key = self.agents.secret(agent["id"], "runtime.key")
         gateway_key = self.agents.secret(agent["id"], "gateway.key")
         if not api_key or not gateway_key:
@@ -364,11 +374,9 @@ class RestrictedDriver:
             "EDGE_TOKEN_SHA256": hashlib.sha256(gateway_key.encode()).hexdigest(),
             "AGENT_UPLINK_SUBNET": str(uplink),
             "AGENT_SANDBOX_SUBNET": str(sandbox),
-            "AGENT_INGRESS_BIND": f"127.0.0.1:{agent['runtime']['port']}",
-            "EDGE_UPSTREAM_HOST": str(next(uplink.hosts())),
-            "EDGE_UPSTREAM_PORT": str(self.listener_port),
-            "EGRESS_DECLARED_TCP": json.dumps(grants, separators=(',', ':')),
-            "EGRESS_TCP_RELAY_HOST": str(next(uplink.hosts())) if grants else '',
+            "AGENT_GATEWAY_DIR": str(self.agents.root / agent["id"] / "gateway"),
+            "AGENT_EDGE_UID": str(os.getuid()),
+            "AGENT_EDGE_GID": str(os.getgid()),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         image = agent["runtime"].get("image") if agent.get("imported") else self.image
@@ -419,16 +427,18 @@ class RestrictedDriver:
             raise RuntimeFailure("restricted_provider_unsupported", 409)
         if agent["runtime"].get("admission") == "importing":
             raise RuntimeFailure("agent_import_in_progress", 409)
+        # The Service must create the socket before Docker; never let bind-mount auto-create a directory.
+        gateway = self.agents.root / agent["id"] / "gateway"
+        try:
+            st = gateway.lstat()
+            sock = (gateway / "gateway.sock").lstat()
+            safe = (stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+                    and stat.S_ISSOCK(sock.st_mode) and sock.st_uid == os.getuid() and stat.S_IMODE(sock.st_mode) == 0o600)
+        except OSError:
+            safe = False
+        if not safe:
+            raise RuntimeFailure("agent_socket_not_ready", 409)
         if agent.get('imported'):
-            if agent['runtime'].get('declared_tcp'):
-                self.env(agent)  # validate policy before any start or helper
-                expected = hashlib.sha256((self.runtime_dir / 'sidecars/egress.py').read_bytes()).hexdigest()
-                code = 'import hashlib; print(hashlib.sha256(open("/srv/egress.py","rb").read()).hexdigest())'
-                actual = docker(['run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
-                                 '--security-opt', 'no-new-privileges:true', '--user', '65534:65534',
-                                 '--entrypoint', 'python3', SIDECAR_IMAGE, '-c', code], timeout=30).stdout.strip()
-                if actual != expected:
-                    raise RuntimeFailure('declared_tcp_image_mismatch', 409)
             docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
             docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
             refresh = self.agents.root / agent["id"] / "import-update.json"
@@ -449,12 +459,14 @@ class RestrictedDriver:
     def apply(self, agent: dict) -> dict:
         self._prepare(agent)
         project = self.project(agent["id"])
-        self._compose(agent, "up", "-d", "--remove-orphans", timeout=1800)
+        # Reconcile actual endpoints/mounts, not only Compose's saved config hash. Legacy
+        # projects can retain an endpoint without the `agent` alias after network migration,
+        # leaving a healthy agent unreachable through the new socket relay.
+        self._compose(agent, "up", "-d", "--force-recreate", "--remove-orphans", timeout=1800)
         return {"ok": True, "driver": "restricted", "project": project}
 
     def start(self, agent: dict) -> dict:
-        self._prepare(agent)
-        self._compose(agent, "up", "-d", timeout=1800)
+        self.apply(agent)
         return {"ok": True}
 
     def stop(self, agent: dict) -> dict:
@@ -934,7 +946,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
-    ap.add_argument("--agent-listener-port", type=int, default=8929, help="the Agent Service's agent-only listener port (WIZARD_AGENT_PORT)")
     args = ap.parse_args(argv)
     token = args.token_file.read_text().strip()
     if len(token) < 24:
@@ -948,8 +959,7 @@ def main(argv: list[str] | None = None) -> int:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
-        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
-                                             args.agent_listener_port)
+        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

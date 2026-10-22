@@ -9,8 +9,7 @@ try {
   const env = { ...process.env, HOME: join(root, 'home'), HERMES_HOME: join(root, 'hermes'),
     WIZARD_OS_HOME: join(root, 'wizard'), TMPDIR: join(root, 'tmp'), PYTHONDONTWRITEBYTECODE: '1' }
   const tests = [resolve('tests/test_hermes_import.py'), resolve('tests/test_restricted_import.py'), resolve('tests/test_hermes_recovery.py'),
-    resolve('tests/test_declared_egress.py'), resolve('tests/test_restricted_rehearsal.py'),
-    resolve('ops/agent-runtime/restricted-agent/conformance/test_declared_tcp.py')]
+    resolve('tests/test_restricted_rehearsal.py'), resolve('tests/test_agent_heavy_plugin.py')]
   const python = process.env.WIZARD_IMPORT_PYTHON
   const uv = !python && spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0
   for (const test of tests) {

@@ -4,10 +4,7 @@
 The agent sits on an internal-only Docker network, so this proxy is its only route out. It accepts
 HTTP CONNECT to port 443 for hostnames on the allowlist and nothing else: no plain HTTP, no IP
 literals, no other ports, and no hostname that resolves to a private, loopback, link-local,
-CGNAT (tailnet) or otherwise non-global address. An explicit EGRESS_DECLARED_TCP policy can
-add exact alias:port raw TCP tunnels, solely via fixed host relays on this agent's uplink gateway.
-It never grants generic SOCKS, arbitrary CONNECT, DNS private-address access, or a Tailscale socket.
-One JSON line per decision goes to stdout.
+CGNAT (tailnet) or otherwise non-global address. One JSON line per decision goes to stdout.
 
 Allowlist file: one hostname per line; a leading "*." allows subdomains (not the bare domain).
 """
@@ -15,7 +12,6 @@ import asyncio
 import ipaddress
 import json
 import os
-import re
 import socket
 import sys
 import time
@@ -56,59 +52,6 @@ if os.environ.get("EGRESS_ALLOWLIST_HOSTS", "").strip():
     EXACT, SUFFIXES = load_allowlist_env(os.environ["EGRESS_ALLOWLIST_HOSTS"])
 else:
     EXACT, SUFFIXES = load_allowlist(ALLOWLIST_FILE)
-
-
-def load_declared_tcp(value, relay_host):
-    """Exact alias:port grants only. The relay's bind address is the uplink gateway,
-    never a client-controlled destination. Invalid policy refuses startup."""
-    entries = json.loads(value)
-    if not isinstance(entries, list) or len(entries) > 16:
-        raise ValueError("invalid declared TCP list")
-    if not entries:
-        return {}
-    relay = ipaddress.ip_address(relay_host)
-    pool = ipaddress.ip_network("10.250.0.0/16")
-    if relay not in pool or int(relay) % 16 != 1:
-        raise ValueError("relay must be a restricted uplink gateway")
-    grants, aliases, ports = {}, set(), set()
-    for item in entries:
-        if not isinstance(item, dict) or set(item) != {"alias", "address", "port", "relay_port"}:
-            raise ValueError("invalid declared TCP entry")
-        alias, address, port, relay_port = (item[k] for k in ("alias", "address", "port", "relay_port"))
-        if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", alias):
-            raise ValueError("invalid declared TCP alias")
-        if not isinstance(address, str) or ipaddress.ip_address(address) not in ipaddress.ip_network("100.64.0.0/10"):
-            raise ValueError("declared TCP address must be tailnet IPv4")
-        if type(port) is not int or not 1 <= port <= 65535 or port == 443:
-            raise ValueError("invalid declared TCP port")
-        if type(relay_port) is not int or not 1024 <= relay_port <= 65535:
-            raise ValueError("invalid relay port")
-        if alias in aliases or relay_port in ports:
-            raise ValueError("duplicate declared TCP alias or relay port")
-        aliases.add(alias)
-        ports.add(relay_port)
-        grants[(alias, str(port))] = dict(item, relay_host=str(relay))
-    return grants
-
-
-DECLARED_TCP = load_declared_tcp(os.environ.get("EGRESS_DECLARED_TCP", "[]"),
-                                 os.environ.get("EGRESS_TCP_RELAY_HOST", ""))
-
-
-async def declared_tunnel(reader, writer, peer, grant):
-    # No SOCKS/general proxy authority in the agent or this sidecar. The host
-    # relay itself launches a fixed tailscale nc destination; it reads no target.
-    try:
-        up_reader, up_writer = await asyncio.wait_for(
-            asyncio.open_connection(grant["relay_host"], grant["relay_port"]), 15)
-    except (OSError, asyncio.TimeoutError):
-        return await refuse(writer, 502, "Declared TCP relay unavailable", peer=peer,
-                            alias=grant["alias"])
-    log(decision="allow", transport="declared-tcp", peer=peer, alias=grant["alias"],
-        address=grant["address"], port=grant["port"])
-    writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-    await writer.drain()
-    await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
 
 
 def log(**fields):
@@ -246,9 +189,6 @@ async def handle(reader, writer):
         return await refuse(writer, 403, "Only HTTPS CONNECT is allowed", peer=peer, method=parts[0][:16])
     target = parts[1]
     host, sep, port = target.rpartition(":")
-    grant = DECLARED_TCP.get((host, port)) if sep else None
-    if grant is not None:
-        return await declared_tunnel(reader, writer, peer, grant)
     host = host.strip().lower().rstrip(".")
     if not sep or port != "443":
         return await refuse(writer, 403, "Only port 443 is allowed", peer=peer, target=target[:255])

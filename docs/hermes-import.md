@@ -44,12 +44,37 @@ merge into that base on the next stopped sync rather than replacing the harness.
 Only preloaded images are accepted. Restricted imports never build or pull on the
 control plane. Preinstall/cache PyYAML and python-dotenv for lifecycle refreshes.
 Do not use the old bridge-network/native-UID runbook below as an acceptance path.
-GitHub HTTPS is on the vendored egress allowlist. Tailnet SSH requires a separate,
-approval-bound `declared_tcp` list and a fixed owner-side relay; see
-[restricted-agent-runtime.md](restricted-agent-runtime.md#declared-tcp-build-host-egress).
-The default remains public TLS/443 only. Never use host networking, a general SOCKS
-proxy, or an agent-mounted Tailscale socket. An old sidecar image fails closed for
-declared grants; a source change alone does not clear the live SSH acceptance gate.
+GitHub HTTPS uses the existing main sidecar image and its public TLS/443 allowlist.
+No new sidecar image is needed. No host TCP listener, firewall change, root command,
+SSH proxy/key or Tailscale socket is part of this migration. Raw SSH belongs to the
+separate Machines component and is intentionally unavailable on day one.
+
+The scan offers `grants.heavy:false` plus a separate `grant_items` approval item.
+Setting the grant true requires explicit owner approval of that item, covered by
+the plan hash. Archimedes has James's approval dated 2026-10-22. The admitted
+`agent.json` has `grants.heavy:true`; a trusted `wizard-agent-heavy` plugin calls
+only `/wizard/v1/agent-heavy/{submit,status,cancel}` through edge using this agent's
+MCP key and originating session. It never carries the host heavy token or SSH key.
+The existing Service enforces agent/session binding, staged worker-root scoping,
+rate limits and continuation revalidation. A receipt is not completion: require a
+terminal completed receipt with exit code 0. Missing/offline relay is a failed gate,
+never permission to fall back to host credentials or shell access.
+
+The separately deployed Service must support owner-only `POST
+/wizard/v1/agents/<id>/prepare-import`: it creates only the reserved importing
+agent's Unix socket without starting a runtime or rewriting the imported harness.
+`GET /wizard/v1/agent-options` reports `import_capabilities` for fail-before-copy
+rehearsal preflight. Enable the existing `WIZARD_AGENT_HEAVY=on` and
+`WIZARD_AGENT_HEAVY_SANDBOX=on` only in a separately authorized Service release;
+this task does not restart or reconfigure it. Health uses the agent's ingress Unix
+socket; no TCP port is published.
+
+The scanner reports `ssh`/`scp`/`rsync` references to Thales in skills, cron and
+scripts as `needs Machines/heavy job`, with file/line references and no command or
+secret values. These dependencies do not become mounts or automatic grants.
+Review cron disposition separately: bounded staged builds can become heavy jobs;
+host reachability, recovery and maintenance stay on the recovery host until the
+Machines design is authorized.
 
 The owner may approve an existing GitHub OAuth `hosts.yml` as a **single file**
 credential grant, with its actual scopes and rationale recorded in `owner_approvals`
