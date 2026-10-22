@@ -119,8 +119,10 @@ it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserve
       const s = await scene(), secondary = await s.create('Offline')
       await s.call('/wizard/hermes/api/sessions?agent=' + secondary.id) // authenticated listing before stop
       await s.call('/wizard/v1/agents/' + secondary.id + '/stop', 'POST', {})
-      // created_at is wall-clock seconds from each run's own create, so it is not part of the comparison.
-      const agents = JSON.parse(JSON.stringify(await (await s.call('/wizard/v1/agents')).json(), (k, v) => k === 'created_at' ? undefined : v))
+      // created_at is wall-clock time; the approved new read permission is explicitly false by default.
+      const catalog = await (await s.call('/wizard/v1/agents')).json()
+      if (!baseline) expect(catalog.agents.find((a:any)=>a.id===secondary.id).permissions.read_standard_chats).toBe(false)
+      const agents = JSON.parse(JSON.stringify(catalog, (k, v) => k === 'created_at' || (k === 'read_standard_chats' && v === false) ? undefined : v))
       const binding = await (await s.call('/wizard/v1/apps/notes/binding')).json()
       const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_client_fresh', source: 'wizard-mobile' })
       const offset = s.calls.length, minted = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })

@@ -51,6 +51,7 @@ import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest,
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
+import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
@@ -2343,6 +2344,7 @@ function buildWizardServer(options, lifetime) {
     mainLabel: options.mainAgentLabel,
     // The gateway address an agent container reaches (/wizard/mcp); unset = container agents get no gateway.
     gatewayUrl: options.agentGatewayUrl || '',
+    standardChatsUrl: options.standardChatsUrl || '',
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     beforeRestrictedStart: id => agentSockets.ensure(id),
@@ -4162,10 +4164,11 @@ function buildWizardServer(options, lifetime) {
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
       const pair = sideReference(key, record)
       const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, agent_id: agent, session_id: pair.session_id }]
+      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
     })) }
   }
 
+  const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
     const requestDone = lifetime.request()
@@ -4193,11 +4196,32 @@ function buildWizardServer(options, lifetime) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
         if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
+        if (url.pathname === '/wizard/standard-chats/mcp' || url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
         if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (url.pathname === '/wizard/standard-chats/mcp') {
+        if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response,415,{error:'json_required'}); return }
+        const agent = principal.kind === 'agent' ? agents?.read(principal.agentId) : null
+        if (!agent || agent.privacy !== 'private' || agent.permissions.read_standard_chats !== true) { sendJson(response,403,{error:'standard_chats_denied'}); return }
+        const now = Date.now()
+        for (const [id,rate] of standardRetrievalRate) if (now-rate.at>60000) standardRetrievalRate.delete(id)
+        const rate = standardRetrievalRate.get(agent.id) || {at:now,count:0}
+        if (++rate.count>30) { sendJson(response,429,{error:'standard_chats_rate_limited'},{'Retry-After':'60'}); return }
+        standardRetrievalRate.set(agent.id,rate)
+        const rpc = parseJsonBody(await readBoundedBody(request,16384))
+        const secrets = [hermesKey,options.inboxToken || '',...(agents.credentialValues?.() || [])].filter(Boolean)
+        let result = standardChatRpc(agent,principal,rpc,hermesStatePath,secrets)
+        const serialized = JSON.stringify(result)
+        if (result && secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1,-1)))) {
+          result = {jsonrpc:'2.0',id:rpc?.id ?? null,result:{content:[{type:'text',text:'unsafe_content'}],isError:true}}
+        }
+        if (result === null) { response.writeHead(202); response.end() }
+        else sendJson(response,200,result,{'Cache-Control':'no-store'})
+        return
       }
       if (url.pathname === '/wizard/v1/setup' || url.pathname.startsWith('/wizard/v1/setup/')) {
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
@@ -5493,6 +5517,11 @@ function buildWizardServer(options, lifetime) {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
           'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
+        }
+        // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
+        if (decoded.includes('/') && decoded.endsWith('.html')) {
+          headers['X-Frame-Options'] = 'SAMEORIGIN'
+          headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace("frame-ancestors 'none'", "frame-ancestors 'self'")
         }
         if (file.endsWith('sw.js')) headers['Service-Worker-Allowed'] = uxPrefix
         response.writeHead(200, headers)
