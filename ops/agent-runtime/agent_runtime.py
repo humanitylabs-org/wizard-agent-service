@@ -946,6 +946,54 @@ def place(driver, agent: dict, payload: dict) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+# ---------------------------------------------------------------- file fetch (agent -> owner: MEDIA lines, read as its uid)
+
+FETCH_LIMIT = 25 * 1024 * 1024
+FETCH_SCRIPT = r'''
+import base64, hashlib, json, os, stat, sys
+p = json.load(sys.stdin)
+parts = p["path"].split("/")[3:]   # /opt/data/<parts>
+fd = os.open("/opt/data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in parts[:-1]:
+        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = next_fd
+    try:
+        out = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except OSError:
+        raise SystemExit("file_missing")
+    with os.fdopen(out, "rb") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 25 * 1024 * 1024:
+            raise SystemExit("file_unavailable")
+        data = f.read(25 * 1024 * 1024 + 1)
+finally:
+    os.close(fd)
+if not 0 < len(data) <= 25 * 1024 * 1024:
+    raise SystemExit("file_unavailable")
+print(json.dumps({"verified": True, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "data_base64": base64.b64encode(data).decode()}))
+'''
+FETCH_PATH = re.compile(r"/opt/data(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._ ()+,@=-]{1,200}){1,16}")
+
+
+def fetch(driver, agent: dict, payload: dict) -> dict:
+    """Read one regular file from the agent's own /opt/data as the agent's uid (no symlinks, bounded)."""
+    if (agent.get("permissions") or {}).get("files") == "none":
+        raise RuntimeFailure("agent_files_disabled", 409)
+    path = payload.get("path")
+    if not isinstance(path, str) or not FETCH_PATH.fullmatch(path):
+        raise RuntimeFailure("invalid_path", 400)
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    result = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", FETCH_SCRIPT],
+                    input_text=json.dumps({"path": path}), timeout=60, check=False)
+    if result.returncode:
+        raise RuntimeFailure("file_unavailable", 404)
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 # ---------------------------------------------------------------- HTTP
 
 def driver_for(agent: dict, driver, restricted_driver):
@@ -983,7 +1031,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1015,6 +1063,11 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     if not isinstance(payload, dict):
                         raise RuntimeFailure("invalid_payload", 400)
                     self._json(200, place(chosen, agent, payload))
+                    return
+                if action == "fetch":
+                    if not isinstance(payload, dict):
+                        raise RuntimeFailure("invalid_payload", 400)
+                    self._json(200, fetch(chosen, agent, payload))
                     return
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))

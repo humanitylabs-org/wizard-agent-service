@@ -1195,5 +1195,6 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
     place: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/place`, payload),
+    fetch: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/fetch`, payload),
   }
 }

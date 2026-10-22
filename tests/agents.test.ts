@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
@@ -84,6 +85,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
+    ...(extra.runtimeFetch ? { fetch: extra.runtimeFetch } : {}),
   }
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
@@ -227,6 +229,42 @@ describe('agents registry and API', () => {
     expect(image.status).toBe(200)
     expect(image.headers.get('content-type')).toBe('image/png')
     expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
+  })
+
+  it('reads a sandboxed agent\'s MEDIA file through the runtime as the agent and serves it', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_sandbox'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Report ready.\n\nMEDIA:/opt/data/cache/documents/report.md\nMEDIA:/opt/data/cache/documents/missing.md' },
+    ])
+    const report = Buffer.from('# SANDBOX_CANARY\n')
+    const fetched: string[] = []
+    const runtimeFetch = async (id: string, payload: any) => {
+      fetched.push(`${id} ${payload.path}`)
+      if (!payload.path.endsWith('report.md')) throw Object.assign(new Error('file_unavailable'), { code: 'file_unavailable' })
+      return { verified: true, bytes: report.length, sha256: createHash('sha256').update(report).digest('hex'), data_base64: report.toString('base64') }
+    }
+    const { base } = await start(dir, main, { runtimeFetch })
+    await withPrivate(dir, base, priv.port)
+    const home = join(dir, 'agents', 'private', 'home')
+    mkdirSync(home, { recursive: true })
+    chmodSync(home, 0o000)   // owned by the sandbox uid in production: unreadable to the service
+    try {
+      for (let pass = 0; pass < 2; pass++) {
+        const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+        expect(response.status).toBe(200)
+        const text = await response.text()
+        expect(text).not.toContain('/opt/data')
+        const content = JSON.parse(text).data[0].content
+        const envelope = JSON.parse(content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+        expect(envelope.items.map((i: any) => i.name)).toEqual(['report.md'])
+        expect(content).toContain('[file: missing.md unavailable]')
+        const file = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+        expect(await file.text()).toBe('# SANDBOX_CANARY\n')
+      }
+      // Fetched once, then served from the mirror; a miss is not retried on every poll.
+      expect(fetched).toEqual(['private /opt/data/cache/documents/report.md', 'private /opt/data/cache/documents/missing.md'])
+    } finally { chmodSync(home, 0o700) }
   })
 
   it('tells routed agents how to send files and projects a finished run\'s MEDIA output', async () => {
