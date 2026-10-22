@@ -54,7 +54,8 @@ export async function scene(kind, serverOptions = {}) {
         const timer=setInterval(()=>{if(['completed','failed','cancelled','interrupted'].includes(run.status))res.end(`event: run.${run.status}\ndata: ${JSON.stringify(run)}\n\n`);else res.write(': synthetic heartbeat\n\n')},250)
         res.on('close',()=>clearInterval(timer));return
       }
-    if (path === '/health') return json(200, { status: 'ok' })
+    if (kind !== 'main' && req.headers.authorization === 'Bearer parity-main-secret' && !url.pathname.startsWith('/p/') && path.startsWith('/api/sessions')) return json(path === '/api/sessions' ? 200 : 404, path === '/api/sessions' ? { data: [], has_more: false } : { error: 'not_found' })
+    if (path === '/health') return json(200, { status: 'ok', provider: 'local', model: 'fixture-stt' })
     if (path === '/v1/models') return json(200, { data: [] })
     if (path === '/v1/audio/transcriptions') return json(200, { text: stt.text, model: 'fixture-stt' })
     if (path === '/v1/capabilities') return json(200, { features: {} })
@@ -116,8 +117,12 @@ export async function scene(kind, serverOptions = {}) {
   }
   const upstream = createServer(handler), socket = createServer(handler)
   const upstreamOrigin = `http://127.0.0.1:${(await listen(upstream)).port}`
+  // An unrestricted container has a different TCP origin from main. Reusing
+  // main's origin would accidentally invoke the main model-lock bridge.
+  const containerUpstream = kind === 'container' ? createServer(handler) : null
+  const containerPort = containerUpstream ? (await listen(containerUpstream)).port : Number(new URL(upstreamOrigin).port)
   if (kind !== 'main') {
-    const runtime = kind === 'host-profile' ? { kind: 'profile', profile: 'parity-profile' } : { kind: 'container', app_id: 'agent-parity-agent', port: Number(new URL(upstreamOrigin).port), ...(kind === 'restricted' ? { isolation: 'restricted' } : {}) }
+    const runtime = kind === 'host-profile' ? { kind: 'profile', profile: 'parity-profile' } : { kind: 'container', app_id: 'agent-parity-agent', port: containerPort, ...(kind === 'restricted' ? { isolation: 'restricted' } : {}) }
     const preset = PRESETS.find(p => p.id === 'standard')
     writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: ['fixture-model', 'fixture-other'], fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
     writeFileSync(join(folder, 'runtime.key'), 'parity-runtime-secret', { mode: 0o600 })
@@ -141,5 +146,5 @@ export async function scene(kind, serverOptions = {}) {
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },
-    close: async () => { await closeServer(wizard); await closeServer(upstream); if (socket.listening) await closeServer(socket); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
+    close: async () => { await closeServer(wizard); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
 }
