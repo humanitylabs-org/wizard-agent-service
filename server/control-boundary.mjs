@@ -15,7 +15,10 @@ export function controlBoundary(req, { allowedHosts = [], controlOrigins = [], s
   const site = req.headers['sec-fetch-site']
   const entry = ['GET', 'HEAD'].includes(req.method) && req.headers['sec-fetch-mode'] === 'navigate'
     && req.headers['sec-fetch-dest'] === 'document' && ['/wizard', '/wizard/', '/wizard-os-home', '/wizard-os-home/'].includes(String(req.url || '').split('?')[0])
-  if (site && !['same-origin', 'none'].includes(site) && !(site === 'cross-site' && entry)) return false
+  // A top-level document load of an entry page carries no authority (no body, no credentials beyond what any
+  // link gets) and cross-site entry is already allowed, so a same-site sibling (the Mac front door on another
+  // loopback port) gets the same treatment. Fetches, writes and every other path stay same-origin only.
+  if (site && !['same-origin', 'none'].includes(site) && !(['cross-site', 'same-site'].includes(site) && entry)) return false
   const origin = req.headers.origin
   if (!origin) return !site || ['GET', 'HEAD'].includes(req.method) // CLI/native; browser writes need Origin
   try {
