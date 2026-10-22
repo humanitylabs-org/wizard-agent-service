@@ -781,7 +781,9 @@ export function createAgentRegistry(options = {}) {
     if (agent.runtime.kind === 'profile') return false
     const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
     const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
-    try { return readFileSync(join(home, 'config.yaml'), 'utf8') !== expected } catch { return false }
+    // Compare against the stamp of what the Service last wrote: Hermes itself may normalise config.yaml on start.
+    const stamp = createHash('sha256').update(expected).digest('hex')
+    try { return readFileSync(join(folder(agent.id), 'config.sha256'), 'utf8').trim() !== stamp } catch { return existsSync(home) }
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
@@ -806,7 +808,9 @@ export function createAgentRegistry(options = {}) {
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) }))
+    const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) })
+    writeTextAtomic(join(home, 'config.yaml'), config)
+    writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
