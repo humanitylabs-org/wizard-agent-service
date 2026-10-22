@@ -45,7 +45,7 @@ it('legacy private tinfoil sessions and runs are not refused when no provider ap
     seen.push({ path, method: req.method || '', auth: String(req.headers.authorization || ''), body })
     const send = (status: number, data: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)) }
     if (path === '/health') return send(200, { status: 'ok' })
-    if (path === '/api/sessions' && req.method === 'GET') return send(200, { data: [{ id: 'legacy-thread', title: 'Synthetic legacy thread' }] })
+    if (path === '/api/sessions' && req.method === 'GET') return send(200, { data: [{ id: 'legacy-thread', title: 'Synthetic legacy thread', source: 'api_server', created_at: 1, updated_at: 1 }] })
     if (path === '/api/sessions' && req.method === 'POST') return send(201, { session: { id: body.id } })
     if (path === '/v1/runs' && req.method === 'POST') return send(202, { run_id: 'legacy-run', status: 'started' })
     return send(404, { error: 'not_found' })
