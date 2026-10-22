@@ -26,7 +26,9 @@ class SourceTest(unittest.TestCase):
             self.assertEqual(mount['target'], '/claude-app'); self.assertTrue(mount['read_only'])
             self.assertEqual(c, before)
             if kind == 'bind': self.assertFalse(mount['bind']['create_host_path'])
-            else: self.assertTrue(doc['volumes']['claude-app-login']['external'])
+            else:
+                self.assertTrue(doc['volumes']['claude-app-login']['external'])
+                self.assertTrue(mount['volume']['nocopy'])
 
     def test_missing_stopped_ambiguous_or_wrong_app_denied(self):
         self.assertIsNone(source.resolve([])); self.assertIsNone(source.resolve([engine(), engine()]))

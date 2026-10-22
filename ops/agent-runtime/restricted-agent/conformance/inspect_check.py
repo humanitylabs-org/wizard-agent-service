@@ -113,8 +113,13 @@ def sidecar_login_problems(mounts, project, expected_source, session_source=None
     # a different credential. Also catch a bind of the volume's backing path.
     sources = {CLAUDE_LOGIN_VOLUME, f"{project}_claude-session"}
     sources.update(s for s in (expected_source, session_source, app_source) if s)
+    def overlaps(path):
+        if not isinstance(path, str) or not os.path.isabs(path):
+            return False
+        return any(os.path.isabs(s) and os.path.commonpath([path, s]) in (path, s)
+                   for s in sources)
     return ["Claude login must never be mounted in a sidecar"] if any(
-        m.get("Name") in sources or m.get("Source") in sources
+        m.get("Name") in sources or m.get("Source") in sources or overlaps(m.get("Source"))
         or m.get("Destination") in ("/claude", "/run/claude-login", "/claude-app")
         for m in mounts) else []
 
@@ -260,6 +265,11 @@ def selftest():
         for wrong in (None, {"type": source["type"], "source": "wrong"}):
             results.append({"case": f"seeder wrong {source['type']} {wrong}",
                             "pass": bool(claude_seed_problems(seed, p, wrong))})
+    for path in ("/srv/apps/wizard-claude/data", "/srv/apps/wizard-claude/data/claude/.credentials.json",
+                 "/docker/volumes/proj_claude-session", "/docker/volumes/proj_claude-session/_data/child"):
+        results.append({"case": f"sidecar source overlap {path}", "pass": bool(sidecar_login_problems(
+            [{"Type": "bind", "Source": path, "Destination": "/alias", "RW": False}], p,
+            "/srv/apps/wizard-claude/data/claude", "/docker/volumes/proj_claude-session/_data"))})
     results.append({"case": "agent session writable denied", "pass": bool(mount_problems(
         [*good, dict(session, rw=True)], p, claude_login=True))})
     print(json.dumps({"summary": {"total": len(results), "passed": sum(r["pass"] for r in results),

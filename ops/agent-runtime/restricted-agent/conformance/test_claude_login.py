@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def render(granted=False, hosts=None):
+def render(granted=False, hosts=None, source_kind='volume'):
     env = {k: v for k, v in os.environ.items() if not k.startswith(('AGENT_', 'EDGE_', 'EGRESS_', 'COMPOSE_', 'CLAUDE_'))}
     env.update(AGENT_API_KEY='synthetic-api-key', EDGE_TOKEN_SHA256='0' * 64,
                CLAUDE_CODE_OAUTH_TOKEN='',
@@ -23,7 +23,8 @@ def render(granted=False, hosts=None):
             spec = importlib.util.spec_from_file_location('claude_source', ROOT / 'claude_source.py')
             module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
             path = Path(folder) / 'source.json'
-            path.write_text(json.dumps(module.compose_override({'type': 'volume', 'source': module.LEGACY_VOLUME})))
+            path.write_text(json.dumps(module.compose_override({'type': source_kind, 'source': module.LEGACY_VOLUME
+                if source_kind == 'volume' else '/synthetic/wizard-claude/data/claude'})))
             args += ['-f', str(path)]
         if hosts:
             spec = importlib.util.spec_from_file_location('passthrough', ROOT / 'passthrough.py')
@@ -62,6 +63,19 @@ class ClaudeComposeTest(unittest.TestCase):
         self.assertTrue(source['read_only'])
         self.assertEqual(doc['volumes']['claude-app-login'], {'name': 'wizard-ai-accounts-claude', 'external': True})
         self.assertEqual(doc['volumes']['claude-session']['driver_opts']['type'], 'tmpfs')
+
+    def test_compiled_share_bind_uses_identical_ro_projection(self):
+        doc = render(True, source_kind='bind')
+        init = doc['services']['claude-init']
+        source = next(v for v in init['volumes'] if v['target'] == '/claude-app')
+        self.assertEqual(source['type'], 'bind')
+        self.assertEqual(source['source'], '/synthetic/wizard-claude/data/claude')
+        self.assertTrue(source['read_only']); self.assertFalse(source['bind']['create_host_path'])
+        self.assertNotIn('claude-app-login', doc.get('volumes', {}))
+        agent = doc['services']['agent']
+        session = next(v for v in agent['volumes'] if v['target'] == '/run/claude-login')
+        self.assertTrue(session['read_only'])
+        self.assertNotIn('/claude-app', [v['target'] for v in agent['volumes']])
 
     def test_grant_preserves_hardening(self):
         base, grant = render(), render(True)

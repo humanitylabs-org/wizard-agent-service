@@ -5,6 +5,7 @@ Synthetic credential only. Prove the old env delivery leaks (positive control),
 then the production tmpfs-config grant does not. All resources are labelled,
 throwaway and cleaned in finally. No network or inference request.
 """
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -45,6 +46,9 @@ except OSError:
 else:
     raise AssertionError('agent projection must be read-only')
 token = auth['accessToken'].encode()
+if os.environ.get('EXPECTED_ACCESS_SHA256'):
+    import hashlib
+    assert hashlib.sha256(token).hexdigest() == os.environ['EXPECTED_ACCESS_SHA256'], 'rotation not projected'
 files = list(pathlib.Path('/opt/data').rglob('*'))
 assert any(p.name.startswith('hermes-snap-') for p in files), 'snapshot control missing'
 status = directsdk_setup.setup_status()
@@ -170,7 +174,9 @@ def main():
                 '--security-opt','no-new-privileges:true','--memory','768m','--pids-limit','128',
                 '--tmpfs','/tmp:rw,nosuid,nodev,size=64m,mode=1777',
                 '--tmpfs','/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000,mode=700',
-                '-v',volume+':/run/claude-login:ro','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
+                '-v',volume+':/run/claude-login:ro',
+                '-e','EXPECTED_ACCESS_SHA256='+hashlib.sha256((SYNTHETIC+'-rotated').encode()).hexdigest(),
+                '-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
                 '-e','HERMES_YOLO_MODE=1','-e','CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login',
                 '--workdir','/opt/data','--entrypoint','/opt/hermes/.venv/bin/python',IMAGE,'-',input=PROBE).splitlines()[-1])
             assert not rotated['matching_home_files']

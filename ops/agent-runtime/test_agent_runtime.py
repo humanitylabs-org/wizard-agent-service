@@ -80,14 +80,14 @@ class RestrictedDriverTest(unittest.TestCase):
     def test_grant_override_digest_is_required_and_verified(self):
         copy = self.tmp / "runtime-grant"
         shutil.copytree(ar.RESTRICTED_DIR, copy)
-        with (copy / "compose.claude-token.yml").open("a") as fh:
+        with (copy / "compose.claude-login.yml").open("a") as fh:
             fh.write("\n# changed\n")
-        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml differs"):
+        with self.assertRaisesRegex(SystemExit, "compose.claude-login.yml differs"):
             ar.verify_vendored(copy)
         manifest = copy / "SOURCE.txt"
         manifest.write_text("\n".join(line for line in manifest.read_text().splitlines()
-                                      if not line.endswith("  ./compose.claude-token.yml")))
-        with self.assertRaisesRegex(SystemExit, "compose.claude-token.yml is not listed"):
+                                      if not line.endswith("  ./compose.claude-login.yml")))
+        with self.assertRaisesRegex(SystemExit, "compose.claude-login.yml is not listed"):
             ar.verify_vendored(copy)
 
     def test_memory_grant_security_sources_cannot_be_unlisted(self):
@@ -95,7 +95,7 @@ class RestrictedDriverTest(unittest.TestCase):
         shutil.copytree(ar.RESTRICTED_DIR, copy)
         manifest = copy / "SOURCE.txt"
         original = manifest.read_text()
-        for name in ("sidecars/claude-init.py", "sidecars/hostname_policy.py", "sidecars/Dockerfile",
+        for name in ("claude_source.py", "sidecars/claude-init.py", "sidecars/hostname_policy.py", "sidecars/Dockerfile",
                      "conformance/in_agent.py", "conformance/docker_credentials.py", "sidecars/edge.py",
                      "conformance/inspect_check.py", "conformance/ingress_probe.py"):
             with self.subTest(name=name):

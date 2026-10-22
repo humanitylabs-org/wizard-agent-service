@@ -36,6 +36,8 @@ def mount_spec(source, target='/claude-app'):
     spec = {**source, 'target': target, 'read_only': True}
     if source['type'] == 'bind':
         spec['bind'] = {'create_host_path': False}
+    else:
+        spec['volume'] = {'nocopy': True}  # daemon copy-up must not write to the app
     return spec
 
 
