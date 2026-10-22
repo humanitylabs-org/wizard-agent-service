@@ -22,6 +22,11 @@ jobs:
       - run: npm ci
       - name: Fetch the archived main release for rollback/compatibility comparisons
         run: git fetch --no-tags --depth=1 origin 859c548d43081a5e28a37680e796d07041971601
+      - name: Importer test dependency (isolated interpreter)
+        run: |
+          python3 -m venv .import-venv
+          .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
+          printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:

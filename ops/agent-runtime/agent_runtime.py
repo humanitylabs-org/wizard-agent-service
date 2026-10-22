@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import fcntl
+from contextlib import contextmanager
 import hmac
 import ipaddress
 import json
@@ -52,7 +54,7 @@ RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
 AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
 MANAGED_FILES = (".env", "config.yaml")
-SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
+SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # existing main image; never rebuilt for imports
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
@@ -77,6 +79,18 @@ class RuntimeFailure(Exception):
         super().__init__(code)
         self.code = code
         self.status = status
+
+
+@contextmanager
+def import_process_lock(agents, agent_id):
+    """Same OS lock as the owner import/undo CLI, outside the sealed home."""
+    folder = agents.root / agent_id
+    fd = os.open(folder / '.lifecycle.lock', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------- docker
@@ -367,8 +381,9 @@ class RestrictedDriver:
         # reaches Compose. A gateway token env persists in Hermes terminal snapshots.
         env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
         env["CLAUDE_TOKEN_FILE"] = ""  # retired path; never trust an inherited override
-        if self.image:
-            env["AGENT_IMAGE"] = self.image
+        image = agent["runtime"].get("image") if agent.get("imported") else self.image
+        if image:
+            env["AGENT_IMAGE"] = image
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -392,6 +407,9 @@ class RestrictedDriver:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             path.write_text(json.dumps(module.compose_override(source)))  # mount metadata only
             files += ["-f", str(self.runtime_dir / "compose.claude-login.yml"), "-f", str(path)]
+        override = self.agents.root / agent["id"] / "import-runtime.json"
+        if agent.get("imported") and override.is_file():
+            files += ["-f", str(override)]
         return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
                       timeout=timeout, env=env)
 
@@ -468,6 +486,8 @@ class RestrictedDriver:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
+        if agent["runtime"].get("admission") == "importing":
+            raise RuntimeFailure("agent_import_in_progress", 409)
         # The Service must create the socket before Docker; never let bind-mount auto-create a directory.
         gateway = self.agents.root / agent["id"] / "gateway"
         try:
@@ -479,8 +499,19 @@ class RestrictedDriver:
             safe = False
         if not safe:
             raise RuntimeFailure("agent_socket_not_ready", 409)
-        self.agents.add_provider_keys(agent)
-        self._compose(agent, "build", timeout=1800)
+        if agent.get('imported'):
+            docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
+            docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
+            refresh = self.agents.root / agent["id"] / "import-update.json"
+            if refresh.is_file():
+                command = ["uv", "run", "--offline", "--no-project", "--with", "PyYAML>=6.0.2,<7", "--with", "python-dotenv>=1,<2", "python"]
+                result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'refresh-managed',
+                                         str(self.agents.root / agent["id"])], capture_output=True, text=True, timeout=60)
+                if result.returncode:
+                    raise RuntimeFailure("import_harness_update_failed")
+        else:
+            self.agents.add_provider_keys(agent)
+            self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -790,6 +821,15 @@ def offline_census(driver, agent: dict) -> dict:
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if isinstance(driver, ImportDriver):
+        # Imports have no compose generation. Absence in a compose label lookup
+        # MUST NOT mint a false stopped seal for an actually running import.
+        if action in {'inspect', 'census'}:
+            raise RuntimeFailure('import_offline_census_unavailable', 503)
+        result = getattr(driver, action)(agent)
+        if action == 'stop':
+            return {**result, 'census': None, 'census_error': 'import_offline_census_unavailable'}
+        return result
     if action == 'inspect':
         return inspect_runtime(driver, agent)[0]
     if action == 'census':
@@ -860,8 +900,12 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
-    cid = container or container_for(driver.project(agent["id"]), service)
-    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(driver.project(agent['id']), service))
+    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    if isinstance(driver, ImportDriver):
+        label = docker(['inspect', '--format', '{{index .Config.Labels "wizard.import.id"}}', cid], timeout=10).stdout.strip()
+        if label != agent['id']:
+            raise RuntimeFailure('import_container_not_owned', 409)
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -996,12 +1040,39 @@ def fetch(driver, agent: dict, payload: dict) -> dict:
 
 # ---------------------------------------------------------------- HTTP
 
+class ImportDriver:
+    """Existing host helper, own-home only; never route an import through Runtipi install."""
+    def __init__(self, agents):
+        self.agents = agents
+
+    def _action(self, agent, action):
+        path = self.agents.root / agent['id'] / 'import-journal.json'
+        interpreter = os.environ.get('WIZARD_IMPORT_PYTHON')
+        command = ([interpreter] if interpreter else ['uv', 'run', '--no-project', '--with', 'PyYAML>=6.0.2,<7', 'python'])
+        result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'lifecycle', str(path), action],
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeFailure('import_lifecycle_failed', 502)
+        return json.loads(result.stdout)
+
+    def start(self, agent):
+        return self._action(agent, 'start')
+
+    def stop(self, agent):
+        return self._action(agent, 'stop')
+
+    def apply(self, agent):
+        return self._action(agent, 'apply')
+
+
 def driver_for(agent: dict, driver, restricted_driver):
     """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
     if restricted(agent):
         if restricted_driver is None:
             raise RuntimeFailure("restricted_runtime_unavailable", 503)
         return restricted_driver
+    if agent.get('imported') == {'schema': 1, 'format': 'hermes'}:
+        return ImportDriver(driver.agents)
     return driver
 
 
@@ -1072,7 +1143,8 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with lifecycle_lock(chosen, restricted_driver, agent_id):
+                with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
+                    agent = agents.read(agent_id)
                     result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:

@@ -16,7 +16,20 @@ export function heavySshTransport({ host, script, root, lock, python = '/opt/hom
   return payload => new Promise((resolve, reject) => {
     const heavyRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
     if (!heavyRoot || !posix.isAbsolute(heavyRoot)) return reject(fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503))
-    const command = ['env', `WIZARD_HEAVY_ROOT=${heavyRoot}`, python, script, '--root', root, '--lock', lock].map(quote).join(' ')
+    // Operator-only allowlist: never forward the bridge's tokens or ambient env.
+    const forwarded = [`WIZARD_HEAVY_ROOT=${heavyRoot}`]
+    const rules = {
+      WIZARD_HEAVY_AGENT_IMAGE: value => /^[a-zA-Z0-9][a-zA-Z0-9._/@:-]{0,255}$/.test(value),
+      WIZARD_HEAVY_DOCKER_BIN: value => posix.isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value) && !value.split('/').includes('..'),
+      WIZARD_HEAVY_DOCKER_HOST: value => value.startsWith('unix:///') && value.length > 8 && !/[\x00-\x20\x7f]/.test(value) && !value.slice(7).split('/').includes('..'),
+    }
+    for (const [name, valid] of Object.entries(rules)) {
+      const value = process.env[name]
+      if (value === undefined) continue
+      if (!valid(value)) return reject(fail(`invalid heavy worker setting: ${name}`, 503))
+      forwarded.push(`${name}=${value}`)
+    }
+    const command = ['env', ...forwarded, python, script, '--root', root, '--lock', lock].map(quote).join(' ')
     const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1', host, command],
       { timeout: 12_000, maxBuffer: 128 * 1024 }, (error, stdout) => {
         if (error) return reject(fail('worker_unavailable', 503))

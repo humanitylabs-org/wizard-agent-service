@@ -2425,6 +2425,8 @@ function buildWizardServer(options, lifetime) {
     isolation: options.agentIsolation === 'restricted' ? 'restricted' : '',
     onAppsChanged: () => bridge?.appsChanged(),
     beforeRestrictedStart: id => agentSockets.ensure(id),
+    importCapabilities: () => ({ socket_prepare: true, heavy_enabled: options.agentHeavy === 'on',
+      heavy_sandbox: process.env.WIZARD_AGENT_HEAVY_SANDBOX === 'on' }),
     mainProviders: async () => {
       const result = await fetchImpl(`${upstreamOrigin}/api/model/options`, { headers: hermesKey ? { Authorization: `Bearer ${hermesKey}` } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
       if (!result.ok) return []

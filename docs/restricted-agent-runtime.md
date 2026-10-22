@@ -121,3 +121,27 @@ visibility and host-port denial across fresh/restart/recreate phases. `test_agen
 unprivileged transport/isolation replacement for the old privileged firewall test. Run both on a disposable
 Docker host; never against live agent data. `tests/agent-sockets.test.ts` and `agent-principals.test.ts`
 exercise real Node Unix HTTP listeners, credential/socket mismatch and the owner/TCP boundary.
+
+
+## Imported sealed Hermes: no new root surface
+
+An imported standard agent keeps the same uid-10000 seal and per-agent Unix socket
+transport as main. Import health uses `gateway/ingress.sock`, never a published
+agent API. The owner-only `prepare-import` action creates a reserved agent socket
+without invoking the runtime helper, building images, generating provider keys or
+accessing its home. It refuses agents not in the importing admission state.
+
+Use the unchanged main vendored sidecars and preloaded image. The import adds no
+firewall exception, privileged host operation, host TCP relay, SSH key/proxy,
+Tailscale socket or broad host mount. Raw SSH to the build host and VPS must fail.
+A per-item owner-approved `grants.heavy` enables only the existing agent-bound
+heavy relay. The agent plugin presents its own gateway key; host-heavy credentials
+remain exclusively in the Service. Day-one builds use bounded staged heavy jobs;
+source staging, log/artifact retrieval and machine administration remain explicit
+Machines/heavy-job design gaps, not implicit shell authority.
+
+Rehearsal preflight requires `import_capabilities.socket_prepare`, `heavy_enabled`
+and `heavy_sandbox` from the live Service, before any reduced copy or registration.
+A missing capability is a blocker requiring a separate authorized Service release,
+not a reason for this rehearsal to change production configuration. See
+[hermes-import.md](hermes-import.md) and `CUTOVER.md` for the current no-root gates.

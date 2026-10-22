@@ -34,7 +34,23 @@ export function createAgentSocketGateway({ agentsDir, ingress }) {
   async function ensure(id) {
     if (closing) throw new Error('agent_socket_closing')
     if (!/^[a-z][a-z0-9-]{0,30}$/u.test(id) || id === 'hermes') throw new Error('agent_socket_invalid_id')
-    if (entries.has(id)) return entries.get(id)
+    if (entries.has(id)) {
+      const previous = entries.get(id)
+      const entry = await previous
+      if (entries.get(id) !== previous) return ensure(id)
+      if (inspect(entry.path)) return entry
+      // An owner import undo removed its whole directory. A later rehearsal of
+      // the same id must not reuse an unreachable, unlinked listener.
+      const replacing = (async () => {
+        entry.server.closeIdleConnections?.()
+        entry.server.closeAllConnections?.()
+        await new Promise(resolve => entry.server.close(resolve))
+        entries.delete(id)
+        return ensure(id)
+      })()
+      entries.set(id, replacing)
+      return replacing
+    }
     const pending = (async () => {
       const path = agentSocketPath(agentsDir, id)
       // Linux sockaddr_un is 108 bytes including NUL (macOS is shorter). Refuse truncation/aliasing.
