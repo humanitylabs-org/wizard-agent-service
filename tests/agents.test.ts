@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { hermesConfigYaml, parseAgentFile } from '../server/agents.mjs'
+import { createAgentRegistry, hermesConfigYaml, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -98,6 +98,34 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('reserves imports stopped through the restricted allocator and refuses future sensitive app grants', async () => {
+    const dir = box()
+    const calls: string[] = []
+    const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), appsJsonPath: join(dir, 'apps.json'),
+      isolation: 'restricted', basePort: 47800,
+      mainProviders: async () => [{ slug: 'anthropic', models: ['claude-opus-5-5'], authenticated: true }],
+      runtime: { apply: async () => { calls.push('apply') } },
+    })
+    const { agent } = await registry.create({ label: 'Import reserve', model: { provider: 'anthropic', model: 'claude-opus-5-5' },
+      permissions: { preset: 'standard', outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [] },
+    }, { deferStart: true })
+    expect(calls).toEqual([])
+    const folder = join(dir, 'agents', agent.id)
+    const record = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(record.runtime.admission).toBe('importing')
+    expect(record.runtime.network).toEqual({ uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' })
+    expect(JSON.parse(readFileSync(join(folder, 'service-state.json'), 'utf8')).desired).toBe('stopped')
+    record.imported = { schema: 1, format: 'hermes' }
+    delete record.runtime.admission
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify(record))
+    registry.list()
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [{ id: 'privacy-com', status: 'running', mcp: { url: 'http://127.0.0.1:1/mcp' } }] }))
+    registry.list()
+    const after = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(after.permissions.wizard_apps).toEqual([])
+    await expect(registry.update(agent.id, { permissions: { wizard_apps: ['privacy-com'] } })).rejects.toMatchObject({ error: 'import_sensitive_app_denied' })
+  })
+
   it('preserves imported memory/auth harness bytes and fails closed on lost import keys', async () => {
     const dir = box()
     const main = await fakeHermes('main')

@@ -6,6 +6,7 @@ secret. Unknown credential-shaped files are whole-file grants, default denied.
 import io
 import json
 import re
+import yaml
 from pathlib import PurePosixPath
 from dotenv import dotenv_values
 
@@ -18,18 +19,46 @@ def dotenv(text):
     return dict(dotenv_values(stream=io.StringIO(text), interpolate=False))
 
 
+INLINE_SECRET = re.compile(r'(?:^|_)(api_key|access_token|refresh_token|token|secret|password|client_secret|authorization)$', re.I)
+
+
+def config_items(value, prefix=()):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = (*prefix, str(key))
+            if INLINE_SECRET.search(str(key)) and child not in (None, ''):
+                yield '/'.join(path)
+            else:
+                yield from config_items(child, path)
+    elif isinstance(value, list):
+        for i, child in enumerate(value):
+            yield from config_items(child, (*prefix, str(i)))
+
+
+def filter_config(value, plan, prefix=()):
+    if isinstance(value, dict):
+        return {k: filter_config(v, plan, (*prefix, str(k))) for k, v in value.items()
+                if not INLINE_SECRET.search(str(k)) or selected(plan, 'config.yaml', 'config-field', '/'.join((*prefix, str(k))))}
+    if isinstance(value, list):
+        return [filter_config(v, plan, (*prefix, str(i))) for i, v in enumerate(value)]
+    return value
+
+
 def inventory(entries, read):
     result = []
     for path in sorted(entries):
         name = PurePosixPath(path).name
-        if name == '.env' or name.startswith('.env.'):
+        if path == 'config.yaml':
+            for item in config_items(yaml.safe_load(read(path)) or {}):
+                result.append({'path': path, 'kind': 'config-field', 'item': item, 'approved': False})
+        elif name == '.env' or name.startswith('.env.'):
             for key in sorted(dotenv(read(path))):
                 result.append({'path': path, 'kind': 'env', 'item': key, 'approved': False})
         elif name == 'auth.json':
             value = json.loads(read(path))
             # Provider and pool are independently selected: provider identifiers
             # are names, never token/account values or arbitrary JSON paths.
-            for section in ('providers', 'credentials'):
+            for section in ('providers', 'credentials', 'credential_pool'):
                 mapping = value.get(section, {})
                 if isinstance(mapping, dict):
                     for provider in sorted(mapping):
@@ -60,7 +89,7 @@ def filtered_auth(text, plan, path='auth.json'):
     # Only harmless schema metadata and specifically approved provider sections.
     if type(value.get('version')) is int:
         out['version'] = value['version']
-    for section in ('providers', 'credentials'):
+    for section in ('providers', 'credentials', 'credential_pool'):
         mapping = value.get(section, {})
         if isinstance(mapping, dict):
             out[section] = {k: v for k, v in mapping.items()

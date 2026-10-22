@@ -1,5 +1,50 @@
 # Bring your Hermes: owner CLI
 
+## Restricted admission (supersedes the historical direct-container path)
+
+The production `apply` now reserves its record and unique /28 pair through the
+Service registry library (`isolation:restricted`, library-only deferred start).
+The reservation has `runtime.admission:importing`: lifecycle starts fail closed.
+The importer and runtime HTTP lifecycle share the same per-agent OS file lock.
+
+Policy transformation runs in an **unregistered private staging home**. Journals,
+originals, quarantines and staged credentials are never mounted into the agent.
+The stopped tree is re-owned in place with a network-none, read-only-root helper
+using only CHOWN/FOWNER/DAC_OVERRIDE. A uid-10000 helper verifies/populates the
+sealed home; `RestrictedDriver` alone starts the actual agent. The agent is never
+run as root or the host UID. HOME and HERMES_HOME are `/opt/data`.
+
+The database is not copied: directory renames preserve its inode through staging,
+admission and undo. Renaming a foreign-owned 0700 directory across parents needs
+DAC_OVERRIDE; the importer temporarily parks its owner-owned enclosing directory
+under the target and uses one constrained fixed-path rename inside **one** bind
+mount. Separate bind mounts would return EXDEV even on the same disk. It never
+chmods the sealed directory to make host access possible. Undo reverses placement
+before re-owning the external staging home; the live target is never unsealed.
+Fixed transfer names reconcile crashes around both rename boundaries.
+
+All `credentials` entries start `approved:false`. Review each dotenv name, auth
+provider/pool, inline config credential and credential file (including OAuth,
+GitHub hosts, SSH keys, `credentials/`, `secrets/`). Unapproved entries are removed
+before sealing. Dotenv parsing is structured, including multiline values; the
+old `approved_env_names` list has no authority. Credential-directory replacements
+must enumerate exact `approved_files`; never approve the host SSH/gh directories.
+Token scope is an independent acceptance check, not inferred from filenames.
+
+Imported agents have standard owner-visible history, **not** the confidential
+private-history preset. App auto-grants are disabled durably; Privacy.com app IDs
+are refused by policy. MCP remains denied unless separately implemented/reviewed.
+Imported memory/plugin config remains the managed base. Owner model/tool changes
+merge into that base on the next stopped sync rather than replacing the harness.
+
+Only preloaded images are accepted. Restricted imports never build or pull on the
+control plane. Preinstall/cache PyYAML and python-dotenv for lifecycle refreshes.
+Do not use the old bridge-network/native-UID runbook below as an acceptance path.
+GitHub HTTPS is on the vendored egress allowlist; tailnet SSH is **not**: CONNECT
+permits TLS/443 and rejects non-public addresses. No host-network/relay bypass is
+permitted. Tailnet SSH acceptance is blocked until separately reviewed declared-
+host TCP egress exists. A successful restricted import alone does not clear it.
+
 Status: implementation/acceptance preview, **not approved for a live cutover**. No UI or remote-agent link is introduced. The scheduler is deliberately untouched: only `paused` and `take-over` (Hermes owns its own cron) exist.
 
 ## Commands
@@ -26,7 +71,7 @@ Cross-machine apply validates **every** ZIP member before extracting anything (a
 - Each outside reference records file/line, kind (`folder`, `credential`, `tool`, `host-service`, `unknown`) and a proposal. Nothing outside the agent home is carried just because it was found. False-positive example paths remain unknown rather than silently mounted.
 - Select a dependency with `approved:true` and an explicit `action`: `mount ro`, `mount rw`, `carry secret`, `available in image`, or `leave behind`. Missing tools must be added to a remotely built image, not mounted from the host.
 - Credential copies are private, read-only mounts at their original logical owner-home paths. Optional `credential_source` selects a separately staged, scoped credential instead of copying the owner's broader directory; it is approval-bound, must be inside the owner home and outside sealed/imported state, and is accepted only for `kind:credential` + `carry secret`. Broad credential directories should be replaced with narrowly scoped material (in particular a build-host SSH key/config, not the owner's entire SSH authority). Do not grant a key that can SSH back into the Wizard host.
-- `approved_env_names` selects secret-bearing dotenv names. Provider API/OAuth names have conservative defaults. Host Wizard/terminal/Docker environment authority is always removed; unapproved secret-manager/GitHub credentials are not silently inherited. Original plaintext files are stored outside all agent mounts for undo.
+- `credentials` grants each named item individually, with no provider defaults. `approved_env_names` is deprecated and ignored. Host Wizard/terminal/Docker authority is always removed. Plaintext rollback originals remain outside every agent mount.
 - `outside_tools` maps to `agent.disabled_toolsets` and the registry's permissions. No fallback model route is inherited. Toolset permissions are not a replacement for mount/network isolation.
 - `approved_plugins` / `approved_mcp` opt into reviewed executable extensions. Other plugins, hooks, named-profile gateways, machine-local binaries/caches, and old Wizard plugins are quarantined, not executed. Named profiles are preserved for undo but not booted as additional active copies.
 - `wizard_assets` accepts digest-pinned, path-checked ZIP envelopes for replacement Wizard plugins and system skills (`kind`, `name`, `archive`, `sha256`; use a harmless root `config.yaml` envelope and put asset files at the root). The MCP `wizard` gateway, per-agent token, local terminal, API host/port/key and disabled platform settings always override imported values. A deployment must supply its approved Wizard asset packages; the importer does not trust the source home's old copies.

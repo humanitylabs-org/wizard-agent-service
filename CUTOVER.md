@@ -1,5 +1,54 @@
 # Bring your Hermes — future owner cutover (NOT EXECUTED)
 
+## RESTRICTED path — current authority, still NO-GO for cutover
+
+This section supersedes the historical unrestricted bridge-network commands below.
+Do not execute those old commands. No production cutover is authorized here.
+
+1. Deploy the reviewed registry/RestrictedDriver changes in a separately authorized
+   release; do not restart/reconfigure the live Service/gateway as part of rehearsal.
+2. Use a separately prepared paused copy. Never point rehearsal apply at the live
+   Hermes home. A directory plan requires `move:true`: same-filesystem rename,
+   inode-preserving in-place re-ownership, **not a full state.db copy**. Validate
+   the source writer census and backup/future-writer fence for any later cutover.
+3. Scan, then review every entry in `credentials`: path + dotenv name, auth
+   provider/pool, config field or entire credential file. Default denied. Supply
+   separate scoped gh and a newly generated Thales-only SSH identity. Enumerate
+   each replacement-directory `approved_files`; do not carry host-wide authority.
+4. Leave `mode:paused`, `isolation:restricted`, `approved_mcp:[]`, no default route
+   action. Choose a preloaded image, not an arbitrary Docker network. The Service
+   library reserves the stopped agent and allocates the uplink/sandbox /28 pair.
+5. Apply keeps its journal under `$WIZARD_OS_HOME/imports/<id>/journal.json`,
+   outside the sealed home. It sanitizes private staging, seals to uid 10000/0700,
+   and uses a minimal fixed-path rename helper before `RestrictedDriver.start`.
+   HOME/HERMES_HOME stay `/opt/data`; approved workspace/context mounts retain
+   original absolute paths. No host Docker socket/home/private-agent mount exists.
+6. From the real uid-10000 container, verify identity, host-UID read refusal,
+   memory/auth harness, RW workspace/RO context, gh auth, git fetch --dry-run and
+   SSH. The existing TLS-only egress permits GitHub HTTPS but **does not permit
+   tailnet SSH**. That acceptance gate must remain red until declared-host TCP
+   egress is reviewed, built remotely and proven; never bypass sandbox/firewall.
+7. Through the live Service create a session for this agent, PATCH `hidden:true`,
+   GET readback true **before any message**, then make one original-provider turn
+   and verify canonical terminal exit codes and fact_store recall. Fail closed.
+8. Undo with the external journal. It locks the same lifecycle file, holds
+   admission, downs only this compose project, reverses the sealed rename into
+   private staging and restores originals/inodes. Atomic fsynced backups carry
+   completion hashes; partial files never become rollback input. Remove the
+   temporary Thales authorized_keys entry and delete every reduced copy.
+9. Verify agent-list restoration, key removal readback, unchanged live config
+   SHA256, unchanged service activity and free space. A reduced-copy result is
+   not full-home acceptance, recovery/default routing proof, or cutover approval.
+
+Current credential/history policy: imported standard history is owner-visible;
+this is not the confidential private preset. No automatic future app grants;
+Privacy.com is denied. Custom memory/auth harness bytes survive managed model
+updates; stopped census uses RestrictedDriver's real uid-10000 sidecar.
+
+---
+
+## Historical cutover research (not executable for restricted admission)
+
 ## NO-GO until every gate is satisfied
 
 This is a runbook, not approval to run it. Retain installation-specific measurements and blockers in the owner's private acceptance report, not a shared PR. Do not cut over until source/image compatibility, full-home rehearsal scope, provider sign-in, git/gh/build-host SSH and a separately healthy system-recovery agent are verified. A staged durable build is packaging only; it does not install or start anything on the live box.

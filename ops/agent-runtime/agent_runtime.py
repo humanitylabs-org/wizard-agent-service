@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import fcntl
+from contextlib import contextmanager
 import hmac
 import ipaddress
 import json
@@ -75,6 +77,18 @@ class RuntimeFailure(Exception):
         super().__init__(code)
         self.code = code
         self.status = status
+
+
+@contextmanager
+def import_process_lock(agents, agent_id):
+    """Same OS lock as the owner import/undo CLI, outside the sealed home."""
+    folder = agents.root / agent_id
+    fd = os.open(folder / '.lifecycle.lock', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------- docker
@@ -348,12 +362,17 @@ class RestrictedDriver:
             "EDGE_UPSTREAM_PORT": str(self.listener_port),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
-        if self.image:
-            env["AGENT_IMAGE"] = self.image
+        image = agent["runtime"].get("image") if agent.get("imported") else self.image
+        if image:
+            env["AGENT_IMAGE"] = image
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
-        return docker(["compose", "-p", self.project(agent["id"]), "-f", str(self.compose_file), *args],
+        files = ["-f", str(self.compose_file)]
+        override = self.agents.root / agent["id"] / "import-runtime.json"
+        if agent.get('imported') and override.is_file():
+            files += ["-f", str(override)]
+        return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
                       timeout=timeout, env=self.env(agent))
 
     def sync_home(self, agent: dict) -> None:
@@ -389,8 +408,21 @@ class RestrictedDriver:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
-        self.agents.add_provider_keys(agent)
-        self._compose(agent, "build", timeout=1800)
+        if agent["runtime"].get("admission") == "importing":
+            raise RuntimeFailure("agent_import_in_progress", 409)
+        if agent.get('imported'):
+            docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
+            docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
+            refresh = self.agents.root / agent["id"] / "import-update.json"
+            if refresh.is_file():
+                command = ["uv", "run", "--offline", "--no-project", "--with", "PyYAML>=6.0.2,<7", "--with", "python-dotenv>=1,<2", "python"]
+                result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'refresh-managed',
+                                         str(self.agents.root / agent["id"])], capture_output=True, text=True, timeout=60)
+                if result.returncode:
+                    raise RuntimeFailure("import_harness_update_failed")
+        else:
+            self.agents.add_provider_keys(agent)
+            self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -857,7 +889,8 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with lifecycle_lock(chosen, restricted_driver, agent_id):
+                with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
+                    agent = agents.read(agent_id)
                     result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:

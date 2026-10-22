@@ -26,6 +26,7 @@ import urllib.request
 import zipfile
 
 import yaml
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
@@ -434,7 +435,7 @@ class DockerRuntime:
             run(['docker', 'rm', '-f', '-v', self.name])
         require(not run(['docker', 'ps', '-a', '--filter', 'name=^/' + self.name + '$', '--format', '{{.Names}}']).strip(), 'container_removal_failed')
 
-    def import_archive(self, archive):
+    def import_archive(self, archive, uid=None):
         # No network, no credentials in argv/env, no host service namespace. The stock
         # public CLI runs as the eventual agent UID into the owned, stopped home.
         code = ('import os,pathlib,runpy; h=pathlib.Path(os.environ["HOME"]); '
@@ -444,7 +445,7 @@ class DockerRuntime:
                 'sys.argv=["hermes","--ignore-rules","import","/import.zip","--force"]; '
                 'runpy.run_module("hermes_cli.main",run_name="__main__")')
         run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
-             '--security-opt', 'no-new-privileges', '--user', f'{os.getuid()}:{os.getgid()}',
+             '--security-opt', 'no-new-privileges', '--user', f'{os.getuid() if uid is None else uid}:{os.getgid() if uid is None else uid}',
              '--tmpfs', '/tmp:rw,mode=1777', '-e', 'HOME=/tmp/import-native', '-e', 'HERMES_HOME=/opt/data',
              '-e', 'PYTHONDONTWRITEBYTECODE=1', '--mount', f'type=bind,src={self.directory / "home"},dst=/opt/data',
              '--mount', f'type=bind,src={archive},dst=/import.zip,readonly',
@@ -537,7 +538,7 @@ def sanitize_credentials(home, plan, directory, journal, journal_path):
     current = credential_policy.inventory([r for _, r, _, link in files(home) if not link],
                                           lambda r: managed_path(home, r).read_text())
     # Fresh names discovered after scan cannot inherit a broad/default approval.
-    for rel in sorted({c['path'] for c in current} - {'.env'}):
+    for rel in sorted({c['path'] for c in current} - {'.env', 'config.yaml'}):
         path = managed_path(home, rel)
         if not path.exists():
             continue
@@ -583,7 +584,7 @@ def wire(home, plan, api_key, gateway_key):
     home = Path(home)
     for name in ['config.yaml', '.env', 'cron/jobs.json']:
         managed_path(home, name)
-    cfg = load_yaml((home / 'config.yaml').read_text() if (home / 'config.yaml').exists() else '{}')
+    cfg = credential_policy.filter_config(load_yaml((home / 'config.yaml').read_text() if (home / 'config.yaml').exists() else '{}'), plan)
     cfg['terminal'] = {'backend': 'local', 'cwd': logical_home(plan), 'timeout': 180}
     disabled = set((cfg.get('agent') or {}).get('disabled_toolsets') or [])
     disabled.update(set(OUTSIDE_TOOLS) - set(plan.get('outside_tools', [])))
@@ -708,7 +709,7 @@ def lifecycle_lock(function):
             root = Path(args[2] if len(args) > 2 else kwargs['wizard_home']).absolute()
         else:
             path = Path(args[0] if args else kwargs['journal_path']).absolute()
-            root = path.parent.parent.parent if path.parent.parent.name == 'agents' else path.parent.parent
+            root = path.parent.parent.parent if path.parent.parent.name in {'agents', 'imports'} else path.parent.parent
         require(not root.is_symlink(), 'wizard_home_symlink')
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         assert_owner(root)
@@ -726,6 +727,9 @@ def lifecycle_lock(function):
 
 @lifecycle_lock
 def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_source_stop=False):
+    if runtime_factory is DockerRuntime:
+        import restricted_import
+        return restricted_import.apply(SimpleNamespace(**globals()), plan, agent_id, wizard_home, allow_source_stop=allow_source_stop)
     started = time.monotonic()
     wizard_home = Path(wizard_home).absolute()
     require(ID_RE.fullmatch(agent_id) and agent_id not in {'hermes', 'main', 'default', 'options', 'new'}, 'agent_id')
@@ -889,6 +893,10 @@ def imported_lifecycle(journal_path, action, *, runtime_factory=DockerRuntime):
     path = Path(journal_path).absolute()
     assert_owner(path)
     journal = json.loads(path.read_text())
+    if runtime_factory is DockerRuntime:
+        require(journal.get('restricted_import'), 'unrestricted_import_lifecycle_disabled')
+        import restricted_import
+        return restricted_import.lifecycle(SimpleNamespace(**globals()), path, action)
     require(journal['state'] == 'applied', 'import_not_applied')
     directory = path.parent
     record = json.loads((directory / 'agent.json').read_text())
@@ -948,6 +956,9 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
     path = Path(journal_path).absolute()
     assert_owner(path)
     journal = json.loads(path.read_text())
+    if runtime_factory is DockerRuntime and journal.get('restricted_import'):
+        import restricted_import
+        return restricted_import.undo(SimpleNamespace(**globals()), path)
     require(journal.get('schema') == SCHEMA and ID_RE.fullmatch(journal['id']), 'journal_invalid')
     directory = path.parent
     if journal['state'] == 'undone':
@@ -1039,6 +1050,8 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    refresh = commands.add_parser('refresh-managed')
+    refresh.add_argument('directory')
     p = commands.add_parser('scan')
     p.add_argument('source')
     p.add_argument('--owner-home')
@@ -1060,7 +1073,27 @@ def main(argv=None):
     p.add_argument('journal')
     args = parser.parse_args(argv)
     try:
-        if args.command == 'scan':
+        if args.command == 'refresh-managed':
+            folder = Path(args.directory)
+            change = json.loads((folder / 'import-update.json').read_text())
+            cfg = load_yaml((folder / 'managed/config.yaml').read_text())
+            model = change['model']
+            cfg.setdefault('model', {}).update(default=model['model'], provider=model['provider'])
+            if 'model_id' in cfg['model']:
+                cfg['model']['model_id'] = model['model']
+            cfg['model'].pop('api_key', None)
+            cfg['model'].pop('base_url', None)
+            cfg.setdefault('terminal', {})['backend'] = 'local'
+            # Preserve memory plugins and custom tools; only known outside-tool
+            # grants are controlled by this owner permission contract.
+            grants = set(change['permissions']['outside_tools'])
+            tools = cfg.setdefault('toolsets', {}).get('api_server', [])
+            outside = {'web', 'search', 'browser', 'x_search', 'vision', 'video', 'image_gen', 'video_gen', 'tts', 'delegation', 'connections', 'homeassistant', 'spotify'}
+            files = {'file', 'terminal', 'code_execution'}
+            cfg['toolsets']['api_server'] = [t for t in tools if (t not in outside or t in grants) and (t not in files or change['permissions']['files'] != 'none')]
+            (folder / 'managed/config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
+            result = {'updated': True}
+        elif args.command == 'scan':
             plan = scan(args.source, owner_home=args.owner_home)
             dump(args.out, plan)
             print(json.dumps({'plan': args.out, 'summary': plan['summary'], 'dependency_count': len(plan['dependencies'])}, indent=2))

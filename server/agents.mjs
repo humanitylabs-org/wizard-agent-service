@@ -144,6 +144,8 @@ export function normalizePermissions(base, patch = {}) {
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
 function assertPrivateWalls(agent) {
+  if (agent.imported && [...(agent.permissions.wizard_apps || []), ...(agent.permissions.agent_apps || [])]
+    .some((id) => /^privacy(?:[.-]?com)?$/iu.test(id))) fail(409, 'import_sensitive_app_denied', 'agent.permissions')
   if (agent.privacy !== 'private') return
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   if (agent.model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
@@ -414,7 +416,7 @@ export function createAgentRegistry(options = {}) {
       if (fresh.length) {
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard') continue
+          if (!agent || agent.privacy !== 'standard' || agent.imported || agent.runtime?.admission === 'importing') continue
           const next = structuredClone(agent)
           for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
@@ -676,6 +678,7 @@ export function createAgentRegistry(options = {}) {
     // their memory backend and provider login. Keys already exist from admission.
     if (agent.imported?.schema === 1 && agent.imported?.format === 'hermes') {
       if (rotateKey || !apiKey(agent.id) || !gatewayKey(agent.id)) fail(409, 'import_keys_unavailable', 'agent.import')
+      writeJsonAtomic(join(folder(agent.id), 'import-update.json'), { model: agent.model, permissions: agent.permissions })
       return
     }
     const dir = folder(agent.id)
@@ -703,7 +706,9 @@ export function createAgentRegistry(options = {}) {
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
-  async function create(body, { idempotencyKey = '' } = {}) {
+  async function create(body, { idempotencyKey = '', deferStart = false } = {}) {
+    // Library-only owner import reservation; HTTP callers cannot set this option.
+    if (deferStart && isolation !== 'restricted') fail(409, 'import_requires_restricted', 'agent.runtime')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
@@ -736,6 +741,7 @@ export function createAgentRegistry(options = {}) {
       runtime: {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
         ...(isolation ? { isolation, network: nextNetwork() } : {}),
+        ...(deferStart ? { admission: 'importing' } : {}),
       },
       created_at: Math.floor(now() / 1000),
     }
@@ -754,7 +760,8 @@ export function createAgentRegistry(options = {}) {
       map[idempotencyKey] = { hash: requestHash, id, at: now() }
       writeJsonAtomic(idempotencyPath, map)
     }
-    writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
+    writeServiceState(id, { desired: deferStart ? 'stopped' : 'running', started_at: deferStart ? 0 : now(), last_error: '' })
+    if (deferStart) return { agent: read(id), replayed: false }
     try { await runtime.apply(id) } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }

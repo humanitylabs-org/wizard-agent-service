@@ -8,7 +8,7 @@ try {
   for (const name of ['home', 'hermes', 'wizard', 'tmp']) mkdirSync(join(root, name))
   const env = { ...process.env, HOME: join(root, 'home'), HERMES_HOME: join(root, 'hermes'),
     WIZARD_OS_HOME: join(root, 'wizard'), TMPDIR: join(root, 'tmp'), PYTHONDONTWRITEBYTECODE: '1' }
-  const tests = [resolve('tests/test_hermes_import.py'), resolve('tests/test_hermes_recovery.py')]
+  const tests = [resolve('tests/test_hermes_import.py'), resolve('tests/test_restricted_import.py'), resolve('tests/test_hermes_recovery.py')]
   const python = process.env.WIZARD_IMPORT_PYTHON
   const uv = !python && spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0
   for (const test of tests) {
