@@ -1982,7 +1982,7 @@ const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encod
 
 // Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
 // cookies or credentials), and only content headers come back; redirects must stay on this origin.
-function proxyShellStatic(request, response, shellOrigin, url) {
+function proxyShellStatic(request, response, shellOrigin, url, browserBoundary = false) {
   return new Promise((resolvePromise) => {
     // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
     const target = new URL(shellOrigin)
@@ -1990,6 +1990,9 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     target.search = url.search
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    if (browserBoundary) for (const name of ['sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site']) {
+      if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    }
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
@@ -4227,7 +4230,7 @@ function buildWizardServer(options, lifetime) {
         if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (url.pathname === '/wizard/standard-chats/mcp' || url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
         if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
-          await proxyShellStatic(request, response, tailnetShellOrigin, url)
+          await proxyShellStatic(request, response, tailnetShellOrigin, url, browserBoundary.enabled)
           return
         }
       }
