@@ -28,7 +28,7 @@ export function isAgentIngress(request) {
 
 /** Paths the agent-only listener serves at all: the app gateway and the agent's own context. */
 export function agentIngressPathAllowed(method, pathname) {
-  return pathname === '/wizard/mcp' || (pathname === '/wizard/v1/agent-context' && method === 'GET')
+  return (method === 'POST' && /^\/wizard\/v1\/agent-heavy\/(submit|status|cancel|artifacts)$/u.test(pathname)) || pathname === '/wizard/mcp' || (pathname === '/wizard/v1/agent-context' && method === 'GET')
 }
 
 function ipv4(address) {
@@ -152,5 +152,5 @@ export function ownerLike(principal) {
 
 /** Paths an agent credential may use at all; everything else is the owner's surface. */
 export function agentPathAllowed(pathname) {
-  return pathname === '/wizard/mcp' || pathname === '/wizard/v1/agent-context' || pathname.startsWith('/wizard/hermes/')
+  return /^\/wizard\/v1\/agent-heavy\/(submit|status|cancel|artifacts)$/u.test(pathname) || pathname === '/wizard/mcp' || pathname === '/wizard/v1/agent-context' || pathname.startsWith('/wizard/hermes/')
 }
