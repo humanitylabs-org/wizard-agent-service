@@ -35,11 +35,19 @@ describe('status backfill across the whole session list', () => {
     `)
     const addSession = state.prepare('INSERT INTO sessions VALUES (?, ?)')
     const addMessage = state.prepare('INSERT INTO messages (session_id, role, finish_reason, content, display_kind, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
+    // Replies past the preview window that carry the agent's own status line.
+    const tag = (status: object) => `Answer\n\n[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
+    const tagged: Record<string, string> = {
+      wizard_bf_50: tag({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'Wizard OS', title: 'Wizard OS · Troubleshooter' }),
+      wizard_bf_54: tag({ state: 'needs_you', ask: 'Approve the code', subject: 'Wizard OS' }),
+      wizard_bf_56: tag({ state: 'done', ask: 'Superseded by a follow-up', subject: 'Wizard OS' }),
+    }
     ids.forEach((id, i) => {
       addSession.run(id, base - i)
       addMessage.run(id, 'user', null, 'Ask', null, replyAt(i) - 60)
-      addMessage.run(id, 'assistant', 'stop', 'Answer', 'final', replyAt(i))
+      addMessage.run(id, 'assistant', 'stop', tagged[id] ?? 'Answer', 'final', replyAt(i))
     })
+    addMessage.run('wizard_bf_56', 'user', null, 'One more thing', null, replyAt(56) + 30)
     // wizard_bf_58: James replied after the classified answer, so its old status must not apply.
     addMessage.run('wizard_bf_58', 'user', null, 'Follow-up', null, replyAt(58) + 30)
     state.close()
@@ -50,6 +58,8 @@ describe('status backfill across the whole session list', () => {
       wizard_bf_58: { state: 'needs_you', ask: 'Pick a layout', subject: 'Wizard OS', assistant_at: replyAt(58) },
       wizard_bf_59: { state: 'fyi', ask: 'Answered the licence question', subject: 'Research', assistant_at: replyAt(59) },
       wizard_bf_57: { state: 'done', ask: 'Old reply', subject: 'Wizard OS', assistant_at: replyAt(57) - 500 },
+      // The reply's own status line wins over a backfill record for the same reply.
+      wizard_bf_54: { state: 'fyi', ask: 'Backfill guess', subject: 'Wizard OS', assistant_at: replyAt(54) },
     } }))
 
     const upstream = createServer((req, res) => {
@@ -103,11 +113,18 @@ describe('status backfill across the whole session list', () => {
     expect(whole.wizard_bf_58).toBeNull() // James replied after it
     expect(whole.wizard_bf_57).toBeNull() // classified a different (older) reply
     expect(whole.wizard_bf_10).toBeNull() // never backfilled
+    // The agent's own status line reaches threads past the preview window.
+    expect(whole.wizard_bf_50).toEqual({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'Wizard OS', title: 'Wizard OS · Troubleshooter' })
+    expect(whole.wizard_bf_54).toEqual({ state: 'needs_you', ask: 'Approve the code', subject: 'Wizard OS' })
+    expect(whole.wizard_bf_56).toBeNull() // James replied after the tagged answer
 
     // Second page of a paged walk gets the same statuses.
     const second = await list(50, 50)
     expect(second.wizard_bf_55).toEqual({ state: 'check', ask: 'Try the new list', subject: 'Wizard OS' })
     expect(second.wizard_bf_59).toEqual({ state: 'fyi', ask: 'Answered the licence question', subject: 'Research' })
     expect(second.wizard_bf_58).toBeNull()
+    expect(second.wizard_bf_50).toEqual(whole.wizard_bf_50)
+    expect(second.wizard_bf_54).toEqual(whole.wizard_bf_54)
+    expect(second.wizard_bf_56).toBeNull()
   })
 })

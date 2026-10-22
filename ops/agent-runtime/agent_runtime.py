@@ -40,11 +40,12 @@ import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from private_providers import CLIENT_IMAGE, PrivateProviders, client_service, migrate_provider
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
 DEFAULT_IMAGE = "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2"
-DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
+DEFAULT_PROXY_IMAGE = CLIENT_IMAGE  # deprecated --proxy-image spelling
 # The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
 RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
@@ -106,9 +107,11 @@ def container_for(project: str, service: str) -> str:
 # ---------------------------------------------------------------- agent folder
 
 class Agents:
-    def __init__(self, root: Path, tinfoil_key_file: Path | None):
+    def __init__(self, root: Path, tinfoil_key_file: Path | None = None, apps_path: Path | None = None, client_image: str = CLIENT_IMAGE):
         self.root = root.resolve()
-        self.tinfoil_key_file = tinfoil_key_file
+        if tinfoil_key_file:
+            sys.stderr.write('[agent-runtime] --tinfoil-key-file is deprecated and unused; configure the provider app\n')
+        self.providers = PrivateProviders(self, apps_path or self.root.parent / 'apps.json', docker, RuntimeFailure, client_image)
 
     def read(self, agent_id: str) -> dict:
         if not ID_RE.match(agent_id) or agent_id == "hermes":
@@ -122,24 +125,18 @@ class Agents:
         port = (agent.get("runtime") or {}).get("port")
         if not isinstance(port, int) or not 1024 <= port <= 65535:
             raise RuntimeFailure("agent_invalid", 400)
+        original_provider = agent.get('model', {}).get('provider')
+        agent.setdefault('model', {})['provider'] = migrate_provider(original_provider)
+        if original_provider in ('tinfoil', 'local') or self.providers.is_private(agent):
+            agent['runtime']['private_client'] = True
+            agent['model']['fallback'] = False
         return agent
 
     def home(self, agent_id: str) -> Path:
         return self.root / agent_id / "home"
 
     def tinfoil_key(self) -> str:
-        if not self.tinfoil_key_file:
-            return ""
-        try:
-            text = self.tinfoil_key_file.read_text()
-        except OSError:
-            return ""
-        for line in text.splitlines():   # a bare key, or an env file with TINFOIL_API_KEY=
-            line = line.strip()
-            if line.startswith("TINFOIL_API_KEY="):
-                return line.split("=", 1)[1].strip().strip("'\"")
-            if line and "=" not in line and not line.startswith("#"):
-                return line
+        """Deprecated API: provider credentials are never read by the runtime."""
         return ""
 
     def managed(self, agent_id: str) -> Path:
@@ -147,7 +144,7 @@ class Agents:
         return self.root / agent_id / "managed"
 
     def add_provider_keys(self, agent: dict) -> None:
-        """The Service writes .env without provider keys; add the ones this agent's provider needs."""
+        """Strip legacy key copies; no provider key is ever added."""
         env_path = (self.managed(agent["id"]) if restricted(agent) else self.home(agent["id"])) / ".env"
         try:
             lines = env_path.read_text().splitlines()
@@ -156,11 +153,7 @@ class Agents:
         except OSError:
             raise RuntimeFailure("agent_not_prepared", 409) from None
         lines = [line for line in lines if not line.startswith("TINFOIL_API_KEY=")]
-        if (agent.get("model") or {}).get("provider") == "tinfoil":
-            key = self.tinfoil_key()
-            if not key:
-                raise RuntimeFailure("provider_not_configured", 503)
-            lines.append(f"TINFOIL_API_KEY={key}")
+
         tmp = env_path.with_name(f".env.tmp-{os.getpid()}")
         try:
             tmp.write_text("\n".join(lines) + "\n")
@@ -181,6 +174,45 @@ def restricted(agent: dict) -> bool:
     return (agent.get("runtime") or {}).get("isolation") == "restricted"
 
 
+def agent_identity(agent: dict) -> tuple[int, int]:
+    """Recorded non-root identity; older restricted records use the original new-agent default."""
+    runtime = agent.get('runtime') or {}
+    uid, gid = runtime.get('uid', AGENT_UID), runtime.get('gid', AGENT_UID)
+    if any(type(v) is not int or not 1 <= v <= 2147483647 for v in (uid, gid)):
+        raise RuntimeFailure('agent_identity_invalid', 409)
+    return uid, gid
+
+
+def legacy_identity(agent: dict, agents: Agents) -> dict:
+    """Metadata only: never stat, open or traverse an agent home. Refuse unknown/root identities."""
+    runtime = agent.get('runtime') or {}
+    if 'uid' in runtime or 'gid' in runtime:
+        if 'uid' not in runtime or 'gid' not in runtime:
+            raise RuntimeFailure('agent_identity_invalid', 409)
+        uid, gid = agent_identity(agent)
+    elif restricted(agent):
+        uid, gid = agent_identity(agent)
+    else:
+        ids = docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + runtime['app_id']], timeout=60).stdout.split()
+        if len(ids) != 1:
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        doc = json.loads(docker(['inspect', ids[0]], timeout=60).stdout)[0]
+        if not any(m.get('Source') == str(agents.home(agent['id'])) and m.get('Destination') == '/opt/data' for m in doc.get('Mounts', [])):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        config = doc.get('Config') or {}
+        env = dict(v.split('=', 1) for v in config.get('Env', []) if '=' in v)
+        user = config.get('User', '')
+        # Stock legacy images launch as root and drop to HERMES_UID/GID in their entrypoint.
+        # For an explicit non-root numeric user, Config.User is the effective identity.
+        launcher = user in ('', 'root', '0', '0:0', 'root:root')
+        pair = [env.get('HERMES_UID', ''), env.get('HERMES_GID', '')] if launcher else user.split(':')
+        if len(pair) != 2 or not all(isinstance(v, str) and re.fullmatch(r'[0-9]+', v) for v in pair):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        uid, gid = map(int, pair)
+        agent_identity({'runtime': {'uid': uid, 'gid': gid}})
+    return {'uid': uid, 'gid': gid}
+
+
 def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Network]:
     """The agent's own /28 pair, as allocated by the Agent Service; anything else is refused."""
     network = (agent.get("runtime") or {}).get("network") or {}
@@ -199,13 +231,26 @@ def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Ne
 def service_names(agent: dict) -> tuple[str, str]:
     """Unique per agent: Runtipi puts every app on one shared network, where service names are DNS aliases."""
     app_id = agent["runtime"]["app_id"]
-    return app_id, f"{app_id}-tinfoil"
+    return app_id, f"{app_id}-client"
 
 
-def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
+CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
+
+
+def uses_claude_login(agent: dict) -> bool:
+    return agent.get("privacy") == "standard" and (agent.get("model") or {}).get("provider") == "anthropic"
+
+
+def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool,
+                private_link: dict | None = None, listener_port: int = 8929, main_service: str = '') -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
     main, proxy = service_names(agent)
+    if private_link:
+        return private_compose_doc(agent, image=image, client_image=proxy_image, home_source=home_source,
+                                   link=private_link, listener_port=listener_port, main=main_service or main)
+    if agent.get('privacy') == 'private':
+        raise RuntimeFailure('private_provider_unavailable', 503)
     hermes = {
         "image": image,
         "command": ["gateway", "run"],
@@ -216,21 +261,51 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         "x-runtipi": {"is_main": True, "internal_port": 8642},
     }
     services = {main: hermes}
-    if (agent.get("model") or {}).get("provider") == "tinfoil":
-        hermes["depends_on"] = [proxy]
-        services[proxy] = {
-            "image": proxy_image,
-            "command": ["--bind", "0.0.0.0", "--port", "3301", "--allowed-host", proxy, "--log-format", "json"],
-            "restart": "unless-stopped",
-            "read_only": True,
-            "tmpfs": ["/tmp", "/root/.cache"],
-            "security_opt": ["no-new-privileges:true"],
-            "cap_drop": ["ALL"],
-        }
+    doc_volumes = {}
+    if uses_claude_login(agent):
+        # The box's one Claude sign-in (the Claude app's volume). Only a standard agent on Claude gets it: a private
+        # agent never sees a public provider's login.
+        hermes["volumes"].append("claude-login:/claude")   # the top-level key below, named after the real volume
+        hermes["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"] = "/claude"
+        doc_volumes["claude-login"] = {"name": CLAUDE_LOGIN_VOLUME, "external": True}
     if ports:
         hermes["ports"] = [f"127.0.0.1:{agent['runtime']['port']}:8642"]
     doc = {"services": services, "x-runtipi": {"schema_version": 2, "overrides": []}}
+    if doc_volumes:
+        doc["volumes"] = doc_volumes
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
+
+
+def private_compose_doc(agent, *, image, client_image, home_source, link, listener_port, main):
+    uplink, sandbox = agent_networks(agent)
+    uid, gid = agent_identity(agent)
+    client = service_names(agent)[1]
+    edge = f"agent-{agent['id']}-edge"
+    # No auto-start after Docker/host restart: private topology must be reconciled before any client starts.
+    hardening = {'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no'}
+    services = {
+        main: {**hardening, 'image': image or DEFAULT_IMAGE, 'user': f'{uid}:{gid}',
+               'entrypoint': ['/opt/hermes/.venv/bin/hermes'], 'command': ['gateway', 'run'],
+               'init': True, 'working_dir': '/opt/data', 'stop_grace_period': '1m',
+               'environment': {'HOME': '/opt/data', 'HERMES_HOME': '/opt/data',
+                               'WIZARD_GATEWAY_URL': f'http://{edge}:8923'},
+               'volumes': [f'{home_source}:/opt/data'],
+               'tmpfs': ['/tmp:rw,nosuid,nodev,size=1g,mode=1777'], 'networks': {'sandbox': {'ipv4_address': str(sandbox.network_address + 2)}},
+               'mem_limit': '4g', 'pids_limit': 512, 'depends_on': [client, edge]},
+        client: client_service(link, client_image),
+        edge: {**hardening, 'image': SIDECAR_IMAGE, 'build': {'context': str(RESTRICTED_DIR / 'sidecars')},
+               'user': '65534:65534', 'command': ['python3', '-u', '/srv/edge.py'],
+               'environment': {'EDGE_UPSTREAM_HOST': str(next(uplink.hosts())), 'EDGE_UPSTREAM_PORT': str(listener_port),
+                               'EDGE_TOKEN_SHA256': '${EDGE_TOKEN_SHA256:?set EDGE_TOKEN_SHA256}', 'EDGE_AGENT_HOST': main},
+               'ports': [f"127.0.0.1:{agent['runtime']['port']}:8642"],
+               'networks': {'sandbox': {'aliases': ['edge'], 'ipv4_address': str(sandbox.network_address + 4)}, 'uplink': {}}, 'pids_limit': 64, 'mem_limit': '128m'},
+    }
+    doc = {'services': services, 'networks': {
+        'sandbox': {'internal': True, 'driver_opts': {'com.docker.network.bridge.inhibit_ipv4': 'true'},
+                    'ipam': {'config': [{'subnet': str(sandbox)}]}},
+        'uplink': {'ipam': {'config': [{'subnet': str(uplink)}]}},
+        'relay': {'external': True, 'name': link['network']}}}
+    return json.dumps(doc, indent=2) + '\n'
 
 
 def config_doc(agent: dict, *, version: str) -> str:
@@ -353,12 +428,15 @@ class RestrictedDriver:
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
-        return docker(["compose", "-p", self.project(agent["id"]), "-f", str(self.compose_file), *args],
+        private_file = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
+        compose_file = private_file if private_file.exists() else self.compose_file
+        return docker(["compose", "-p", self.project(agent["id"]), "-f", str(compose_file), *args],
                       timeout=timeout, env=self.env(agent))
 
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
         only the file capabilities, like the runtime's own home-init. The host never writes into the home itself."""
+        uid, gid = agent_identity(agent)
         managed = self.agents.managed(agent["id"])
         missing = [name for name in MANAGED_FILES if not (managed / name).is_file()]
         if missing:
@@ -370,10 +448,10 @@ class RestrictedDriver:
         # by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target. rename(2)
         # replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes the sync
         # fail, which only stops that agent.
-        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
+        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {uid}:{gid} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
         script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
-                  f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
+                  f' chown {uid}:{gid} /opt/data; chmod 700 /opt/data')
         name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
         try:
             docker(["run", "--rm", "--name", name, "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
@@ -386,15 +464,24 @@ class RestrictedDriver:
             raise RuntimeFailure("agent_sync_timeout", 504)
 
     def _prepare(self, agent: dict) -> None:
-        if (agent.get("model") or {}).get("provider") == "tinfoil":
-            # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
-            raise RuntimeFailure("restricted_provider_unsupported", 409)
+        uid, gid = agent_identity(agent)  # refuse root before any writes, builds or network mutation
         self.agents.add_provider_keys(agent)
+        if self.agents.providers.is_private(agent):
+            docker(['build', '-t', SIDECAR_IMAGE, str(self.runtime_dir / 'sidecars')], timeout=1800)
+            self._compose(agent, 'down', '--remove-orphans', timeout=300)
+            link = self.agents.providers.prepare(agent)
+            path = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
+            path.write_text(compose_doc(agent, image=self.image or DEFAULT_IMAGE,
+                                       proxy_image=self.agents.providers.client_image,
+                                       home_source=str(self.agents.home(agent['id'])), uid=uid, gid=gid,
+                                       ports=True, private_link=link, listener_port=self.listener_port,
+                                       main_service=RESTRICTED_SERVICE))
         self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
-        self.sync_home(agent)
+        if restricted(agent) or os.getuid() == 0:
+            self.sync_home(agent)
 
     def apply(self, agent: dict) -> dict:
         self._prepare(agent)
@@ -410,6 +497,12 @@ class RestrictedDriver:
     def stop(self, agent: dict) -> dict:
         self._compose(agent, "stop", timeout=300)
         return {"ok": True}
+
+    def delete(self, agent: dict) -> dict:
+        self._compose(agent, 'down', '--remove-orphans', timeout=300)
+        self.agents.providers.revoke(agent)
+        (self.agents.root / agent['id'] / 'runtime' / 'private-compose.json').unlink(missing_ok=True)
+        return {'ok': True}
 
 
 def verify_vendored(runtime_dir: Path) -> None:
@@ -745,7 +838,7 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
     cid = container or container_for(driver.project(agent["id"]), service)
-    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    user = ":".join(map(str, agent_identity(agent))) if restricted(agent) else "hermes"
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -758,7 +851,7 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
 
 def driver_for(agent: dict, driver, restricted_driver):
     """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
-    if restricted(agent):
+    if restricted(agent) or agent.get('privacy') == 'private' or agent.get('runtime', {}).get('private_client'):
         if restricted_driver is None:
             raise RuntimeFailure("restricted_runtime_unavailable", 503)
         return restricted_driver
@@ -791,7 +884,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|deliver|identity|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -813,11 +906,21 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
                     return
                 agent = agents.read(agent_id)
+                if action == "identity":
+                    self._json(200, legacy_identity(agent, agents))
+                    return
                 chosen = driver_for(agent, driver, restricted_driver)
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
                 with lifecycle_lock(chosen, restricted_driver, agent_id):
+                    if chosen is restricted_driver and isinstance(driver, RuntipiDriver) and action in ('apply', 'start'):
+                        # Read-time migration: stop the old WAM-managed agent/proxy project before using the seal.
+                        # No mutation happens until the owner explicitly starts/applies this agent.
+                        with LOCK:
+                            if driver._installed(driver.cli.Config().runtipi(), agent):
+                                if not driver.stop(agent).get('ok'):
+                                    raise RuntimeFailure('legacy_private_agent_stop_failed', 503)
                     result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:
@@ -839,7 +942,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
     ap.add_argument("--tinfoil-key-file", type=Path)
     ap.add_argument("--image", default=DEFAULT_IMAGE)
-    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
+    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE, help='deprecated alias of --client-image')
+    ap.add_argument('--client-image', default=None)
+    ap.add_argument('--apps-json', type=Path, help='installed registry (default: agents-dir/../apps.json)')
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
@@ -848,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
     token = args.token_file.read_text().strip()
     if len(token) < 24:
         raise SystemExit("token file must hold a random token of at least 24 characters")
-    agents = Agents(args.agents_dir, args.tinfoil_key_file)
+    agents = Agents(args.agents_dir, args.tinfoil_key_file, args.apps_json, args.client_image or args.proxy_image)
     if args.driver == "runtipi":
         if not args.wam:
             raise SystemExit("--wam is required for the runtipi driver")
@@ -859,6 +964,8 @@ def main(argv: list[str] | None = None) -> int:
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""),
                                              args.agent_listener_port)
+    for failure in agents.providers.reconcile_installed():
+        sys.stderr.write('[agent-runtime] provider reconciliation failed: ' + json.dumps(failure) + '\n')
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

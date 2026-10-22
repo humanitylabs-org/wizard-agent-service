@@ -105,6 +105,24 @@ test('an archive thread whose old queue run is pruned (or changes) is re-project
   assert.equal(row(added.rows, 's180').wizard_last_run_id, 'wizardq_new')
 })
 
+test('warm (recently active, quiet) threads are rebuilt once a minute, not on every build', async () => {
+  const w = world()
+  let t = 0
+  const p = createHybridProjector({ now: () => t, warmMaxAgeMs: 60_000 })
+  const warm = new Set(['s150', 's160'])
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  w.projected.length = 0; t = 30_000
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100), [], 'within a minute: served from cache')
+  w.projected.length = 0; t = 61_000
+  await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100).filter((id) => warm.has(id)).sort(), ['s150', 's160'])
+  const changed = w.sessions.map((s) => (s.id === 's160' ? { ...s, message_count: 9 } : s))
+  w.projected.length = 0; t = 62_000
+  await p.project({ sessions: changed, warm, projectBatch: w.projectBatch })
+  assert.deepEqual(w.projected.slice(100), ['s160'], 'a new message still rebuilds at once')
+})
+
 test('removed threads drop out; new threads appear', async () => {
   const w = world()
   const p = createHybridProjector({ now: () => 0 })
@@ -178,4 +196,22 @@ test('shared snapshot: a failed build is not cached and the next call retries', 
 test('diff names the threads and fields that differ', () => {
   const d = diffProjectedRows([{ id: 'a', status: 'running' }, { id: 'b' }], [{ id: 'a' }, { id: 'c' }])
   assert.deepEqual(d, [{ id: 'a', kind: 'changed', fields: ['status'] }, { id: 'b', kind: 'missing' }, { id: 'c', kind: 'extra' }])
+})
+
+test('stale-while-revalidate: a moved gate serves the current snapshot and rebuilds behind it', async () => {
+  let t = 0, builds = 0, release
+  const snap = createSharedSnapshot({ staleMs: 20_000, now: () => t })
+  const first = await snap.get({ gate: 'a', local: 1, build: async () => (++builds, 'v1') })
+  assert.equal(first, 'v1')
+  t = 5_000
+  const slow = new Promise((r) => { release = r })
+  const served = await snap.get({ gate: 'b', local: 1, build: async () => { builds++; await slow; return 'v2' } })
+  assert.equal(served, 'v1', 'answers at once from the current snapshot')
+  assert.equal(builds, 2, 'one background rebuild started')
+  release(); await new Promise((r) => setImmediate(r))
+  assert.equal(await snap.get({ gate: 'b', local: 1, build: async () => 'never' }), 'v2')
+  t = 6_000
+  assert.equal(await snap.get({ gate: 'c', local: 2, build: async () => 'v3' }), 'v3', 'an owner action waits for fresh rows')
+  t = 40_000
+  assert.equal(await snap.get({ gate: 'd', local: 2, build: async () => 'v4' }), 'v4', 'past staleMs it waits')
 })

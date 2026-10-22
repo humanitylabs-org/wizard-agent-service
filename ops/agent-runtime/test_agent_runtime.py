@@ -31,6 +31,34 @@ def agent_folder(root: Path, agent_id: str, network: dict | None, isolation: str
     return agent
 
 
+class ClaudeLoginMountTest(unittest.TestCase):
+    def doc(self, privacy, provider):
+        agent = {"id": "phil", "privacy": privacy, "model": {"provider": provider},
+                 "runtime": {"app_id": "agent-phil", "port": 18651}}
+        kwargs = {}
+        if privacy == "private":
+            agent["runtime"]["network"] = {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"}
+            kwargs["private_link"] = {"kind": "attested-relay", "relay_url": "http://fixture-relay:8090",
+                                      "sandbox_ip": "10.251.0.19", "relay_ip": "10.252.0.3", "models": [],
+                                      "token_file": "/fixture/relay-token", "network": "fixture-relay"}
+        return json.loads(ar.compose_doc(agent, image="img", proxy_image="proxy", home_source="/h", uid=1000, gid=1000, ports=False, **kwargs))
+
+    def test_standard_claude_agent_mounts_the_shared_login(self):
+        doc = self.doc("standard", "anthropic")
+        svc = doc["services"]["agent-phil"]
+        self.assertIn("claude-login:/claude", svc["volumes"])
+        self.assertEqual(svc["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"], "/claude")
+        self.assertEqual(doc["volumes"]["claude-login"], {"name": "wizard-ai-accounts-claude", "external": True})
+
+    def test_private_or_other_provider_never_gets_it(self):
+        for privacy, provider in (("private", "anthropic"), ("private", "tinfoil"), ("standard", "openai-codex")):
+            doc = self.doc(privacy, provider)
+            self.assertNotIn("volumes", doc)
+            for service in doc["services"].values():
+                self.assertFalse(any("/claude" in v for v in service.get("volumes", [])))
+                self.assertNotIn("CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR", service.get("environment", {}))
+
+
 class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
@@ -77,13 +105,14 @@ class RestrictedDriverTest(unittest.TestCase):
         # Provider keys land in managed/.env, not in the home.
         self.assertFalse((self.tmp / "agents" / "daily" / "home" / ".env").exists())
 
-    def test_tinfoil_agents_are_refused_before_anything_runs(self):
+    def test_missing_private_provider_fails_without_a_public_fallback(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         agent["model"] = {"provider": "tinfoil"}
+        agent['privacy'] = 'private'
         with self.assertRaises(ar.RuntimeFailure) as raised:
             self.driver.apply(agent)
-        self.assertEqual((raised.exception.code, raised.exception.status), ("restricted_provider_unsupported", 409))
-        self.assertEqual(self.calls, [])
+        self.assertEqual((raised.exception.code, raised.exception.status), ("private_provider_unavailable", 503))
+        self.assertFalse(any('up' in args for args, _ in self.calls))
 
     def test_sync_writes_through_a_fresh_temp_dir_and_renames(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
@@ -171,6 +200,37 @@ class RestrictedDriverTest(unittest.TestCase):
         finally:
             ar.container_for = real
         self.assertEqual(seen, [("agent-daily", "agent")])
+
+    def test_legacy_identity_and_uid_are_metadata_only(self):
+        agent = agent_folder(self.tmp / 'agents', 'old', None, isolation='')
+        doc = {'Config': {'User': 'root', 'Env': ['HERMES_UID=1000', 'HERMES_GID=1000']},
+               'Mounts': [{'Source': str(self.agents.home('old')), 'Destination': '/opt/data'}]}
+        def fake(args, **kw):
+            return type('R', (), {'stdout': 'cid' if args[0] == 'ps' else json.dumps([doc]), 'returncode': 0})()
+        ar.docker = fake
+        self.assertEqual(ar.legacy_identity(agent, self.agents), {'uid': 1000, 'gid': 1000})
+        doc['Config']['Env'] = ['HERMES_UID=0', 'HERMES_GID=1000']
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+        doc['Config']['Env'] = []
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+        doc['Config']['User'] = '1001:1002'
+        self.assertEqual(ar.legacy_identity(agent, self.agents), {'uid': 1001, 'gid': 1002})
+        doc['Mounts'] = []
+        with self.assertRaises(ar.RuntimeFailure): ar.legacy_identity(agent, self.agents)
+
+    def test_recorded_identity_controls_sync_and_refuses_root_before_mutation(self):
+        agent = agent_folder(self.tmp / 'agents', 'old', {'uplink': '10.250.0.16/28', 'sandbox': '10.251.0.16/28'})
+        agent['runtime'].update(uid=1000, gid=1001)
+        self.driver.sync_home(agent)
+        script = self.calls[-1][0][-1]
+        self.assertIn('chown 1000:1001', script)
+        self.assertNotIn('10000', script)
+        self.assertNotIn('chown -R', script)
+        self.calls.clear()
+        for uid in (0, -1, True, '1000', None):
+            agent['runtime']['uid'] = uid
+            with self.assertRaises(ar.RuntimeFailure): self.driver.apply(agent)
+        self.assertEqual(self.calls, [])
 
     def test_actual_vendored_tree_is_pinned_including_edge(self):
         ar.verify_vendored(ar.RESTRICTED_DIR)

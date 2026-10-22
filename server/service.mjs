@@ -2327,8 +2327,9 @@ function buildWizardServer(options, lifetime) {
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
-    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainKey: hermesKey,
+    agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
+    aiConnectionAddress: options.aiConnectionAddress,
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,
@@ -2370,6 +2371,7 @@ function buildWizardServer(options, lifetime) {
     accessOk: async (request) => !(request[TAILNET_INGRESS] || baseRequireAccess) || await accessVerified(request, request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
+      if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
       try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
     },
@@ -2521,6 +2523,7 @@ function buildWizardServer(options, lifetime) {
         : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
+  let mainCatalogCensus = null, mainCatalogCensusAt = 0
   let canonicalSessionInFlight = null
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
@@ -3220,7 +3223,18 @@ function buildWizardServer(options, lifetime) {
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
-      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) return refreshCanonicalSessions()
+      // A new assistant reply refreshes the listing, but a busy Hermes can take seconds to answer
+      // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
+      // short moment, then serve the last listing; the refresh bumps the generation and the list
+      // snapshot rebuilds as soon as it lands.
+      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) {
+        const fresh = refreshCanonicalSessions()
+        const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
+        let timer
+        const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
+        const sessions = await Promise.race([fresh.catch(() => null), late]).finally(() => clearTimeout(timer))
+        return Array.isArray(sessions) ? sessions : canonicalSessionCache.sessions
+      }
       if (canonicalSessionCache.expiresAt <= now) void refreshCanonicalSessions().catch(() => undefined)
       return canonicalSessionCache.sessions
     }
@@ -3310,19 +3324,23 @@ function buildWizardServer(options, lifetime) {
   // Threads past the preview window (or on later pages) get no history read, so the backfill is matched
   // against the list's own wizard_last_assistant_at instead. Applies only when that reply is the thread's
   // latest turn (no newer user message), exactly like the history path.
-  const backfillFromList = (session, operator) => {
+  // The agent's own [WIZARD_STATUS_V1] line on that reply (read from session truth) wins over the
+  // backfill file, matching the history path's `messages.status ?? backfill` order.
+  const backfillFromList = (session, operator, sessionTruth = null) => {
     if (operator || !session || typeof session.id !== 'string' || session.wizard_attention) return session
     const assistantAt = Number(session.wizard_last_assistant_at)
     const userAt = Number(session.wizard_last_user_at)
     if (!Number.isFinite(assistantAt) || assistantAt <= 0 || (Number.isFinite(userAt) && userAt > assistantAt)) return session
-    const attention = statusBackfill.lookup(session.id, assistantAt)
+    const truth = sessionTruth?.get?.(session.id)
+    const own = truth?.status && Math.abs(Number(truth.lastAssistantAt) - assistantAt) <= 2 ? truth.status : null
+    const attention = own ?? statusBackfill.lookup(session.id, assistantAt)
     return attention ? { ...session, wizard_attention: attention } : session
   }
-  const backfillSessionList = (result, operator) => {
+  const backfillSessionList = (result, operator, sessionTruth = null) => {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
-      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => backfillFromList(session, operator))
+      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => backfillFromList(session, operator, sessionTruth))
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
@@ -3407,13 +3425,13 @@ function buildWizardServer(options, lifetime) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
-  const enrichSessionListMessages = async (result, operator) => {
+  const enrichSessionListMessages = async (result, operator, sessionTruth = null) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator)
+          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -3427,7 +3445,7 @@ function buildWizardServer(options, lifetime) {
             const headers = new Headers({ Accept: 'application/json' })
             if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
             const response = await fetchImpl(historyUrl, { method: 'GET', headers, signal: AbortSignal.timeout(1_500) })
-            if (!response.ok) return backfillFromList(session, operator)
+            if (!response.ok) return backfillFromList(session, operator, sessionTruth)
             messages = latestVisibleSessionMessages(await response.json(), operator, completions, records)
             sessionMessageCache.set(cacheKey, { signature, messages })
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
@@ -3515,7 +3533,7 @@ function buildWizardServer(options, lifetime) {
             try { result = await backgroundResults.project(result) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator) : backfillSessionList(result, operator)
+          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
     return result
   }
@@ -3546,7 +3564,7 @@ function buildWizardServer(options, lifetime) {
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
       last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
-    const snapshot = createSharedSnapshot()
+    const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
       const entry = { at: new Date().toISOString(), kind, ...detail }
       console.log(`[list-cache] ${kind} ${JSON.stringify(detail).slice(0, 4000)}`)
@@ -3575,23 +3593,27 @@ function buildWizardServer(options, lifetime) {
       const nowSeconds = Date.now() / 1000
       const recent = readRecentHermesRootIds(hermesStatePath, nowSeconds - hotWindowSeconds)
       if (!recent) throw new Error('recent hermes threads unavailable')
-      const hot = new Set([...recent, ...(delta.roots ?? [])])
+      // Recently active threads are "warm" (rebuilt once a minute); only threads with a live signal
+      // are rebuilt on every build. Before, ~300 recent threads were rebuilt on every message anywhere.
+      const warm = new Set(recent)
+      const hot = new Set(delta.roots ?? [])
+      try { for (const id of readActiveHumanSessionIds(hermesStatePath)) hot.add(id) } catch { for (const id of recent) hot.add(id) }
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
       const stamps = runQueue ? runQueue.sessionStamps() : null
-      return { hot, stamps, reset: delta.roots === null, mark: delta.maxId }
+      return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
       const started = performance.now()
       const all = await humanSessions()
-      const { hot, stamps, reset, mark } = await hotIds()
+      const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      const result = await projector.project({ sessions: all, hot, stamps, epoch: 'direct', projectBatch })
+      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
-        last_projected: result.projected, last_cached: result.cached, last_hot: hot.size })
+        last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
     // Compare the cache with a full rebuild. Only rows the cache served unchanged count as a cache
@@ -5324,7 +5346,13 @@ function buildWizardServer(options, lifetime) {
           if (agents && !operator) {
             const rows = parseJsonBody(result)
             agents.observeSessions(MAIN_AGENT_ID, (rows.data ?? rows.sessions ?? []).map(row => row?.id))
-            await agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined)
+            // The catalog census pages through every Hermes thread (100 per call, ~3 s each when
+            // Hermes is busy). The list does not use its result, so it never waits for it: one
+            // census at a time, at most once a minute.
+            if (!mainCatalogCensus && Date.now() - mainCatalogCensusAt > 60_000) {
+              mainCatalogCensusAt = Date.now()
+              mainCatalogCensus = agents.refreshCatalog(MAIN_AGENT_ID).catch(() => undefined).finally(() => { mainCatalogCensus = null })
+            }
           }
           if (!canonicalPage?.window_projected) result = await projectSessionList(result, operator, canonicalPage, Number(url.searchParams.get('offset') ?? 0) === 0)
         }

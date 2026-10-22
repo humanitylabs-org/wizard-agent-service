@@ -5,7 +5,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen } from '../server/service.mjs'
+import { listen } from '../server/service.mjs'
+import { createWizardServer } from './helpers/private-provider-fixture.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((r) => s.close(() => r(undefined))) })
@@ -64,6 +65,8 @@ async function addPrivate(dir: string, base: string) {
   const agentHermes = await fakeHermes('private')
   const file = join(dir, 'agents', agent.id, 'agent.json')
   const value = JSON.parse(readFileSync(file, 'utf8'))
+  // These tests exercise the retained legacy host-managed inbox, not restricted in-container placement.
+  delete value.runtime.isolation
   value.runtime.port = agentHermes.port
   writeFileSync(file, JSON.stringify(value))
   return { agent, agentHermes }
