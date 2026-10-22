@@ -99,6 +99,7 @@ const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
 const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
+const ROUTED_MIRROR_FRESH_MS = 20_000
 const SESSION_LIST_PREVIEW_LIMIT = 48
 const CANONICAL_SESSION_LIMIT = 2_000
 const CANONICAL_SESSION_CACHE_MS = 30_000
@@ -2454,7 +2455,9 @@ function buildWizardServer(options, lifetime) {
     for (const path of routedMediaPaths(result, media.containerRoot)) {
       const relative = path.slice(media.containerRoot.length + 1)
       const target = resolve(media.mirror, relative)
-      if (!target.startsWith(`${media.mirror}${sep}`) || existsSync(target)) continue
+      if (!target.startsWith(`${media.mirror}${sep}`)) continue
+      // An agent may rewrite the same file and send it again; a copy older than this is read again.
+      try { if (Date.now() - statSync(target).mtimeMs < ROUTED_MIRROR_FRESH_MS) continue } catch { /* not mirrored yet */ }
       const key = `${agent.id}\0${path}`
       if (Date.now() - (mirrorMisses.get(key) ?? 0) < 60_000) continue
       try {

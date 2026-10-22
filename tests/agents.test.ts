@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -237,7 +237,7 @@ describe('agents registry and API', () => {
     const priv = await fakeHermes('private', ['wizard_private_sandbox'], [
       { id: 1, role: 'assistant', timestamp: 1, content: 'Report ready.\n\nMEDIA:/opt/data/cache/documents/report.md\nMEDIA:/opt/data/cache/documents/missing.md' },
     ])
-    const report = Buffer.from('# SANDBOX_CANARY\n')
+    let report = Buffer.from('# SANDBOX_CANARY\n')
     const fetched: string[] = []
     const runtimeFetch = async (id: string, payload: any) => {
       fetched.push(`${id} ${payload.path}`)
@@ -264,6 +264,13 @@ describe('agents registry and API', () => {
       }
       // Fetched once, then served from the mirror; a miss is not retried on every poll.
       expect(fetched).toEqual(['private /opt/data/cache/documents/report.md', 'private /opt/data/cache/documents/missing.md'])
+      // The agent rewrites the same file and sends it again: a stale mirror is read again.
+      report = Buffer.from('# SANDBOX_CANARY v2\n')
+      const mirrored = join(dir, 'agents', 'private', 'wizard-artifacts', 'mirror', 'cache', 'documents', 'report.md')
+      utimesSync(mirrored, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+      const again = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+      const envelope = JSON.parse(JSON.parse(await again.text()).data[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+      expect(await (await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)).text()).toBe('# SANDBOX_CANARY v2\n')
     } finally { chmodSync(home, 0o700) }
   })
 
