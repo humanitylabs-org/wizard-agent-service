@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('node:child_process', async (importOriginal) => ({ ...await importOriginal(), execFile: (...args: any[]) => { const cb = args.at(-1); cb(null, 't-123456789abc\n', ''); return { stdin: {on() {}, end() {}}, on() {} } } }))
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
@@ -142,7 +143,7 @@ it('R3_WORKER_CLOSE: service lease survives asynchronous heavy writer shutdown',
  const s=await scene({queued:true});await new Promise<void>(resolve=>{s.service.close(()=>resolve());s.service.closeAllConnections()})
  const heavyPath=join(s.dir,'heavy.sqlite')
  const seed=new DurableHeavyQueue({statePath:heavyPath,intervalMs:0,transport:async()=>({}),current:async()=>false,continuation:async()=>({})})
- const job=seed.submit({sessionId:'wizard_old',origin:'fixture-origin',key:'fixture',watermark:null,spec:{cwd:'/Volumes/ThalesMedia/fixture',argv:['true'],timeout_seconds:1}});await seed.close()
+ const job=seed.submit({sessionId:'wizard_old',origin:'fixture-origin',key:'fixture',watermark:null,spec:{cwd:join(heavyRoot, 'fixture'),argv:['true'],timeout_seconds:1}});await seed.close()
  let enter:()=>void=()=>{},finish:(x:any)=>void=()=>{},finished=false
  const entered=new Promise<void>(resolve=>{enter=resolve})
  Object.assign(s.serverOptions,{heavyStatePath:heavyPath,heavyToken:'fixture-heavy-token-at-least-32-characters',heavyPollIntervalMs:1,heavyTransport:async()=>{enter();const out=await new Promise(resolve=>{finish=resolve});finished=true;return out}})

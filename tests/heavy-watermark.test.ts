@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -101,7 +102,7 @@ it('uses the compacted watermark at admission and rejects a newer correction at 
     request: (path: string) => path.startsWith('/v1/runs/') ? Promise.resolve({}) : read(path) })
   cleanup.push(() => integration.close())
   const job = await integration.handle({ headers: { authorization: `Bearer ${token}` } }, '/wizard/internal/heavy/submit', {
-    session_id: 's', key: 'fixture', spec: { cwd: '/Volumes/ThalesMedia/qa', argv: ['true'], timeout_seconds: 10 } })
+    session_id: 's', key: 'fixture', spec: { cwd: join(heavyRoot, 'fixture'), argv: ['true'], timeout_seconds: 10 } })
   expect(integration.queue.get(job.job_id).watermark).toEqual(mark(rows[0]))
   expect(integration.queue.get(job.job_id).route).toEqual({ model: 'origin-model', provider: 'origin-provider', require_model_lock: true })
   complete = true; await runs.tick(true); await integration.queue.tick()

@@ -1,3 +1,4 @@
+import { heavyRoot } from './support/heavy-root'
 import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -32,7 +33,7 @@ describe('agent-pair store migrations', () => {
       queue = new DurableRunQueue(queueOptions)
       expect(queue.byIdempotencyKey('direct', key)).toMatchObject({ agent_id: 'hermes', sessionId: id }); queue.close()
       let heavy = new DurableHeavyQueue(heavyOptions)
-      const job = heavy.submit({ sessionId: id, origin: key, key, watermark: null, spec: { cwd: '/Volumes/ThalesMedia/tests', argv: ['true'], timeout_seconds: 1 } }); heavy.close()
+      const job = heavy.submit({ sessionId: id, origin: key, key, watermark: null, spec: { cwd: join(heavyRoot, 'fixture'), argv: ['true'], timeout_seconds: 1 } }); heavy.close()
       heavy = new DurableHeavyQueue(heavyOptions)
       expect(heavy.get(job.job_id)).toMatchObject({ agent_id: 'hermes', session_id: id }); heavy.close()
       let uploads = createUploadStore(uploadOptions)

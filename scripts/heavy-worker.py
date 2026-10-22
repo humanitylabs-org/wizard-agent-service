@@ -70,10 +70,113 @@ def public(row):
             'receipt': json.loads(row['receipt']) if row['receipt'] else None}
 
 
+def heavy_root():
+    value = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if not value or not Path(value).is_absolute():
+        raise ValueError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
+    return Path(value).resolve()
+
+
+def agent_directory(spec):
+    """Resolve every component before exposing a single agent tree to Docker."""
+    agent = spec['agent_id']
+    if not isinstance(agent, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', agent) or agent == 'hermes':
+        raise ValueError('invalid agent identity')
+    base = heavy_root()
+    expected = base / 'agents' / agent
+    # Neither the agents directory nor the agent root may alias another tree.
+    for component in (base / 'agents', expected):
+        if component.resolve(strict=True) != component:
+            raise ValueError('agent root must not be a symlink')
+    raw = Path(spec['cwd'])
+    if not raw.is_absolute() or '..' in raw.parts or not raw.is_relative_to(expected):
+        raise ValueError('work directory must be under the agent root')
+    cursor = expected
+    for part in raw.relative_to(expected).parts:
+        cursor = cursor / part
+        if not cursor.resolve(strict=True).is_relative_to(expected):
+            raise ValueError('agent work directory escapes through a symlink')
+    cwd = raw.resolve(strict=True)
+    if not cwd.is_dir():
+        raise ValueError('invalid agent work directory')
+    return expected, cwd
+
+
+def agent_image():
+    # This operator-only setting is the allowed image, never a value from the spec.
+    image = os.environ.get('WIZARD_HEAVY_AGENT_IMAGE', '')
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._/@:-]{0,255}', image):
+        raise ValueError('agent sandbox unavailable: configure WIZARD_HEAVY_AGENT_IMAGE')
+    return image
+
+
+def docker_binary():
+    return os.environ.get('WIZARD_HEAVY_DOCKER_BIN') or shutil.which('docker') or '/usr/bin/docker'
+
+
+def container_name(job_id):
+    if not re.fullmatch(r'heavy_[0-9a-f]{32}', job_id):
+        raise ValueError('invalid job identity')
+    return 'wizard-agent-' + job_id
+
+
+def agent_command(spec, job_id):
+    root, cwd = agent_directory(spec)
+    image = agent_image()
+    binary = docker_binary()
+    # Use ONLY the image's own PATH. No host env, Docker context, credentials,
+    # lock descriptors or worker configuration is inherited by the command.
+    result = subprocess.run([binary, 'image', 'inspect', '--format', '{{json .Config}}', image],
+                            env={}, check=True, capture_output=True, text=True, timeout=15)
+    config = json.loads(result.stdout)
+    if config.get('Volumes'):
+        raise ValueError('agent image must not declare additional volumes')
+    image_env = config.get('Env') or []
+    paths = [entry[5:] for entry in image_env if isinstance(entry, str) and entry.startswith('PATH=')]
+    if not paths or not paths[-1] or '\0' in paths[-1]:
+        raise ValueError('agent image must define PATH')
+    relative = cwd.relative_to(root).as_posix()
+    workdir = '/work' if relative == '.' else '/work/' + relative
+    if ':' in str(root) or ',' in str(root):
+        raise ValueError('invalid agent mount path')
+    return [binary, 'run', '--rm', '--init', '--pull', 'never', '--name', container_name(job_id),
+            '--user', '10000:10000', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+            '--pids-limit', '512', '--memory', '4g', '-v', str(root) + ':/work', '-w', workdir,
+            '-e', 'HOME=/work', '-e', 'PATH=' + paths[-1], image, *spec['argv']]
+
+
+def kill_agent_container(job_id):
+    binary, name = docker_binary(), container_name(job_id)
+    subprocess.run([binary, 'kill', name], env={},
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+    result = subprocess.run([binary, 'container', 'inspect', '--format', '{{.State.Running}}', name],
+                            env={}, capture_output=True, text=True, timeout=15, check=False)
+    if result.returncode == 0 and result.stdout.strip() == 'false':
+        return
+    if result.returncode and ('No such object' in result.stderr or 'No such container' in result.stderr):
+        return  # --rm already removed the finished container.
+    raise RuntimeError('agent container cleanup unconfirmed')
+
+
+def launch_command(spec, job_id, worker_fd, log):
+    if 'agent_id' in spec:
+        return subprocess.Popen(agent_command(spec, job_id), env={}, stdout=log,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    # Preserve the Hermes path, environment and inherited build-lock contract.
+    env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
+           'WIZARD_WORKER_LANE': spec.get('lane', 'heavy')}
+    return subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
+
+
 def validate(spec):
-    cwd = Path(spec['cwd']).resolve(strict=True)
-    if not cwd.is_relative_to('/Volumes/ThalesMedia') or not cwd.is_dir():
-        raise ValueError('work directory must be on the external volume')
+    if 'agent_id' in spec:
+        _, cwd = agent_directory(spec)
+        agent_image()  # Reject at RPC admission as well as execution, never host fallback.
+    else:
+        cwd = Path(spec['cwd']).resolve(strict=True)
+    if not cwd.is_relative_to(heavy_root()) or not cwd.is_dir():
+        raise ValueError('work directory must be under the configured heavy root')
     argv = spec['argv']
     if not isinstance(argv, list) or not 1 <= len(argv) <= 100 or any(
             not isinstance(x, str) or not x or '\0' in x or len(x) > 8192 for x in argv):
@@ -107,6 +210,7 @@ def execute(root, job_id, worker_fd, execution_fd):
     db = connect(root)
     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
     state, code, reason = 'failed', None, 'worker_execution_error'
+    agent_started = False
     try:
         spec = validate(json.loads(row['spec']))
         if row['deadline'] is None:
@@ -120,11 +224,10 @@ def execute(root, job_id, worker_fd, execution_fd):
             with (root / (job_id + '.log')).open('ab', buffering=0) as log:
                 # A light job's fd is the packaging lock: helpers that verify the
                 # shared Android lock inode (android-build-thales) fail closed.
-                env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
-                       'WIZARD_WORKER_LANE': spec.get('lane', 'heavy')}
-                # The command and all non-detached descendants stay in OUR group.
-                process = subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
-                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
+                # Docker containers are not members of the executor's host PGID.
+                # Mark before launch, so even an ambiguous Docker client failure is cleaned.
+                agent_started = 'agent_id' in spec
+                process = launch_command(spec, job_id, worker_fd, log)
                 while True:
                     cancelled = db.execute('SELECT cancel FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
                     if cancelled:
@@ -140,6 +243,8 @@ def execute(root, job_id, worker_fd, execution_fd):
                     time.sleep(0.2)
     finally:
         try:
+            if agent_started:
+                kill_agent_container(job_id)
             # This is NOT a terminal receipt yet. The dispatcher finalizes only
             # after the execution lease is released by process-group termination.
             db.execute('UPDATE jobs SET execution_result=? WHERE id=?',
@@ -157,6 +262,14 @@ def resource_wait(root):
     if shutil.disk_usage(root).free < 20 * 1024**3:
         return 'disk_pressure'
     try:
+        if sys.platform.startswith('linux'):
+            # Same conservative Linux floor as interactive admission; unknown
+            # health still fails closed. macOS keeps its existing sysctl policy.
+            memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+            available_kib = int(memory['MemAvailable'].split()[0])
+            pressure_line = next(line for line in Path('/proc/pressure/memory').read_text().splitlines() if line.startswith('full '))
+            full = dict(field.split('=', 1) for field in pressure_line.split()[1:])
+            return 'memory_pressure' if available_kib < 512 * 1024 or float(full['avg10']) >= 20 else ''
         pressure = int(subprocess.check_output(['/usr/sbin/sysctl', '-n',
             'kern.memorystatus_vm_pressure_level'], text=True, timeout=2).strip())
         return 'memory_pressure' if pressure >= 4 else ''
@@ -204,6 +317,10 @@ def dispatch(root, lock_path):
                     # result between our SELECT and release of the lease.
                     orphan = db.execute('SELECT * FROM jobs WHERE id=?', (orphan['id'],)).fetchone()
                     result = json.loads(orphan['execution_result']) if orphan['execution_result'] else None
+                    if 'agent_id' in json.loads(orphan['spec']):
+                        # A killed executor cannot run its finally block. Never release
+                        # lane capacity to another job while its container is still live.
+                        kill_agent_container(orphan['id'])
                     if result:
                         finish(db, root, orphan, result['state'], result['code'], result['reason'])
                     else:
@@ -319,8 +436,12 @@ if __name__ == '__main__':
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
     args = parser.parse_args()
-    if not args.root.resolve().is_relative_to('/Volumes/ThalesMedia') or not args.lock.resolve().is_relative_to('/Volumes/ThalesMedia'):
-        raise SystemExit('worker storage must be on external volume')
+    try:
+        allowed_root = heavy_root()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if not args.root.resolve().is_relative_to(allowed_root) or not args.lock.resolve().is_relative_to(allowed_root):
+        raise SystemExit('worker storage must be under the configured heavy root')
     if args.execute:
         if not re.fullmatch(r'heavy_[0-9a-f]{32}', args.execute):
             raise SystemExit('invalid job identity')
