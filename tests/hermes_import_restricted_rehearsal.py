@@ -216,6 +216,9 @@ def main():
     declaration = {'alias': host, 'address': get('BUILD_ADDRESS'), 'port': 22,
                    'relay_port': int(get('BUILD_RELAY_PORT'))}
     restricted.declared_egress.validate([declaration])
+    firewall = Path(__file__).resolve().parents[1] / 'ops/agent-runtime/agent-firewall.sh'
+    # Read-only privilege/guard check before any reduced copy, key or registry write.
+    command(['sudo', '-n', 'sh', str(firewall), 'check'], check=True)
     before_free = shutil.disk_usage(source).free
     before_agents = sorted(a['id'] for a in canary.call(service, '/wizard/v1/agents')['agents'])
     root.mkdir(mode=0o700, parents=True)
@@ -225,7 +228,6 @@ def main():
     key_added = False
     relay = None
     fw_scope = None
-    firewall = Path(__file__).resolve().parents[1] / 'ops/agent-runtime/agent-firewall.sh'
     try:
         section('1. Read-only source snapshot and reduced copy')
         emit(config_sha256_before=before_hash, free_bytes_before=before_free, baseline_agents=before_agents)
