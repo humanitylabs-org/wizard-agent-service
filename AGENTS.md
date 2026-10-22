@@ -124,6 +124,10 @@ Carry on with other work while you wait.
 
 Anything shipped, tagged or handed to a tester is built only from commits already on GitHub. Release notes name the repo, branch and commit.
 
+### Chat feature parity
+
+Every new or changed chat feature must add/update `qa/agent-parity/features.json` and a behavioral per-kind test (main, host-profile, container, restricted). Shared-helper tests alone do not establish parity. `npm run test:agent-parity` is included in `npm test`, CI and the deploy helper's existing mandatory npm-test gate. Missing server checks fail coverage; policy exemptions require explicit executable policy evidence, never a blanket agent exemption. Browser/live evidence must be distinguished from synthetic HTTP fixtures. Never run QA against an existing private agent or read its sessions/home.
+
 ### Safety
 
 - **Keep secrets and private data out of commits.** That covers keys, tokens, passwords, `.env` files, personal data, real conversation content, owner hostnames and home-directory paths. Put these in config or environment variables. Private repos are still visible to every org member.
