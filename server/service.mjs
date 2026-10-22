@@ -1916,8 +1916,31 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
-function setupHostAllowed(request, settings) {
-  const allowed = new Set(LOOPBACK_HOSTS)
+// The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
+// `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
+// this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
+// Setup never opened. apps.json is written by the App Manager and mounted read-only; a page cannot change it.
+export function shellHostsFromApps(appsJsonPath) {
+  const hosts = new Set()
+  if (!appsJsonPath) return hosts
+  let doc = null
+  try {
+    if (statSync(appsJsonPath).size > 2 * 1024 * 1024) return hosts
+    doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
+  } catch { return hosts }
+  for (const app of Array.isArray(doc?.apps) ? doc.apps : []) {
+    if (!Array.isArray(app?.provides) || !app.provides.includes('shell')) continue
+    const url = typeof app.view === 'string' ? app.view : app.view?.url
+    try {
+      const u = new URL(String(url ?? ''))
+      if (u.protocol === 'https:' && !u.username && !u.password && u.hostname) hosts.add(u.hostname.toLowerCase())
+    } catch { /* not an absolute https url */ }
+  }
+  return hosts
+}
+
+function setupHostAllowed(request, settings, extraHosts = []) {
+  const allowed = new Set([...LOOPBACK_HOSTS, ...extraHosts])
   for (const origin of [settings.network.base_url, settings.access.tailscale.origin]) {
     try { if (origin) allowed.add(new URL(origin).hostname) } catch { /* normalised already */ }
   }
@@ -4140,7 +4163,7 @@ function buildWizardServer(options, lifetime) {
         // Enrollment decides who owns this box on the tailnet: a DNS-rebound page must not reach it through an
         // unauthenticated box-local listener, so there the Host must be loopback or one of this box's own
         // configured addresses. (Verified listeners already pin the Host: Serve origin or Access.)
-        if (!requireAccess && !setupHostAllowed(request, readSettings(settingsPath).settings)) { sendJson(response, 403, { error: 'host_not_allowed' }); return }
+        if (!requireAccess && !setupHostAllowed(request, readSettings(settingsPath).settings, shellHostsFromApps(appsJsonPath))) { sendJson(response, 403, { error: 'host_not_allowed' }); return }
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         // Reads can advance enrollment (turn Serve on after sign-in) and carry the sign-in link: same-origin only.
         if (request.headers['sec-fetch-site'] !== undefined && !['same-origin', 'none'].includes(request.headers['sec-fetch-site'])) {
