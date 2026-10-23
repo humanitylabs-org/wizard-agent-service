@@ -88,7 +88,7 @@ export function normalizeMemory(value) {
 export const PRESETS = [
   {
     id: 'private', label: 'Private',
-    summary: 'Confidential model only, no fallback, no outside tools, only its own files, no apps.',
+    summary: 'Confidential model only, no fallback, no outside tools, only its own files; Airlock is its only app.',
     privacy: 'private',
     permissions: { outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' },
   },
@@ -100,6 +100,12 @@ export const PRESETS = [
   },
 ]
 const PRESET = new Map(PRESETS.map((preset) => [preset.id, preset]))
+/**
+ * Slots whose apps a private agent gets by default (#58 exception, James 23 Oct): the private agent's only way to hand
+ * work to a standard agent is the owner-gated redaction app (Airlock), so it starts ticked for every private agent and
+ * joins existing private agents when installed. The owner can untick it later; nothing re-adds it.
+ */
+export const PRIVATE_DEFAULT_SLOTS = Object.freeze(['transcript-redaction'])
 export const DEFAULT_APPEARANCE = { private: { glyph: 'lock', hue: 160 }, standard: { glyph: 'spark', hue: 265 } }
 const GLYPH_RE = /^[a-z][a-z0-9-]{0,23}$/u
 
@@ -512,12 +518,22 @@ export function createAgentRegistry(options = {}) {
     const fresh = current.filter((id) => !seen.has(id))
     try {
       if (fresh.length) {
+        const privateFresh = privateDefaultApps()
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard' || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
+          if (!agent || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
+          if (agent.privacy !== 'standard' && agent.privacy !== 'private') continue
+          const joining = agent.privacy === 'private' ? fresh.filter((app) => privateFresh.has(app)) : fresh
+          if (!joining.length) continue
           const next = structuredClone(agent)
-          for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
+          for (const app of joining) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
+          if (agent.privacy === 'private') {
+            // Its first app gives a private agent the gateway, which needs a harness restart: go through update().
+            const { wizard_apps, agent_apps } = next.permissions
+            queueMicrotask(() => { update(id, { permissions: { wizard_apps, agent_apps } }).catch(() => undefined) })
+            continue
+          }
           writeHarnessFiles(next)
           writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
         }
@@ -717,6 +733,14 @@ export function createAgentRegistry(options = {}) {
     return out
   }
 
+  /** Installed app ids that every private agent gets by default (PRIVATE_DEFAULT_SLOTS). */
+  function privateDefaultApps() {
+    const apps = readJson(appsJsonPath)?.apps
+    return new Set((Array.isArray(apps) ? apps : [])
+      .filter((app) => Array.isArray(app?.provides) && app.provides.some((slot) => PRIVATE_DEFAULT_SLOTS.includes(slot)))
+      .map((app) => app.id))
+  }
+
   function installedApps() {
     const apps = readJson(appsJsonPath)?.apps
     const wizardApps = []
@@ -851,6 +875,13 @@ export function createAgentRegistry(options = {}) {
     if (!preset) fail(400, 'unknown_preset', 'agent.permissions.preset')
     const { preset: _ignored, ...overrides } = body.permissions ?? {}
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
+    if (preset.privacy === 'private') {
+      const kinds = appKinds()
+      for (const app of privateDefaultApps()) {
+        const field = kinds.get(app)
+        if (field && !agentAppIds({ permissions }).has(app)) permissions[field].push(app)
+      }
+    }
     const model = validateModel(body.model, await providers(), { privacy: preset.privacy })
     if (preset.privacy === 'private' && model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
