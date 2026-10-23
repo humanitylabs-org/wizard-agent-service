@@ -89,4 +89,13 @@ describe('launcher on a Wizard OS box', () => {
     const ids = readApps({ appsJsonPath, launcherPath: join(dir, 'none.json') }).apps.map((a) => a.id)
     expect(ids).toEqual(['files'])
   })
+  it("passes the owner's In development list from launcher.json, cleaned", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wla-'))
+    const appsJsonPath = join(dir, 'apps.json'), launcherPath = join(dir, 'launcher.json')
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'reference', name: 'Reference', view: { url: '/reference/' } }] }))
+    writeFileSync(launcherPath, JSON.stringify({ links: [], in_development: ['reference', 'usuals', 'reference', 'Bad Id', 7] }))
+    expect(readApps({ appsJsonPath, launcherPath }).in_development).toEqual(['reference', 'usuals'])
+    writeFileSync(launcherPath, JSON.stringify({ links: [] }))
+    expect(readApps({ appsJsonPath, launcherPath })).not.toHaveProperty('in_development')
+  })
 })
