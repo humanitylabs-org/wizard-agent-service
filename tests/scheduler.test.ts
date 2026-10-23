@@ -360,6 +360,8 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
         if (sessions.has(body.id)) { send(409, { error: 'exists' }); return }
         sessions.set(body.id, body); send(201, body); return
       }
+      const patched = path.match(/^\/api\/sessions\/([^/]+)$/)
+      if (patched && req.method === 'PATCH') { const id = decodeURIComponent(patched[1]); sessions.set(id, { ...sessions.get(id), ...body }); send(200, sessions.get(id)); return }
       if (path === '/v1/runs' && req.method === 'POST') {
         const key = String(req.headers['idempotency-key'])
         if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? 'fixture report', error: 'credential-fixture-do-not-expose' }) }
@@ -432,6 +434,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(f.bodies[0].input).toContain("the owner's Notifications, not this chat")
     expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key }])
     expect(f.server.scheduler.project(f.server.scheduler.get(created.id)).lastRun.outcome).toBe('notified')
+    expect(f.sessions.get(receipt.thread)).toMatchObject({ hidden: true })
     const row = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
     const runId = JSON.parse(row.receipt).run_id
     // The raw view is internal-only: an owner asking for it still gets the scrubbed run.
