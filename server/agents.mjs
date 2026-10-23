@@ -88,7 +88,7 @@ export function normalizeMemory(value) {
 export const PRESETS = [
   {
     id: 'private', label: 'Private',
-    summary: 'Confidential model only, no fallback, no outside tools, only its own files, no apps.',
+    summary: 'Confidential model only, no fallback, no outside tools, only its own files; only apps tagged private.',
     privacy: 'private',
     permissions: { outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' },
   },
@@ -100,6 +100,15 @@ export const PRESETS = [
   },
 ]
 const PRESET = new Map(PRESETS.map((preset) => [preset.id, preset]))
+/**
+ * Slots whose apps a private agent gets by default (#58 exception, James 23 Oct): the private agent's only way to hand
+ * work to a standard agent is the owner-gated redaction app (Airlock), so it starts ticked for every private agent and
+ * joins existing private agents when installed. The owner can untick it later; nothing re-adds it.
+ */
+export const PRIVATE_DEFAULT_SLOTS = Object.freeze(['transcript-redaction'])
+// James, 23 Oct 2026: "The whole point of Mizel was to be fully private so no public agent can read its transcripts."
+// Apps holding private recordings never join standard agents or the main agent on install; only an explicit tick does.
+export const PRIVATE_DATA_SLOTS = Object.freeze(['meeting-transcripts', 'meeting-recording'])
 export const DEFAULT_APPEARANCE = { private: { glyph: 'lock', hue: 160 }, standard: { glyph: 'spark', hue: 265 } }
 const GLYPH_RE = /^[a-z][a-z0-9-]{0,23}$/u
 
@@ -512,12 +521,23 @@ export function createAgentRegistry(options = {}) {
     const fresh = current.filter((id) => !seen.has(id))
     try {
       if (fresh.length) {
+        const privateFresh = privateDefaultApps()
+        const sealedFresh = appsProviding(PRIVATE_DATA_SLOTS)
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard' || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
+          if (!agent || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
+          if (agent.privacy !== 'standard' && agent.privacy !== 'private') continue
+          const joining = agent.privacy === 'private' ? fresh.filter((app) => privateFresh.has(app)) : fresh.filter((app) => !sealedFresh.has(app))
+          if (!joining.length) continue
           const next = structuredClone(agent)
-          for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
+          for (const app of joining) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
+          if (agent.privacy === 'private') {
+            // Its first app gives a private agent the gateway, which needs a harness restart: go through update().
+            const { wizard_apps, agent_apps } = next.permissions
+            queueMicrotask(() => { update(id, { permissions: { wizard_apps, agent_apps } }).catch(() => undefined) })
+            continue
+          }
           writeHarnessFiles(next)
           writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
         }
@@ -525,7 +545,7 @@ export function createAgentRegistry(options = {}) {
         const stored = readJson(mainPath)
         if (stored?.schema === 1) {
           const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
-          for (const app of fresh) if (!apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
+          for (const app of fresh) if (!sealedFresh.has(app) && !apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
           writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
         }
       }
@@ -717,6 +737,15 @@ export function createAgentRegistry(options = {}) {
     return out
   }
 
+  /** Installed app ids that every private agent gets by default (PRIVATE_DEFAULT_SLOTS). */
+  function appsProviding(slots) {
+    const apps = readJson(appsJsonPath)?.apps
+    return new Set((Array.isArray(apps) ? apps : [])
+      .filter((app) => Array.isArray(app?.provides) && app.provides.some((slot) => slots.includes(slot)))
+      .map((app) => app.id))
+  }
+  function privateDefaultApps() { return appsProviding(PRIVATE_DEFAULT_SLOTS) }
+
   function installedApps() {
     const apps = readJson(appsJsonPath)?.apps
     const wizardApps = []
@@ -851,6 +880,13 @@ export function createAgentRegistry(options = {}) {
     if (!preset) fail(400, 'unknown_preset', 'agent.permissions.preset')
     const { preset: _ignored, ...overrides } = body.permissions ?? {}
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
+    if (preset.privacy === 'private') {
+      const kinds = appKinds()
+      for (const app of privateDefaultApps()) {
+        const field = kinds.get(app)
+        if (field && !agentAppIds({ permissions }).has(app)) permissions[field].push(app)
+      }
+    }
     const model = validateModel(body.model, await providers(), { privacy: preset.privacy })
     if (preset.privacy === 'private' && model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
@@ -868,6 +904,9 @@ export function createAgentRegistry(options = {}) {
       },
       created_at: Math.floor(now() / 1000),
     }
+    // Private agents read standard chats by default (James, 23 Oct 2026) where the read-only transport exists;
+    // an explicit false from the client wins.
+    if (agent.privacy === 'private' && overrides?.read_standard_chats === undefined && standardUrlFor(agent)) agent.permissions.read_standard_chats = true
     assertPrivateWalls(agent)
     assertStandardTransport(agent)
     assertIsolationSupports(agent)

@@ -222,6 +222,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
+      voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
+        typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [],
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })

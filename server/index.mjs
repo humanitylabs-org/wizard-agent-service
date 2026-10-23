@@ -196,6 +196,8 @@ server = createWizardServer({
   wizardOsHome: osHome,
   ...(process.env.WIZARD_MCP_TOKEN ? { mcpToken: process.env.WIZARD_MCP_TOKEN } : {}),
   ...(process.env.WIZARD_AGENT_BRIDGE === 'off' ? { agentBridge: false } : {}),
+  // 'gateway': the app gateway for container agents only; the main agent's runs, skills and kernel stay as with 'off'.
+  ...(process.env.WIZARD_AGENT_BRIDGE === 'gateway' ? { agentBridge: 'gateway' } : {}),
   threadAppsStatePath: process.env.WIZARD_THREAD_APPS_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-apps.json'),
   appsSkillsInline: process.env.WIZARD_APPS_SKILLS_INLINE === '1',
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',

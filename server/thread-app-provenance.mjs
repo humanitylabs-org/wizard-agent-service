@@ -21,7 +21,7 @@ export const APP_PROVENANCE_INSTRUCTIONS = 'App provenance is optional: add app_
 
 export function appProvenanceRunNote(catalog) {
   // JSON keeps names data, not instruction syntax; the catalogue is read afresh for every run.
-  return `${APP_PROVENANCE_INSTRUCTIONS}\nInstalled Wizard app IDs and names (data): ${JSON.stringify(catalog)}`
+  return `${APP_PROVENANCE_INSTRUCTIONS}\nInstalled app IDs and names (data): ${JSON.stringify(catalog)}`
 }
 
 export function metadataAppId(metadata) {

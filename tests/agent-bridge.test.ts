@@ -95,7 +95,7 @@ describe('agent bridge: kernel', () => {
   it('routes app development to the OS builder before ordinary job routing, including an empty box', () => {
     for (const apps of [[], bridgeApps({ apps: [app('hello-wizard', 1)] })]) {
       const text = renderKernel(apps)
-      expect(text).toContain('To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view')
+      expect(text).toContain('To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view')
       expect(text.indexOf('wizard-builder')).toBeLessThan(text.indexOf('wizard-job-<job>'))
       expect(text).toContain('follow its coding and wam workflow')
       expect(text).toContain('For ordinary app use: Never search the disk')
@@ -278,8 +278,8 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     expect(seen.at(-1)).toContain('Transcriber')
     // The delta names only the new app. The separate app-provenance catalogue (live 41de73a, every run) lists
     // every installed app id/name as data, so the delta rule is checked on the text before that catalogue.
-    const delta = String(seen.at(-1)).split('Installed Wizard app IDs and names (data):')[0]
+    const delta = String(seen.at(-1)).split('Installed app IDs and names (data):')[0]
     expect(delta).not.toContain('Hello Wizard')
-    expect(seen.at(-1)).toContain('Installed Wizard app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
+    expect(seen.at(-1)).toContain('Installed app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
   })
 })

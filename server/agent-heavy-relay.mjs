@@ -6,9 +6,13 @@ import { AGENT_RUN_INSTRUCTIONS } from './agents-http.mjs'
 
 const fail = (message, status) => Object.assign(new Error(message), { status })
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+// Only actual completed-run metadata is authority; never requested/registry defaults.
+const routeFrom = runtime => typeof runtime?.model === 'string' && runtime.model.trim()
+  && typeof runtime.provider === 'string' && runtime.provider.trim() && runtime.provider === runtime.provider.trim() && runtime.provider.toLowerCase() !== 'custom'
+  ? { model: runtime.model, provider: runtime.provider, require_model_lock: true } : null
 export const AGENT_HEAVY_ROUTE = /^\/wizard\/v1\/agent-heavy\/(submit|status|cancel|artifacts)$/u
 
-export function createAgentHeavyRelay({ options, registry, queue }) {
+export function createAgentHeavyRelay({ options, registry, queue, fetchAgent = (agent, path, init) => registry.fetchAgent(agent, path, init) }) {
   const enabled = () => options.agentHeavy === 'on'
   const sandbox = () => process.env.WIZARD_AGENT_HEAVY_SANDBOX === 'on'
   const buckets = new Map()
@@ -40,7 +44,10 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
     if (!key) throw fail('agent unavailable', 503)
     let response
     try {
-      response = await registry.fetchAgent(agent, path, {
+      // Resolve public run IDs for reads only. Continuations retain the direct
+      // frozen POST and heavy-queue launch-time fence; never defer that mutation.
+      const transport = (init.method || 'GET') === 'GET' ? fetchAgent : (a, p, i) => registry.fetchAgent(a, p, i)
+      response = await transport(agent, path, {
         ...init, headers: { ...init.headers, Authorization: `Bearer ${key}` },
         redirect: 'error', signal: AbortSignal.timeout(4000),
       })
@@ -64,16 +71,54 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
     return allowed(job.agent_id) && !after.cancel_requested && !after.continuation_invalidated
       && originCurrent(job)
   }
+  const observeOrigin = async job => {
+    const fresh = queue().get(job.job_id)
+    if (!fresh || fresh.route_state !== 'pending_origin' || !allowed(job.agent_id)
+      || fresh.resume || fresh.cancel_requested || fresh.continuation_invalidated) return fresh
+    let origin
+    try { origin = await request(job.agent_id, `/v1/runs/${encodeURIComponent(job.origin)}`) }
+    catch (error) {
+      if (error?.status !== 404) throw error
+      origin = { status: 'failed' } // confirmed lost origin cannot authorize a new turn
+    }
+    if (!terminal.has(origin.status)) return fresh
+    // Re-read after I/O so concurrent cancellation/steering is never overwritten.
+    const after = queue().get(job.job_id)
+    if (after.route_state !== 'pending_origin' || after.resume || after.cancel_requested || after.continuation_invalidated) return after
+    const route = origin.status === 'completed' ? routeFrom(origin.runtime) : null
+    return queue().save(route ? { ...after, route, route_state: 'bound' }
+      : { ...after, route: null, route_state: 'unavailable', continuation_reason: 'origin_route_unavailable',
+        continuation_invalidated: true, resume: 'suppressed' })
+  }
   const view = job => ({ job_id: job.job_id, agent_id: job.agent_id, session_id: job.sessionId,
-    state: job.state, reason: job.reason, cancel_requested: job.cancel_requested,
+    state: job.state, reason: job.reason || job.continuation_reason, route_state: job.route_state,
+    continuation_reason: job.continuation_reason, cancel_requested: job.cancel_requested,
     continuation: job.resume || 'pending', continuation_invalidated: Boolean(job.continuation_invalidated), receipt: job.receipt,
     instruction: 'Submission is durable. End this turn; the service resumes this agent thread when the worker finishes. Do not poll or repeat the job.' })
   return {
-    allowed, current,
+    allowed, current, observeOrigin,
     async continuation(job) {
       // Wait for the original mutation owner; a heavy receipt cannot release its slot.
-      const origin = await request(job.agent_id, `/v1/runs/${encodeURIComponent(job.origin)}`)
+      job = queue().get(job.job_id)
+      // The queue's single observation phase alone binds pending rows. Never
+      // take a second snapshot here and confuse newly completed with no route.
+      if (job.route_state === 'pending_origin') throw fail('origin still owns session', 503)
+      // Binding durably proves completed-origin authority. Run records can be
+      // evicted while a long build runs; frozen admissions must also replay.
+      let origin = { status: 'completed' }
+      if (job.route_state !== 'bound' && !job.continuation_body) {
+        try { origin = await request(job.agent_id, `/v1/runs/${encodeURIComponent(job.origin)}`) }
+        catch (error) {
+          if (error?.status !== 404) throw error
+          origin = { status: 'failed' }
+        }
+      }
       if (!terminal.has(origin.status)) throw fail('origin still owns session', 503)
+      if (!job.continuation_body && (origin.status !== 'completed' || job.route_state === 'unavailable' || !routeFrom(job.route))) {
+        queue().save({ ...queue().get(job.job_id), continuation_reason: 'origin_route_unavailable',
+          continuation_invalidated: true, resume: 'suppressed' })
+        throw fail('origin_route_unavailable', 410)
+      }
       if (!await current(job)) throw fail('heavy request superseded', 410)
       // Persist the exact wire body before admission, so ambiguous retries survive restart.
       let fresh = queue().get(job.job_id)
@@ -135,14 +180,14 @@ export function createAgentHeavyRelay({ options, registry, queue }) {
       const origin = registry.latestRunForSession(id, session, { includeHeavy: true })
       if (!origin) throw fail('no mutation-owning agent run', 409)
       const observed = await request(id, `/v1/runs/${encodeURIComponent(origin.run_id)}`)
-      if (!['running', 'launching', 'started'].includes(observed.status)) throw fail('no mutation-owning agent run', 409)
-      const runtime = observed.runtime
-      if (!runtime?.model || !runtime?.provider || runtime.provider === 'custom') throw fail('origin model route unavailable', 503)
+      if (!['running', 'launching', 'started', 'completed'].includes(observed.status)) throw fail('no mutation-owning agent run', 409)
+      const route = observed.status === 'completed' ? routeFrom(observed.runtime) : null
+      const routeState = observed.status !== 'completed' ? 'pending_origin' : route ? 'bound' : 'unavailable'
       const mark = await watermark(id, session)
       requireGrant(id)
       if (registry.latestRunForSession(id, session, { includeHeavy: true })?.run_id !== origin.run_id) throw fail('origin changed', 409)
       return view(queue().submit({ sessionId: session, agent_id: id, origin: origin.run_id,
-        key: value.key, spec: { ...spec, agent_id: id }, route: { model: runtime.model, provider: runtime.provider, require_model_lock: true },
+        key: value.key, spec: { ...spec, agent_id: id }, route, routeState,
         watermark: mark, activeLimit: 2 }))
     },
   }

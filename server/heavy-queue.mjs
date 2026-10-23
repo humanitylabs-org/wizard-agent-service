@@ -58,7 +58,7 @@ export function heavyRpcTransport({ origin, token }) {
 
 /** Durable outbox + continuation receipt. It never owns an interactive slot. */
 export class DurableHeavyQueue {
-  constructor({ statePath, transport, continuation, current, intervalMs = 1500, canDispatch = () => true }) {
+  constructor({ statePath, transport, continuation, current, observe = async () => {}, intervalMs = 1500, canDispatch = () => true }) {
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     const hadState = existsSync(statePath)
     this.db = new DatabaseSync(statePath)
@@ -93,7 +93,7 @@ export class DurableHeavyQueue {
       try { this.db.close() } catch { /* preserve original */ }
       throw error
     }
-    Object.assign(this, { transport, continuation, current, canDispatch, intervalMs, closed: false, busy: null, timer: null })
+    Object.assign(this, { transport, continuation, current, observe, canDispatch, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {
     const row = this.db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get(id)
@@ -102,7 +102,7 @@ export class DurableHeavyQueue {
   rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
   save(job) { this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id); return job }
   // Synchronous durable receipt: no SSH, history, or model request on this path.
-  submit({ sessionId, origin, key, spec, route = {}, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
+  submit({ sessionId, origin, key, spec, route = {}, routeState, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
     if (!validAgentId(agent_id)) throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
     const configuredRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
@@ -122,7 +122,10 @@ export class DurableHeavyQueue {
     if (this.rows().filter(job => job.agent_id === agent_id && !terminal.has(job.state)).length >= activeLimit) throw fail('agent heavy capacity exceeded', 429)
     const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id, session_id: sessionId, origin, spec, route, watermark,
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
-      remote_ack: false, resume: '', continuation_invalidated: false, receipt: null }
+      remote_ack: false, resume: '', continuation_invalidated: false, receipt: null,
+      ...(routeState ? { route_state: routeState } : {}),
+      ...(routeState === 'unavailable' ? { continuation_reason: 'origin_route_unavailable',
+        continuation_invalidated: true, resume: 'suppressed' } : {}) }
     this.db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job), agent_id)
     return job
   }
@@ -200,7 +203,15 @@ export class DurableHeavyQueue {
           break
         }
       }
-      job = this.get(job.job_id)
+    }
+    // Finish every worker RPC first. Slow origins cannot delay another dispatch.
+    await Promise.all(this.rows().filter(job => job.route_state === 'pending_origin'
+      && !job.resume && !job.cancel_requested && !job.continuation_invalidated).map(async job => {
+      try { await this.observe(job) } catch { /* transient runtime outage: retry next tick */ }
+    }))
+    for (const snapshot of this.rows()) {
+      if (this.closed) return
+      let job = this.get(snapshot.job_id)
       if (terminal.has(job.state) && !job.resume && !job.cancel_requested && !job.continuation_invalidated) {
         try {
           if (!await this.current(job)) { this.save({ ...this.get(job.job_id), resume: 'superseded' }); continue }
@@ -209,7 +220,10 @@ export class DurableHeavyQueue {
           // Preserve supersession/cancel arriving during admission.
           this.save({ ...job, resume: result.publicRunId })
         } catch (error) {
-          if (error?.status === 410) this.save({ ...this.get(job.job_id), resume: 'superseded' })
+          if (error?.status === 410) {
+            const fresh = this.get(job.job_id)
+            this.save({ ...fresh, resume: fresh.resume || 'superseded' })
+          }
           // Admission unknown: same job key will replay the durable run receipt.
         }
       }

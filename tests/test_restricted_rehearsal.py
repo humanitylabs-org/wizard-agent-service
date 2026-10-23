@@ -31,6 +31,15 @@ class RehearsalTests(unittest.TestCase):
                     with self.assertRaisesRegex(h.ImportFailure, 'config_baseline_required'):
                         r.config_baseline(source)
 
+    def test_single_deferred_heavy_call_is_observed_without_resubmission(self):
+        args = {'key': 'fixture', 'cwd': '/worker/agents/fixture', 'argv': ['uname'], 'lane': 'light'}
+        for name, value in [('wizard_heavy_submit', args), ('tool_call', {'calls': [{'name': 'wizard_heavy_submit', 'arguments': args}]})]:
+            self.assertEqual(r.effective_call({'function': {'name': name, 'arguments': json.dumps(value)}}),
+                             ('wizard_heavy_submit', args))
+        name, _ = r.effective_call({'function': {'name': 'tool_call', 'arguments': {'calls': [
+            {'name': 'wizard_heavy_submit', 'arguments': args}, {'name': 'foreign', 'arguments': {}}]}}})
+        self.assertEqual(name, 'tool_call')
+
     def test_no_root_tcp_or_ssh_key_path(self):
         source = Path(r.__file__).read_text()
         for forbidden in ['sudo', 'iptables', 'remote_key(', 'ProxyCommand', 'declared_' + 'tcp', 'ssh-keygen']:

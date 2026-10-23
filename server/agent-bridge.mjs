@@ -105,7 +105,7 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
   const idNote = ' (<app> = app id, - as _)'
   const text = [
     'Wizard OS: you are the owner\'s agent on this box. Its apps do jobs for them.',
-    ...(hermes ? ['To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
+    ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
       'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
     hermes
@@ -444,7 +444,7 @@ export function createAgentBridge({
   async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
     const names = await toolNames(agentId)
     const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
-    return { content: [{ type: 'text', text: lines.length ? `Installed Wizard apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
+    return { content: [{ type: 'text', text: lines.length ? `Installed apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
   }
 
   const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
@@ -467,7 +467,7 @@ export function createAgentBridge({
     const tool = app ? name.slice(app.prefix.length + 2) : ''
     if (!app || !tool) {
       log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
-      return failure(`No installed Wizard app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
+      return failure(`No installed app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
     }
     let result
     let ok = false

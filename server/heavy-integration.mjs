@@ -51,7 +51,7 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry }) {
+export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry, fetchAgent }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -62,7 +62,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
   }
   const watermark = sessionId => heavyRequestWatermark(request, sessionId)
   let heavy
-  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy })
+  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy, fetchAgent })
   const sameGeneration = (latest, job) => latest?.publicRunId === job.origin
     || (latest?.continuation?.kind === HEAVY_KIND && heavy.get(latest.continuation.job_id)?.origin === job.origin)
   const current = async job => {
@@ -83,6 +83,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     transport: options.heavyTransport ?? (options.heavyRpcOrigin
       ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavySshTransport(options.heavyWorker)),
     intervalMs: options.heavyPollIntervalMs ?? 1500, current,
+    observe: job => agentRelay.observeOrigin(job),
     canDispatch: job => (job.agent_id ?? 'hermes') === 'hermes' || agentRelay.allowed(job.agent_id),
     continuation: async job => {
       if ((job.agent_id ?? 'hermes') !== 'hermes') return agentRelay.continuation(job)
