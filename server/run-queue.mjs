@@ -22,7 +22,7 @@ export const isBackgroundContinuation = record => Boolean(record.continuation)
 // and are resumed once, through normal admission, under this stable key prefix.
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
 export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
-const RECOVERY_INPUT_CHARS = 4000
+const RECOVERY_EXCERPT_CHARS = 120
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
@@ -588,12 +588,17 @@ export class DurableRunQueue {
     const original = parseJson(record.body, {})
     const value = { ...original }
     delete value._wizard_background_recovery
-    const text = queuedInputText(original)
-    const quoted = text.length > RECOVERY_INPUT_CHARS ? `${text.slice(0, RECOVERY_INPUT_CHARS)}…` : text
+    // An interrupted run was already dispatched, so its request is already the owner's last message in
+    // this thread. Quoting it in full (voice note, file block and all) put the same message in the thread
+    // twice: the owner saw his voice note repeated and the model read it as a second, new request.
+    // Name it by a short excerpt only, and say plainly that it is not a new message.
+    const text = queuedInputText(original).split('[WIZARD_FILES_V1]')[0].replace(/\s+/g, ' ').trim()
+    const excerpt = text.length > RECOVERY_EXCERPT_CHARS ? `${text.slice(0, RECOVERY_EXCERPT_CHARS).trimEnd()}…` : text
     value.input = '[Wizard follow-through] Wizard restarted while your previous turn in this thread was running, so it was '
       + 'cut off before you replied. Resume that request from where it stopped and give your final answer in this thread. '
-      + 'Check what already happened before repeating any step with side effects.'
-      + (quoted ? `\n\nThe interrupted request was:\n${quoted}` : '')
+      + 'Check what already happened before repeating any step with side effects. '
+      + 'The request is the owner\'s last message above, unchanged: this note is not a new or repeated message from the owner.'
+      + (excerpt ? `\n\nIt began: "${excerpt}"` : '')
     return JSON.stringify(value)
   }
 
