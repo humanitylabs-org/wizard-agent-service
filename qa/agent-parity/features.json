@@ -415,14 +415,15 @@
     },
     {
       "id": "read-receipts",
-      "description": "Mark one thread seen",
+      "description": "Mark one thread seen or unread",
       "layer": "server",
-      "how_to_test": "Mark one thread seen; assert unread badge clears only for its exact agent/session and survives restart.",
+      "how_to_test": "Mark one thread seen, then unread; assert both markers stay scoped to its exact agent/session and survive restart.",
       "source_refs": [
         "server/thread-seen.mjs"
       ],
       "reference_tests": [
-        "tests/unified-chats-routing.test.ts"
+        "tests/unified-chats-routing.test.ts",
+        "tests/thread-unread.test.ts"
       ],
       "fixture": "read-receipts",
       "policy_exemptions": []

@@ -16,12 +16,14 @@ function validRecord(value) {
   const previewFingerprint = value.previewFingerprint
   const assistantActivityAt = value.assistantActivityAt
   const seenAt = value.seenAt
+  const unreadAt = value.unreadAt
   if (messageCount !== undefined && (!Number.isSafeInteger(messageCount) || messageCount < 0)) return null
   if (status !== undefined && !RUN_STATUSES.has(status)) return null
   if (typeof updatedAt !== 'string' || updatedAt.length > 100 || !Number.isFinite(Date.parse(updatedAt))) return null
   if (typeof previewFingerprint !== 'string' || !/^[a-z0-9]{1,32}$/.test(previewFingerprint)) return null
   if (assistantActivityAt !== undefined && (typeof assistantActivityAt !== 'string' || assistantActivityAt.length > 100 || !Number.isFinite(Date.parse(assistantActivityAt)))) return null
   if (!Number.isFinite(seenAt) || seenAt < 0) return null
+  if (unreadAt !== undefined && (!Number.isFinite(unreadAt) || unreadAt < 0)) return null
   return {
     ...(value.agent_id !== undefined ? { agent_id: value.agent_id, session_id: value.session_id } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
@@ -30,6 +32,7 @@ function validRecord(value) {
     previewFingerprint,
     ...(assistantActivityAt !== undefined ? { assistantActivityAt } : {}),
     seenAt,
+    ...(unreadAt !== undefined ? { unreadAt } : {}),
   }
 }
 
@@ -78,6 +81,7 @@ function laterRecord(left, right) {
     }
   }
   const seenAt = Math.max(left.seenAt, right.seenAt)
+  const unreadAt = Math.max(left.unreadAt ?? -1, right.unreadAt ?? -1)
   const leftAssistantAt = Date.parse(left.assistantActivityAt ?? '')
   const rightAssistantAt = Date.parse(right.assistantActivityAt ?? '')
   const assistantActivityAt = !Number.isFinite(leftAssistantAt)
@@ -87,9 +91,9 @@ function laterRecord(left, right) {
       : rightAssistantAt !== leftAssistantAt
         ? rightAssistantAt > leftAssistantAt ? right.assistantActivityAt : left.assistantActivityAt
         : (right.assistantActivityAt ?? '') > (left.assistantActivityAt ?? '') ? right.assistantActivityAt : left.assistantActivityAt
-  return selected.seenAt === seenAt && selected.assistantActivityAt === assistantActivityAt
+  return selected.seenAt === seenAt && (selected.unreadAt ?? -1) === unreadAt && selected.assistantActivityAt === assistantActivityAt
     ? selected
-    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt }
+    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt, ...(unreadAt >= 0 ? { unreadAt } : {}) }
 }
 
 export function mergeThreadSeenStates(left, right, { protect = null, keepInitializedAt = false } = {}) {
@@ -106,7 +110,7 @@ export function mergeThreadSeenStates(left, right, { protect = null, keepInitial
     }
   }
   if (!changed) return left
-  const order = (a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])
+  const order = (a, b) => Math.max(b[1].seenAt, b[1].unreadAt ?? -1) - Math.max(a[1].seenAt, a[1].unreadAt ?? -1) || a[0].localeCompare(b[0])
   const all = Object.entries(threads)
   // Protected records are kept whatever the caller sends and have their own capacity, so the number of visible
   // records a caller can store never depends on how many hidden ones exist.
