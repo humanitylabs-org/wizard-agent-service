@@ -75,6 +75,9 @@ class MachinesTest(unittest.TestCase):
     def test_ssh_compatible_mode_for_rsync_and_git(self):
         r = self.client("--ssh", "-l", "x", "-o", "Foo=bar", "-p", "22", "box", "echo", "a", "b")
         self.assertEqual((r.returncode, r.stdout), (0, b"a b\n"))
+        before = (self.root / "audit.jsonl").read_text()
+        self.assertEqual(self.client("--ssh", "-G", "box").returncode, 0)
+        self.assertEqual((self.root / "audit.jsonl").read_text(), before, "git's -G probe opens no session")
         r = self.client("--ssh", "git@box", "--", "echo ok")
         self.assertEqual(r.stdout, b"ok\n")
 

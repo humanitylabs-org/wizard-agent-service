@@ -63,6 +63,8 @@ def main(argv):
     if argv[0] == "list":
         header = {"op": "list"}
     elif argv[0] == "--ssh":
+        if "-G" in argv[1:]:   # git probes `ssh -G host` to detect OpenSSH; answer locally, open no session
+            return 0
         host, command = parse_ssh(argv[1:])
         header = {"machine": host, "command": command}
     else:
