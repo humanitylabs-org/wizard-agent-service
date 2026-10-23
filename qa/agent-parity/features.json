@@ -36,6 +36,22 @@
   ],
   "features": [
     {
+      "id": "chats-focus",
+      "description": "Persistent All/agent/subject Focus in the shared Chats list without per-agent windows or desks",
+      "layer": "ux",
+      "how_to_test": "Run wizard-ux/qa-chats-focus.cjs against baseline and candidate. In phone touch and desktop, compare main and routed rows, subjects, search/status AND, scoped errors, New chat route, private lock, persistence, legacy-window migration, Back and foreign-thread deep links; intercept every write and assert zero /v1/runs. Separately verify the same list and route contracts for disposable host-profile, container and restricted runtimes; fixture browser passes are not live-runtime evidence.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/commands.js",
+        "wizard-ux/web/core/chat-power.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-chats-focus.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "session-create",
       "description": "Create a hidden disposable thread",
       "layer": "server",
