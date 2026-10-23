@@ -243,7 +243,9 @@ export class Scheduler {
     this.refreshing = (async () => {
       // Only the last occurrence can be shown. Never use unrelated chat activity.
       // Every unfinished admitted occurrence (bounded to 6 h) so the trickle's in-flight count is true.
-      const rows = this.db.prepare('SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND instant > ?').all(this.now() - 6 * 3600_000)
+      // A notification occurrence keeps being observed for 7 days, so a long run or a slot outage still sends it.
+      const rows = this.db.prepare(`SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL
+        AND (instant > ? OR (json_extract(data,'$.deliver')='notification' AND instant > ?))`).all(this.now() - 6 * 3600_000, this.now() - 7 * 86400_000)
       await Promise.all(rows.map(async row => {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
@@ -262,7 +264,7 @@ export class Scheduler {
                 await this.notifier.send({ ...note, key: row.key })
                 outcome = 'notified'
               } catch {
-                // Stay unfinished so the next tick retries (bounded by the 6 h refresh window).
+                // Stay unfinished so the next refresh retries (notification rows are observed for 7 days).
                 this.db.prepare("UPDATE schedule_occurrences SET outcome='failed', error=? WHERE key=?").run('Notification not delivered; will retry', row.key)
                 return
               }
