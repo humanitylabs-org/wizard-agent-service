@@ -375,12 +375,14 @@
       "id": "heavy-relay",
       "description": "Submit disposable heavy work",
       "layer": "runtime",
-      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption.",
+      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption. For main, a running continuation may submit authorized follow-up behind a newer queued sibling, including after restart; unrelated newer requests/stop/steer still fence it. For restricted agents, guidance preserves original authorization and explicit owner gates. Nonrestricted container and host-profile heavy grants stay refused by the existing sandbox policy.",
       "source_refs": [
-        "server/heavy-integration.mjs"
+        "server/heavy-integration.mjs",
+        "server/agent-heavy-relay.mjs"
       ],
       "reference_tests": [
-        "tests/agent-heavy-relay.test.ts"
+        "tests/agent-heavy-relay.test.ts",
+        "tests/heavy-continuation-admission.test.ts"
       ],
       "fixture": null,
       "policy_exemptions": []
