@@ -1,6 +1,7 @@
 import { heavyRoot } from './support/heavy-root'
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
@@ -8,7 +9,7 @@ import { createHeavyIntegration } from '../server/heavy-integration.mjs'
 
 const cleanup: (() => any)[] = []
 afterEach(async () => { for (const fn of cleanup.reverse()) await fn(); cleanup.length = 0 })
-const token = 'heavy-followup-test-token-00000000000000'
+const token = randomBytes(32).toString('hex')
 const req = { headers: { authorization: `Bearer ${token}` } }
 const spec = { cwd: heavyRoot, argv: ['uname', '-a'], timeout_seconds: 10, lane: 'light' }
 const path = '/wizard/internal/heavy/submit'
@@ -21,18 +22,18 @@ async function fixture() {
   let duringHistory = async () => {}, duringRuntime = async () => {}
   let runs: any
   const open = () => {
-  runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0,
-    launch: async (r: any) => {
-      if (r.continuation?.kind === 'external-heavy') await integration.validate(r)
-      statuses.set(r.publicRunId, 'running')
-      return { upstreamRunId: r.publicRunId, payload: { status: 'running' } }
-    }, lookup: async (r: any) => ({ payload: { status: statuses.get(r.publicRunId) || 'running' } }) })
-  integration = createHeavyIntegration({ options: { heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
-    heavyTransport: async (p: any) => ({ job_id: p.job_id, state: 'completed', receipt: { exit_code: 0 } }) },
-    queue: runs, request: async (p: string) => {
-      if (p.startsWith('/v1/runs/')) { await duringRuntime(); return { runtime: { model: 'original', provider: 'original-provider' } } }
-      await duringHistory(); return { data: history }
-    } })!
+    runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0,
+      launch: async (r: any) => {
+        if (r.continuation?.kind === 'external-heavy') await integration.validate(r)
+        statuses.set(r.publicRunId, 'running')
+        return { upstreamRunId: r.publicRunId, payload: { status: 'running' } }
+      }, lookup: async (r: any) => ({ payload: { status: statuses.get(r.publicRunId) || 'running' } }) })
+    integration = createHeavyIntegration({ options: { heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
+      heavyTransport: async (p: any) => ({ job_id: p.job_id, state: 'completed', receipt: { exit_code: 0 } }) },
+      queue: runs, request: async (p: string) => {
+        if (p.startsWith('/v1/runs/')) { await duringRuntime(); return { runtime: { model: 'original', provider: 'original-provider' } } }
+        await duringHistory(); return { data: history }
+      } })!
   }
   open()
   cleanup.push(async () => { await integration.close(); runs.close(); rmSync(root, { recursive: true, force: true }) })
