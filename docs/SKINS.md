@@ -7,8 +7,8 @@ The service owns Files folders and verifies public listings; the owner's Wizard 
 
 - `WIZARD_USER_FILES_ROOT` (else `WIZARD_MEDIA_ROOT`): owner Files root. Skin folders are `Skins/<id>`; `Skins/active` contains an id followed by a newline, or is empty for no active layer. Missing pointers migrate an existing `Skins/My skin` folder. The existing commented My skin bootstrap and flat-file compatibility remain intact.
 - `WIZARD_SKINS_STATE_DIR`: private service state (defaults alongside other service state). Contains verified blob cache, pending packs, published events, and the first-use `upload-key.hex` (0600). Do not expose this directory through Files or HTTP.
-- `WIZARD_SKINS_RELAYS`: comma/whitespace-separated relay URLs. Defaults: `wss://store.wizard001.com/relay`, `wss://nos.lol`, `wss://relay.damus.io`.
-- `WIZARD_SKINS_BLOSSOM`: upload server; defaults to `https://store.wizard001.com/blossom`.
+- `WIZARD_SKINS_RELAYS`: comma/whitespace-separated relay URLs. Defaults: `wss://relay.aiwizards.com`, `wss://nos.lol`, `wss://relay.damus.io`.
+- `WIZARD_SKINS_BLOSSOM`: upload server; defaults to `https://blossom.aiwizards.com`.
 - `WIZARD_SKINS_CURATOR`: pinned curator hex pubkey. Default: `9f6deaf1a019f9393e3a044f873e508b1ac6cfa093db77ba21e70c811ee1f127`.
 
 All `/wizard/v1/skins` endpoints require the existing owner principal and access checks. They reject cross-origin/sibling-origin requests; writes require `application/json`. The existing `/wizard/v1/my-skin` and `/script` now read the active folder; their prior CSS sanitation, script hashes, ETags, caps and flat-file fallback remain compatible.

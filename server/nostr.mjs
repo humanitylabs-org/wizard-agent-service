@@ -6,8 +6,8 @@ import https from 'node:https'
 import http from 'node:http'
 import { schnorr } from '@noble/curves/secp256k1.js'
 
-export const DEFAULT_SKINS_RELAYS = ['wss://store.wizard001.com/relay', 'wss://nos.lol', 'wss://relay.damus.io']
-export const DEFAULT_SKINS_BLOSSOM = 'https://store.wizard001.com/blossom'
+export const DEFAULT_SKINS_RELAYS = ['wss://relay.aiwizards.com', 'wss://nos.lol', 'wss://relay.damus.io']
+export const DEFAULT_SKINS_BLOSSOM = 'https://blossom.aiwizards.com'
 // Set the archive curator's public key at deployment; no untrusted key may curate by default.
 export const DEFAULT_SKINS_CURATOR = '9f6deaf1a019f9393e3a044f873e508b1ac6cfa093db77ba21e70c811ee1f127'
 export const hex = bytes => Buffer.from(bytes).toString('hex')
