@@ -578,3 +578,52 @@ describe('windows, reminders and trickled agent work', () => {
     expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(0)
   })
 })
+
+describe('Boomerang returns (kind return)', () => {
+  it('validates a return as a once-only, prompt-free hand-back of a thread or message', () => {
+    const s = scheduler()
+    const thread = s.create({ name: 'Boomerang · Loomis', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', prompt: '  Reply to Loomis  ' })
+    expect(thread).toMatchObject({ kind: 'return', thread: 'wizard_t1', prompt: 'Reply to Loomis', skill: '', target: { message: null, excerpt: '' } })
+    const message = s.create({ name: 'Boomerang · msg', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: 1792700000.5, excerpt: 'the   price\nquote' } })
+    expect(message.target).toEqual({ message: 1792700000.5, excerpt: 'the price quote' })
+    expect(() => s.create({ name: 'x', kind: 'return', when: { every: 5 }, thread: 'wizard_t1' })).toThrow(/once/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' } })).toThrow(/thread/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', skill: 'k' })).toThrow(/runs nothing/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: '<b>' } })).toThrow(/target/)
+    expect(() => s.create({ name: 'x', when: { once: '2026-10-21T02:00:00Z' }, prompt: 'p', target: { message: 1 } })).toThrow(/only for kind return/)
+    const r = s.transaction(() => s.reserve(message, clock))
+    expect(r.body).toBeUndefined()
+    expect(r).toMatchObject({ kind: 'return', thread: 'wizard_t1', target: { message: 1792700000.5 } })
+  })
+
+  it('returns on time without a run, skips the trickle, and serves its watch id only once returned', async () => {
+    const delivered: any[] = []
+    const s = scheduler(async (o: any) => { delivered.push(o); return { returned: true } }, { trickleMs: 60_000, maxInflight: 1,
+      lookup: async () => ({ status: 'running' }) })
+    const work = s.create({ name: 'Busy', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: 'wizard_w' })
+    const back = s.create({ name: 'Boomerang · Thread', kind: 'return', when: { once: '2026-10-21T00:02:00Z' }, thread: 'wizard_b', prompt: 'Check the quote' })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', session_id: 'wizard_b', output: '' })
+    expect(s.returnRun(`wzb_${work.id}`)).toBeNull()
+    expect(s.returnRun('wzb_missing')).toBeNull()
+    await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id])
+    clock += 120_000; await s.tick()
+    // The trickle and the in-flight cap (work still running) never hold a Boomerang.
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id])
+    expect(delivered[1].body).toBeUndefined()
+    expect(s.project(s.get(back.id))).toMatchObject({ nextRun: null, lastRun: { outcome: 'returned' } })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed', session_id: 'wizard_b', output: '🪃 Back: Check the quote' })
+    clock += 120_000; await s.tick(); await s.refreshRuns()
+    expect(delivered).toHaveLength(2)
+    expect(s.project(s.get(back.id)).lastRun.outcome).toBe('returned')
+    // Again: a new time re-arms it, and the earlier return never reads as this one.
+    s.update(back.id, { when: { once: '2026-10-21T01:00:00Z' }, enabled: true })
+    expect(s.project(s.get(back.id)).nextRun).toBe('2026-10-21T01:00:00.000Z')
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', output: '' })
+    clock = Date.parse('2026-10-21T01:00:30Z'); await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id, back.id])
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
+    s.delete(back.id)
+    expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
+  })
+})
