@@ -114,7 +114,7 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
     id_note = " (<app> = app id, - as _)"
     text = [
         "Wizard OS: you are the owner's agent on this box. Installed apps do jobs for the owner.",
-        *(["To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow."] if hermes else []),
+        *(["To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow."] if hermes else []),
         f"Files root: {files_root}; app tool paths are relative to it.",
         "When a request matches a wizard-job-<job> skill in your skills list:" if hermes else "When a request matches a job below:",
         "1. Load that skill with skill_view for tool names and purposes." if hermes else "1. Use the app named for that job.",
