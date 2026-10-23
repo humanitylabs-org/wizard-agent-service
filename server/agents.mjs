@@ -1073,12 +1073,25 @@ export function createAgentRegistry(options = {}) {
     })) }
   })
   let pinsCache = null
+  // session id -> pinned agent ids, rebuilt whenever the pin table object changes. A linear scan per
+  // lookup made the private-thread filter quadratic (~15% of service CPU on seen-state reads).
+  let pinIndex = null
   const pins = () => {
     if (!pinsCache) pinsCache = readJson(threadsPath)?.threads ?? {}
     return pinsCache
   }
   function pinnedAgents(sessionId) {
-    return Object.values(pins()).filter(row => row.session_id === sessionId && ['runtime_verified', 'service_admission', 'migrated_pin'].includes(row.provenance)).map(row => row.agent_id)
+    const table = pins()
+    if (pinIndex?.table !== table) {
+      const bySession = new Map()
+      for (const row of Object.values(table)) {
+        if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(row?.provenance)) continue
+        if (!bySession.has(row.session_id)) bySession.set(row.session_id, [])
+        bySession.get(row.session_id).push(row.agent_id)
+      }
+      pinIndex = { table, bySession }
+    }
+    return [...(pinIndex.bySession.get(sessionId) ?? [])]
   }
   function pinnedAgent(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return ''
