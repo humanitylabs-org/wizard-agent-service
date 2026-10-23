@@ -89,7 +89,8 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
 }
 
 const json = (body: unknown, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+// Explicitly off: these tests switch standard-chat reading themselves (the default-on rule has its own test).
+const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private', read_standard_chats: false } }
 const STANDARD = (label: string, extra: Record<string, unknown> = {}) => ({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard', ...extra } })
 
 async function create(base: string, body: unknown, port?: number, dir?: string) {
@@ -213,6 +214,67 @@ describe('#58 which agents can use an app', () => {
     expect(await (await fetch(`${base}/wizard/v1/apps/notes/agents`, json({ agents: ['ghost'] }, 'PUT'))).json()).toMatchObject({ check: 'agent.id' })
   })
 
+  it('the redaction app (transcript-redaction slot) comes ticked for private agents: at creation and when installed later', async () => {
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const airlock = await fakeApp('airlock_submit')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const applied: string[] = []
+    const base = await start(dir, main, { agentRuntime: {
+      apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }),
+      deliver: async (_id: string, payload: any) => ({ verified: true, session_id: payload.session_id }),
+    } })
+    // An existing private agent, then Airlock is installed: it joins the private agent (and restarts it for the gateway).
+    const priv = await create(base, PRIVATE)
+    expect(priv.permissions).toMatchObject({ wizard_apps: [], agent_apps: [] })
+    applied.length = 0
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('airlock', airlock.url), provides: ['transcript-redaction'] }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const joined = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
+    expect(joined.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
+    expect(applied).toContain('private')
+    expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['airlock__airlock_submit', 'wizard_apps'])
+    // A new private agent starts with Airlock ticked even when the client sends an empty app list; other apps stay off.
+    const second = await create(base, { ...PRIVATE, label: 'Diary', permissions: { preset: 'private', wizard_apps: [], agent_apps: [] } })
+    expect(second.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
+    // The owner can untick it, and nothing re-adds it.
+    await fetch(`${base}/wizard/v1/agents/${second.id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))
+    const music = await fakeApp('play')
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('airlock', airlock.url), provides: ['transcript-redaction'] }, appEntry('music', music.url)])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const after = (await (await fetch(`${base}/wizard/v1/agents/${second.id}`)).json()).agent
+    expect(after.permissions.wizard_apps).toEqual([])
+    expect((await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent.permissions.wizard_apps).toEqual(['airlock'])
+  })
+
+  it('a meeting-transcripts app (Mizel) installed later never joins standard agents; other new apps still do', async () => {
+    // James, 23 Oct 2026: "The whole point of Mizel was to be fully private so no public agent can read its transcripts."
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main)
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    const mizel = await fakeApp('get_transcript')
+    const music = await fakeApp('play')
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('mizel', mizel.url), provides: ['meeting-recording', 'meeting-transcripts'] }, appEntry('music', music.url)])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const after = (await (await fetch(`${base}/wizard/v1/agents/${helper.id}`)).json()).agent
+    expect(after.permissions.wizard_apps).toContain('music')
+    expect(after.permissions.wizard_apps).not.toContain('mizel')
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('mizel__get_transcript')
+    const ticked = (await (await fetch(`${base}/wizard/v1/apps/mizel/agents`)).json()).agents.filter((a: any) => a.enabled).map((a: any) => a.id)
+    expect(ticked).not.toContain(helper.id)
+  })
+
   it('hermesConfigYaml: no gateway URL configured = no gateway for anyone', () => {
     const agent = { id: 'x', privacy: 'standard', model: { provider: 'tinfoil', model: 'glm-5-3', fallback: false }, permissions: { outside_tools: [], files: 'own', wizard_apps: ['a'], agent_apps: [] } }
     expect(hermesConfigYaml(agent)).not.toContain('wizard:')
@@ -312,5 +374,25 @@ describe('#59 private agents are sealed', () => {
     await fetch(`${base}/wizard/hermes/api/sessions?agent=${other.id}`)
     const std = await fetch(`${base}/wizard/hermes/api/sessions/wizard_other_1/messages`)
     expect(std.status).toBe(200)
+  })
+})
+
+// James, 23 Oct 2026: "give Philosopher full access to Wisdom" through the #58 tick. The daily box keeps the main
+// agent's runs unchanged (bridge off), which also turned off the gateway every container agent needs. 'gateway'
+// serves container agents their ticked apps and leaves the main agent exactly as 'off' does.
+describe('agentBridge gateway: container agents only', () => {
+  it('a ticked agent gets its apps; the main token, its kernel and its runs get nothing new', async () => {
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main, { agentBridge: 'gateway' })
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps'])
+    const allowed = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'notes__note_add', arguments: {} })
+    expect(allowed.json.result.content[0].text).toBe('ran note_add')
+    expect((await mcp(base, MAIN_TOKEN, 'tools/list')).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${MAIN_TOKEN}` } })).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${gatewayKey(dir, helper.id)}` } })).status).toBe(200)
   })
 })

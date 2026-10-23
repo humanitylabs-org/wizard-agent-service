@@ -11,7 +11,8 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, searchHermesSessionText, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
+import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
@@ -38,7 +39,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { GATEWAY_MAIN_AGENT, ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
@@ -2413,13 +2414,17 @@ function buildWizardServer(options, lifetime) {
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
   // The agent registry (below) decides which apps each agent may use on the gateway (#58).
   let gatewayAgents = null
+  // agentBridge 'gateway': serve /wizard/mcp and the agent kernel to container agents (their own gateway token)
+  // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
+  const gatewayOnly = options.agentBridge === 'gateway'
+  const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
-      fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
+      fetchImpl, writeSkills: !gatewayOnly && options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
     })
@@ -2427,7 +2432,7 @@ function buildWizardServer(options, lifetime) {
   if (bridge) lifetime.own(() => bridge.close())
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   const osInstructions = (sessionId) => {
-    if (!bridge) return ''
+    if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
     const { settings } = readSettings(settingsPath)
     if (settings.agent.adapter === 'hermes-plugin') {
@@ -3390,7 +3395,9 @@ function buildWizardServer(options, lifetime) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents,
+    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
@@ -3454,14 +3461,15 @@ function buildWizardServer(options, lifetime) {
         if (q && listCache.mode() === 'on') {
           // Search reuses the shared list snapshot; only the message-text lookup is per query.
           // Rows are shared with other clients, so matches get a copy, never a mutation.
-          try {
-            const cached = await listCache.served()
-            const hits = new Map()
-            for (let i=0; i<cached.length; i+=200) {
-              for (const [id, text] of searchHermesSessionText(hermesStatePath, cached.slice(i,i+200).map(s=>s.id), q)) hits.set(id, text)
-            }
+          let cached
+          try { cached = await listCache.served() }
+          catch (error) { listCache.fellBack(error) }
+          if (cached) {
+            // Search failures are not cache failures: never retry a timed-out scan
+            // as a full projection plus one new search for every batch.
+            const hits = await searchHermesSessionTextAsync(hermesStatePath, cached.map(s => s.id), q)
             return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
-          } catch (error) { listCache.fellBack(error) }
+          }
         }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
@@ -3470,7 +3478,7 @@ function buildWizardServer(options, lifetime) {
           const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
           const batch = JSON.parse(result.toString('utf8')).data
           if (searchParams.get('q')) {
-            const hits = searchHermesSessionText(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
+            const hits = await searchHermesSessionTextAsync(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
             for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
           }
           rows.push(...batch)
@@ -4711,7 +4719,7 @@ function buildWizardServer(options, lifetime) {
         return
       }
       if (url.pathname === '/wizard/mcp') {
-        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!bridge || (gatewayOnly && !containerAgent(request))) { sendJson(response, 404, { error: 'not_found' }); return }
         await bridge.handle(request, response)
         return
       }
@@ -4765,6 +4773,7 @@ function buildWizardServer(options, lifetime) {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
         const tokenAgent = bridge.agentFor(request)
+        if (gatewayOnly && !containerAgent(request)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
         const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
