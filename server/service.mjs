@@ -57,7 +57,7 @@ import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
-import { Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
@@ -4132,6 +4132,12 @@ function buildWizardServer(options, lifetime) {
     deliver: async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      if (occurrence.kind === 'return') {
+        // Boomerang: no run. A deferred thread comes back (Defer is cleared); the shell lifts the thread to the
+        // top of Ready with its banner, and the phone's reply watcher posts the notification for `wzb_<id>`.
+        threadDispositionStore.clearSession(occurrence.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', occurrence.thread, agent)
+        return { returned: true }
+      }
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
       if (!agents && agent !== MAIN_AGENT_ID) throw Object.assign(new Error('agent unavailable'), { status: 404 })
       if (agents && (!agents.read(agent) || agents.read(agent)?.role === 'recovery')) throw Object.assign(new Error('agent unavailable'), { status: 409 })
@@ -4550,6 +4556,13 @@ function buildWizardServer(options, lifetime) {
           }
           sendJson(response, parts.length <= 3 ? 405 : 404, { error: parts.length <= 3 ? 'method_not_allowed' : 'not_found' })
         } catch (error) { sendUploadError(response, error) }
+        return
+      }
+      if (request.method === 'GET' && url.pathname.startsWith(`${PROXY_PREFIX}/v1/runs/${RETURN_RUN_PREFIX}`)) {
+        // Boomerang watch ids (see Scheduler.returnRun). Served here, never proxied to Hermes.
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const run = scheduler?.returnRun(decodeURIComponent(url.pathname.slice(`${PROXY_PREFIX}/v1/runs/`.length)))
+        sendJson(response, run ? 200 : 404, run ?? { error: 'not_found' }, { 'Cache-Control': 'no-store' })
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences') {
