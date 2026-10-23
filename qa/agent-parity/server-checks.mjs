@@ -60,11 +60,14 @@ export const serverChecks = {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
     const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': record } }), method: 'PUT' })
     assert.equal(r.status, 200)
+    const unreadAt = now + 1
+    const unread = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, unreadAt } } }), method: 'PUT' })
+    assert.equal(unread.status, 200)
     await s.restart()
     const state = await (await s.raw('/wizard/thread-seen')).json()
     const records = Object.values(state.state.threads)
     assert.equal(records.length, 1)
-    assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now)
+    assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now); assert.equal(records[0].unreadAt, unreadAt)
   },
   'session-search': async s => {
     s.sessions.get('wizard_parity').messages.push({ role: 'user', timestamp: Date.now() / 1000, content: 'parityuniquetoken' })
