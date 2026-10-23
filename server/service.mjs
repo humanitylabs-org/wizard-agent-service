@@ -2019,6 +2019,27 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+// The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
+// (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+export function scheduleNotifier({ bridge, appsJsonPath }) {
+  const pick = () => {
+    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+    let chosen = ''
+    try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
+    return providers.find(app => app.id === chosen) || (providers.length === 1 ? providers[0] : null)
+  }
+  return {
+    available: () => pick()?.status === 'running',
+    send: async ({ title, message }) => {
+      const app = pick()
+      if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      if (!result || result.isError) throw new Error('notify failed')
+      return { app: app.id }
+    },
+  }
+}
+
 // The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
@@ -4175,6 +4196,7 @@ function buildWizardServer(options, lifetime) {
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
