@@ -1552,7 +1552,7 @@ function appendFileMarker(input, files, includeNativeImages = false) {
   return [message]
 }
 
-async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
+export async function prepareRunBody(body, resolveFiles, includeNativeImages = false) {
   const value = parseJsonBody(body)
   const recovered = recoverProjectedFileChips(value.input)
   const declared = Object.hasOwn(value, 'wizard_file_ids')
