@@ -597,6 +597,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "swipe-gestures",
+      "description": "Swipe a main and routed thread back, and short-swipe it",
+      "layer": "ux",
+      "how_to_test": "In a main and routed thread, a short or subtle sideways swipe keeps the thread and snaps it fully back; an intentional swipe right returns one step to that agent's list; the app never exits.",
+      "source_refs": [
+        "wizard-ux/web/core/thread-swipe-back.js",
+        "wizard-ux/web/core/swipe-intent.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-thread-swipe-back.cjs",
+        "wizard-ux/tests/thread-swipe-snapback.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "appearance",
       "description": "Render main and routed threads in two shell skins",
       "layer": "ux",
