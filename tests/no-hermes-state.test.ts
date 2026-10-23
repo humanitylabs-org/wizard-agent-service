@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // With WIZARD_HERMES_STATE_PATH unset, the Agent Service must reach Hermes over HTTP only: listing,
-// follow-through scans and run admission open no SQLite file except its own run queue.
+// follow-through scans and run admission open only service-owned queue/coordination SQLite files.
 const opened: string[] = []
 vi.mock('node:sqlite', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:sqlite')>()
@@ -58,6 +58,9 @@ describe('no Hermes state fallback configured', () => {
 
     expect(seen).toContain('GET /api/sessions')
     expect(seen).toContain('GET /api/sessions/wizard_x/messages')
-    expect(opened.filter((path) => !path.includes('run-queue') && !path.startsWith(join(home, 'queue')))).toEqual([])
+    // The service lease is a lock-only DB, not Hermes state. storeDirectories resolves aliases
+    // (including macOS /var -> /private/var), so allow only this exact canonical lease path.
+    const serviceLeasePath = join(realpathSync(join(home, 'queue')), '.agent-pairs.service-lease.sqlite')
+    expect(opened.filter((path) => !path.includes('run-queue') && !path.startsWith(join(home, 'queue')) && path !== serviceLeasePath)).toEqual([])
   }, 20_000)
 })

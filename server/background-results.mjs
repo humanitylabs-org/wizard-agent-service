@@ -7,6 +7,11 @@ import { parseStatus } from './thread-status.mjs'
 const ID = /^[A-Za-z0-9._:-]{1,180}$/
 const WIZARD = /^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/
 const ACTIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
+const CATALOG_PAGE_SIZE = 50
+const CATALOG_ROW_LIMIT = 50_000
+const HISTORY_CONCURRENCY = 2
+const READ_DEADLINE_MIN_MS = 5000
+const READ_DEADLINE_MAX_MS = 10_000
 const PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 const INTERNAL = /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/
 const rowsOf = p => Array.isArray(p?.data) ? p.data : Array.isArray(p?.sessions) ? p.sessions : []
@@ -31,15 +36,36 @@ function snapshot(rows, at) {
 export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000 }) {
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
-  const requestBounded = (path, signal) => request(path, {
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
-  })
+  let discovery = null
+  let completedUnreported = false
+  let retryAt = 0
+  // Catalog enrichment has a substantial fixed cost even for small pages. Give
+  // measured slow reads headroom, not an unbounded wait. Keep history latency
+  // separate so fast message reads cannot erase the catalog's observed budget.
+  const deadlines = { catalog: READ_DEADLINE_MIN_MS, history: READ_DEADLINE_MIN_MS }
+  const requestBounded = async path => {
+    const kind = path.startsWith('/api/sessions?') ? 'catalog' : 'history'
+    // Only idempotent reads retry, once, with a NEW signal. A second timeout
+    // remains a visible failure even at the maximum individual read deadline.
+    for (let attempt = 0; ; attempt++) {
+      const started = now()
+      try {
+        const value = await request(path, { signal: AbortSignal.timeout(deadlines[kind]) })
+        deadlines[kind] = Math.max(READ_DEADLINE_MIN_MS, Math.min(READ_DEADLINE_MAX_MS, Math.ceil((now() - started) * 2 + 1000)))
+        return value
+      } catch (failure) {
+        if (!['AbortError', 'TimeoutError'].includes(failure?.name)) throw failure
+        deadlines[kind] = Math.min(READ_DEADLINE_MAX_MS, deadlines[kind] * 2)
+        if (attempt) throw failure
+      }
+    }
+  }
   const reads = new Map()
   const clicks = new Map()
-  const recent = async (id, fresh = false, revision = '', signal) => {
+  const recent = async (id, fresh = false, revision = '') => {
     const previous = reads.get(id)
     if (!fresh && previous?.revision === revision) return previous.rows
-    const rows = rowsOf(await requestBounded(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`, signal)).map(row => ({
+    const rows = rowsOf(await requestBounded(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=100`)).map(row => ({
       id: row.id, role: row.role, timestamp: row.timestamp, finish_reason: row.finish_reason, display_kind: row.display_kind,
       // Native photos/voice are real human turns too. Keep their boundary without retaining base64 media or
       // unrelated reasoning in the discovery cache. Completion text is retained for the explicit replay.
@@ -50,10 +76,10 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     reads.set(id, { revision, rows })
     return rows
   }
-  const threadRows = async (root, readId, fresh = false, revision = '', signal) => {
-    const rows = await recent(readId, fresh, revision, signal)
+  const threadRows = async (root, readId, fresh = false, revision = '') => {
+    const rows = await recent(readId, fresh, revision)
     if (root === readId) return rows
-    const rootRows = await recent(root, fresh, revision, signal)
+    const rootRows = await recent(root, fresh, revision)
     const unique = new Map()
     for (const row of [...rows, ...rootRows]) unique.set(String(row.id), row)
     return [...unique.values()]
@@ -74,14 +100,23 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     if (snap.moved || snap.gated || isBusy(candidate.sessionId) || isBusy(candidate.readId) || consumed(rows, candidate.delegationId, candidate.at, candidate.messageId, candidate.sourceKind)) return null
     return { ...candidate, boundary: snap.boundary }
   }
-  const scan = async () => {
-    const signal = AbortSignal.timeout(40_000)
+  // A large history is a finite scan, not a slow individual request. Advance it in
+  // bounded slices across list polls instead of aborting at 40 s and restarting
+  // at page zero forever. Publish only a fully reconciled generation.
+  const scan = async function* () {
     const sessions = [], records = [], aliases = new Map(), roots = new Map(), failures = new Map()
     let complete = true
     // Walk the real HTTP pages, including session 101. This is independent of the UX's 30-day display policy.
     // Unchanged conversations reuse their message reads; one scan is shared/cached by all list consumers.
-    for (let offset = 0; ; offset += 200) {
-      const p = await requestBounded(`/api/sessions?limit=200&offset=${offset}&include_children=false`, signal)
+    for (let offset = 0; ;) {
+      let p
+      try { p = await requestBounded(`/api/sessions?limit=${CATALOG_PAGE_SIZE}&offset=${offset}&include_children=false`) }
+      catch (failure) {
+        // Yield the failure without closing the generator: retries must resume
+        // THIS page rather than repeatedly re-enriching the catalog from zero.
+        yield { failure }
+        continue
+      }
       const page = rowsOf(p)
       for (const row of page) {
         const root = String(row._lineage_root_id || row.id || '')
@@ -93,16 +128,19 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         roots.set(root, { ...row, id: root })
         sessions.push({ row, id, root })
       }
-      if (page.length < 200 || p.has_more === false) break
-      if (offset >= 9800) { complete = false; break }
+      // Some stock versions report has_more=false on a full first page. The
+      // actual page length is the termination fence; do not silently omit page 2.
+      yield
+      if (page.length < CATALOG_PAGE_SIZE) break
+      offset += CATALOG_PAGE_SIZE
+      if (offset >= CATALOG_ROW_LIMIT) { complete = false; break }
     }
-    for (let offset = 0; offset < sessions.length; offset += 8) {
-      await Promise.all(sessions.slice(offset, offset + 8).map(async ({ row, id, root }) => {
+    for (let offset = 0; offset < sessions.length; offset += HISTORY_CONCURRENCY) {
+      await Promise.all(sessions.slice(offset, offset + HISTORY_CONCURRENCY).map(async ({ row, id, root }) => {
         if (isBusy(root) || isBusy(id)) return
         let rows
-        try { rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`, signal) }
+        try { rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`) }
         catch (failure) {
-          if (signal.aborted) throw failure
           complete = false; failures.set(root, Number(failure?.status) || 503)
           return
         }
@@ -121,6 +159,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         const cacheEntry = reads.get(id)
         if (cacheEntry && !records.some(record => record.readId === id)) if (!rows.some(m => textOf(m).startsWith(PREFIX) && now() / 1000 - Number(m.timestamp) <= 7200)) cacheEntry.rows = []
       }))
+      yield
     }
     // Optional read-only history opt-in: dropped/pending receipts that never produced a transcript row.
     // The existing receipt reader still enforces consumption, moved-on and owner-gate fences. Only its age
@@ -131,29 +170,54 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       const root = aliases.get(receipt.sessionId)
       if (!WIZARD.test(root)) continue
       let rows
-      try { rows = await threadRows(root, receipt.sessionId, true, '', signal) }
+      try { rows = await threadRows(root, receipt.sessionId, true, '') }
       catch (failure) {
-        if (signal.aborted) throw failure
         complete = false; failures.set(root, Number(failure?.status) || 503)
         continue
       }
       const candidate = acceptable({ ...receipt, sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
         input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, rows)
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
+      yield
     }
     for (const id of reads.keys()) if (!aliases.has(id)) reads.delete(id)
     cache = { at: now(), records, sessions: [...roots.values()], complete, failures, error: false }
     return cache
   }
+  const unavailable = failure => {
+    console.warn('[background-results] discovery temporarily unavailable:', String(failure?.message || 'read failed').slice(0, 120))
+    cache = { ...cache, at: now(), error: true }
+    retryAt = now() + refreshMs
+    return cache
+  }
   const refresh = async (fresh = false) => {
-    if (!fresh && cache.at && now() - cache.at < refreshMs) return cache
-    if (!inflight) inflight = scan().catch(error => { console.warn('[background-results] discovery temporarily unavailable:', String(error?.message || 'read failed').slice(0, 120)); cache = { ...cache, at: now(), error: true }; return cache }).finally(() => { inflight = null })
-    return inflight
+    if (now() < retryAt) return cache
+    if (!fresh && !discovery && cache.at && now() - cache.at < refreshMs) return cache
+    if (!inflight) {
+      discovery ??= scan()
+      inflight = discovery.next().then(({ done, value }) => {
+        if (!done && value?.failure) return unavailable(value.failure)
+        retryAt = 0
+        if (done) { discovery = null; completedUnreported = true }
+        return done ? value : cache
+      }).catch(error => {
+        discovery = null
+        return unavailable(error)
+      }).finally(() => { inflight = null })
+    }
+    const result = await inflight
+    // Explicit Continue requires a reconciled snapshot, never a partially scanned generation.
+    if (fresh && discovery && !retryAt) return refresh(true)
+    if (fresh) completedUnreported = false
+    return result
   }
   const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
   return {
     async list() {
-      void refresh()
+      // Deliver one settled generation even when the client's polling interval
+      // exceeds refreshMs; otherwise every poll can restart 'scanning'.
+      if (completedUnreported && !inflight && !discovery) completedUnreported = false
+      else void refresh()
       const c = cache
       const pending = c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId) && !isBusy(row.readId))
       const bySession = new Map(pending.map(row => [row.sessionId, row]))
@@ -165,7 +229,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         status: 'completed', wizard_background_result: publicRecord(bySession.get(row.id)),
         wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result' },
       }))
-      return { results: pending.map(publicRecord), sessions, scan_complete: !inflight && !c.error && c.complete, scanning: Boolean(inflight), available: !c.error }
+      return { results: pending.map(publicRecord), sessions, scan_complete: !inflight && !discovery && !c.error && c.complete, scanning: Boolean(inflight || discovery), available: !c.error }
     },
     async project(result) {
       void refresh()

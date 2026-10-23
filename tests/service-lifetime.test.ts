@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { serviceLifetime } from '../server/service-lifetime.mjs'
@@ -28,7 +28,9 @@ it('a stopped timer producer keeps its fence through an admitted continuation an
     expect(handleClosed).toBe(false)
     finish(); await tick; await drained
     expect(handleClosed).toBe(true)
-    expect(restoreStoreSet([dir], { serviceStopped: true })).toContain(join(dir, 'receipt.json'))
+    // Restore returns canonical paths and removes newly created stores; resolve before restore.
+    const receiptPath = realpathSync(join(dir, 'receipt.json'))
+    expect(restoreStoreSet([dir], { serviceStopped: true })).toContain(receiptPath)
   } finally { finish(); await drained; rmSync(dir, { recursive: true, force: true }) }
 })
 
