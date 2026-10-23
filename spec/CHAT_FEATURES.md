@@ -19,6 +19,7 @@ History/test families included: attachment transport and profile routing; privat
 
 | ID | Layer | Per-kind check |
 |---|---|---|
+| chats-focus | ux | `wizard-ux/qa-chats-focus.cjs`: synthetic main/routed browser acceptance; disposable live runtime evidence remains required |
 | session-create | server | HTTP fixture |
 | native-images | server | HTTP fixture |
 | image-history-reload | server | HTTP fixture |
