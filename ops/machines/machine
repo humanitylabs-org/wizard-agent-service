@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""machine: run commands on a computer your owner gave you (Wizard Machines).
+
+  machine list                          machines you own
+  machine thales -- uname -a            run one command (exit code passes through)
+  machine thales                        shell on stdin (no terminal)
+  machine --ssh [ssh options] thales cmd   ssh-compatible, for other tools:
+      rsync -e 'machine --ssh' ./src thales:work/src
+      GIT_SSH_COMMAND='machine --ssh' git ...
+      tar -cz src | machine thales -- tar -xz -C work   (bulk copy)
+
+No key or address lives in this container: the relay behind
+/run/wizard-machines/machines.sock holds them. Refusals print `machine: <reason>`.
+"""
+import json
+import os
+import socket
+import struct
+import sys
+import threading
+
+SOCK = os.environ.get("WIZARD_MACHINES_SOCKET", "/run/wizard-machines/machines.sock")
+# ssh options that take a value; everything else starting with '-' is a flag we ignore.
+SSH_VALUE_OPTS = set("bcDEeFIiJLlmOopQRSWw")
+
+
+def frame(kind, payload=b""):
+    return kind + struct.pack(">I", len(payload)) + payload
+
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def parse_ssh(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        opt = args[i]
+        if len(opt) == 2 and opt[1] in SSH_VALUE_OPTS:
+            i += 1
+        i += 1
+    if i < len(args) and args[i] == "--":
+        i += 1
+    if i >= len(args):
+        sys.exit("machine: no host given")
+    host = args[i].split("@", 1)[-1]
+    rest = args[i + 1:]
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    return host, (" ".join(rest) if rest else None)   # ssh joins words with spaces; so do we
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if argv[0] == "list":
+        header = {"op": "list"}
+    elif argv[0] == "--ssh":
+        host, command = parse_ssh(argv[1:])
+        header = {"machine": host, "command": command}
+    else:
+        rest = argv[1:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        header = {"machine": argv[0], "command": " ".join(rest) if rest else None}
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+    except OSError:
+        print("machine: no machines are connected to this agent", file=sys.stderr)
+        return 255
+    s.sendall(frame(b"h", json.dumps(header).encode()))
+
+    def feed():
+        try:
+            fd = sys.stdin.fileno()
+            while True:
+                data = os.read(fd, 65536)
+                if not data:
+                    break
+                s.sendall(frame(b"i", data))
+            s.sendall(frame(b"e"))
+        except (OSError, ValueError):
+            with_eof = frame(b"e")
+            try:
+                s.sendall(with_eof)
+            except OSError:
+                pass
+
+    if header.get("op") != "list":
+        threading.Thread(target=feed, daemon=True).start()
+    out, err = sys.stdout.buffer, sys.stderr.buffer
+    while True:
+        head = recv_exact(s, 5)
+        if head is None:
+            print("machine: connection to the relay was lost", file=sys.stderr)
+            return 255
+        kind, size = head[:1], struct.unpack(">I", head[1:])[0]
+        body = recv_exact(s, size) if size else b""
+        if body is None:
+            return 255
+        if kind == b"o":
+            out.write(body)
+            out.flush()
+        elif kind == b"r":
+            err.write(body)
+            err.flush()
+        elif kind == b"x":
+            result = json.loads(body)
+            if "machines" in result:
+                for m in result["machines"]:
+                    print(f"{m['id']}\t{m['label']}\t{m['level']}")
+                if not result["machines"]:
+                    print("machine: no machines are connected to this agent", file=sys.stderr)
+            if result.get("error"):
+                print(f"machine: {result['error']}", file=sys.stderr)
+            return int(result.get("code", 255))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
