@@ -300,7 +300,18 @@ export class Scheduler {
     }
     return job
   }
-  create(input) { return this.save(this.normalize(input)) }
+  /** `placement` is service-internal (never from an HTTP body): a fixed thread the first occurrence creates
+   * with `threadTitle`, so a series of one-shots (the onboarding tips) shares one thread; `group` tags the series. */
+  create(input, placement = null) {
+    const job = this.normalize(input)
+    if (placement?.thread) {
+      if (!id(placement.thread)) throw fail('invalid thread')
+      Object.assign(job, { thread: placement.thread, createThread: true })
+    }
+    if (placement?.threadTitle) job.threadTitle = text(placement.threadTitle, 160, 'thread title')
+    if (placement?.group) job.group = text(placement.group, 60, 'group')
+    return this.save(job)
+  }
   update(jobId, input) {
     return this.transaction(() => {
       const prior = this.get(jobId)
@@ -324,7 +335,7 @@ export class Scheduler {
     if (!job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
     const key = `schedule:${job.id}:${iso(instant)}`
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
-      createThread: Boolean(job.createThread), title: job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`,
+      createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
       kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job), ...(job.model ? { model: job.model } : {}) } }) }
