@@ -495,6 +495,13 @@ export class DurableRunQueue {
     return row ? this._record(row) : null
   }
 
+  // Receipt insertion order is not lease ownership: a newer sibling completion
+  // may be queued behind the running turn. Fail closed on ambiguous owners.
+  mutationOwnerForSession(sessionId) {
+    const rows = this.database.prepare("SELECT * FROM wizard_run_queue WHERE session_id=? AND status IN ('running','launching') LIMIT 2").all(sessionId)
+    return rows.length === 1 ? this._record(rows[0]) : null
+  }
+
   async summary() {
     await this.tick(false)
     let external = []
