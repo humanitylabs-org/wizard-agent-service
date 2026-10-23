@@ -134,7 +134,7 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect(body.results).toHaveLength(205)
     expect(body.results.some((r: any) => r.session_id === 'wizard-assistant-101')).toBe(true)
     expect(body.results.some((r: any) => r.session_id === 'wizard_compressed')).toBe(true)
-    expect(f.reads).toContain('/api/sessions?limit=200&offset=200&include_children=false')
+    expect(f.reads).toContain('/api/sessions?limit=50&offset=200&include_children=false')
     expect(JSON.stringify(body)).not.toContain('Saved findings:')
     expect(body.scan_complete).toBe(true)
     expect(f.calls).toHaveLength(0)

@@ -58,11 +58,11 @@ describe('background soak regressions', () => {
       const offset = Number(new URL(path, 'http://fixture').searchParams.get('offset'))
       offsets.push(offset)
       return { has_more: false, data: offset < 2400
-        ? Array.from({ length: 200 }, (_, i) => ({ id: `cron_${offset + i}` }))
+        ? Array.from({ length: Number(new URL(path, 'http://fixture').searchParams.get('limit')) }, (_, i) => ({ id: `cron_${offset + i}` }))
         : [{ id: 'wizard_tail', message_count: 2, last_active: began / 1000 - 10800 }] }
     } })
     let result: any
-    for (let n = 0; n < 80; n++) {
+    for (let n = 0; n < 220; n++) {
       result = await bg.list()
       if (!result.scanning) break
       await vi.advanceTimersByTimeAsync(4000)
@@ -72,6 +72,71 @@ describe('background soak regressions', () => {
     expect(offsets.filter(x => x === 0)).toHaveLength(1)
     expect(result.available).toBe(true); expect(result.scan_complete).toBe(true)
     expect(result.results.map((r: any) => r.session_id)).toEqual(['wizard_tail'])
+  })
+
+  it('uses small catalog pages and at most two concurrent history reads', async () => {
+    let active = 0, peak = 0
+    const limits: number[] = []
+    const bg = createBackgroundResults({ queue: () => null, request: async (path: string) => {
+      if (path.includes('/messages?')) {
+        peak = Math.max(peak, ++active)
+        await flush(); active--
+        return { data: [] }
+      }
+      const url = new URL(path, 'http://fixture')
+      const limit = Number(url.searchParams.get('limit')); limits.push(limit)
+      return { data: Array.from({ length: 12 }, (_, i) => ({ id: `wizard_load_${i}` })) }
+    } })
+    for (let n = 0; n < 30; n++) { await bg.list(); await flush() }
+    expect(limits).toEqual([50])
+    expect(peak).toBe(2)
+  })
+
+  it('keeps the failed page cursor, backs off polling, and resumes past 10,000 catalog rows', async () => {
+    let clock = 1000, fail = true
+    const offsets: number[] = [], warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const bg = createBackgroundResults({ now: () => clock, queue: () => ({ byBackgroundRecovery: () => null }), request: async (path: string) => {
+      if (path.includes('/messages?')) return { data: [] }
+      const url = new URL(path, 'http://fixture'), offset = Number(url.searchParams.get('offset'))
+      const limit = Number(url.searchParams.get('limit')); offsets.push(offset)
+      if (offset === 50 && fail) throw new DOMException('deadline', 'TimeoutError')
+      return { has_more: false, data: offset < 10350 ? Array.from({ length: limit }, (_, i) => ({ id: `cron_${offset + i}` })) : [] }
+    } })
+    await bg.list(); await flush(); await bg.list(); await flush()
+    expect((await bg.list()).available).toBe(false)
+    expect(offsets).toEqual([0, 50, 50]); expect(warn).toHaveBeenCalledOnce()
+    // Neither polling nor explicit Continue can spin on a persistently failed page.
+    for (let i = 0; i < 5; i++) await bg.list()
+    await expect(bg.continueOnce('bg_' + 'a'.repeat(32), 'wizard_missing')).rejects.toThrow('history is temporarily unavailable')
+    expect(offsets).toEqual([0, 50, 50])
+    fail = false; clock += 15001
+    let result: any
+    for (let n = 0; n < 220; n++) {
+      result = await bg.list(); if (!result.scanning) break
+      await flush()
+    }
+    expect(offsets.filter(x => x === 0)).toHaveLength(1)
+    expect(offsets).toContain(10350)
+    expect(result.available).toBe(true); expect(result.scan_complete).toBe(true)
+  })
+
+  it('adapts only bounded read deadlines, retries once with a fresh signal, and still exposes failure', async () => {
+    let clock = 1000
+    const deadlines: number[] = [], signals: AbortSignal[] = []
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      deadlines.push(ms); return new AbortController().signal
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const bg = createBackgroundResults({ now: () => clock, queue: () => null, request: async (path: string, init: any) => {
+      signals.push(init.signal)
+      const offset = Number(new URL(path, 'http://fixture').searchParams.get('offset'))
+      if (offset === 0) { clock += 3500; return { data: Array.from({ length: 50 }, (_, i) => ({ id: `cron_${i}` })) } }
+      throw new DOMException('deadline', 'TimeoutError')
+    } })
+    await bg.list(); await flush(); await bg.list(); await flush()
+    expect(deadlines).toEqual([5000, 8000, 10000])
+    expect(new Set(signals).size).toBe(3)
+    expect((await bg.list()).available).toBe(false); expect(warn).toHaveBeenCalledOnce()
   })
 
   it('retries a transient read deadline once, but exposes a persistent catalog failure', async () => {

@@ -7,6 +7,11 @@ import { parseStatus } from './thread-status.mjs'
 const ID = /^[A-Za-z0-9._:-]{1,180}$/
 const WIZARD = /^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/
 const ACTIVE = new Set(['queued', 'running', 'waiting_for_approval', 'stopping'])
+const CATALOG_PAGE_SIZE = 50
+const CATALOG_ROW_LIMIT = 50_000
+const HISTORY_CONCURRENCY = 2
+const READ_DEADLINE_MIN_MS = 5000
+const READ_DEADLINE_MAX_MS = 10_000
 const PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 const INTERNAL = /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/
 const rowsOf = p => Array.isArray(p?.data) ? p.data : Array.isArray(p?.sessions) ? p.sessions : []
@@ -33,13 +38,25 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   let inflight = null
   let discovery = null
   let completedUnreported = false
+  let retryAt = 0
+  // Catalog enrichment has a substantial fixed cost even for small pages. Give
+  // measured slow reads headroom, not an unbounded wait. Keep history latency
+  // separate so fast message reads cannot erase the catalog's observed budget.
+  const deadlines = { catalog: READ_DEADLINE_MIN_MS, history: READ_DEADLINE_MIN_MS }
   const requestBounded = async path => {
-    // A congested local upstream can miss one read deadline. Retry the idempotent
-    // read once with a NEW signal; never replay a mutation or hide a persistent fault.
+    const kind = path.startsWith('/api/sessions?') ? 'catalog' : 'history'
+    // Only idempotent reads retry, once, with a NEW signal. A second timeout
+    // remains a visible failure even at the maximum individual read deadline.
     for (let attempt = 0; ; attempt++) {
-      try { return await request(path, { signal: AbortSignal.timeout(5000) }) }
-      catch (failure) {
-        if (attempt || !['AbortError', 'TimeoutError'].includes(failure?.name)) throw failure
+      const started = now()
+      try {
+        const value = await request(path, { signal: AbortSignal.timeout(deadlines[kind]) })
+        deadlines[kind] = Math.max(READ_DEADLINE_MIN_MS, Math.min(READ_DEADLINE_MAX_MS, Math.ceil((now() - started) * 2 + 1000)))
+        return value
+      } catch (failure) {
+        if (!['AbortError', 'TimeoutError'].includes(failure?.name)) throw failure
+        deadlines[kind] = Math.min(READ_DEADLINE_MAX_MS, deadlines[kind] * 2)
+        if (attempt) throw failure
       }
     }
   }
@@ -91,8 +108,15 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     let complete = true
     // Walk the real HTTP pages, including session 101. This is independent of the UX's 30-day display policy.
     // Unchanged conversations reuse their message reads; one scan is shared/cached by all list consumers.
-    for (let offset = 0; ; offset += 200) {
-      const p = await requestBounded(`/api/sessions?limit=200&offset=${offset}&include_children=false`)
+    for (let offset = 0; ;) {
+      let p
+      try { p = await requestBounded(`/api/sessions?limit=${CATALOG_PAGE_SIZE}&offset=${offset}&include_children=false`) }
+      catch (failure) {
+        // Yield the failure without closing the generator: retries must resume
+        // THIS page rather than repeatedly re-enriching the catalog from zero.
+        yield { failure }
+        continue
+      }
       const page = rowsOf(p)
       for (const row of page) {
         const root = String(row._lineage_root_id || row.id || '')
@@ -107,11 +131,12 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       // Some stock versions report has_more=false on a full first page. The
       // actual page length is the termination fence; do not silently omit page 2.
       yield
-      if (page.length < 200) break
-      if (offset >= 9800) { complete = false; break }
+      if (page.length < CATALOG_PAGE_SIZE) break
+      offset += CATALOG_PAGE_SIZE
+      if (offset >= CATALOG_ROW_LIMIT) { complete = false; break }
     }
-    for (let offset = 0; offset < sessions.length; offset += 8) {
-      await Promise.all(sessions.slice(offset, offset + 8).map(async ({ row, id, root }) => {
+    for (let offset = 0; offset < sessions.length; offset += HISTORY_CONCURRENCY) {
+      await Promise.all(sessions.slice(offset, offset + HISTORY_CONCURRENCY).map(async ({ row, id, root }) => {
         if (isBusy(root) || isBusy(id)) return
         let rows
         try { rows = await threadRows(root, id, false, `${row.last_active || row.started_at}:${row.message_count}`) }
@@ -159,23 +184,30 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     cache = { at: now(), records, sessions: [...roots.values()], complete, failures, error: false }
     return cache
   }
+  const unavailable = failure => {
+    console.warn('[background-results] discovery temporarily unavailable:', String(failure?.message || 'read failed').slice(0, 120))
+    cache = { ...cache, at: now(), error: true }
+    retryAt = now() + refreshMs
+    return cache
+  }
   const refresh = async (fresh = false) => {
+    if (now() < retryAt) return cache
     if (!fresh && !discovery && cache.at && now() - cache.at < refreshMs) return cache
     if (!inflight) {
       discovery ??= scan()
       inflight = discovery.next().then(({ done, value }) => {
+        if (!done && value?.failure) return unavailable(value.failure)
+        retryAt = 0
         if (done) { discovery = null; completedUnreported = true }
         return done ? value : cache
       }).catch(error => {
         discovery = null
-        console.warn('[background-results] discovery temporarily unavailable:', String(error?.message || 'read failed').slice(0, 120))
-        cache = { ...cache, at: now(), error: true }
-        return cache
+        return unavailable(error)
       }).finally(() => { inflight = null })
     }
     const result = await inflight
     // Explicit Continue requires a reconciled snapshot, never a partially scanned generation.
-    if (fresh && discovery) return refresh(true)
+    if (fresh && discovery && !retryAt) return refresh(true)
     if (fresh) completedUnreported = false
     return result
   }
