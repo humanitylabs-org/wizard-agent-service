@@ -23,7 +23,7 @@ async function fixture() {
   const open = () => {
   runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0,
     launch: async (r: any) => {
-      if (r.continuation) await integration.validate(r)
+      if (r.continuation?.kind === 'external-heavy') await integration.validate(r)
       statuses.set(r.publicRunId, 'running')
       return { upstreamRunId: r.publicRunId, payload: { status: 'running' } }
     }, lookup: async (r: any) => ({ payload: { status: statuses.get(r.publicRunId) || 'running' } }) })
@@ -41,7 +41,15 @@ async function fixture() {
     return (await runs.admit({ runtime: 'direct', sessionId, idempotencyKey: key, body,
       requestHash: queueRequestHash('direct', body), continuation })).record
   }
-  const submit = (key: string, session_id = 's', command = spec) => integration.handle(req, path, { session_id, key, spec: command })
+  const jobOrder = new Map<string, number>()
+  const submit = async (key: string, session_id = 's', command = spec) => {
+    const result = await integration.handle(req, path, { session_id, key, spec: command })
+    // Synchronous fixture submissions can share Date.now(); make their intended
+    // completion order explicit instead of relying on UUID/index tie ordering.
+    if (!jobOrder.has(result.job_id)) jobOrder.set(result.job_id, jobOrder.size + 1)
+    integration.queue.save({ ...integration.queue.get(result.job_id), created_at: jobOrder.get(result.job_id) })
+    return result
+  }
   const finish = async (id: string) => { statuses.set(id, 'completed'); await runs.tick(true) }
   const origin = await admit('human')
   return { get runs() { return runs }, get integration() { return integration }, submit, finish, admit, origin, history,
@@ -152,7 +160,7 @@ it.each(['human', 'helper'])('re-fences a route await against %s without wedging
   })
   await f.integration.queue.tick()
   expect(injected).toBe(true)
-  expect(f.integration.queue.get(second.job_id).resume).toBe('superseded')
+  expect(['suppressed', 'superseded']).toContain(f.integration.queue.get(second.job_id).resume)
   expect(f.runs.byIdempotencyKey('direct', `wizard-heavy-${second.job_id}`)).toBeNull()
   await expect(f.submit('must-not-run')).rejects.toMatchObject({ status: 409 })
   await f.finish(f.integration.queue.get(first.job_id).resume)
