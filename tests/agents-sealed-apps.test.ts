@@ -291,6 +291,37 @@ describe('#58 which agents can use an app', () => {
     expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
   })
 
+  it('an installed app that later turns private is taken back from the main and standard agents', async () => {
+    const notes = await fakeApp('note_add')
+    const diary = await fakeApp('entry_read')
+    const dir = await box({ notes: notes.url })
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('diary', diary.url)])
+    const main = await fakeHermes('main')
+    const base = await start(dir, main)
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes', 'diary'] }))
+    const priv = await create(base, PRIVATE)
+    expect((await fetch(`${base}/wizard/v1/apps/diary/agents`, json({ agents: ['hermes', helper.id, priv.id] }, 'PUT'))).status).toBe(200)
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
+    expect(await toolNames(base, MAIN_TOKEN)).toContain('diary__entry_read')
+    // An update tags it private: standard grants never covered private data.
+    writeApps(dir, [appEntry('notes', notes.url), { ...appEntry('diary', diary.url), privacy: 'private' }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 80))
+    const sheet = await (await fetch(`${base}/wizard/v1/apps/diary/agents`)).json()
+    expect(sheet.privacy).toBe('private')
+    expect(sheet.agents.filter((a: any) => a.enabled).map((a: any) => a.id)).toEqual([priv.id])
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('diary__entry_read')
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('notes__note_add')
+    expect(await toolNames(base, MAIN_TOKEN)).not.toContain('diary__entry_read')
+    expect(await toolNames(base, gatewayKey(dir, priv.id))).toContain('diary__entry_read')
+    // The owner can tick it again explicitly, and a later sync keeps that choice.
+    expect((await fetch(`${base}/wizard/v1/apps/diary/agents`, json({ agents: [priv.id, helper.id] }, 'PUT'))).status).toBe(200)
+    writeApps(dir, [appEntry('notes', notes.url), { ...appEntry('diary', diary.url), privacy: 'private', version: '2' }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 80))
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
+  })
+
   it('hermesConfigYaml: no gateway URL configured = no gateway for anyone', () => {
     const agent = { id: 'x', privacy: 'standard', model: { provider: 'tinfoil', model: 'glm-5-3', fallback: false }, permissions: { outside_tools: [], files: 'own', wizard_apps: ['a'], agent_apps: [] } }
     expect(hermesConfigYaml(agent)).not.toContain('wizard:')
