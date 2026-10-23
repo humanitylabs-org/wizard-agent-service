@@ -253,6 +253,28 @@ describe('#58 which agents can use an app', () => {
     expect((await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent.permissions.wizard_apps).toEqual(['airlock'])
   })
 
+  it('a meeting-transcripts app (Mizel) installed later never joins standard agents; other new apps still do', async () => {
+    // James, 23 Oct 2026: "The whole point of Mizel was to be fully private so no public agent can read its transcripts."
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main)
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    const mizel = await fakeApp('get_transcript')
+    const music = await fakeApp('play')
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('mizel', mizel.url), provides: ['meeting-recording', 'meeting-transcripts'] }, appEntry('music', music.url)])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const after = (await (await fetch(`${base}/wizard/v1/agents/${helper.id}`)).json()).agent
+    expect(after.permissions.wizard_apps).toContain('music')
+    expect(after.permissions.wizard_apps).not.toContain('mizel')
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('mizel__get_transcript')
+    const ticked = (await (await fetch(`${base}/wizard/v1/apps/mizel/agents`)).json()).agents.filter((a: any) => a.enabled).map((a: any) => a.id)
+    expect(ticked).not.toContain(helper.id)
+  })
+
   it('hermesConfigYaml: no gateway URL configured = no gateway for anyone', () => {
     const agent = { id: 'x', privacy: 'standard', model: { provider: 'tinfoil', model: 'glm-5-3', fallback: false }, permissions: { outside_tools: [], files: 'own', wizard_apps: ['a'], agent_apps: [] } }
     expect(hermesConfigYaml(agent)).not.toContain('wizard:')
