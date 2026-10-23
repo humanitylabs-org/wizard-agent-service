@@ -11,11 +11,13 @@ test('installed launch names survive the service projection', () => {
     writeFileSync(appsJsonPath, JSON.stringify({apps: [
       {id:'example-reader',name:'Example Reader',view:{url:'/reader/'},voice_names:['Reading Room','page turner']},
       {id:'legacy',name:'Legacy',view:{url:'/legacy/'}},
+      {id:'opt-out',name:'Opt Out',view:{url:'/opt-out/'},voice_names:[]},
       {id:'invalid',name:'Invalid',view:{url:'/invalid/'},voice_names:[null,true,'', 'x'.repeat(41)]},
     ]}))
-    const apps = readApps({appsJsonPath,launcherPath:join(root,'missing.json')}).apps
+    const apps: any[] = readApps({appsJsonPath,launcherPath:join(root,'missing.json')}).apps
     expect(apps.find(a => a.id === 'example-reader').voice_names).toEqual(['Reading Room','page turner'])
-    expect(apps.find(a => a.id === 'legacy').voice_names).toEqual([])
+    expect(Object.hasOwn(apps.find(a => a.id === 'legacy'), 'voice_names')).toBe(false)
+    expect(apps.find(a => a.id === 'opt-out').voice_names).toEqual([])
     expect(apps.find(a => a.id === 'invalid').voice_names).toEqual([])
   } finally { rmSync(root, {recursive:true,force:true}) }
 })
