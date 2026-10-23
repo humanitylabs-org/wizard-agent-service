@@ -61,6 +61,13 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertEqual(r.reown.call_args_list[-1].args[1], os.getuid())
 
     def test_registry_authority_allocates_pair_and_moves_inode(self):
+        for rel in ['data/apps/host/file', 'hermes-agent/venv/bin/python', 'state/host/file']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('host fixture')
+        self.plan['host_shared_paths'] = ['state/host']
+        h.approve(self.plan)
+        host_inode = (self.home / 'data/apps/host/file').stat().st_ino
         inode = (self.home / 'state.db').stat().st_ino
         result = h.apply(self.plan, 'restricted-fixture', self.root)
         folder = self.root / 'agents/restricted-fixture'
@@ -70,7 +77,14 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertNotIn('admission', record['runtime'])
         self.assertEqual((folder / 'home/state.db').stat().st_ino, inode)
         self.assertFalse(result['journal'].startswith(str(folder)))
+        outer = json.loads(Path(result['journal']).read_text())
+        for rel in ['data/apps', 'hermes-agent', 'state/host']:
+            self.assertTrue((self.home / rel).exists())
+            self.assertFalse((folder / 'home' / rel).exists())
+            self.assertFalse(any(p == rel or p.startswith(rel + '/') for p in outer['metadata']))
+        self.assertEqual((self.home / 'data/apps/host/file').stat().st_ino, host_inode)
         h.undo(result['journal'])
+        self.assertEqual((self.home / 'data/apps/host/file').stat().st_ino, host_inode)
         self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
         self.assertFalse(folder.exists())
     def test_outer_crash_steps_restore_exact_source(self):
