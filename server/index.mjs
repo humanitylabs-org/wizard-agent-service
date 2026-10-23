@@ -185,6 +185,12 @@ server = createWizardServer({
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  skinsStateDir: process.env.WIZARD_SKINS_STATE_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'skins'),
+  skins: {
+    ...(process.env.WIZARD_SKINS_RELAYS ? { relays: process.env.WIZARD_SKINS_RELAYS.split(/[\s,]+/).filter(Boolean) } : {}),
+    ...(process.env.WIZARD_SKINS_BLOSSOM ? { blossom: process.env.WIZARD_SKINS_BLOSSOM } : {}),
+    ...(process.env.WIZARD_SKINS_CURATOR ? { curator: process.env.WIZARD_SKINS_CURATOR } : {}),
+  },
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',

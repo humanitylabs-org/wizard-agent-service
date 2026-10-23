@@ -48,6 +48,7 @@ import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
+import { createSkins, SkinsError } from './skins.mjs'
 import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
@@ -1521,6 +1522,34 @@ function inputContainsMarker(input) {
     || normalized.includes('[WIZARDFILECHIPSV1]') || normalized.includes('[/WIZARDFILECHIPSV1]')
 }
 
+const PROJECTED_FILE_CHIPS = /\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g
+function recoverProjectedFileChips(input) {
+  const ids = []
+  const visit = (value) => {
+    if (typeof value === 'string') return value.replace(PROJECTED_FILE_CHIPS, (_marker, raw) => {
+      let files
+      try { files = JSON.parse(raw) } catch { throw Object.assign(new Error('invalid projected file chips'), { status: 400 }) }
+      if (!Array.isArray(files) || !files.length || files.length > WIZARD_FILE_LIMIT
+        || files.some(file => !file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !FILE_ID.test(file.id))) {
+        throw Object.assign(new Error('invalid projected file chips'), { status: 400 })
+      }
+      ids.push(...files.map(file => file.id))
+      return ''
+    })
+    if (Array.isArray(value)) return value.map(visit)
+    if (!value || typeof value !== 'object') return value
+    const projected = { ...value }
+    if (typeof projected.text === 'string') projected.text = visit(projected.text)
+    if (typeof projected.content === 'string' || Array.isArray(projected.content)) projected.content = visit(projected.content)
+    return projected
+  }
+  const recovered = visit(input)
+  // Only a complete display-only chip envelope may cross back into a retry. Canonical,
+  // partial or obfuscated markers stay reserved; every recovered id is authorized again below.
+  if (inputContainsMarker(recovered)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
+  return { input: recovered, ids }
+}
+
 function imageMimeFromMagic(bytes) {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'binary'))) return 'image/png'
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
@@ -1585,15 +1614,20 @@ function appendFileMarker(input, files, includeNativeImages = false) {
 
 export async function prepareRunBody(body, resolveFiles, includeNativeImages = false, projectFiles = async (files) => files) {
   const value = parseJsonBody(body)
-  if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
-  if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
-  if (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT) {
+  const recovered = recoverProjectedFileChips(value.input)
+  const declared = Object.hasOwn(value, 'wizard_file_ids')
+  if (!declared && !recovered.ids.length) return { body, trustedPaths: [] }
+  if (declared && (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT)) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
-  const ids = [...new Set(value.wizard_file_ids)]
-  if (ids.length !== value.wizard_file_ids.length || ids.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
+  const declaredIds = declared ? [...new Set(value.wizard_file_ids)] : []
+  if (declaredIds.length !== (value.wizard_file_ids?.length ?? 0)
+    || declaredIds.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
+  const ids = [...new Set([...declaredIds, ...recovered.ids])]
+  if (ids.length > WIZARD_FILE_LIMIT) throw Object.assign(new Error('invalid file ids'), { status: 400 })
+  value.input = recovered.input
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
   const files = await projectFiles(await resolveFiles(ids))
@@ -1965,6 +1999,12 @@ export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, lega
 // localhost app origins), and an Origin, when present, must be this host.
 // On the box-local listener a trusted local proxy may forward the browser-facing Host as X-Forwarded-Host (as
 // for /wizard/thread-dispositions); requests through Serve are judged on their own Host only.
+function skinOriginRefused(request) {
+  if (['cross-site', 'same-site'].includes(request.headers['sec-fetch-site'])) return true
+  if (!request.headers.origin) return false
+  try { return new URL(request.headers.origin).host !== (request.headers['x-forwarded-host'] || request.headers.host) } catch { return true }
+}
+
 function setupWriteRefusal(request, tailnetIngress) {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return 415
   const site = request.headers['sec-fetch-site']
@@ -4186,6 +4226,13 @@ function buildWizardServer(options, lifetime) {
   // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
   const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
   if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
+  const skins = options.mySkin === false ? null : createSkins({
+    root: options.userFilesRoot || options.mediaRoot || '',
+    stateDir: options.skinsStateDir || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'skins') : join(bridgeOsHome || wizardOsHome(), 'skins')),
+    ...(options.skins || {}),
+  })
+  // Lazy migration keeps unavailable/symlinked Files roots from preventing service startup.
+  try { skins?.migrate() } catch { /* API reads report unavailable; the shell still renders */ }
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -4604,6 +4651,44 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
       }
+      if (url.pathname === '/wizard/v1/skins' || url.pathname.startsWith('/wizard/v1/skins/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (!skins) { sendJson(response, 503, { error: 'skins_unavailable' }); return }
+        try {
+          const route = url.pathname.slice('/wizard/v1/skins'.length)
+          const action = /^\/([^/]+)\/(pack|publish)$/.exec(route)
+          const blob = /^\/store\/blob\/([a-f0-9]{64})$/.exec(route)
+          const allowed = route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || action ? ['POST'] : []
+          if (!allowed.length) { sendJson(response, 404, { error: 'not_found' }); return }
+          if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
+          let input = {}
+          if (request.method !== 'GET') {
+            if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+            try { input = JSON.parse((await readBoundedBody(request, 768 * 1024)).toString('utf8')) } catch (e) { throw new SkinsError(e?.status === 413 ? 413 : 400, e?.status === 413 ? 'body_too_large' : 'invalid_request') }
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SkinsError(400, 'invalid_request')
+          }
+          let output
+          if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css })
+          else if (route === '/active') output = skins.setActive(input.id)
+          else if (route === '/store') output = await skins.store({ refresh: url.searchParams.get('refresh') === '1', authors: url.searchParams.get('authors') || '' })
+          else if (blob) {
+            const value = await skins.blob(blob[1])
+            response.writeHead(200, { 'Content-Type': value.mime, 'Content-Length': String(value.body.length), 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" })
+            response.end(value.body); return
+          }
+          else if (route === '/store/add') output = await skins.add(input.a)
+          else if (route === '/store/report') output = await skins.report(input)
+          else if (action) {
+            let id
+            try { id = decodeURIComponent(action[1]) } catch { throw new SkinsError(400, 'invalid_skin_id') }
+            output = action[2] === 'pack' ? await skins.pack(id, input) : await skins.publish(id, input.event)
+          }
+          sendJson(response, 200, output, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, error instanceof SkinsError ? error.status : 503, { error: error instanceof SkinsError ? error.code : 'skins_unavailable' }) }
+        return
+      }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!['GET', 'HEAD'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, HEAD' }); return }
@@ -4634,12 +4719,7 @@ function buildWizardServer(options, lifetime) {
         // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
         // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        if (request.headers.origin) {
-          let host
-          try { host = new URL(request.headers.origin).host } catch { host = '' }
-          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
         try {
           if (request.method === 'DELETE') mySkin.reset()
