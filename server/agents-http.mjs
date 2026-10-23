@@ -301,7 +301,11 @@ export async function handleAppBindingApi(ctx, url, request, response) {
     try {
       if (method === 'GET') {
         const value = registry.appAgents(appId)
-        sendJson(response, 200, Array.isArray(value?.agents) ? { ...value, agents: value.agents.filter((agent) => visibleAgent(registry, request, agent?.id)) } : value)
+        if (!Array.isArray(value?.agents)) { sendJson(response, 200, value); return true }
+        const agents = value.agents.filter((agent) => visibleAgent(registry, request, agent?.id))
+        // A caller who cannot see the private agent is told only what it can see.
+        const extra = 'needs_private_agent' in value ? { needs_private_agent: !agents.some((agent) => agent?.privacy === 'private') } : {}
+        sendJson(response, 200, { ...value, ...extra, agents })
       } else if (method === 'PUT') {
         const body = await readJson(ctx, request)
         const current = registry.appAgents(appId)
