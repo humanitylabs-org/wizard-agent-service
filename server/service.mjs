@@ -1521,6 +1521,34 @@ function inputContainsMarker(input) {
     || normalized.includes('[WIZARDFILECHIPSV1]') || normalized.includes('[/WIZARDFILECHIPSV1]')
 }
 
+const PROJECTED_FILE_CHIPS = /\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g
+function recoverProjectedFileChips(input) {
+  const ids = []
+  const visit = (value) => {
+    if (typeof value === 'string') return value.replace(PROJECTED_FILE_CHIPS, (_marker, raw) => {
+      let files
+      try { files = JSON.parse(raw) } catch { throw Object.assign(new Error('invalid projected file chips'), { status: 400 }) }
+      if (!Array.isArray(files) || !files.length || files.length > WIZARD_FILE_LIMIT
+        || files.some(file => !file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !FILE_ID.test(file.id))) {
+        throw Object.assign(new Error('invalid projected file chips'), { status: 400 })
+      }
+      ids.push(...files.map(file => file.id))
+      return ''
+    })
+    if (Array.isArray(value)) return value.map(visit)
+    if (!value || typeof value !== 'object') return value
+    const projected = { ...value }
+    if (typeof projected.text === 'string') projected.text = visit(projected.text)
+    if (typeof projected.content === 'string' || Array.isArray(projected.content)) projected.content = visit(projected.content)
+    return projected
+  }
+  const recovered = visit(input)
+  // Only a complete display-only chip envelope may cross back into a retry. Canonical,
+  // partial or obfuscated markers stay reserved; every recovered id is authorized again below.
+  if (inputContainsMarker(recovered)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
+  return { input: recovered, ids }
+}
+
 function imageMimeFromMagic(bytes) {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'binary'))) return 'image/png'
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
@@ -1585,15 +1613,20 @@ function appendFileMarker(input, files, includeNativeImages = false) {
 
 export async function prepareRunBody(body, resolveFiles, includeNativeImages = false, projectFiles = async (files) => files) {
   const value = parseJsonBody(body)
-  if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
-  if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
-  if (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT) {
+  const recovered = recoverProjectedFileChips(value.input)
+  const declared = Object.hasOwn(value, 'wizard_file_ids')
+  if (!declared && !recovered.ids.length) return { body, trustedPaths: [] }
+  if (declared && (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT)) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
-  const ids = [...new Set(value.wizard_file_ids)]
-  if (ids.length !== value.wizard_file_ids.length || ids.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
+  const declaredIds = declared ? [...new Set(value.wizard_file_ids)] : []
+  if (declaredIds.length !== (value.wizard_file_ids?.length ?? 0)
+    || declaredIds.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
+  const ids = [...new Set([...declaredIds, ...recovered.ids])]
+  if (ids.length > WIZARD_FILE_LIMIT) throw Object.assign(new Error('invalid file ids'), { status: 400 })
+  value.input = recovered.input
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
   const files = await projectFiles(await resolveFiles(ids))
