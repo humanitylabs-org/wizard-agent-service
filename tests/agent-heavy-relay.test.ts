@@ -98,7 +98,8 @@ async function scene(enabled: string | undefined = 'on', routed = false) {
   const resolver = createPrincipalResolver({ ownerProof: proof, agentForToken: (key: string) => registry.agentForGatewayToken(key),
     agentRestricted: (id: string) => registry.agentRestricted(id) })
   const options: any = { heavyStatePath: join(root, 'heavy.db'), heavyToken: token, heavyTransport: runtime.transport, fetchImpl: runtime.fetchImpl, agentHeavy: enabled }
-  const hostQueue = { latestForSession: () => ({ publicRunId: 'host-origin', runtime: 'direct', status: 'running', body: JSON.stringify({ model: 'host-model', provider: 'host-provider' }) }) }
+  const hostOrigin = { publicRunId: 'host-origin', sessionId: 'shared', runtime: 'direct', status: 'running', body: JSON.stringify({ model: 'host-model', provider: 'host-provider' }) }
+  const hostQueue = { latestForSession: () => hostOrigin, mutationOwnerForSession: () => hostOrigin, get: () => hostOrigin }
   const routedQueues = routed ? createRoutedQueues({ registry, own: (fn: any) => clean.push(fn), pollIntervalMs: 60_000 }) : null
   const heavy = createHeavyIntegration({ options, registry, queue: hostQueue,
     fetchAgent: routedQueues ? (agent: any, path: string, init: any) => routedQueues.fetch(agent, path, init) : undefined, request: async () => ({ data: [{ id: 1, role: 'user', content: 'Host instruction' }] }) })!
@@ -113,6 +114,24 @@ async function scene(enabled: string | undefined = 'on', routed = false) {
   const change = (id: string, fn: (value: any) => any) => { const file = join(root, 'agents', id, 'agent.json'); writeFileSync(file, JSON.stringify(fn(JSON.parse(readFileSync(file, 'utf8'))))) }
   return { root, registry, heavy, hostQueue, options, req, spec, submit, change, routedQueues, ...runtime }
 }
+
+it.each(['host-profile', 'container', 'restricted'])('preserves heavy authority and completion guidance for %s', async kind => {
+  const s = await scene()
+  if (kind === 'host-profile') s.change('alpha', (a: any) => ({ ...a, runtime: { kind: 'host-profile', profile: 'fixture' } }))
+  if (kind === 'container') s.change('alpha', (a: any) => ({ ...a, runtime: { ...a.runtime, isolation: 'standard' } }))
+  if (kind !== 'restricted') {
+    await expect(s.submit()).rejects.toMatchObject({ status: 403 })
+    expect(s.remote).toEqual([])
+    return
+  }
+  const receipt = await s.submit()
+  s.states.originDone = true; s.states.workerDone = true
+  await s.heavy.queue.tick()
+  const posted = s.posts.find(p => p.headers.get('idempotency-key') === `wizard-heavy-${receipt.job_id}`)!
+  expect(posted.body.input).toContain('within the original authorization')
+  expect(posted.body.input).toContain('Preserve explicit owner approval gates; new scope still needs authorization.')
+  expect(posted.body.require_model_lock).toBe(true)
+})
 
 it('resolves public routed run ids for agent heavy admission and continuation without sending them to Hermes', async () => {
   const s = await scene('on', true), agent = s.registry.read('alpha')
