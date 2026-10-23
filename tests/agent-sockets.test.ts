@@ -52,6 +52,16 @@ describe('per-agent socket gateway', () => {
     expect(lstatSync(a.path).mode & 0o777).toBe(0o600)
     expect(lstatSync(a.path).uid).toBe(process.getuid!())
   })
+  it('rebinds after owner undo deletes an imported directory, coalescing retries', async () => {
+    const { root, sockets } = fixture()
+    const first = await sockets.ensure('one')
+    rmSync(join(root, 'one'), { recursive: true })
+    mkdirSync(join(root, 'one'))
+    const [a, b] = await Promise.all([sockets.ensure('one'), sockets.ensure('one')])
+    expect(a).toBe(b)
+    expect(a.server).not.toBe(first.server)
+    expect((await call(a.path, 'token-one')).agentId).toBe('one')
+  })
   it('uses a stable directory across shutdown and restart (no pinned socket inode mount)', async () => {
     const { root, sockets, service } = fixture()
     const first = await sockets.ensure('one'), dirInode = lstatSync(join(root, 'one', 'gateway')).ino

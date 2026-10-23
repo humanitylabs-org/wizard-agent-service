@@ -1,13 +1,14 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { standardChatRpc, searchHistory, readHistory } from '../server/standard-chats.mjs'
 import { privateChatMatches } from '../server/private-chat-search.mjs'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
+import { agentVisionHelper, createAgentRegistry, claudeModelId, hermesConfigYaml, normalizeMemory, parseAgentFile } from '../server/agents.mjs'
 import { readApps } from '../server/wizard-os-settings.mjs'
 
 const servers: Server[] = []
@@ -84,6 +85,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
     start: async (id: string) => { calls.push(`start ${id}`); return { ok: true } },
     stop: async (id: string) => { calls.push(`stop ${id}`); return { ok: true } },
     deliver: async (id: string, payload: any) => { deliveries.push({ id, payload }); return { verified: true, already_delivered: false, session_id: payload.session_id, message_id: 3 } },
+    ...(extra.runtimeFetch ? { fetch: extra.runtimeFetch } : {}),
   }
   const svc = createWizardServer({
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
@@ -114,6 +116,91 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('prepares only the reserved import socket through an owner-only API, without runtime calls', async () => {
+    const dir = box(), main = await fakeHermes('main')
+    const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), isolation: 'restricted',
+      mainProviders: async () => [{ slug: 'anthropic', models: ['claude-opus-5-5'], authenticated: true }],
+      runtime: { apply() { throw new Error('must not start') } } })
+    const { agent } = await registry.create({ label: 'Reserve', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }, { deferStart: true })
+    const proof = 'synthetic-owner-proof-01234567890123456789'
+    const { base, calls } = await start(dir, main, { agentIsolation: 'restricted', ownerProof: proof })
+    const route = base + '/wizard/v1/agents/' + agent.id + '/prepare-import'
+    expect((await fetch(route, json({}))).status).toBe(403)
+    const headers = { 'x-wizard-owner-proof': proof }
+    expect((await fetch(route, json({}, headers))).status).toBe(202)
+    expect(calls).toEqual([])
+    expect(existsSync(join(dir, 'agents', agent.id, 'home', 'config.yaml'))).toBe(false)
+    const options = await (await fetch(base + '/wizard/v1/agent-options', { headers })).json()
+    expect(options.import_capabilities).toEqual({ socket_prepare: true, heavy_enabled: false, heavy_sandbox: false })
+    const recordPath = join(dir, 'agents', agent.id, 'agent.json')
+    const record = JSON.parse(readFileSync(recordPath, 'utf8'))
+    delete record.runtime.admission
+    writeFileSync(recordPath, JSON.stringify(record))
+    expect((await fetch(route, json({}, headers))).status).toBe(409)
+    expect(calls).toEqual([])
+  })
+  it('reserves imports stopped through the restricted allocator and refuses future sensitive app grants', async () => {
+    const dir = box()
+    const calls: string[] = []
+    const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), appsJsonPath: join(dir, 'apps.json'),
+      isolation: 'restricted', basePort: 47800,
+      mainProviders: async () => [{ slug: 'anthropic', models: ['claude-opus-5-5'], authenticated: true }],
+      beforeRestrictedStart: async () => { calls.push('socket') },
+      runtime: { apply: async () => { calls.push('apply') } },
+    })
+    const { agent } = await registry.create({ label: 'Import reserve', model: { provider: 'anthropic', model: 'claude-opus-5-5' },
+      permissions: { preset: 'standard', outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [] },
+    }, { deferStart: true })
+    expect(calls).toEqual([])
+    const folder = join(dir, 'agents', agent.id)
+    const record = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(record.runtime.admission).toBe('importing')
+    expect(existsSync(join(folder, 'home', 'config.yaml'))).toBe(false)
+    const configBefore = 'memory: {provider: synthetic}\n'
+    mkdirSync(join(folder, 'home'), { recursive: true })
+    writeFileSync(join(folder, 'home', 'config.yaml'), configBefore)
+    await registry.prepareImport(agent.id)
+    expect(calls).toEqual(['socket'])
+    expect(readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')).toBe(configBefore)
+    expect(record.runtime.network).toEqual({ uplink: '10.250.0.16/28', sandbox: '10.251.0.16/28' })
+    expect(JSON.parse(readFileSync(join(folder, 'service-state.json'), 'utf8')).desired).toBe('stopped')
+    record.imported = { schema: 1, format: 'hermes' }
+    delete record.runtime.admission
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify(record))
+    registry.list()
+    await expect(registry.prepareImport(agent.id)).rejects.toMatchObject({ error: 'agent_not_importing' })
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [{ id: 'privacy-com', status: 'running', mcp: { url: 'http://127.0.0.1:1/mcp' } }] }))
+    registry.list()
+    const after = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    expect(after.permissions.wizard_apps).toEqual([])
+    await expect(registry.update(agent.id, { permissions: { wizard_apps: ['privacy-com'] } })).rejects.toMatchObject({ error: 'import_sensitive_app_denied' })
+  })
+
+  it('preserves imported memory/auth harness bytes and fails closed on lost import keys', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base, calls } = await start(dir, main)
+    const response = await fetch(`${base}/wizard/v1/agents`, json({ label: 'Imported', harness: 'hermes', model: { provider: 'anthropic', model: 'claude-opus-5-5' }, permissions: { preset: 'standard' } }, { 'Idempotency-Key': 'import-fixture' }))
+    expect(response.status).toBe(201)
+    const { agent } = await response.json()
+    const folder = join(dir, 'agents', agent.id)
+    const record = JSON.parse(readFileSync(join(folder, 'agent.json'), 'utf8'))
+    record.imported = { schema: 1, format: 'hermes' }
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify(record))
+    const original = 'memory:\n  provider: holographic\nplugins:\n  hermes-memory-store:\n    hrr_dim: 2048\n'
+    writeFileSync(join(folder, 'home', 'config.yaml'), original)
+    writeFileSync(join(folder, 'home', 'auth.json'), '{"fixture":"not-a-credential"}')
+    const started = await fetch(`${base}/wizard/v1/agents/${agent.id}/start`, json({}))
+    expect(started.status).toBe(202)
+    expect(calls).toContain(`start ${agent.id}`)
+    expect(readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')).toBe(original)
+    expect(readFileSync(join(folder, 'home', 'auth.json'), 'utf8')).toBe('{"fixture":"not-a-credential"}')
+    writeFileSync(join(folder, 'runtime.key'), '')
+    const refused = await fetch(`${base}/wizard/v1/agents/${agent.id}/start`, json({}))
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ error: 'import_keys_unavailable' })
+    expect(readFileSync(join(folder, 'home', 'config.yaml'), 'utf8')).toBe(original)
+  })
   it('restricted isolation gives each new agent its own uplink/sandbox /28 and the edge as its gateway', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -187,6 +274,121 @@ describe('agents registry and API', () => {
     expect(payload.data[0].run_context.redacted).toBe(true)
     expect(JSON.stringify(payload)).not.toMatch(/(?:PRIVATE|CONTAINER|HOST)_PATH_CANARY/)
     expect(payload.data[0].run_context.original).toContain('[private attachment]')
+  })
+
+  it('turns a routed agent\'s own MEDIA files into openable attachments kept in that agent\'s folder', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const home = join(dir, 'agents', 'private', 'home')
+    const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex')
+    const priv = await fakeHermes('private', ['wizard_private_media'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Here are your notes.\n\nMEDIA:/opt/data/cache/documents/notes.md\nMEDIA:/opt/data/cache/images/chart.png' },
+      { id: 2, role: 'assistant', timestamp: 2, content: `Escapes.\n\nMEDIA:/opt/data/cache/documents/escape.md\nMEDIA:${join(dir, 'outside.md')}` },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    mkdirSync(join(home, 'cache', 'documents'), { recursive: true })
+    mkdirSync(join(home, 'cache', 'images'), { recursive: true })
+    writeFileSync(join(home, 'cache', 'documents', 'notes.md'), '# OUTBOUND_MD_CANARY\n')
+    writeFileSync(join(home, 'cache', 'images', 'chart.png'), png)
+    writeFileSync(join(dir, 'outside.md'), 'OUTSIDE_CANARY')
+    symlinkSync(join(dir, 'outside.md'), join(home, 'cache', 'documents', 'escape.md'))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_media/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).not.toContain('/opt/data')
+    expect(text).not.toContain(dir)
+    const rows = JSON.parse(text).data
+    const envelope = JSON.parse(rows[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+    expect(envelope.items.map((i: any) => [i.name, i.kind])).toEqual([['notes.md', 'file'], ['chart.png', 'image']])
+    expect(rows[1].content).toContain('[file: escape.md unavailable]')
+    expect(rows[1].content).toContain('[file: outside.md unavailable]')
+    expect(rows[1].content).not.toContain('<helm_attachments>')
+    // Bytes live in the agent's own folder, not the main agent's shared artifact store.
+    expect(readdirSync(join(dir, 'agents', 'private', 'wizard-artifacts')).filter(n => n.endsWith('.bin')).length).toBe(2)
+    const md = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+    expect(md.status).toBe(200)
+    expect(md.headers.get('content-disposition')).toContain('notes.md')
+    expect(await md.text()).toContain('OUTBOUND_MD_CANARY')
+    const image = await fetch(`${base}/wizard/attachments/${envelope.items[1].id}`)
+    expect(image.status).toBe(200)
+    expect(image.headers.get('content-type')).toBe('image/png')
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
+  })
+
+  it('reads a sandboxed agent\'s MEDIA file through the runtime as the agent and serves it', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_sandbox'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Report ready.\n\nMEDIA:/opt/data/cache/documents/report.md\nMEDIA:/opt/data/cache/documents/missing.md' },
+    ])
+    let report = Buffer.from('# SANDBOX_CANARY\n')
+    const fetched: string[] = []
+    const runtimeFetch = async (id: string, payload: any) => {
+      fetched.push(`${id} ${payload.path}`)
+      if (!payload.path.endsWith('report.md')) throw Object.assign(new Error('file_unavailable'), { code: 'file_unavailable' })
+      return { verified: true, bytes: report.length, sha256: createHash('sha256').update(report).digest('hex'), data_base64: report.toString('base64') }
+    }
+    const { base } = await start(dir, main, { runtimeFetch })
+    await withPrivate(dir, base, priv.port)
+    const home = join(dir, 'agents', 'private', 'home')
+    mkdirSync(home, { recursive: true })
+    chmodSync(home, 0o000)   // owned by the sandbox uid in production: unreadable to the service
+    try {
+      for (let pass = 0; pass < 2; pass++) {
+        const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+        expect(response.status).toBe(200)
+        const text = await response.text()
+        expect(text).not.toContain('/opt/data')
+        const content = JSON.parse(text).data[0].content
+        const envelope = JSON.parse(content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+        expect(envelope.items.map((i: any) => i.name)).toEqual(['report.md'])
+        expect(content).toContain('[file: missing.md unavailable]')
+        const file = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+        expect(await file.text()).toBe('# SANDBOX_CANARY\n')
+      }
+      // Fetched once, then served from the mirror; a miss is not retried on every poll.
+      expect(fetched).toEqual(['private /opt/data/cache/documents/report.md', 'private /opt/data/cache/documents/missing.md'])
+      // The agent rewrites the same file and sends it again: a stale mirror is read again.
+      report = Buffer.from('# SANDBOX_CANARY v2\n')
+      const mirrored = join(dir, 'agents', 'private', 'wizard-artifacts', 'mirror', 'cache', 'documents', 'report.md')
+      utimesSync(mirrored, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+      const again = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_sandbox/messages?agent=private&view=wizard`)
+      const envelope = JSON.parse(JSON.parse(await again.text()).data[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
+      expect(await (await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)).text()).toBe('# SANDBOX_CANARY v2\n')
+    } finally { chmodSync(home, 0o700) }
+  })
+
+  it('tells routed agents how to send files and projects a finished run\'s MEDIA output', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_run'])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const run = await fetch(`${base}/wizard/hermes/v1/runs?agent=private`, json({ session_id: 'wizard_private_run', input: 'send it' }))
+    expect(run.status).toBe(202)
+    const sent = priv.seen.find(r => r.path === '/v1/runs')
+    expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
+    expect(status.status).toBe(200)
+  })
+
+  it('gives a text-only Tinfoil agent its allowed Tinfoil vision model as confidential eyes', () => {
+    const agent: any = { id: 'private', privacy: 'private', model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3', 'deepseek-v4-1-flash'], fallback: false },
+      permissions: { files: 'own', outside_tools: [], other_agents: 'none' }, apps: [], runtime: { kind: 'container' } }
+    expect(agentVisionHelper(agent)).toBe('deepseek-v4-1-flash')
+    const yaml = hermesConfigYaml(agent)
+    expect(yaml).toContain("auxiliary:\n  vision:\n    provider: custom\n    model: \"deepseek-v4-1-flash\"\n    base_url: \"http://agent-private-tinfoil:3301/v1\"\n    key_env: TINFOIL_API_KEY")
+    const disabled = yaml.match(/disabled_toolsets: \[(.*)\]/)[1]
+    expect(disabled).not.toContain('"vision"')
+    expect(disabled).toContain('"web"')
+    // No vision model allowed, files off, or a vision main model: no helper, the public vision tool stays off.
+    for (const change of [{ model: { ...agent.model, allowed_models: ['glm-5-3'] } }, { permissions: { ...agent.permissions, files: 'none' } }, { model: { ...agent.model, model: 'deepseek-v4-1-flash' } }]) {
+      const other = { ...agent, ...change }
+      expect(agentVisionHelper(other)).toBeNull()
+      expect(hermesConfigYaml(other)).not.toContain('auxiliary:')
+      expect(hermesConfigYaml(other).match(/disabled_toolsets: \[(.*)\]/)[1]).toContain('"vision"')
+    }
   })
 
   it('lists the main agent and only schema-1 agent folders', async () => {
@@ -283,6 +485,24 @@ describe('agents registry and API', () => {
     expect(calls.at(-1)).toBe('stop private')
   })
 
+  it('an unchanged update re-applies only a config an older release wrote, not one Hermes normalised', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const { base, calls } = await start(dir, main)
+    await withPrivate(dir, base)
+    const same = () => fetch(`${base}/wizard/v1/agents/private`, { ...json({ label: 'Private' }), method: 'PATCH' })
+    const applies = () => calls.filter((c: string) => c === 'apply private').length
+    const before = applies()
+    writeFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), '# normalised by Hermes on start\n')
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before)                     // Hermes rewriting its own file is not stale
+    rmSync(join(dir, 'agents', 'private', 'config.sha256'))   // a release before the stamp, or a changed generator
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
+    expect((await same()).status).toBe(200)
+    expect(applies()).toBe(before + 1)
+  })
+
   it('agent options: harnesses, Tinfoil plus signed-in AI Accounts providers, presets, Wizard apps vs agent apps', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -290,7 +510,7 @@ describe('agents registry and API', () => {
     const options = await (await fetch(`${base}/wizard/v1/agent-options`)).json()
     expect(options.harnesses).toEqual([{ id: 'hermes', label: 'Hermes' }])
     expect(options.providers.map((p: any) => [p.id, p.confidential])).toEqual([['tinfoil', true], ['anthropic', false], ['openai-codex', false]])
-    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }])
+    expect(options.providers[0].models).toEqual([{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }])
     expect(options.presets.map((p: any) => p.id)).toEqual(['private', 'standard'])
     expect(options.wizard_apps.map((a: any) => a.id)).toEqual(['meditate'])
     expect(options.agent_apps.map((a: any) => a.id)).toEqual(['transcriber'])

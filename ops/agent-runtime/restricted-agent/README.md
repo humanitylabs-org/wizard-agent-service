@@ -36,60 +36,62 @@ It runs the stock Wizard Hermes image unmodified; all restriction comes from how
 docker compose -f compose.yml -p agent-<id> up -d --build
 ```
 
-## Per-agent Claude token grant
+## Claude app login grant
 
-The trusted driver loads `compose.claude-token.yml` only for owner-managed records with
-`privacy: standard`, `model.provider: anthropic`, and an agent-scoped `claude.token` secret.
-It passes only the **path** as `CLAUDE_TOKEN_FILE` to Compose. Never put the token in the gateway
-process environment: this stock image explicitly retains `CLAUDE_CODE_OAUTH_TOKEN` in terminal
-subprocesses and persists it in `cache/terminal/hermes-snap-*.sh`. There is no supported named-var
-blocklist in that image; editing core Hermes or the DirectSDK plugin is not part of this grant.
+Load `compose.claude-login.yml` only for an independently owner-authorized record:
+`runtime.isolation: restricted`, `privacy: standard`, `model.provider: anthropic`.
+Private/unknown privacy and other providers must not inspect or mount this source.
+The driver resolves the installed `wizard-claude-engine` container's exact `/claude`
+mount through `claude_source.py`: legacy `wizard-ai-accounts-claude` named volume,
+or the Claude app's compiled `data/claude` share bind. No grant-file values, ambient
+credential overrides, invented provider login or HTTP token gateway are involved.
+This is compatible with Store #19's `mounts: [{app: wizard-claude, share: claude-login,
+path: /claude}]`: the login remains owned by that app in either storage form.
 
-The no-network `claude-init` seeder reads the owner file through a read-only bind mount (outside
-`/opt/data`), validates regular/non-symlink mode 0600 input, and atomically writes `.credentials.json`
-into a size-capped **local-driver tmpfs volume**. It uses root with only CHOWN/FOWNER/DAC_OVERRIDE,
-no-new-privileges and read-only root, just like the existing home initializer, but never mounts home.
-The seeder stays running to retain the tmpfs mount: a one-shot initializer would lose the memory
-volume at its last unmount before the agent starts. The agent gets only this per-agent memory volume,
-uid10000-owned 0700/0600, via supported `CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/run/claude-login`.
-No raw secret mount or token env reaches the agent, home-init, edge or egress. No shared login state
-or refresh token is granted. This is an owner setup-token, not a managed OAuth refresh flow;
-local expiry is a non-refresh sentinel, while server-side expiry/revocation remains authoritative.
-The helper must stop the agent, recreate the seeder to rebind an atomically rotated owner file,
-then recreate the agent on apply/start. Missing/revoked grants must remove orphan seeders.
-Agent uid10000/cap-drop ALL, ro root and network boundaries are unchanged.
-Private/unknown privacy and other providers receive no token, including from the helper's ambient env.
-The shared-volume override has been removed: uid-1000 0700/0600 writers are incompatible with uid 10000.
-Missing tokens do not prevent startup: the helper reports `claude_token_missing` without restart loops.
+A no-network/root/ro-root `claude-init` mounts the **source directory read-only**
+at `/claude-app` (not a single file, so atomic app rotation is visible). Its only
+other mount is the per-agent local-driver **tmpfs** `claude-session`. Root has only
+CHOWN/FOWNER/DAC_OVERRIDE to read uid1000 0700/0600 source files and publish a uid10000
+0700/0600 projection. It never chowns/chmods/writes the source. Every two seconds
+it projects only `accessToken`, real `expiresAt`, scopes and plan metadata: **never
+refreshToken** or arbitrary CLI files. Logout, invalid login and expiry erase the
+projection. Renewal belongs to the app's official Claude Code login/test/auto-renew
+flow; the seeder has no network and no refresh chain. Consumers cannot co-refresh.
 
-`inspect_check.py --claude-token` is an independent owner grant, never inferred from container env.
-I14 always rejects token env and requires the independently granted config path; I6 validates the
-per-agent tmpfs mount and its actual Docker volume driver/options; I22 validates the isolated seeder
-and independently supplied owner source. I19/I20/I23 reject the session volume by name/backing
-source and the owner secret by source at **any** destination in home-init, edge, egress and every
-other project container (including unknown/orphan seeders). Only the exact validated seeder is exempt. With named homes, pass `--claude-token-file "$SECRET_FILE"`;
-with a dedicated home bind, the default expected source is its sibling `claude.token`.
-`in_agent.py` no longer masks the flaw: it fails if a gateway token env would persist.
-`conformance/docker_credentials.py` uses the real stock image and ordinary `model_tools` terminal
-dispatcher (no pre-removal). The old env delivery must produce a matching home snapshot; the new
-grant must produce a snapshot but **zero** matching files anywhere under `/opt/data`, including
-after `cat /run/claude-login/.credentials.json`, real `AIAgent._persist_session` / `_save_trajectory`,
-and database close/reopen. It uses a deliberately fake **OAuth-shaped** `sk-ant-oat01-...` token:
-stock `agent/redact.py`'s supported `security.redact_secrets: true` (already default) masks the
-`sk-` family in ordinary dispatcher output before persistence. The Service pins that setting in
-restricted standard/anthropic harness configs. A redaction-disabled positive control persists the
-same unchanged cat result in state.db and trajectory_samples.jsonl. An arbitrary non-token-shaped
-fixture string does not test the stock token pattern. DirectSDK's offline usable-login probe and
-an uncredentialed negative control are also required. Agent runs uid10000
-without capabilities; the seeder uses the production script and a real tmpfs volume. Finally cleanup
-verifies fixture-labelled containers, networks and volumes are absent. Only synthetic credentials.
-Never publish raw production inspect/Compose config or secret contents. Docker admins and the agent
-can read the intentionally granted credential; this is not a credential enclave. tmpfs is memory-backed
-but host swap/hibernation policy is separate. Accepted residual: the agent can deliberately read,
-encode, copy or disable redaction for its own credential; encoded/unknown token shapes may still
-persist in state.db or trajectories. Pattern redaction is defense-in-depth, not a secret enclave.
-The grant is per-agent and revocable; network use remains restricted to allowlisted hosts, which
-can still receive agent-visible data. No stronger malicious-agent no-persistence claim is made.
+The agent mounts only the projection **read-only**, at `/run/claude-login`, with
+`CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR` pointing there. No raw app mount or token
+env reaches the agent, home-init, edge or egress; no credential is copied into the
+home. The unchanged stock DirectSDK plugin uses the official Claude CLI, not a token
+gateway. The seeder stays up to retain tmpfs and observes refresh/logout without
+agent recreation. Missing login is healthy initialization with no credential, not
+a restart loop; the Service reports `claude_login_missing` and clears it after a
+connected login and apply/start. Missing/stopped app metadata omits the grant.
+Stop the agent before seeder removal/home sync. Revocation removes stale seeders.
+
+`inspect_check.py --claude-login` is independent authorization, never inferred from
+a container env. `--claude-login-source volume:wizard-ai-accounts-claude` (default)
+or `--claude-login-source bind:/srv/app-data/core/wizard-claude/data/claude` must
+match the installed app metadata. I6 checks the RO per-agent tmpfs; I22 checks exact
+RO app source and no-network seeder; I14 rejects gateway token env. I19/I20/I23
+reject credentials at **any** destination in home-init, edge, egress and unknown
+project containers, including volume backing paths. I21 retains exact SNI aliases.
+
+`conformance/docker_credentials.py` uses **only synthetic app login fixtures** and
+the real stock image, uid10000/cap-drop/ro-root. Ordinary terminal snapshot and
+unmodified dispatcher cat -> AIAgent session/trajectory -> DB reopen must leave no
+raw credential under `/opt/data` with the pinned `security.redact_secrets: true`.
+Legacy-env and redaction-off controls must leak to prove sensitivity. Rotation,
+logout/reconnect, source ownership/modes and refresh-chain exclusion are checked.
+All Docker fixtures are labelled `claude-app-grant-test`, `--rm`, no-network, with
+finally cleanup and label-filtered absence verification. No live login is used.
+
+This grants an app-wide access credential to a trusted restricted standard agent,
+not an enclave or per-agent provider identity. Deliberate encoded copying or disabling
+stock redaction can still persist the credential. Revoke access in the app/owner
+record; Docker administrators, host swap and stale in-flight native sessions remain
+outside this boundary. Nonrestricted legacy consumers still mount the full login RW
+and can refresh via the native CLI; sole-refresh ownership is enforced by **this
+restricted path**, not retroactively claimed for every existing consumer.
 
 ## Direct TLS passthrough
 

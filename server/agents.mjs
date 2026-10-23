@@ -42,7 +42,23 @@ const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
 // Tinfoil chat models an agent may be allowed to use.
 export const TINFOIL = {
   id: 'tinfoil', label: 'Tinfoil (confidential)', confidential: true,
-  models: [{ id: 'glm-5-3', label: 'GLM 5.3' }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash' }],
+  models: [{ id: 'glm-5-3', label: 'GLM 5.3', images: false }, { id: 'deepseek-v4-1-flash', label: 'DeepSeek V4.1 Flash', images: true }],
+}
+/** False only for a model its provider rejects image input for (Tinfoil GLM 5.3: HTTP 400 "not a multimodal model"). */
+export function agentModelSeesImages(agent) {
+  if (agent?.model?.provider !== TINFOIL.id) return true
+  return TINFOIL.models.find((model) => model.id === agent.model.model)?.images !== false
+}
+/**
+ * A Tinfoil agent whose own model is text-only gets an image-capable Tinfoil model from its own allowed list as its
+ * eyes: Hermes' vision_analyze runs on it (auxiliary.vision) through the same attested proxy, so images never leave
+ * the confidential route. Null when the agent sees images itself or has no allowed vision model.
+ */
+export function agentVisionHelper(agent) {
+  if (agent?.model?.provider !== TINFOIL.id || agentModelSeesImages(agent)) return null
+  if (agent.permissions?.files === 'none') return null
+  const allowed = new Set(agent.model.allowed_models ?? [agent.model.model])
+  return TINFOIL.models.find((model) => model.images && allowed.has(model.id))?.id ?? null
 }
 // Hermes must leave its default reasoning effort off these Tinfoil models' requests: DeepSeek V4.1 Flash on Tinfoil
 // rejects "medium" (HTTP 400 chat_template_kwargs). Written into the agent's config.yaml as model_overrides.
@@ -181,6 +197,8 @@ export function normalizePermissions(base, patch = {}) {
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
 function assertPrivateWalls(agent) {
+  if (agent.imported && [...(agent.permissions.wizard_apps || []), ...(agent.permissions.agent_apps || [])]
+    .some((id) => /^privacy(?:[.-]?com)?$/iu.test(id))) fail(409, 'import_sensitive_app_denied', 'agent.permissions')
   if (agent.permissions.read_standard_chats && agent.privacy !== 'private') fail(409, 'private_permission_required', 'agent.permissions.read_standard_chats')
   if (agent.privacy !== 'private') return
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
@@ -313,6 +331,9 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
+  const visionHelper = agentVisionHelper(agent)
+  // The Tinfoil vision helper is confidential, not a public model: its image tool stays on.
+  if (visionHelper) granted.add('vision')
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
   const lines = [
@@ -335,6 +356,10 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // persistence. Pin its supported secure setting for the restricted grant.
   if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
     lines.push('security:', '  redact_secrets: true')
+  }
+  if (visionHelper) {
+    lines.push('auxiliary:', '  vision:', '    provider: custom', `    model: ${yamlString(visionHelper)}`,
+      `    base_url: ${yamlString(tinfoilUrl)}`, '    key_env: TINFOIL_API_KEY')
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.
@@ -489,7 +514,7 @@ export function createAgentRegistry(options = {}) {
       if (fresh.length) {
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy !== 'standard' || agent.runtime.kind === 'profile') continue
+          if (!agent || agent.privacy !== 'standard' || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
           const next = structuredClone(agent)
           for (const app of fresh) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
           if (JSON.stringify(next.permissions) === JSON.stringify(agent.permissions)) continue
@@ -663,7 +688,7 @@ export function createAgentRegistry(options = {}) {
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
     } catch { healthy = false }
-    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' }
+    if (healthy) value = { status: 'running', status_detail: state.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' }
     else if (state.desired === 'stopped') value = { status: 'stopped', status_detail: '' }
     else if (state.last_error) value = { status: 'error', status_detail: String(state.last_error).slice(0, 200) }
     else if (Number(state.started_at) && now() - Number(state.started_at) < startingGraceMs) value = { status: 'starting', status_detail: '' }
@@ -713,6 +738,7 @@ export function createAgentRegistry(options = {}) {
     const { wizardApps, agentApps } = installedApps()
     return {
       harnesses: HARNESSES,
+      import_capabilities: options.importCapabilities?.() ?? { socket_prepare: false, heavy_enabled: false, heavy_sandbox: false },
       providers: await providers(),
       presets: PRESETS.map((preset) => ({ id: preset.id, label: preset.label, summary: preset.summary, privacy: preset.privacy, permissions: preset.permissions })),
       wizard_apps: wizardApps,
@@ -753,8 +779,26 @@ export function createAgentRegistry(options = {}) {
     return port
   }
 
+  /** True when the agent's managed config.yaml is not what this release would write (a new release changed it). */
+  function harnessStale(agent) {
+    if (agent.runtime.kind === 'profile') return false
+    const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
+    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
+    // Compare against the stamp of what the Service last wrote: Hermes itself may normalise config.yaml on start.
+    const stamp = createHash('sha256').update(expected).digest('hex')
+    try { return readFileSync(join(folder(agent.id), 'config.sha256'), 'utf8').trim() !== stamp } catch { return existsSync(home) }
+  }
+
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
+    // Imported agents keep their full memory/settings/auth. Their host driver merges
+    // only Wizard-owned fields on start/apply; a fresh generated config would erase
+    // their memory backend and provider login. Keys already exist from admission.
+    if (agent.imported?.schema === 1 && agent.imported?.format === 'hermes') {
+      if (rotateKey || !apiKey(agent.id) || !gatewayKey(agent.id)) fail(409, 'import_keys_unavailable', 'agent.import')
+      writeJsonAtomic(join(folder(agent.id), 'import-update.json'), { model: agent.model, permissions: agent.permissions })
+      return
+    }
     const dir = folder(agent.id)
     // A restricted agent owns its home (uid 10000, see ops/agent-runtime/restricted-agent): the Service writes the
     // files it manages to managed/, and the runtime driver copies them in before every start.
@@ -775,12 +819,16 @@ export function createAgentRegistry(options = {}) {
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
-    writeTextAtomic(join(home, 'config.yaml'), hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) }))
+    const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) })
+    writeTextAtomic(join(home, 'config.yaml'), config)
+    writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
 
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
-  async function create(body, { idempotencyKey = '' } = {}) {
+  async function create(body, { idempotencyKey = '', deferStart = false } = {}) {
+    // Library-only owner import reservation; HTTP callers cannot set this option.
+    if (deferStart && isolation !== 'restricted') fail(409, 'import_requires_restricted', 'agent.runtime')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     if (body.runtime !== undefined && body.runtime?.kind !== 'container') fail(400, 'invalid_runtime', 'agent.runtime', 'only container agents may be created through the API')
@@ -816,6 +864,7 @@ export function createAgentRegistry(options = {}) {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
         // port is retained for schema/old records, but restricted agents never publish or use it.
         ...(isolation ? { isolation, network: nextNetwork(), ingress_socket: join(folder(id), 'gateway', 'ingress.sock') } : {}),
+        ...(deferStart ? { admission: "importing" } : {}),
       },
       created_at: Math.floor(now() / 1000),
     }
@@ -835,11 +884,12 @@ export function createAgentRegistry(options = {}) {
       map[idempotencyKey] = { hash: requestHash, id, at: now() }
       writeJsonAtomic(idempotencyPath, map)
     }
-    writeServiceState(id, { desired: 'running', started_at: now(), last_error: '' })
+    writeServiceState(id, { desired: deferStart ? 'stopped' : 'running', started_at: deferStart ? 0 : now(), last_error: '' })
+    if (deferStart) return { agent: read(id), replayed: false }
     try {
       if (restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await runtime.apply(id)
-      writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     await refreshCatalog(id).catch(() => undefined)
     return { agent: read(id), replayed: false }
@@ -912,7 +962,8 @@ export function createAgentRegistry(options = {}) {
     assertPrivateWalls(next)
     assertStandardTransport(next)
     assertIsolationSupports(next)
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions])
+    // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
+    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
@@ -922,11 +973,21 @@ export function createAgentRegistry(options = {}) {
       try {
         if (restricted(next)) await options.beforeRestrictedStart?.(id)
         const result = await runtime.apply(id)
-        writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+        writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
       await refreshCatalog(id).catch(() => undefined)
     }
     return read(id)
+  }
+
+  async function prepareImport(id) {
+    const agent = read(id)
+    if (!agent || !restricted(agent) || agent.privacy !== 'standard'
+      || agent.runtime.admission !== 'importing') fail(409, 'agent_not_importing', 'agent.import')
+    if (!options.beforeRestrictedStart) fail(503, 'agent_socket_unavailable', 'agent.import')
+    // Socket only: no runtime, harness rewrite, key rotation, home access or start.
+    await options.beforeRestrictedStart(id)
+    return agent
   }
 
   async function setRunning(id, running) {
@@ -935,6 +996,8 @@ export function createAgentRegistry(options = {}) {
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are always on with the main gateway')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
+    // An imported Hermes keeps its keys from admission; never start it with a missing key (fail closed, nothing regenerated).
+    if (running && agent.imported?.schema === 1 && agent.imported?.format === 'hermes' && (!apiKey(id) || !gatewayKey(id))) fail(409, 'import_keys_unavailable', 'agent.import')
     // Invalidate negative evidence across lifecycle transitions. A failed refresh is not an empty history.
     invalidateCatalog(id)
     writeServiceState(id, running ? { desired: 'running', started_at: now(), last_error: '' } : { desired: 'stopped', last_error: '' })
@@ -943,7 +1006,7 @@ export function createAgentRegistry(options = {}) {
     try {
       if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
-      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_token_missing' ? 'claude_token_missing' : '' })
+      if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       if (!running && result?.ok !== false) stoppedCensus = result?.census
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
     if (running) await refreshCatalog(id).catch(() => undefined)
@@ -1150,7 +1213,7 @@ export function createAgentRegistry(options = {}) {
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
     syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
-    grants, addGrant, removeGrant, readableSources,
+    grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId
@@ -1194,5 +1257,7 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     inspect: (id) => call('POST', `/agents/${encodeURIComponent(id)}/inspect`),
     census: (id) => call('POST', `/agents/${encodeURIComponent(id)}/census`),
     deliver: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/deliver`, payload),
+    place: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/place`, payload),
+    fetch: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/fetch`, payload),
   }
 }

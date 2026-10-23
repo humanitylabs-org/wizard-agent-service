@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Scheduler, importHermesSchedules, isSilentResult, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
+import { Scheduler, importHermesSchedules, isSilentResult, isScheduleInput, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createWizardServer, listen, latestVisibleSessionMessages, projectWizardMessageHistory } from '../server/service.mjs'
 import { projectStatusMarkers } from '../server/thread-status.mjs'
@@ -504,5 +504,126 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     await new Promise<void>(resolve => f.server.close(() => resolve())); await f.server.drained
     servers.splice(servers.indexOf(f.server), 1)
     expect(f.server.scheduler.timer).toBeNull()
+  })
+})
+
+
+describe('windows, reminders and trickled agent work', () => {
+  const BKK = 'Asia/Bangkok'
+  it('resolves morning to the next 08:30 and overnight to the next 03:30 (+ jitter) in the owner timezone', () => {
+    // 2026-10-22 01:00 Bangkok: still the owner's evening; "tomorrow morning" is today 08:30.
+    const lateNight = Date.parse('2026-10-21T18:00:00Z')
+    expect(new Date(resolveWindow('morning', BKK, lateNight, () => 0)).toISOString()).toBe('2026-10-22T01:30:00.000Z')
+    expect(new Date(resolveWindow('overnight', BKK, lateNight, () => 0)).toISOString()).toBe('2026-10-21T20:30:00.000Z')
+    // 14:00 Bangkok -> next calendar day's windows; jitter stays inside 20 minutes.
+    const afternoon = Date.parse('2026-10-22T07:00:00Z')
+    expect(new Date(resolveWindow('morning', BKK, afternoon, () => 0.99)).toISOString()).toBe('2026-10-23T01:30:00.000Z')
+    expect(new Date(resolveWindow('overnight', BKK, afternoon, () => 0.99)).toISOString()).toBe('2026-10-22T20:49:00.000Z')
+    expect(() => resolveWindow('lunch', BKK, afternoon)).toThrow(/unknown window/)
+  })
+
+  it('stores a window as a labelled one-shot and builds reminder vs deferred-work input', () => {
+    const s = scheduler(undefined, { timezone: BKK, random: () => 0 })
+    const remind = s.create({ name: 'Play Store', kind: 'remind', when: { at: 'morning' }, prompt: 'Create the Play Store account', thread: 'wizard_t1' })
+    expect(remind).toMatchObject({ kind: 'remind', window: 'morning', when: { once: '2026-10-21T01:30:00.000Z' } })
+    const work = s.create({ name: 'Overnight merge', when: { at: 'overnight' }, prompt: 'Merge the PR', thread: 'wizard_t2' })
+    const r = s.transaction(() => s.reserve(remind, clock)), w = s.transaction(() => s.reserve(work, clock))
+    expect(r.body.input).toContain('reminded'); expect(r.body.input).not.toContain('[SILENT]')
+    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).not.toContain('[SILENT]')
+    expect(isScheduleInput(r.body.input) && isScheduleInput(w.body.input)).toBe(true)
+    expect(r.body.session_id).toBe('wizard_t1')
+    expect(() => s.create({ name: 'x', kind: 'remind', when: { at: 'morning' }, skill: 'k' })).toThrow(/reminder needs/)
+    expect(() => s.create({ name: 'x', kind: 'email', when: { at: 'morning' }, prompt: 'p' })).toThrow(/kind/)
+  })
+
+  it('trickles due agent work (one per trickle, capped in flight) while reminders go straight through', async () => {
+    const admitted: string[] = []
+    const status: Record<string, string> = {}
+    const s = scheduler(async (o: any) => { admitted.push(o.jobId); status[o.jobId] = 'running'; return { run_id: o.jobId } },
+      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId] }) })
+    const jobs = Array.from({ length: 6 }, (_, i) => s.create({ name: `Work ${i}`, when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: `wizard_w${i}` }))
+    const reminders = Array.from({ length: 2 }, (_, i) => s.create({ name: `R ${i}`, kind: 'remind', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'note', thread: `wizard_r${i}` }))
+    await s.tick()
+    expect(admitted.filter(id => reminders.some(r => r.id === id))).toHaveLength(2)
+    expect(admitted.filter(id => jobs.some(j => j.id === id))).toHaveLength(1)
+    for (let i = 0; i < 6; i++) { clock += 60_000; await s.tick() }
+    // Cap 3 holds the rest while nothing finishes, even though the trickle allows more.
+    expect(admitted.filter(id => jobs.some(j => j.id === id))).toHaveLength(3)
+    for (const id of admitted) status[id] = 'completed'
+    await s.refreshRuns()
+    for (let i = 0; i < 4; i++) { clock += 60_000; await s.tick() }
+    expect(admitted.filter(id => jobs.some(j => j.id === id))).toHaveLength(6)
+    expect(new Set(admitted).size).toBe(8)
+  })
+
+  it('lets the main agent schedule, list and cancel in its own thread over the loopback token only', async () => {
+    const token = 'fixture-heavy-token-with-more-than-32-chars'
+    const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, heavyToken: token,
+      schedulerStatePath: join(root, 'agent-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
+    servers.push(server)
+    const origin = `http://127.0.0.1:${(await listen(server)).port}`
+    const call = (action: string, body: any, auth = token) => fetch(`${origin}/wizard/internal/schedules/${action}`, { method: 'POST',
+      headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await call('create', { session_id: 'wizard_a', name: 'x', when: { at: 'morning' }, text: 'hi' }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
+    const made = await (await call('create', { session_id: 'wizard_a', name: 'Reminder · Loomis', kind: 'remind', when: { at: 'morning' }, text: 'Email Loomis' })).json()
+    expect(made).toMatchObject({ thread: 'wizard_a', kind: 'remind', window: 'morning', nextRun: '2026-10-21T01:30:00.000Z' })
+    await call('create', { session_id: 'wizard_b', name: 'Other', when: { at: 'overnight' }, text: 'Run it' })
+    expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules.map((j: any) => j.id)).toEqual([made.id])
+    expect((await (await call('list', { session_id: 'wizard_a', all: true })).json()).schedules).toHaveLength(2)
+    expect((await call('create', { session_id: 'wizard_a', name: 'bad', when: { at: 'lunch' }, text: 'x' })).status).toBe(400)
+    const other = (await (await call('list', { session_id: 'wizard_b' })).json()).schedules[0]
+    expect((await call('cancel', { session_id: 'wizard_a', schedule_id: other.id })).status).toBe(409)
+    expect((await call('cancel', { session_id: 'wizard_a', schedule_id: made.id })).status).toBe(200)
+    expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(0)
+  })
+})
+
+describe('Boomerang returns (kind return)', () => {
+  it('validates a return as a once-only, prompt-free hand-back of a thread or message', () => {
+    const s = scheduler()
+    const thread = s.create({ name: 'Boomerang · Loomis', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', prompt: '  Reply to Loomis  ' })
+    expect(thread).toMatchObject({ kind: 'return', thread: 'wizard_t1', prompt: 'Reply to Loomis', skill: '', target: { message: null, excerpt: '' } })
+    const message = s.create({ name: 'Boomerang · msg', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: 1792700000.5, excerpt: 'the   price\nquote' } })
+    expect(message.target).toEqual({ message: 1792700000.5, excerpt: 'the price quote' })
+    expect(() => s.create({ name: 'x', kind: 'return', when: { every: 5 }, thread: 'wizard_t1' })).toThrow(/once/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' } })).toThrow(/thread/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', skill: 'k' })).toThrow(/runs nothing/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: '<b>' } })).toThrow(/target/)
+    expect(() => s.create({ name: 'x', when: { once: '2026-10-21T02:00:00Z' }, prompt: 'p', target: { message: 1 } })).toThrow(/only for kind return/)
+    const r = s.transaction(() => s.reserve(message, clock))
+    expect(r.body).toBeUndefined()
+    expect(r).toMatchObject({ kind: 'return', thread: 'wizard_t1', target: { message: 1792700000.5 } })
+  })
+
+  it('returns on time without a run, skips the trickle, and serves its watch id only once returned', async () => {
+    const delivered: any[] = []
+    const s = scheduler(async (o: any) => { delivered.push(o); return { returned: true } }, { trickleMs: 60_000, maxInflight: 1,
+      lookup: async () => ({ status: 'running' }) })
+    const work = s.create({ name: 'Busy', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: 'wizard_w' })
+    const back = s.create({ name: 'Boomerang · Thread', kind: 'return', when: { once: '2026-10-21T00:02:00Z' }, thread: 'wizard_b', prompt: 'Check the quote' })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', session_id: 'wizard_b', output: '' })
+    expect(s.returnRun(`wzb_${work.id}`)).toBeNull()
+    expect(s.returnRun('wzb_missing')).toBeNull()
+    await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id])
+    clock += 120_000; await s.tick()
+    // The trickle and the in-flight cap (work still running) never hold a Boomerang.
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id])
+    expect(delivered[1].body).toBeUndefined()
+    expect(s.project(s.get(back.id))).toMatchObject({ nextRun: null, lastRun: { outcome: 'returned' } })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed', session_id: 'wizard_b', output: '🪃 Back: Check the quote' })
+    clock += 120_000; await s.tick(); await s.refreshRuns()
+    expect(delivered).toHaveLength(2)
+    expect(s.project(s.get(back.id)).lastRun.outcome).toBe('returned')
+    // Again: a new time re-arms it, and the earlier return never reads as this one.
+    s.update(back.id, { when: { once: '2026-10-21T01:00:00Z' }, enabled: true })
+    expect(s.project(s.get(back.id)).nextRun).toBe('2026-10-21T01:00:00.000Z')
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', output: '' })
+    clock = Date.parse('2026-10-21T01:00:30Z'); await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id, back.id])
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
+    s.delete(back.id)
+    expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
   })
 })

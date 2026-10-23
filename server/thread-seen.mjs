@@ -4,9 +4,11 @@ import { migrateJson, atomicStoreWrite, qualifySideRecords, qualifyRawThreadReco
 
 const MAX_THREAD_RECORDS = 500
 const MAX_ACCOUNT_SCOPES = 32
+const MAX_FUTURE_TIMESTAMP_MS = 24 * 60 * 60 * 1000
 const THREAD_KEY = /^[A-Za-z0-9._:-]{1,320}$/
 const RUN_STATUSES = new Set(['idle', 'submitting', 'queued', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'])
 const READY_OR_ATTENTION_STATUSES = new Set(['completed', 'failed', 'interrupted', 'waiting_for_approval', 'unknown'])
+const validTimestamp = value => Number.isSafeInteger(value) && value >= 0 && value <= Date.now() + MAX_FUTURE_TIMESTAMP_MS
 
 function validRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -16,12 +18,14 @@ function validRecord(value) {
   const previewFingerprint = value.previewFingerprint
   const assistantActivityAt = value.assistantActivityAt
   const seenAt = value.seenAt
+  const unreadAt = value.unreadAt
   if (messageCount !== undefined && (!Number.isSafeInteger(messageCount) || messageCount < 0)) return null
   if (status !== undefined && !RUN_STATUSES.has(status)) return null
   if (typeof updatedAt !== 'string' || updatedAt.length > 100 || !Number.isFinite(Date.parse(updatedAt))) return null
   if (typeof previewFingerprint !== 'string' || !/^[a-z0-9]{1,32}$/.test(previewFingerprint)) return null
   if (assistantActivityAt !== undefined && (typeof assistantActivityAt !== 'string' || assistantActivityAt.length > 100 || !Number.isFinite(Date.parse(assistantActivityAt)))) return null
-  if (!Number.isFinite(seenAt) || seenAt < 0) return null
+  if (!validTimestamp(seenAt)) return null
+  if (unreadAt !== undefined && !validTimestamp(unreadAt)) return null
   return {
     ...(value.agent_id !== undefined ? { agent_id: value.agent_id, session_id: value.session_id } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
@@ -30,6 +34,7 @@ function validRecord(value) {
     previewFingerprint,
     ...(assistantActivityAt !== undefined ? { assistantActivityAt } : {}),
     seenAt,
+    ...(unreadAt !== undefined ? { unreadAt } : {}),
   }
 }
 
@@ -78,6 +83,7 @@ function laterRecord(left, right) {
     }
   }
   const seenAt = Math.max(left.seenAt, right.seenAt)
+  const unreadAt = Math.max(left.unreadAt ?? -1, right.unreadAt ?? -1)
   const leftAssistantAt = Date.parse(left.assistantActivityAt ?? '')
   const rightAssistantAt = Date.parse(right.assistantActivityAt ?? '')
   const assistantActivityAt = !Number.isFinite(leftAssistantAt)
@@ -87,9 +93,9 @@ function laterRecord(left, right) {
       : rightAssistantAt !== leftAssistantAt
         ? rightAssistantAt > leftAssistantAt ? right.assistantActivityAt : left.assistantActivityAt
         : (right.assistantActivityAt ?? '') > (left.assistantActivityAt ?? '') ? right.assistantActivityAt : left.assistantActivityAt
-  return selected.seenAt === seenAt && selected.assistantActivityAt === assistantActivityAt
+  return selected.seenAt === seenAt && (selected.unreadAt ?? -1) === unreadAt && selected.assistantActivityAt === assistantActivityAt
     ? selected
-    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt }
+    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt, ...(unreadAt >= 0 ? { unreadAt } : {}) }
 }
 
 export function mergeThreadSeenStates(left, right, { protect = null, keepInitializedAt = false } = {}) {
@@ -106,7 +112,7 @@ export function mergeThreadSeenStates(left, right, { protect = null, keepInitial
     }
   }
   if (!changed) return left
-  const order = (a, b) => b[1].seenAt - a[1].seenAt || a[0].localeCompare(b[0])
+  const order = (a, b) => Math.max(b[1].seenAt, b[1].unreadAt ?? -1) - Math.max(a[1].seenAt, a[1].unreadAt ?? -1) || a[0].localeCompare(b[0])
   const all = Object.entries(threads)
   // Protected records are kept whatever the caller sends and have their own capacity, so the number of visible
   // records a caller can store never depends on how many hidden ones exist.
@@ -119,6 +125,9 @@ export function mergeThreadSeenStates(left, right, { protect = null, keepInitial
 export class ThreadSeenStore {
   constructor(statePath = '') {
     this.statePath = statePath
+    // Older services rewrite schema-1 records without unknown fields. Keep the
+    // additive marker beside that file so a downgrade cannot erase it.
+    this.manualUnreadPath = statePath ? `${statePath}.manual-unread.json` : ''
     this.scopes = new Map()
     if (!statePath || !existsSync(statePath)) return
     migrateJson(statePath, value => {
@@ -134,6 +143,33 @@ export class ThreadSeenStore {
     for (const [scope, candidate] of Object.entries(payload.scopes).slice(0, MAX_ACCOUNT_SCOPES)) {
       const state = normalizeThreadSeenState(candidate)
       if (state) this.scopes.set(scope, state)
+    }
+    this.restoreManualUnread()
+  }
+
+  restoreManualUnread() {
+    if (!this.manualUnreadPath || !existsSync(this.manualUnreadPath)) return
+    let payload
+    try { payload = JSON.parse(readFileSync(this.manualUnreadPath, 'utf8')) }
+    catch { throw new Error('Wizard thread unread state is invalid') }
+    if (payload?.schema !== 1 || !payload.scopes || typeof payload.scopes !== 'object' || Array.isArray(payload.scopes)) throw new Error('Wizard thread unread state is invalid')
+    const scopes = Object.entries(payload.scopes)
+    if (scopes.length > MAX_ACCOUNT_SCOPES) throw new Error('Wizard thread unread state is invalid')
+    for (const [scope, candidate] of scopes) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('Wizard thread unread state is invalid')
+      const marks = Object.entries(candidate)
+      if (marks.length > MAX_THREAD_RECORDS * 2) throw new Error('Wizard thread unread state is invalid')
+      const current = this.scopes.get(scope)
+      let threads = current?.threads, changed = false
+      for (const [key, unreadAt] of marks) {
+        if (key.length > 600 || !validTimestamp(unreadAt)) throw new Error('Wizard thread unread state is invalid')
+        const record = threads?.[key]
+        if (!record || (record.unreadAt ?? -1) >= unreadAt) continue
+        if (!changed) threads = { ...threads }
+        threads[key] = { ...record, unreadAt }
+        changed = true
+      }
+      if (changed) this.scopes.set(scope, { ...current, threads })
     }
   }
 
@@ -158,6 +194,14 @@ export class ThreadSeenStore {
   persist() {
     if (!this.statePath) return
     mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 })
+    const unreadScopes = {}
+    for (const [scope, state] of this.scopes) {
+      const marks = Object.fromEntries(Object.entries(state.threads).filter(([, record]) => record.unreadAt !== undefined).map(([key, record]) => [key, record.unreadAt]))
+      if (Object.keys(marks).length) unreadScopes[scope] = marks
+    }
+    // Write the downgrade-safe copy first: a failed sidecar write must not
+    // publish a main state that an older service can later strip.
+    atomicStoreWrite(this.manualUnreadPath, JSON.stringify({ schema: 1, scopes: unreadScopes }))
     atomicStoreWrite(this.statePath, JSON.stringify({ schema: 1, scopes: Object.fromEntries(this.scopes) }))
   }
 }

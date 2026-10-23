@@ -1,0 +1,768 @@
+{
+  "schema_version": 1,
+  "runtime_kinds": [
+    "main",
+    "host-profile",
+    "container",
+    "restricted"
+  ],
+  "scope": "Observable main-chat contracts apply to every agent; missing evidence is a failure, never a policy exemption. Fixture evidence is not live/browser evidence.",
+  "baseline": {
+    "wizard-agent-service": "72d1a25",
+    "wizard-ux": "e3668d2e"
+  },
+  "derivation": {
+    "history_window": "2026-08-22..2026-10-22",
+    "method": "main branch source, server test inventory, UX tests/browser suites, merge/commit subjects and loaded chat/release skills",
+    "evidence": "spec/CHAT_FEATURES.md"
+  },
+  "policies": [
+    {
+      "id": "private-history",
+      "rule": "Private agent history, memory and home are invisible to standard agents. Do not test against existing private agents; use fresh disposable synthetic data."
+    },
+    {
+      "id": "models",
+      "rule": "Agent model allowlists and restricted-provider unsupported combinations remain enforced; test an allowed model, never exempt the whole model picker."
+    },
+    {
+      "id": "files-none",
+      "rule": "An explicit files:none grant refuses attachments; files:own must support attached bytes. Do not count unavailable placement as policy."
+    },
+    {
+      "id": "sandbox",
+      "rule": "Restricted runtime must use its per-agent Unix socket and edge transport; no host TCP fallback."
+    }
+  ],
+  "features": [
+    {
+      "id": "session-create",
+      "description": "Create a hidden disposable thread",
+      "layer": "server",
+      "how_to_test": "Create a hidden disposable thread; read back its identity and hidden flag.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/hidden-canary-session.test.ts"
+      ],
+      "fixture": "session-create",
+      "policy_exemptions": []
+    },
+    {
+      "id": "native-images",
+      "description": "Send a real PNG as a native image part",
+      "layer": "server",
+      "how_to_test": "Send a real PNG as a native image part; assert exact image bytes reach the model boundary.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-attachments.test.ts"
+      ],
+      "fixture": "native-images",
+      "policy_exemptions": []
+    },
+    {
+      "id": "image-history-reload",
+      "description": "Send an inline screenshot",
+      "layer": "server",
+      "how_to_test": "Send an inline screenshot; restart Service; reload Wizard history and assert native image parts replace the flattened placeholder. Raw history must not change.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-history-marker-projection.test.ts"
+      ],
+      "fixture": "image-history-reload",
+      "policy_exemptions": []
+    },
+    {
+      "id": "file-upload",
+      "description": "Upload a PNG",
+      "layer": "server",
+      "how_to_test": "Upload a PNG; send its file id; assert validated ids are resolved and native image content survives.",
+      "source_refs": [
+        "server/uploads.mjs"
+      ],
+      "reference_tests": [
+        "tests/uploads.test.ts"
+      ],
+      "fixture": "file-upload",
+      "policy_exemptions": []
+    },
+    {
+      "id": "file-durable-copy",
+      "description": "Verify exact bytes are available at an agent-readable durable path",
+      "layer": "server",
+      "how_to_test": "Verify exact bytes are available at an agent-readable durable path; native image-only fallback is a failure for durable-copy parity.",
+      "source_refs": [
+        "server/agent-files.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-attachments.test.ts"
+      ],
+      "fixture": "file-durable-copy",
+      "policy_exemptions": []
+    },
+    {
+      "id": "file-history",
+      "description": "Reload history after an attachment and assert safe WIZARD_FILE_CHIPS_V1 metadata, never trusted paths",
+      "layer": "server",
+      "how_to_test": "Reload history after an attachment and assert safe WIZARD_FILE_CHIPS_V1 metadata, never trusted paths.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-media.test.ts"
+      ],
+      "fixture": "file-history",
+      "policy_exemptions": []
+    },
+    {
+      "id": "idempotent-resend",
+      "description": "Resend identical input with the same Idempotency-Key",
+      "layer": "server",
+      "how_to_test": "Resend identical input with the same Idempotency-Key; verify one run identity and replay header.",
+      "source_refs": [
+        "server/run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/proxy-queue.test.ts"
+      ],
+      "fixture": "idempotent-resend",
+      "policy_exemptions": []
+    },
+    {
+      "id": "steer",
+      "description": "Send steering text into an admitted run",
+      "layer": "server",
+      "how_to_test": "Send steering text into an admitted run; assert it reaches the same run and agent.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-attachments.test.ts"
+      ],
+      "fixture": "steer",
+      "policy_exemptions": []
+    },
+    {
+      "id": "stop",
+      "description": "Stop the exact admitted run",
+      "layer": "server",
+      "how_to_test": "Stop the exact admitted run; verify stop reaches the correct upstream and terminal status is observed.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/proxy-queue.test.ts"
+      ],
+      "fixture": "stop",
+      "policy_exemptions": []
+    },
+    {
+      "id": "tool-progress",
+      "description": "Read the SSE run stream",
+      "layer": "server",
+      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agents.test.ts"
+      ],
+      "fixture": "tool-progress",
+      "policy_exemptions": []
+    },
+    {
+      "id": "model-picker",
+      "description": "Read supported models, change to an allowed route, and reject an unlisted model on an agent",
+      "layer": "server",
+      "how_to_test": "Read supported models, change to an allowed route, and reject an unlisted model on an agent.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/profile-agents.test.ts"
+      ],
+      "fixture": "model-picker",
+      "policy_exemptions": []
+    },
+    {
+      "id": "status-hidden",
+      "description": "Return WIZARD_STATUS_V1 in an assistant reply",
+      "layer": "server",
+      "how_to_test": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history must hide the wire marker.",
+      "source_refs": [
+        "server/thread-status.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status.test.ts"
+      ],
+      "fixture": "status-hidden",
+      "policy_exemptions": []
+    },
+    {
+      "id": "retry-input",
+      "description": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session",
+      "layer": "server",
+      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session.",
+      "source_refs": [
+        "server/session-detail.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-truth-seek.test.ts"
+      ],
+      "fixture": "retry-input",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-archive",
+      "description": "Archive and restore the disposable thread, reading back both changes",
+      "layer": "server",
+      "how_to_test": "Archive and restore the disposable thread, reading back both changes.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agents.test.ts"
+      ],
+      "fixture": "session-archive",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-rename",
+      "description": "Rename a thread",
+      "layer": "server",
+      "how_to_test": "Rename a thread; read back the exact title.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-titles.test.ts"
+      ],
+      "fixture": "session-rename",
+      "policy_exemptions": []
+    },
+    {
+      "id": "screen-context",
+      "description": "Send bounded Wizard screen context",
+      "layer": "server",
+      "how_to_test": "Send bounded Wizard screen context; assert it reaches each runtime framed as untrusted background, not system instructions.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/voice-context-parity.test.ts"
+      ],
+      "fixture": "screen-context",
+      "policy_exemptions": []
+    },
+    {
+      "id": "media-contract",
+      "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
+      "layer": "server",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering.",
+      "source_refs": [
+        "server/chat-presentation.mjs"
+      ],
+      "reference_tests": [
+        "tests/markdown-hint.test.ts"
+      ],
+      "fixture": "media-contract",
+      "policy_exemptions": []
+    },
+    {
+      "id": "nonimage-files",
+      "description": "Attach a text/PDF file and verify exact durable bytes can be consumed by the agent tools",
+      "layer": "server",
+      "how_to_test": "Attach a text/PDF file and verify exact durable bytes can be consumed by the agent tools.",
+      "source_refs": [
+        "server/agent-files.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-attachments.test.ts"
+      ],
+      "fixture": "nonimage-files",
+      "policy_exemptions": []
+    },
+    {
+      "id": "queue-busy",
+      "description": "Keep a run busy",
+      "layer": "server",
+      "how_to_test": "Keep a run busy; admit a second turn, then complete the first; assert the second starts once on the locked model.",
+      "source_refs": [
+        "server/run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/proxy-queue.test.ts"
+      ],
+      "fixture": "queue-busy",
+      "policy_exemptions": []
+    },
+    {
+      "id": "queue-restart",
+      "description": "Restart while a turn is queued",
+      "layer": "server",
+      "how_to_test": "Restart while a turn is queued; verify no loss or duplicate dispatch.",
+      "source_refs": [
+        "server/run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/restart-interrupt-recovery.test.ts"
+      ],
+      "fixture": "queue-restart",
+      "policy_exemptions": []
+    },
+    {
+      "id": "status-list-state",
+      "description": "Emit needs_you/done/working status with ask, subject and title",
+      "layer": "server",
+      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags.",
+      "source_refs": [
+        "server/thread-status.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status-backfill-list.test.ts"
+      ],
+      "fixture": "status-list-state",
+      "policy_exemptions": []
+    },
+    {
+      "id": "automatic-titles",
+      "description": "Complete an untitled thread and verify its generated title after list reload without touching other agents",
+      "layer": "server",
+      "how_to_test": "Complete an untitled thread and verify its generated title after list reload without touching other agents.",
+      "source_refs": [
+        "server/thread-titles.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-titles.test.ts"
+      ],
+      "fixture": "automatic-titles",
+      "policy_exemptions": []
+    },
+    {
+      "id": "subjects",
+      "description": "Emit a valid subject and verify stable subject membership across follow-up turns and restart",
+      "layer": "server",
+      "how_to_test": "Emit a valid subject and verify stable subject membership across follow-up turns and restart.",
+      "source_refs": [
+        "server/thread-subjects.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-subjects.test.ts"
+      ],
+      "fixture": "subjects",
+      "policy_exemptions": []
+    },
+    {
+      "id": "helper-continuation",
+      "description": "Complete a background helper",
+      "layer": "runtime",
+      "how_to_test": "Complete a background helper; verify its result resumes the exact originating thread once, including after restart.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/helper-continuation-evidence.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "heavy-relay",
+      "description": "Submit disposable heavy work",
+      "layer": "runtime",
+      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption.",
+      "source_refs": [
+        "server/heavy-integration.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-heavy-relay.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "assistant-media",
+      "description": "Return MEDIA image and file tags from the agent own cache",
+      "layer": "server",
+      "how_to_test": "Return MEDIA image and file tags from the agent own cache; verify renderable authenticated URLs, not raw paths or unavailable cards.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-media.test.ts"
+      ],
+      "fixture": "assistant-media",
+      "policy_exemptions": []
+    },
+    {
+      "id": "download-links",
+      "description": "Download assistant and user attachments through authenticated public URLs",
+      "layer": "server",
+      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/content-disposition.test.ts"
+      ],
+      "fixture": "download-links",
+      "policy_exemptions": []
+    },
+    {
+      "id": "read-receipts",
+      "description": "Mark one thread seen or unread",
+      "layer": "server",
+      "how_to_test": "Mark one thread seen, then unread; assert both markers stay scoped to its exact agent/session and survive restart.",
+      "source_refs": [
+        "server/thread-seen.mjs"
+      ],
+      "reference_tests": [
+        "tests/unified-chats-routing.test.ts",
+        "tests/thread-unread.test.ts"
+      ],
+      "fixture": "read-receipts",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-search",
+      "description": "Search for a unique synthetic turn, including outside the loaded list window",
+      "layer": "server",
+      "how_to_test": "Search for a unique synthetic turn, including outside the loaded list window; private context must not appear in standard-agent search.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agents.test.ts"
+      ],
+      "fixture": "session-search",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-delete",
+      "description": "Delete a disposable thread",
+      "layer": "server",
+      "how_to_test": "Delete a disposable thread; verify it is absent from history/list and no image receipts remain.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agents.test.ts"
+      ],
+      "fixture": "session-delete",
+      "policy_exemptions": []
+    },
+    {
+      "id": "voice-notes",
+      "description": "Upload a real short voice fixture with text",
+      "layer": "server",
+      "how_to_test": "Upload a real short voice fixture with text; verify transcript and audio attachment reach the selected agent on the selected model.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/voice-input-projection.test.ts"
+      ],
+      "fixture": "voice-notes",
+      "policy_exemptions": []
+    },
+    {
+      "id": "dictation",
+      "description": "Dictate into an agent thread",
+      "layer": "ux",
+      "how_to_test": "Dictate into an agent thread; verify inserted text, cursor position, model and thread identity through send/reload.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/outbox-voice-reload-handoff.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "transcription",
+      "description": "Transcribe supported audio MIME fixtures and no-speech input",
+      "layer": "server",
+      "how_to_test": "Transcribe supported audio MIME fixtures and no-speech input; verify useful transcript or safe no-speech result with no hallucinated turn.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/voice-transcribe-types.test.ts"
+      ],
+      "fixture": "transcription",
+      "policy_exemptions": []
+    },
+    {
+      "id": "regenerate",
+      "description": "Regenerate an assistant response in a main and routed thread",
+      "layer": "ux",
+      "how_to_test": "Regenerate an assistant response in a main and routed thread; verify the same user input, files, agent and model are preserved once.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/outbox-steer-boundary.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "ready-needs-you",
+      "description": "Emit a needs_you status and verify the Ready queue/card exposes the ask, subject and agent",
+      "layer": "ux",
+      "how_to_test": "Emit a needs_you status and verify the Ready queue/card exposes the ask, subject and agent; dismiss/read it and verify state.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "tests/chats-views.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "working-milestones",
+      "description": "Emit todo_list updates with changing milestones",
+      "layer": "ux",
+      "how_to_test": "Emit todo_list updates with changing milestones; inspect the Working dropdown and verify it settles at completion.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "tests/helper-status.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "image-thumbnail",
+      "description": "Open a main and agent thread after reload",
+      "layer": "ux",
+      "how_to_test": "Open a main and agent thread after reload; assert a decoded thumbnail with nonzero geometry in the owner bubble, then open/close its viewer.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-chats-parity.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "copy-share",
+      "description": "Copy and share user/assistant text and attachment links in both thread kinds",
+      "layer": "ux",
+      "how_to_test": "Copy and share user/assistant text and attachment links in both thread kinds; verify no reserved markers or local paths escape.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-chats-parity.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "notifications",
+      "description": "Complete background work in an unread thread",
+      "layer": "ux",
+      "how_to_test": "Complete background work in an unread thread; verify notification, agent attribution, click navigation and safe reply routing.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/notification-reply-send.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "back-contract",
+      "description": "Open thread and overlay, press Back once per layer",
+      "layer": "ux",
+      "how_to_test": "Open thread and overlay, press Back once per layer; assert the shell stays open at root and never exits on first Back.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-chats-parity.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "appearance",
+      "description": "Render main and routed threads in two shell skins",
+      "layer": "ux",
+      "how_to_test": "Render main and routed threads in two shell skins; assert shared wz tokens, transparent hosted canvas and live redress, with screenshots.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/skin-frame.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "reading-position",
+      "description": "Open unread and already-read threads, scroll, receive updates and reopen",
+      "layer": "ux",
+      "how_to_test": "Open unread and already-read threads, scroll, receive updates and reopen; verify correct unread anchor without stealing scroll.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-chats-parity.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "outbox-offline",
+      "description": "Send offline",
+      "layer": "ux",
+      "how_to_test": "Send offline; reload and reconnect; verify one delivered turn, preserved file tray/voice recovery and safe retry state.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/outbox-voice-reload-handoff.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "history-pagination",
+      "description": "Load bounded newest/oldest history pages and search an older thread",
+      "layer": "server",
+      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries.",
+      "source_refs": [
+        "server/session-list-window.mjs"
+      ],
+      "reference_tests": [
+        "tests/chats-views.test.ts"
+      ],
+      "fixture": "history-pagination",
+      "policy_exemptions": []
+    },
+    {
+      "id": "tool-approval",
+      "description": "Request approval/clarification from a run",
+      "layer": "server",
+      "how_to_test": "Request approval/clarification from a run; verify only the selected agent/run receives the response and resumes.",
+      "source_refs": [
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-principals.test.ts"
+      ],
+      "fixture": "tool-approval",
+      "policy_exemptions": []
+    },
+    {
+      "id": "app-context",
+      "description": "Send from a bound app and inspect bounded provenance",
+      "layer": "server",
+      "how_to_test": "Send from a bound app and inspect bounded provenance; verify correct agent, app context and no ungranted cross-agent files.",
+      "source_refs": [
+        "server/app-bindings.mjs"
+      ],
+      "reference_tests": [
+        "tests/app-bindings.test.ts"
+      ],
+      "fixture": "app-context",
+      "policy_exemptions": []
+    },
+    {
+      "id": "private-isolation",
+      "description": "Verify standard credentials cannot enumerate/open/search private threads",
+      "layer": "runtime",
+      "how_to_test": "Verify standard credentials cannot enumerate/open/search private threads; own-agent principal cannot use owner attachment ids. Metadata only on existing agents.",
+      "source_refs": [
+        "server/principals.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-principals.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "model-lock",
+      "description": "Queue/steer/retry on one route while changing global default",
+      "layer": "server",
+      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked.",
+      "source_refs": [
+        "server/run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/proxy-queue.test.ts"
+      ],
+      "fixture": "model-lock",
+      "policy_exemptions": []
+    },
+    {
+      "id": "error-recovery",
+      "description": "Interrupt a run/connection and reload",
+      "layer": "ux",
+      "how_to_test": "Interrupt a run/connection and reload; verify safe error, Retry/Stop controls, no raw exception or stuck working indicator.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/errors-voice-dismiss.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "thread-links",
+      "description": "Open an agent-qualified thread link and old-format links",
+      "layer": "ux",
+      "how_to_test": "Open an agent-qualified thread link and old-format links; verify correct agent identity even with colliding session ids.",
+      "source_refs": [
+        "wizard-ux/web/live.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/thread-link-compat.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "pending-first-send",
+      "description": "Create an empty main/agent thread and send once",
+      "layer": "ux",
+      "how_to_test": "Create an empty main/agent thread and send once; verify optimistic message, list state and composer/tray cleanup after acknowledgement.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js"
+      ],
+      "reference_tests": [
+        "tests/pending-first-send.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "memory-compaction",
+      "description": "Compact an isolated long fixture thread",
+      "layer": "runtime",
+      "how_to_test": "Compact an isolated long fixture thread; reload visible history and continue without leaking memory scaffolding or losing attachments.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/history-compaction-replay.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    }
+  ]
+}

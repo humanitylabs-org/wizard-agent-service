@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import fcntl
+from contextlib import contextmanager
 import hmac
 import ipaddress
 import json
@@ -35,7 +37,6 @@ import secrets
 import shlex
 import stat
 import subprocess
-import tempfile
 import importlib.util
 import sys
 import threading
@@ -53,7 +54,7 @@ RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
 AGENT_UID = 10000                      # the restricted runtime's agent user (compose.yml, home-init.sh)
 MANAGED_FILES = (".env", "config.yaml")
-SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # compose.yml default; built by `compose build`
+SIDECAR_IMAGE = "restricted-agent-sidecars:local"   # existing main image; never rebuilt for imports
 UPLINK_POOL = ipaddress.ip_network("10.250.0.0/16")
 SANDBOX_POOL = ipaddress.ip_network("10.251.0.0/16")
 LOCK = threading.Lock()   # the Runtipi/compose drivers: one lifecycle action at a time (they patch shared module state)
@@ -78,6 +79,18 @@ class RuntimeFailure(Exception):
         super().__init__(code)
         self.code = code
         self.status = status
+
+
+@contextmanager
+def import_process_lock(agents, agent_id):
+    """Same OS lock as the owner import/undo CLI, outside the sealed home."""
+    folder = agents.root / agent_id
+    fd = os.open(folder / '.lifecycle.lock', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------- docker
@@ -173,42 +186,8 @@ class Agents:
         tmp.replace(env_path)
 
 
-    def set_secret(self, agent_id: str, name: str, value: str) -> None:
-        """Owner CLI only; never exposed through HTTP or copied into the agent home."""
-        if name != "claude.token" or not value or len(value) > 16384 or any(not 33 <= ord(c) <= 126 for c in value):
-            raise RuntimeFailure("invalid_secret", 400)
-        if not ID_RE.fullmatch(agent_id) or agent_id == "hermes":
-            raise RuntimeFailure("agent_not_found", 404)
-        folder = self.root / agent_id
-        if folder.is_symlink() or folder.resolve().parent != self.root:
-            raise RuntimeFailure("agent_invalid", 400)
-        self.read(agent_id)
-        fd, tmp = tempfile.mkstemp(prefix=".claude.token-", dir=folder)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write(value + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(tmp, folder / name)  # replace a symlink; never follow it
-            directory = os.open(folder, os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-
     def secret(self, agent_id: str, name: str) -> str:
         try:
-            if name == "claude.token":
-                fd = os.open(self.root / agent_id / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd) as stream:
-                    st = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:
-                        return ""
-                    value = stream.read(16385).strip()
-                    return value if len(value) <= 16384 and not any(not 33 <= ord(c) <= 126 for c in value) else ""
             return (self.root / agent_id / name).read_text().strip()
         except (OSError, UnicodeError):
             return ""
@@ -401,18 +380,15 @@ class RestrictedDriver:
         # Clear ambient helper credentials; only the independently authorized path
         # reaches Compose. A gateway token env persists in Hermes terminal snapshots.
         env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
-        env["CLAUDE_TOKEN_FILE"] = (str(self.agents.root / agent["id"] / "claude.token")
-                                    if uses_claude_login(agent) and self.agents.secret(agent["id"], "claude.token") else "")
-        if self.image:
-            env["AGENT_IMAGE"] = self.image
+        env["CLAUDE_TOKEN_FILE"] = ""  # retired path; never trust an inherited override
+        image = agent["runtime"].get("image") if agent.get("imported") else self.image
+        if image:
+            env["AGENT_IMAGE"] = image
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
         env = self.env(agent)
         files = ["-f", str(self.compose_file)]
-        if env["CLAUDE_TOKEN_FILE"]:
-            # Independent owner record + per-agent secret, never ambient credentials.
-            files += ["-f", str(self.runtime_dir / "compose.claude-token.yml")]
         hosts = os.environ.get("EGRESS_PASSTHROUGH_HOSTS")
         if hosts:
             spec = importlib.util.spec_from_file_location("runtime_passthrough", self.runtime_dir / "passthrough.py")
@@ -424,8 +400,46 @@ class RestrictedDriver:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             path.write_text(module.compose_override(hosts))  # aliases only; never a secret
             files += ["-f", str(path)]
+        source = self.claude_source(agent)
+        if source:
+            module = self._claude_source_module()
+            path = self.agents.root / agent["id"] / "runtime" / "claude-source.json"
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.write_text(json.dumps(module.compose_override(source)))  # mount metadata only
+            files += ["-f", str(self.runtime_dir / "compose.claude-login.yml"), "-f", str(path)]
+        override = self.agents.root / agent["id"] / "import-runtime.json"
+        if agent.get("imported") and override.is_file():
+            files += ["-f", str(override)]
         return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
                       timeout=timeout, env=env)
+
+    def _claude_source_module(self):
+        spec = importlib.util.spec_from_file_location("runtime_claude_source", self.runtime_dir / "claude_source.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeFailure("claude_source_resolver_missing", 500)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def claude_source(self, agent: dict) -> dict | None:
+        # Read authorization from the current owner record, not helper env/model
+        # credentials. Private agents must not even inspect the connection app.
+        if not restricted(agent) or not uses_claude_login(agent):
+            return None
+        module = self._claude_source_module()
+        try:
+            ids = docker(["ps", "-q", "--filter", "label=com.docker.compose.service=" + module.ENGINE_SERVICE],
+                         timeout=30).stdout.split()
+            if not ids:
+                return None
+            # Request only source metadata: never retrieve the app's env/command.
+            fmt = ('{"Config":{"Labels":{"com.docker.compose.service":'
+                   '{{json (index .Config.Labels "com.docker.compose.service")}}}},'
+                   '"State":{"Running":{{json .State.Running}}},"Mounts":{{json .Mounts}}}')
+            records = docker(["inspect", "--format", fmt, *ids], timeout=30).stdout.splitlines()
+            return module.resolve([json.loads(line) for line in records])
+        except (RuntimeFailure, subprocess.TimeoutExpired, ValueError, TypeError):
+            return None
 
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
@@ -457,8 +471,8 @@ class RestrictedDriver:
             raise RuntimeFailure("agent_sync_timeout", 504)
 
     def _remove_claude_seeder(self, agent: dict) -> None:
-        # An atomic owner-file replacement changes its inode: recreate the binder
-        # on every apply/start, even when Compose's path string has not changed.
+        # Rebind the installed app source on every apply/start (share migration
+        # can change it), and remove obsolete seeder state on grant revocation.
         # Select independently of the current grant so revocation/private changes
         # also remove an old seeder (including on stop).
         ids = docker(["ps", "-a", "-q", "--filter", f"label=com.docker.compose.project={self.project(agent['id'])}",
@@ -472,6 +486,8 @@ class RestrictedDriver:
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
+        if agent["runtime"].get("admission") == "importing":
+            raise RuntimeFailure("agent_import_in_progress", 409)
         # The Service must create the socket before Docker; never let bind-mount auto-create a directory.
         gateway = self.agents.root / agent["id"] / "gateway"
         try:
@@ -483,8 +499,19 @@ class RestrictedDriver:
             safe = False
         if not safe:
             raise RuntimeFailure("agent_socket_not_ready", 409)
-        self.agents.add_provider_keys(agent)
-        self._compose(agent, "build", timeout=1800)
+        if agent.get('imported'):
+            docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
+            docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
+            refresh = self.agents.root / agent["id"] / "import-update.json"
+            if refresh.is_file():
+                command = ["uv", "run", "--offline", "--no-project", "--with", "PyYAML>=6.0.2,<7", "--with", "python-dotenv>=1,<2", "python"]
+                result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'refresh-managed',
+                                         str(self.agents.root / agent["id"])], capture_output=True, text=True, timeout=60)
+                if result.returncode:
+                    raise RuntimeFailure("import_harness_update_failed")
+        else:
+            self.agents.add_provider_keys(agent)
+            self._compose(agent, "build", timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -501,7 +528,18 @@ class RestrictedDriver:
         return {"ok": True, "driver": "restricted", "project": project, **self.claude_status(agent)}
 
     def claude_status(self, agent: dict) -> dict:
-        detail = "claude_token_missing" if uses_claude_login(agent) and not self.agents.secret(agent["id"], "claude.token") else ""
+        detail = ""
+        if restricted(agent) and uses_claude_login(agent):
+            detail = "claude_login_missing"
+            if self.claude_source(agent):
+                try:
+                    ids = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={self.project(agent['id'])}",
+                                  "--filter", "label=com.docker.compose.service=claude-init"], timeout=30).stdout.split()
+                    if len(ids) == 1 and docker(["exec", ids[0], "python3", "/srv/claude-init.py", "--check"],
+                                               timeout=30, check=False).returncode == 0:
+                        detail = ""
+                except (RuntimeFailure, subprocess.TimeoutExpired):
+                    pass
         return {"status_detail": detail, "last_error": detail}
 
     def start(self, agent: dict) -> dict:
@@ -524,7 +562,7 @@ def verify_vendored(runtime_dir: Path) -> None:
     except OSError:
         raise SystemExit("restricted runtime: SOURCE.txt missing") from None
     listed = [line.split("  ", 1) for line in lines if re.fullmatch(r"[0-9a-f]{64}  \./\S+", line)]
-    for required in ("./compose.yml", "./compose.claude-token.yml", "./passthrough.py", "./sidecars/egress.py",
+    for required in ("./compose.yml", "./compose.claude-login.yml", "./claude_source.py", "./passthrough.py", "./sidecars/egress.py",
                      "./sidecars/upstream_dns.py", "./sidecars/hostname_policy.py", "./sidecars/claude-init.py",
                      "./sidecars/Dockerfile", "./sidecars/edge.py", "./conformance/inspect_check.py",
                      "./conformance/ingress_probe.py", "./conformance/in_agent.py", "./conformance/docker_credentials.py"):
@@ -783,6 +821,15 @@ def offline_census(driver, agent: dict) -> dict:
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if isinstance(driver, ImportDriver):
+        # Imports have no compose generation. Absence in a compose label lookup
+        # MUST NOT mint a false stopped seal for an actually running import.
+        if action in {'inspect', 'census'}:
+            raise RuntimeFailure('import_offline_census_unavailable', 503)
+        result = getattr(driver, action)(agent)
+        if action == 'stop':
+            return {**result, 'census': None, 'census_error': 'import_offline_census_unavailable'}
+        return result
     if action == 'inspect':
         return inspect_runtime(driver, agent)[0]
     if action == 'census':
@@ -853,8 +900,12 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
-    cid = container or container_for(driver.project(agent["id"]), service)
-    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(driver.project(agent['id']), service))
+    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    if isinstance(driver, ImportDriver):
+        label = docker(['inspect', '--format', '{{index .Config.Labels "wizard.import.id"}}', cid], timeout=10).stdout.strip()
+        if label != agent['id']:
+            raise RuntimeFailure('import_container_not_owned', 409)
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
     if run.returncode:
@@ -863,7 +914,156 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
+# ---------------------------------------------------------------- file placement (only the agent's inbox, as its uid)
+
+PLACE_LIMIT = 25 * 1024 * 1024
+PLACE_SCRIPT = r'''
+import base64, datetime, hashlib, json, os, re, sys
+p = json.load(sys.stdin)
+data = base64.b64decode(p["data_base64"], validate=True)
+if not 0 < len(data) <= 25 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != p["sha256"]:
+    raise SystemExit("invalid_file")
+name = p["filename"]
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", name):
+    raise SystemExit("invalid_filename")
+day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+fd = os.open("/opt/data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in ("inbox", day):
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = next_fd
+    # A content-qualified name is idempotent without overwriting existing agent files.
+    try:
+        out = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        created = True
+    except FileExistsError:
+        out = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        created = False
+    with os.fdopen(out, "r+b" if created else "rb") as f:
+        if created:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            f.seek(0)
+        if hashlib.sha256(f.read(25 * 1024 * 1024 + 1)).hexdigest() != p["sha256"]:
+            raise SystemExit("file_conflict")
+finally:
+    os.close(fd)
+print(json.dumps({"verified": True, "path": "/opt/data/inbox/" + day + "/" + name, "bytes": len(data), "sha256": p["sha256"]}))
+'''
+
+
+def place(driver, agent: dict, payload: dict) -> dict:
+    import base64
+    if (agent.get("permissions") or {}).get("files") == "none":
+        raise RuntimeFailure("agent_files_disabled", 409)
+    raw = payload.get("data_base64")
+    if not isinstance(raw, str) or len(raw) > 4 * ((PLACE_LIMIT + 2) // 3):
+        raise RuntimeFailure("file_too_large", 413)
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except ValueError:
+        raise RuntimeFailure("invalid_file", 400)
+    if not 0 < len(data) <= PLACE_LIMIT:
+        raise RuntimeFailure("file_too_large", 413)
+    digest = hashlib.sha256(data).hexdigest()
+    if payload.get("sha256") != digest:
+        raise RuntimeFailure("file_hash_mismatch", 400)
+    name = payload.get("filename")
+    if not isinstance(name, str) or not name:
+        raise RuntimeFailure("invalid_filename", 400)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name.replace("\\", "/").split("/")[-1]).lstrip("._-") or "attachment"
+    name = digest[:16] + "-" + name[:180]
+    clean = {"filename": name, "data_base64": raw, "sha256": digest}
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    result = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", PLACE_SCRIPT],
+                    input_text=json.dumps(clean), timeout=60, check=False)
+    if result.returncode:
+        raise RuntimeFailure("file_placement_failed", 502)
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+# ---------------------------------------------------------------- file fetch (agent -> owner: MEDIA lines, read as its uid)
+
+FETCH_LIMIT = 25 * 1024 * 1024
+FETCH_SCRIPT = r'''
+import base64, hashlib, json, os, stat, sys
+p = json.load(sys.stdin)
+parts = p["path"].split("/")[3:]   # /opt/data/<parts>
+fd = os.open("/opt/data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in parts[:-1]:
+        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = next_fd
+    try:
+        out = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except OSError:
+        raise SystemExit("file_missing")
+    with os.fdopen(out, "rb") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 25 * 1024 * 1024:
+            raise SystemExit("file_unavailable")
+        data = f.read(25 * 1024 * 1024 + 1)
+finally:
+    os.close(fd)
+if not 0 < len(data) <= 25 * 1024 * 1024:
+    raise SystemExit("file_unavailable")
+print(json.dumps({"verified": True, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "data_base64": base64.b64encode(data).decode()}))
+'''
+FETCH_PATH = re.compile(r"/opt/data(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._ ()+,@=-]{1,200}){1,16}")
+
+
+def fetch(driver, agent: dict, payload: dict) -> dict:
+    """Read one regular file from the agent's own /opt/data as the agent's uid (no symlinks, bounded)."""
+    if (agent.get("permissions") or {}).get("files") == "none":
+        raise RuntimeFailure("agent_files_disabled", 409)
+    path = payload.get("path")
+    if not isinstance(path, str) or not FETCH_PATH.fullmatch(path):
+        raise RuntimeFailure("invalid_path", 400)
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    result = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", FETCH_SCRIPT],
+                    input_text=json.dumps({"path": path}), timeout=60, check=False)
+    if result.returncode:
+        raise RuntimeFailure("file_unavailable", 404)
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 # ---------------------------------------------------------------- HTTP
+
+class ImportDriver:
+    """Existing host helper, own-home only; never route an import through Runtipi install."""
+    def __init__(self, agents):
+        self.agents = agents
+
+    def _action(self, agent, action):
+        path = self.agents.root / agent['id'] / 'import-journal.json'
+        interpreter = os.environ.get('WIZARD_IMPORT_PYTHON')
+        command = ([interpreter] if interpreter else ['uv', 'run', '--no-project', '--with', 'PyYAML>=6.0.2,<7', 'python'])
+        result = subprocess.run([*command, str(Path(__file__).with_name('hermes_import.py')), 'lifecycle', str(path), action],
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeFailure('import_lifecycle_failed', 502)
+        return json.loads(result.stdout)
+
+    def start(self, agent):
+        return self._action(agent, 'start')
+
+    def stop(self, agent):
+        return self._action(agent, 'stop')
+
+    def apply(self, agent):
+        return self._action(agent, 'apply')
+
 
 def driver_for(agent: dict, driver, restricted_driver):
     """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
@@ -871,6 +1071,8 @@ def driver_for(agent: dict, driver, restricted_driver):
         if restricted_driver is None:
             raise RuntimeFailure("restricted_runtime_unavailable", 503)
         return restricted_driver
+    if agent.get('imported') == {'schema': 1, 'format': 'hermes'}:
+        return ImportDriver(driver.agents)
     return driver
 
 
@@ -900,12 +1102,17 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 512 * 1024:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._json(400, {"error": "invalid_length"})
+                return
+            limit = 4 * ((PLACE_LIMIT + 2) // 3) + 4096 if m.group(2) == "place" else 512 * 1024
+            if length < 0 or length > limit:
                 self._json(413, {"error": "too_large"})
                 return
             try:
@@ -923,10 +1130,21 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     return
                 agent = agents.read(agent_id)
                 chosen = driver_for(agent, driver, restricted_driver)
+                if action == "place":
+                    if not isinstance(payload, dict):
+                        raise RuntimeFailure("invalid_payload", 400)
+                    self._json(200, place(chosen, agent, payload))
+                    return
+                if action == "fetch":
+                    if not isinstance(payload, dict):
+                        raise RuntimeFailure("invalid_payload", 400)
+                    self._json(200, fetch(chosen, agent, payload))
+                    return
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with lifecycle_lock(chosen, restricted_driver, agent_id):
+                with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
+                    agent = agents.read(agent_id)
                     result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:
@@ -942,9 +1160,6 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--agents-dir", required=True, type=Path)
     ap.add_argument("--token-file", type=Path)
-    ap.add_argument("command", nargs="?", choices=["set-secret"])
-    ap.add_argument("agent", nargs="?")
-    ap.add_argument("secret_name", nargs="?")
     ap.add_argument("--port", type=int, default=7795)
     ap.add_argument("--driver", choices=["runtipi", "compose"], default="runtipi")
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
@@ -956,15 +1171,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
     args = ap.parse_args(argv)
-    if args.command == "set-secret":
-        if not args.agent or args.secret_name != "claude.token" or sys.stdin.isatty():
-            ap.error("set-secret requires <agent> claude.token and piped stdin")
-        try:
-            value = sys.stdin.read(16386).rstrip("\r\n")
-            Agents(args.agents_dir, None).set_secret(args.agent, args.secret_name, value)
-        except RuntimeFailure as error:
-            raise SystemExit(error.code) from None
-        return 0
     if not args.token_file:
         ap.error("--token-file is required for the HTTP helper")
     token = args.token_file.read_text().strip()

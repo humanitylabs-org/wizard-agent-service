@@ -72,6 +72,48 @@ const text = (value, max, field) => {
   return value.trim()
 }
 const id = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
+// run: agent work in a thread. remind: a short agent turn that reminds. return (Boomerang): no agent at all,
+// the thread or one message in it comes back to the owner's Ready list with a notification.
+export const KINDS = ['run', 'remind', 'return']
+export const RETURN_RUN_PREFIX = 'wzb_'
+function normalizeTarget(target) {
+  if (target === undefined || target === null) return { message: null, excerpt: '' }
+  if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).some(k => !['message', 'excerpt'].includes(k))) throw fail('invalid target')
+  const message = target.message ?? null
+  if (message !== null && !(typeof message === 'number' && Number.isFinite(message) && message > 0) && !(typeof message === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(message))) throw fail('invalid target message')
+  if (target.excerpt !== undefined && typeof target.excerpt !== 'string') throw fail('invalid target excerpt')
+  return { message, excerpt: String(target.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 280) }
+}
+
+// Named windows are sugar for `once`: resolved to one instant at insert, labelled for the
+// Morning summary. 'morning' is the owner's wake time; 'overnight' starts after they sleep and
+// is jittered so a batch of overnight jobs does not all go due in the same second.
+export const WINDOWS = { morning: { hour: 8, minute: 30, jitterMin: 0 }, overnight: { hour: 3, minute: 30, jitterMin: 20 } }
+function zonedParts(ms, timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(ms)).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]))
+  return parts
+}
+function zonedInstant(y, mo, d, h, mi, timeZone) {
+  // Wall-clock time in timeZone -> UTC ms (two passes absorb DST edges).
+  let guess = Date.UTC(y, mo - 1, d, h, mi)
+  for (let i = 0; i < 2; i++) {
+    const p = zonedParts(guess, timeZone)
+    guess -= Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - Date.UTC(y, mo - 1, d, h, mi)
+  }
+  return guess
+}
+export function resolveWindow(name, timezone, now, random = Math.random) {
+  const spec = WINDOWS[name]
+  if (!spec) throw fail(`unknown window (use ${Object.keys(WINDOWS).join(' or ')})`)
+  const today = zonedParts(now, timezone)
+  let at = zonedInstant(today.year, today.month, today.day, spec.hour, spec.minute, timezone)
+  if (at <= now) {
+    const next = zonedParts(now + 24 * 3600_000, timezone)
+    at = zonedInstant(next.year, next.month, next.day, spec.hour, spec.minute, timezone)
+  }
+  return at + Math.floor(random() * spec.jitterMin) * 60_000
+}
 
 export function normalizeWhen(when, timezone, now) {
   if (!when || typeof when !== 'object' || Array.isArray(when) || Object.keys(when).length !== 1) throw fail('when requires exactly one of cron, every, once')
@@ -103,8 +145,20 @@ function latestInstant(job, now) {
 // One SQLite transaction claims an occurrence AND advances the high-water cursor.
 // Delivery is an outbox: only a confirmed ordinary chat admission acknowledges it.
 // There is deliberately no bounded seen-list and no log/file scanning for delivery.
+function scheduleInput(job) {
+  const skill = job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''
+  if ((job.kind ?? 'run') === 'remind') {
+    return `${SCHEDULE_INPUT} reminder\nThe owner asked to be reminded, in this thread, about:\n${job.prompt}\n`
+      + 'Deliver the reminder now, briefly. You may cheaply check whether it is still relevant and add the current state. Do not start the work itself unless the reminder says to.'
+  }
+  if (job.when?.once) {
+    return `${SCHEDULE_INPUT} deferred work\nThe owner asked for this to run later, in this thread:\n${skill}${job.prompt}\nDo the work now and report the result here.`
+  }
+  return `${SCHEDULE_INPUT}\n${skill}${job.prompt}\nIf there is nothing to report, respond exactly [SILENT].`
+}
+
 export class Scheduler {
-  constructor({ statePath, deliver, lookup = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000 }) {
+  constructor({ statePath, deliver, lookup = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -128,6 +182,13 @@ export class Scheduler {
     this.timezone = timezone
     this.hermesHome = hermesHome
     this.intervalMs = intervalMs
+    // Agent work trickles: one admission per trickleMs, at most maxInflight scheduled runs
+    // unfinished at once. Reminders are short and bypass both. The run queue's own
+    // max-active cap still applies on top, shared with interactive threads.
+    this.trickleMs = trickleMs
+    this.maxInflight = maxInflight
+    this.random = random
+    this.lastAdmitAt = -Infinity
     this.stopped = false
     this.inflight = null
   }
@@ -156,9 +217,9 @@ export class Scheduler {
     if (this.refreshing) return this.refreshing
     this.refreshing = (async () => {
       // Only the last occurrence can be shown. Never use unrelated chat activity.
-      await Promise.all(this.list().map(async job => {
-        const row = this.latest(job.id)
-        if (!row?.admitted || row.finished_at) return
+      // Every unfinished admitted occurrence (bounded to 6 h) so the trickle's in-flight count is true.
+      const rows = this.db.prepare('SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND instant > ?').all(this.now() - 6 * 3600_000)
+      await Promise.all(rows.map(async row => {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
         try {
@@ -185,7 +246,7 @@ export class Scheduler {
   save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
   normalize(input, prior = null) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('invalid schedule')
-    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled']
+    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target']
     if (Object.keys(input).some(key => !allowed.includes(key))) throw fail('unknown schedule field')
     const now = this.now()
     const job = { ...(prior ?? {}), ...input }
@@ -193,12 +254,36 @@ export class Scheduler {
     job.name = text(job.name, 160, 'name')
     job.timezone = text(job.timezone ?? (typeof this.timezone === 'function' ? this.timezone() : this.timezone), 100, 'timezone')
     try { new Intl.DateTimeFormat('en', { timeZone: job.timezone }).format() } catch { throw fail('invalid timezone') }
-    job.when = normalizeWhen(job.when, job.timezone, now)
+    if (input.when && typeof input.when === 'object' && Object.hasOwn(input.when, 'at') && Object.keys(input.when).length === 1) {
+      const name = String(input.when.at)
+      job.when = { once: iso(resolveWindow(name, job.timezone, now, this.random)) }
+      job.window = name
+    } else {
+      if (Object.hasOwn(input, 'when')) delete job.window
+      job.when = normalizeWhen(job.when, job.timezone, now)
+    }
+    job.kind = job.kind ?? 'run'
+    if (!KINDS.includes(job.kind)) throw fail(`kind must be ${KINDS.join(', ')}`)
+    if (job.kind === 'remind' && !job.prompt) throw fail('a reminder needs its text in prompt')
     job.agent = job.agent ?? 'main'
     if (!/^[a-z][a-z0-9-]{0,30}$/.test(job.agent)) throw fail('invalid agent')
+    if (job.kind === 'return') {
+      // Boomerang: hand an existing thread (or one message in it) back to the owner. Never a prompt or a run,
+      // so it has no skill/model, an optional short note, and must name the thread it returns.
+      if (!job.when.once) throw fail('a return happens once (use once or at)')
+      if (!job.thread || !id(job.thread)) throw fail('a return needs its thread')
+      if (job.skill || (job.model !== undefined && job.model !== null)) throw fail('a return runs nothing (no skill or model)')
+      job.prompt = typeof job.prompt === 'string' ? job.prompt.trim().slice(0, 500) : ''
+      job.skill = ''
+      delete job.model
+      job.target = normalizeTarget(job.target)
+    } else {
+      if (Object.hasOwn(input, 'target')) throw fail('target is only for kind return')
+      delete job.target
+    }
     job.prompt = job.prompt ? text(job.prompt, 64_000, 'prompt') : ''
     job.skill = job.skill ? text(job.skill, 200, 'skill') : ''
-    if (!job.prompt && !job.skill) throw fail('prompt or skill required')
+    if (!job.prompt && !job.skill && job.kind !== 'return') throw fail('prompt or skill required')
     if (job.model !== undefined && job.model !== null) job.model = text(job.model, 200, 'model')
     else delete job.model
     if (job.thread !== undefined && job.thread !== null && !id(job.thread)) throw fail('invalid thread')
@@ -233,19 +318,21 @@ export class Scheduler {
       this.db.prepare('DELETE FROM schedule_occurrences WHERE job_id=? AND admitted=0').run(jobId)
     })
   }
-  reserve(job, instant) {
+  reserve(job, instant, manual = false) {
     // This identity is persisted before any external session/run call. A crashed create
     // retries the same session id; a crashed admission retries the same frozen body/key.
     if (!job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
     const key = `schedule:${job.id}:${iso(instant)}`
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`,
-      body: { session_id: job.thread, input: `${SCHEDULE_INPUT}\n${job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''}${job.prompt}\nIf there is nothing to report, respond exactly [SILENT].`, ...(job.model ? { model: job.model } : {}) } }
+      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}),
+      ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
+        : { body: { session_id: job.thread, input: scheduleInput(job), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))
     return occurrence
   }
   runNow(jobId) {
-    const occurrence = this.transaction(() => this.reserve(this.get(jobId), this.now()))
+    const occurrence = this.transaction(() => this.reserve(this.get(jobId), this.now(), true))
     // The durable receipt is returned immediately; admission retries on the loop or the
     // next explicit run request. A paused job stays paused, but its manual outbox drains.
     void this.tick(false).catch(() => { console.error('[scheduler] manual admission failed') })
@@ -283,15 +370,48 @@ export class Scheduler {
     })
     for (const row of this.db.prepare('SELECT key,data FROM schedule_occurrences WHERE admitted=0 ORDER BY instant').all()) {
       if (this.stopped) break
+      const occurrence = JSON.parse(row.data)
+      // Reminders, Boomerang returns and the owner's explicit Run now skip the trickle.
+      const trickled = !['remind', 'return'].includes(occurrence.kind) && !occurrence.manual
+      // A held row stays pending and is retried on the next tick, in due order.
+      if (trickled && (this.now() - this.lastAdmitAt < this.trickleMs || this.inflightCount() >= this.maxInflight)) continue
       try {
-        const receipt = await this.deliver(JSON.parse(row.data))
-        this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='running', finished_at=NULL WHERE key=?").run(JSON.stringify(receipt ?? {}), row.key)
+        const receipt = await this.deliver(occurrence)
+        if (trickled) this.lastAdmitAt = this.now()
+        if (occurrence.kind === 'return') {
+          // A return has no run to watch: delivery is the whole outcome.
+          const at = iso(this.now())
+          this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='returned', started_at=?, finished_at=? WHERE key=?").run(JSON.stringify(receipt ?? {}), at, at, row.key)
+        } else this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='running', finished_at=NULL WHERE key=?").run(JSON.stringify(receipt ?? {}), row.key)
       } catch (error) {
         // No arbitrary exception/body strings in state/API responses (they may contain credentials).
         this.db.prepare("UPDATE schedule_occurrences SET error=?, outcome='failed' WHERE key=?").run('Admission failed; will retry', row.key)
       }
     }
     await this.refreshRuns()
+  }
+  inflightCount() {
+    // Unfinished scheduled agent work. A run never observed finishing stops counting after 6 h.
+    return this.db.prepare(`SELECT count(*) AS n FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL
+      AND coalesce(json_extract(data,'$.kind'),'run') NOT IN ('remind','return') AND instant > ?`).get(this.now() - 6 * 3600_000).n
+  }
+  // The phone's reply watcher polls a run id. A Boomerang hands it `wzb_<job id>` at creation, so the same
+  // native notification path tells the owner when the thread comes back. Never exposes a prompt: only the
+  // owner's own note or message excerpt, which the owner wrote or chose.
+  returnRun(runId) {
+    if (typeof runId !== 'string' || !runId.startsWith(RETURN_RUN_PREFIX)) return null
+    const jobId = runId.slice(RETURN_RUN_PREFIX.length)
+    const row = this.db.prepare('SELECT data FROM schedules WHERE id=?').get(jobId)
+    // Cancelled or already acknowledged: unknown to the watcher (404), which drops it without a notification.
+    if (!row) return null
+    const job = JSON.parse(row.data)
+    if (job.kind !== 'return') return null
+    const done = this.latest(job.id)
+    // Only the occurrence for the current time counts: "Again" moves the time, and the earlier return must not re-notify.
+    const returned = done?.admitted === 1 && done.outcome === 'returned' && Boolean(job.when?.once) && done.instant === Date.parse(job.when.once)
+    const text = job.prompt || job.target?.excerpt || job.name
+    return { id: runId, run_id: runId, session_id: job.thread, status: returned ? 'completed' : 'queued',
+      output: returned ? `🪃 Back: ${text}` : '', ...(returned ? { completed_at: done.finished_at } : {}) }
   }
   hasRun(agent, runId) {
     return Boolean(this.db.prepare("SELECT 1 FROM schedule_occurrences WHERE json_extract(data,'$.agent')=? AND json_extract(receipt,'$.run_id')=? LIMIT 1").get(agent, runId))

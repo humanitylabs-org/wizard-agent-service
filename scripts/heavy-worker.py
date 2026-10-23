@@ -31,6 +31,12 @@ LANES = ('heavy', 'light')
 LIGHT_MAX_SECONDS = 900
 
 
+def agent_spool(root):
+    # A pre-sandbox dispatcher may still hold the legacy spool leadership lock.
+    # It must never see agent specs, even while its host jobs drain normally.
+    return Path(root) / 'agent-sandbox-v1'
+
+
 def light_root(root):
     return Path(root) / 'light'
 
@@ -114,6 +120,18 @@ def docker_binary():
     return os.environ.get('WIZARD_HEAVY_DOCKER_BIN') or shutil.which('docker') or '/usr/bin/docker'
 
 
+def docker_environment():
+    # Docker CLIENT routing only. Never add this to container -e flags or HOME.
+    host = os.environ.get('WIZARD_HEAVY_DOCKER_HOST')
+    if host is None:
+        return {}
+    if (not host.startswith('unix:///') or len(host) <= 8
+            or re.search(r'[\x00-\x20\x7f]', host)
+            or '..' in host[7:].split('/')):
+        raise ValueError('invalid WIZARD_HEAVY_DOCKER_HOST')
+    return {'DOCKER_HOST': host}
+
+
 def container_name(job_id):
     if not re.fullmatch(r'heavy_[0-9a-f]{32}', job_id):
         raise ValueError('invalid job identity')
@@ -127,7 +145,7 @@ def agent_command(spec, job_id):
     # Use ONLY the image's own PATH. No host env, Docker context, credentials,
     # lock descriptors or worker configuration is inherited by the command.
     result = subprocess.run([binary, 'image', 'inspect', '--format', '{{json .Config}}', image],
-                            env={}, check=True, capture_output=True, text=True, timeout=15)
+                            env=docker_environment(), check=True, capture_output=True, text=True, timeout=15)
     config = json.loads(result.stdout)
     if config.get('Volumes'):
         raise ValueError('agent image must not declare additional volumes')
@@ -147,10 +165,10 @@ def agent_command(spec, job_id):
 
 def kill_agent_container(job_id):
     binary, name = docker_binary(), container_name(job_id)
-    subprocess.run([binary, 'kill', name], env={},
+    subprocess.run([binary, 'kill', name], env=docker_environment(),
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
     result = subprocess.run([binary, 'container', 'inspect', '--format', '{{.State.Running}}', name],
-                            env={}, capture_output=True, text=True, timeout=15, check=False)
+                            env=docker_environment(), capture_output=True, text=True, timeout=15, check=False)
     if result.returncode == 0 and result.stdout.strip() == 'false':
         return
     if result.returncode and ('No such object' in result.stderr or 'No such container' in result.stderr):
@@ -160,7 +178,7 @@ def kill_agent_container(job_id):
 
 def launch_command(spec, job_id, worker_fd, log):
     if 'agent_id' in spec:
-        return subprocess.Popen(agent_command(spec, job_id), env={}, stdout=log,
+        return subprocess.Popen(agent_command(spec, job_id), env=docker_environment(), stdout=log,
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     # Preserve the Hermes path, environment and inherited build-lock contract.
     env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
@@ -381,7 +399,7 @@ def spawn_dispatcher(root, lock_path):
 
 def find(root, job_id):
     """Spool holding job_id: heavy (root) first, then light. Never creates a spool."""
-    for lane_root in (root, light_root(root)):
+    for lane_root in (root, light_root(root), agent_spool(root), light_root(agent_spool(root))):
         if (lane_root / 'jobs.sqlite3').exists():
             db = connect(lane_root)
             try:
@@ -402,7 +420,8 @@ def rpc(root, lock_path, value):
     target = find(root, job_id)
     if action == 'submit':
         validated = validate(value['spec'])
-        wanted = light_root(root) if validated.get('lane') == 'light' else root
+        base = agent_spool(root) if 'agent_id' in validated else root
+        wanted = light_root(base) if validated.get('lane') == 'light' else base
         if target is not None and target != wanted:
             raise ValueError('idempotency conflict')
         target = wanted
@@ -423,6 +442,12 @@ def rpc(root, lock_path, value):
     spawn_dispatcher(root, lock_path)
     if (light_root(root) / 'jobs.sqlite3').exists():
         spawn_dispatcher(light_root(root), light_lock(root))
+    # Separate storage, SAME resource locks: no extra heavy/light capacity.
+    if (agent_spool(root) / 'jobs.sqlite3').exists():
+        spawn_dispatcher(agent_spool(root), lock_path)
+    if (light_root(agent_spool(root)) / 'jobs.sqlite3').exists():
+        light_root(root).mkdir(mode=0o700, exist_ok=True)
+        spawn_dispatcher(light_root(agent_spool(root)), light_lock(root))
     return public(row)
 
 
