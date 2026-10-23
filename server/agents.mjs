@@ -530,6 +530,12 @@ export function createAgentRegistry(options = {}) {
     const seenFile = readJson(appsSeenPath)
     const seen = new Set(seenFile?.schema === 1 ? listIds(seenFile.apps) : current)
     const fresh = current.filter((id) => !seen.has(id))
+    // Apps already seen that have since become private (a privacy: private tag or a private-data slot added by an
+    // update). Recorded classifications start with this release: an older seen file adopts today's classes without
+    // revoking anything, since its grants cannot be told apart from explicit ticks.
+    const privateNow = privateApps()
+    const seenPrivate = seenFile?.schema === 1 && Array.isArray(seenFile.private) ? new Set(listIds(seenFile.private)) : null
+    const turnedPrivate = seenPrivate ? current.filter((id) => seen.has(id) && privateNow.has(id) && !seenPrivate.has(id)) : []
     try {
       if (fresh.length) {
         const privateFresh = privateApps()
@@ -559,9 +565,33 @@ export function createAgentRegistry(options = {}) {
           writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
         }
       }
-      if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))) {
+      if (turnedPrivate.length) {
+        // A grant made while the app was standard was never consent to private data: take it back from the main
+        // agent and every non-private agent. Private agents keep theirs; the owner can tick any agent again.
+        const turned = new Set(turnedPrivate)
+        for (const id of folderIds()) {
+          const agent = readRaw(id)
+          if (!agent || agent.privacy === 'private' || agent.runtime.kind === 'profile' || agent.runtime?.admission === 'importing') continue
+          const wizard_apps = listIds(agent.permissions.wizard_apps).filter((app) => !turned.has(app))
+          const agent_apps = listIds(agent.permissions.agent_apps).filter((app) => !turned.has(app))
+          if (wizard_apps.length === listIds(agent.permissions.wizard_apps).length && agent_apps.length === listIds(agent.permissions.agent_apps).length) continue
+          const next = structuredClone(agent)
+          next.permissions.wizard_apps = wizard_apps
+          next.permissions.agent_apps = agent_apps
+          writeHarnessFiles(next)
+          writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+        }
+        const stored = readJson(mainPath)
+        if (stored?.schema === 1) {
+          writeJsonAtomic(mainPath, { ...stored, wizard_apps: listIds(stored.wizard_apps).filter((app) => !turned.has(app)), agent_apps: listIds(stored.agent_apps).filter((app) => !turned.has(app)) })
+        }
+        queueMicrotask(appsChanged)
+      }
+      const privateList = current.filter((id) => privateNow.has(id))
+      if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))
+        || !seenPrivate || privateList.length !== seenPrivate.size || privateList.some((id) => !seenPrivate.has(id))) {
         mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-        writeJsonAtomic(appsSeenPath, { schema: 1, apps: current })
+        writeJsonAtomic(appsSeenPath, { schema: 1, apps: current, private: privateList })
       }
     } catch { appsSignature = null }   // retry on the next read
   }

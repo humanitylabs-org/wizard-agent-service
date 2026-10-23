@@ -29,7 +29,8 @@ const SERVE_RETRY_MS = 5000
 export function helperCall(socketPath, method, path, body, { timeoutMs = 20000 } = {}) {
   return new Promise((resolvePromise, reject) => {
     if (!socketPath || !existsSync(socketPath)) {
-      reject(Object.assign(new Error('no helper socket'), { code: 'unavailable' }))
+      // absent: this box has no private-access helper at all (a dev box, or one whose owner runs Tailscale).
+      reject(Object.assign(new Error('no helper socket'), { code: 'unavailable', absent: true }))
       return
     }
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body))
@@ -57,7 +58,8 @@ export function helperCall(socketPath, method, path, body, { timeoutMs = 20000 }
       // EACCES is a socket-group mistake on a real box, not a dev box: say so instead of "unavailable".
       const code = ['ENOENT', 'ECONNREFUSED'].includes(error?.code) ? 'unavailable' : error?.code === 'EACCES' ? 'helper_forbidden'
         : error?.code === 'helper_timeout' ? 'helper_timeout' : 'helper_error'
-      reject(Object.assign(new Error('helper unreachable'), { code }))
+      // ECONNREFUSED: the helper's socket exists but nothing answers, an outage on a helper-managed box, not an absent helper.
+      reject(Object.assign(new Error('helper unreachable'), { code, absent: error?.code === 'ENOENT' }))
     })
     if (payload) req.end(payload)
     else req.end()
@@ -156,14 +158,15 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     raw.setup = keep
   })
 
-  const view = (status, error = null) => {
+  const view = (status, error = null, absent = false) => {
     const saved = settings()
     const base = { step: 'unavailable', auth_url: null, https_enable_url: null, wizard_url: null, device_name: null, phones: [], install_url: INSTALL_URL, error }
     if (!status) {
       // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner
       // runs Tailscale themselves) and network.base_url names that address: the phone can connect today, so
       // show the address and QR instead of "phone setup isn't available".
-      const hosted = !error && validTailnetOrigin(saved.network?.base_url)
+      // Only when the helper is genuinely absent: during a helper outage the saved address may be stale.
+      const hosted = absent && !error && validTailnetOrigin(saved.network?.base_url)
       if (hosted) {
         const seen = Boolean(saved.setup.phone_seen_at)
         return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: `${hosted}/`, device_name: new URL(hosted).hostname, managed: 'host' }
@@ -196,7 +199,11 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
 
   const statusOrNull = async () => {
     try { return { status: await helper('GET', '/v1/status') } }
-    catch (error) { return { status: null, error: error?.code === 'unavailable' ? null : (error?.code || 'helper_error') } }
+    catch (error) {
+      if (error?.code !== 'unavailable') return { status: null, error: error?.code || 'helper_error' }
+      // A helper that exists but is down is a failure to report, never a host-managed box with a stale QR.
+      return error.absent === true ? { status: null, error: null, absent: true } : { status: null, error: 'helper_unreachable' }
+    }
   }
 
   // Bring a signed-in box the rest of the way: Serve on, settings recorded, phone noticed.
@@ -239,8 +246,8 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     }),
     /** GET /wizard/v1/setup/phone */
     phone: () => serial(async () => {
-      const { status, error } = await statusOrNull()
-      if (!status) return view(null, error)
+      const { status, error, absent } = await statusOrNull()
+      if (!status) return view(null, error, absent)
       return advance(status)
     }),
     /** POST /wizard/v1/setup/phone/start */
