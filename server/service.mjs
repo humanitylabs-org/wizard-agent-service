@@ -39,7 +39,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { GATEWAY_MAIN_AGENT, ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
@@ -58,6 +58,7 @@ import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
+import { onboardingTools } from './onboarding.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
@@ -2418,8 +2419,11 @@ function buildWizardServer(options, lifetime) {
   // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
   const gatewayOnly = options.agentBridge === 'gateway'
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
+  // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
+  let onboarding = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
+      builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -4193,6 +4197,9 @@ function buildWizardServer(options, lifetime) {
     },
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null

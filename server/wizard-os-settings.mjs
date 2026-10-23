@@ -244,7 +244,11 @@ export function readApps({ appsJsonPath, launcherPath }) {
   const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
   const requested = installed?.slots?.chats?.default
   const active = candidates.includes(requested) ? requested : CHATS_DEFAULT
-  return { schema: 1, apps: out, slots: { chats: { default: active, candidates } },
+  // Owner's "In development" list (launcher.json in_development: [app ids]): apps the owner considers unfinished.
+  // The launcher folds them under an "In development" row; any id may be listed, including shell built-ins.
+  const inDevelopment = Array.isArray(launcher?.in_development)
+    ? [...new Set(launcher.in_development.map(v => cleanText(v, 64)).filter(v => /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)))].slice(0, 200) : []
+  return { schema: 1, apps: out, ...(inDevelopment.length ? { in_development: inDevelopment } : {}), slots: { chats: { default: active, candidates } },
     parking: [{ slot: 'chats', name: 'Chats', required: false, default_app: CHATS_DEFAULT, active, state: 'filled' }] }
 }
 

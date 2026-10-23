@@ -104,17 +104,18 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
   const text = [
-    'Wizard OS: you are the owner\'s agent on this box. Installed apps do jobs for the owner.',
-    ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.'] : []),
+    'Wizard OS: you are the owner\'s agent on this box. Its apps do jobs for them.',
+    ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
+      'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
     hermes
-      ? 'When a request matches a wizard-job-<job> skill in your skills list:'
+      ? 'When a request matches a wizard-job-<job> skill in your skills:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load that skill with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
+    ...(hermes ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
-    `"What apps do I have?": call \`${meta}\`. Report unreachable tools (\`wam doctor\`).`,
+    `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Save routing-only app-job skills.',
   ]
   if (jobMap || !hermes) {
@@ -330,7 +331,7 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
-  agentForToken = () => '', appsFor = () => null,
+  agentForToken = () => '', appsFor = () => null, builtins = null,
 }) {
   let mtime = null
   let apps = []
@@ -427,7 +428,7 @@ export function createAgentBridge({
 
   async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
-    const out = [metaTool()]
+    const out = [metaTool(), ...(builtins?.list?.(agentId) || [])]
     const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
     for (const [app, tools] of lists) {
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
@@ -451,6 +452,11 @@ export function createAgentBridge({
   async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const started = Date.now()
+    const builtin = builtins && await builtins.call(name, args && typeof args === 'object' ? args : {}, agentId)
+    if (builtin) {
+      log(JSON.stringify({ event: 'call', app: 'wizard', tool: clean(String(name), 80), agent: agentId, ms: Date.now() - started, ok: !builtin.isError }))
+      return builtin
+    }
     if (name === META_TOOL) {
       const r = await wizardApps(agentId)
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
