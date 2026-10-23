@@ -88,7 +88,7 @@ export function normalizeMemory(value) {
 export const PRESETS = [
   {
     id: 'private', label: 'Private',
-    summary: 'Confidential model only, no fallback, no outside tools, only its own files; Airlock is its only app.',
+    summary: 'Confidential model only, no fallback, no outside tools, only its own files; only apps tagged private.',
     privacy: 'private',
     permissions: { outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' },
   },
