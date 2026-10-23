@@ -12,7 +12,8 @@ import time
 from typing import Any
 
 USER_EVENT_KINDS = {"async_delegation_complete", "internal_notification", "system"}
-HUMAN_SESSION_SOURCES = {"webui", "telegram", "discord", "slack", "whatsapp", "signal", "wizard-mobile"}
+# Stock Hermes import retains CLI/TUI source and ids; do not rewrite imported history.
+HUMAN_SESSION_SOURCES = {"cli", "tui", "webui", "telegram", "discord", "slack", "whatsapp", "signal", "wizard-mobile"}
 HUMAN_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 INTERNAL_USER_PREFIXES = (
     "[IMPORTANT: Background process ",
