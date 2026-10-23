@@ -407,7 +407,8 @@ export class Scheduler {
     const job = JSON.parse(row.data)
     if (job.kind !== 'return') return null
     const done = this.latest(job.id)
-    const returned = done?.admitted === 1 && done.outcome === 'returned'
+    // Only the occurrence for the current time counts: "Again" moves the time, and the earlier return must not re-notify.
+    const returned = done?.admitted === 1 && done.outcome === 'returned' && Boolean(job.when?.once) && done.instant === Date.parse(job.when.once)
     const text = job.prompt || job.target?.excerpt || job.name
     return { id: runId, run_id: runId, session_id: job.thread, status: returned ? 'completed' : 'queued',
       output: returned ? `🪃 Back: ${text}` : '', ...(returned ? { completed_at: done.finished_at } : {}) }

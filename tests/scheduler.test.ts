@@ -616,6 +616,13 @@ describe('Boomerang returns (kind return)', () => {
     clock += 120_000; await s.tick(); await s.refreshRuns()
     expect(delivered).toHaveLength(2)
     expect(s.project(s.get(back.id)).lastRun.outcome).toBe('returned')
+    // Again: a new time re-arms it, and the earlier return never reads as this one.
+    s.update(back.id, { when: { once: '2026-10-21T01:00:00Z' }, enabled: true })
+    expect(s.project(s.get(back.id)).nextRun).toBe('2026-10-21T01:00:00.000Z')
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', output: '' })
+    clock = Date.parse('2026-10-21T01:00:30Z'); await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id, back.id])
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
     s.delete(back.id)
     expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
   })
