@@ -89,7 +89,8 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
 }
 
 const json = (body: unknown, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+// Explicitly off: these tests switch standard-chat reading themselves (the default-on rule has its own test).
+const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private', read_standard_chats: false } }
 const STANDARD = (label: string, extra: Record<string, unknown> = {}) => ({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard', ...extra } })
 
 async function create(base: string, body: unknown, port?: number, dir?: string) {

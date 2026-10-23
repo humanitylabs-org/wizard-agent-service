@@ -899,6 +899,9 @@ export function createAgentRegistry(options = {}) {
       },
       created_at: Math.floor(now() / 1000),
     }
+    // Private agents read standard chats by default (James, 23 Oct 2026) where the read-only transport exists;
+    // an explicit false from the client wins.
+    if (agent.privacy === 'private' && overrides?.read_standard_chats === undefined && standardUrlFor(agent)) agent.permissions.read_standard_chats = true
     assertPrivateWalls(agent)
     assertStandardTransport(agent)
     assertIsolationSupports(agent)
