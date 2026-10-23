@@ -39,7 +39,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { GATEWAY_MAIN_AGENT, ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
@@ -58,6 +58,7 @@ import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
+import { onboardingTools } from './onboarding.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
@@ -1521,6 +1522,34 @@ function inputContainsMarker(input) {
     || normalized.includes('[WIZARDFILECHIPSV1]') || normalized.includes('[/WIZARDFILECHIPSV1]')
 }
 
+const PROJECTED_FILE_CHIPS = /\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g
+function recoverProjectedFileChips(input) {
+  const ids = []
+  const visit = (value) => {
+    if (typeof value === 'string') return value.replace(PROJECTED_FILE_CHIPS, (_marker, raw) => {
+      let files
+      try { files = JSON.parse(raw) } catch { throw Object.assign(new Error('invalid projected file chips'), { status: 400 }) }
+      if (!Array.isArray(files) || !files.length || files.length > WIZARD_FILE_LIMIT
+        || files.some(file => !file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !FILE_ID.test(file.id))) {
+        throw Object.assign(new Error('invalid projected file chips'), { status: 400 })
+      }
+      ids.push(...files.map(file => file.id))
+      return ''
+    })
+    if (Array.isArray(value)) return value.map(visit)
+    if (!value || typeof value !== 'object') return value
+    const projected = { ...value }
+    if (typeof projected.text === 'string') projected.text = visit(projected.text)
+    if (typeof projected.content === 'string' || Array.isArray(projected.content)) projected.content = visit(projected.content)
+    return projected
+  }
+  const recovered = visit(input)
+  // Only a complete display-only chip envelope may cross back into a retry. Canonical,
+  // partial or obfuscated markers stay reserved; every recovered id is authorized again below.
+  if (inputContainsMarker(recovered)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
+  return { input: recovered, ids }
+}
+
 function imageMimeFromMagic(bytes) {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'binary'))) return 'image/png'
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
@@ -1585,15 +1614,20 @@ function appendFileMarker(input, files, includeNativeImages = false) {
 
 export async function prepareRunBody(body, resolveFiles, includeNativeImages = false, projectFiles = async (files) => files) {
   const value = parseJsonBody(body)
-  if (inputContainsMarker(value.input)) throw Object.assign(new Error('reserved file marker'), { status: 400 })
-  if (!Object.hasOwn(value, 'wizard_file_ids')) return { body, trustedPaths: [] }
-  if (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT) {
+  const recovered = recoverProjectedFileChips(value.input)
+  const declared = Object.hasOwn(value, 'wizard_file_ids')
+  if (!declared && !recovered.ids.length) return { body, trustedPaths: [] }
+  if (declared && (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT)) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
-  const ids = [...new Set(value.wizard_file_ids)]
-  if (ids.length !== value.wizard_file_ids.length || ids.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
+  const declaredIds = declared ? [...new Set(value.wizard_file_ids)] : []
+  if (declaredIds.length !== (value.wizard_file_ids?.length ?? 0)
+    || declaredIds.some((id) => typeof id !== 'string' || !FILE_ID.test(id))) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
+  const ids = [...new Set([...declaredIds, ...recovered.ids])]
+  if (ids.length > WIZARD_FILE_LIMIT) throw Object.assign(new Error('invalid file ids'), { status: 400 })
+  value.input = recovered.input
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
   const files = await projectFiles(await resolveFiles(ids))
@@ -2385,8 +2419,11 @@ function buildWizardServer(options, lifetime) {
   // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
   const gatewayOnly = options.agentBridge === 'gateway'
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
+  // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
+  let onboarding = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
+      builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -4168,6 +4205,9 @@ function buildWizardServer(options, lifetime) {
     },
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null

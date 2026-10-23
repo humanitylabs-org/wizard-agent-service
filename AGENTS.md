@@ -25,7 +25,7 @@ Historical evidence/receipt paths are explicitly exempt, not executable examples
 - **Publishing:** merging to `main` triggers the **publish-image** workflow, which publishes the public image. Confirm the run succeeded. Live boxes run `main`.
 - **Real conversation content** never goes into fixtures, tests or PR text. Use synthetic threads.
 
-<!-- wizard-os-team-rules v2 (19 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
+<!-- wizard-os-team-rules v3 (23 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
 ## Wizard OS team rules (identical in every repo)
 
 Wizard OS is built by James, Jan and Miguel together with their agents. Archimedes commits as `defleur-agents` and Oscar as `oscarhenrycollins`. Every repo belongs to Wizard OS as a whole, and no repo belongs to one person. Make the change that is best for the whole system, and build on each other's work.
@@ -82,16 +82,16 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
 
 ### Merging
 
-- **The author merges their own PR** once three things hold:
+- **Nobody merges their own PR** (agreed 23 Oct 2026). Contributors open PRs; an admin who is not the author approves and merges. The admins are James (`jdefleur`), Jan (`JanMesaric`), Miguel (`mistermizel`) and Archimedes (`defleur-agents`). Where GitHub allows it, `main` requires one approving review and admins cannot bypass it.
+- **Every PR gets an agent review.** The **Agent review** workflow (`humanitylabs-org/wizard-ux` `tools/pr-agent-review.mjs`) posts one review on each push to a ready PR. It flags taste changed for everyone instead of in your own skin, likely breaking changes, secrets and personal paths or private hosts, and `docs/COMPONENTS.md` reuse problems. Fix every 🔴 before asking for approval; each 🟡 is something the approving admin checks. The review is advisory and never approves.
+- **An admin approves and merges** once three things hold:
   - the required checks are green;
   - the Verified section reflects real results;
   - nothing in the PR needs a decision (see the next section).
-
-  There is no wait for a human approval.
 - **What each tier means for merging:**
   - **Recommended fixes and maintenance** merge on those conditions.
   - **Strong suggestions** merge on them too, unless they change something James sees or uses every day. In that case add `needs: james review` and wait.
-  - **Opinionated changes** to the shell's look or UX go into your own skin: wizard-ux `web/skins/<yours>/` plus your `SKINS` entry (see wizard-ux `web/skins/README.md`). A PR that only touches your own skin merges on the conditions above. Never add a Settings toggle or core code for one person's taste.
+  - **Opinionated changes** to the shell's look or UX go into your own skin: wizard-ux `web/skins/<yours>/` plus your `SKINS` entry (see wizard-ux `web/skins/README.md`). A PR that only touches your own skin merges on the conditions above, approved by an admin who is not the author. Never add a Settings toggle or core code for one person's taste.
   - **Making something the default for everyone** (any opinionated change outside your own skin) carries `needs: james review` and waits for James. Bring it once you have used it in your skin, with a preview he can try.
   - **`preview only`** PRs never merge.
 - **Use "Create a merge commit"**, then delete the branch.
