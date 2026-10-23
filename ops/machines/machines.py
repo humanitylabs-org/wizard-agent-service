@@ -13,12 +13,12 @@ open sessions within two seconds and refuses new ones.
 
 Owner CLI (stdlib only):
 
-  machines.py add thales --label Thales --host 100.83.57.121 --user thales \
+  machines.py add builder --label Builder --host <address> --user <account> \
       --known-hosts-from ~/.ssh/known_hosts      # prints the public key to authorize
-  machines.py grant thales archimedes-new
-  machines.py check thales                        # owner-side SSH test
+  machines.py grant builder <agent>
+  machines.py check builder                        # owner-side SSH test
   machines.py serve                               # the relay (systemd unit alongside)
-  machines.py revoke thales archimedes-new
+  machines.py revoke builder <agent>
   machines.py list | audit
 """
 from __future__ import annotations

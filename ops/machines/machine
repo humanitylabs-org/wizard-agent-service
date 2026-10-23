@@ -2,12 +2,12 @@
 """machine: run commands on a computer your owner gave you (Wizard Machines).
 
   machine list                          machines you own
-  machine thales -- uname -a            run one command (exit code passes through)
-  machine thales                        shell on stdin (no terminal)
-  machine --ssh [ssh options] thales cmd   ssh-compatible, for other tools:
-      rsync -e 'machine --ssh' ./src thales:work/src
+  machine builder -- uname -a            run one command (exit code passes through)
+  machine builder                        shell on stdin (no terminal)
+  machine --ssh [ssh options] builder cmd   ssh-compatible, for other tools:
+      rsync -e 'machine --ssh' ./src builder:work/src
       GIT_SSH_COMMAND='machine --ssh' git ...
-      tar -cz src | machine thales -- tar -xz -C work   (bulk copy)
+      tar -cz src | machine builder -- tar -xz -C work   (bulk copy)
 
 No key or address lives in this container: the relay behind
 /run/wizard-machines/machines.sock holds them. Refusals print `machine: <reason>`.
