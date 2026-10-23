@@ -42,7 +42,14 @@ export async function runCurator(args, { env = process.env, output = value => pr
       const meta = existsSync(join(source, 'skin.json')) ? JSON.parse(readFileSync(join(source, 'skin.json'), 'utf8')) : {}
       writeFileSync(join(folder, 'skin.json'), JSON.stringify({ ...meta, name: flags.name, summary: flags.summary }))
       const skins = createSkins({ root, stateDir: join(scratch, 'state'), relays, blossom, transport })
-      const pack = await skins.pack('Seed', { slug: flags.slug, summary: flags.summary })
+      let preview
+      const previewFile = join(source, 'preview.webp')
+      if (existsSync(previewFile)) {
+        const st = lstatSync(previewFile)
+        if (!st.isFile() || st.size > 512 * 1024) throw new Error('Invalid preview file')
+        preview = readFileSync(previewFile).toString('base64')
+      }
+      const pack = await skins.pack('Seed', { slug: flags.slug, summary: flags.summary, ...(preview ? { preview_webp_b64: preview } : {}) })
       const event = signEvent(pack.unsigned, key)
       output(await skins.publish('Seed', event))
       // Preserve publication state for the next seed update, but never copy any key into the source folder.

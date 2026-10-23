@@ -100,6 +100,12 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
   const query = transport.relayRequest || relayRequest, broadcast = transport.relayPublish || relayPublish
   const cacheRoot = join(state, 'blobs'), packsRoot = join(state, 'packs'), publishedRoot = join(state, 'published')
   let cached = null, pending = null
+  const busy = new Set()
+  async function exclusive(id, action) {
+    if (busy.has(id)) fail('skin_busy', 409)
+    busy.add(id)
+    try { return await action() } finally { busy.delete(id) }
+  }
   function storage() {
     for (const dir of [state, cacheRoot, packsRoot, publishedRoot]) { mkdirSync(dir, { recursive: true, mode: 0o700 }); if (!lstatSync(dir).isDirectory()) fail('skins_state_unavailable', 503) }
   }
@@ -330,6 +336,8 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     cached = null
     return { event_id: event.id, a: item.a, relays: results }
   }
-  return { list, setActive, create, store, blob, add, report, pack, publish, migrate }
+  return { list, setActive, create, store, blob, add, report,
+    pack: (id, input) => exclusive(id, () => pack(id, input)),
+    publish: (id, event) => exclusive(id, () => publish(id, event)), migrate }
 }
 function lstatSafe(file) { try { return lstatSync(file) } catch { return null } }

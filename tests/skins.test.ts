@@ -133,6 +133,11 @@ describe('My skins folders', () => {
     expect(() => skins.setActive('Escape')).toThrow('skin_not_found')
     await expect(skins.pack('Escape')).rejects.toThrow('skin_not_found')
     expect(skins.list().skins.map((s: any) => s.id)).toEqual(['Local', 'Local 2'])
+    expect(skins.create({ name: 'active' }).id).toBe('active 2')
+    const spaced = skins.create({ name: ' space ' }).id
+    skins.setActive(spaced)
+    expect(skins.list().active).toBe(' space ')
+    expect(createMySkin({ root })!.relative).toBe('Skins/ space /skin.css')
   })
 })
 
@@ -204,6 +209,21 @@ describe('verified Store', () => {
 })
 
 describe('pack, publish, report and curator', () => {
+  it('serializes pack/publish for each folder and includes a validated optional preview', async () => {
+    const net = await network(), { skins } = local(net), { id } = skins.create({ name: 'Preview', css: CSS.toString() })
+    const image = Buffer.from('RIFF0000WEBPsynthetic-preview')
+    const first = skins.pack(id, { preview_webp_b64: image.toString('base64') })
+    await expect(skins.pack(id)).rejects.toThrow('skin_busy')
+    const packed = await first
+    expect(packed.unsigned.tags).toContainEqual(['file', 'preview.webp', sha256(image), 'image/webp', String(image.length)])
+    expect(net.blobs.get(sha256(image))?.body).toEqual(image)
+    const event = sign(packed.unsigned)
+    const publishing = skins.publish(id, event)
+    await expect(skins.publish(id, event)).rejects.toThrow('skin_busy')
+    expect((await publishing).event_id).toBe(event.id)
+    expect(net.published).toHaveLength(1)
+    await expect(skins.pack(id, { preview_webp_b64: Buffer.from('not-webp').toString('base64') })).rejects.toThrow('invalid_preview')
+  })
   it('uploads only bounded schema-1 blobs, preserves fork / first-publish tags and increments version', async () => {
     const net = await network(), { skins, root, stateDir, options } = local(net), parent = listing(net.blossom)
     net.events.push(parent)
