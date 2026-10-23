@@ -13,6 +13,24 @@ export const isSilentResult = value => {
   const text = value.replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gi, '').trim()
   return text.startsWith('[SILENT]') || text.endsWith('[SILENT]')
 }
+// Where a scheduled result goes. `thread`: the job's chat thread (default). `notification`: the box's
+// notifications slot (bell beside Chats), for one-way alerts with no conversation to own them. The run still
+// happens in its thread for history, but its answer is silent there and the service sends it to the slot.
+export const DELIVERIES = ['thread', 'notification']
+const NOTIFY_INSTRUCTION = '\nDeliver to: the owner\'s Notifications, not this chat. Write only the notification: a short title on the first line,'
+  + ' then one or two plain sentences (what happened and what, if anything, they need to do). Put [SILENT] alone on the last line.'
+  + ' If nothing is worth telling them, respond exactly [SILENT].'
+/** The notification inside a notification-delivery answer: title + message, or null when there is nothing to send. */
+export function notificationFromOutput(value) {
+  if (typeof value !== 'string') return null
+  const text = value.replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gi, '').replace(/\[SILENT\]/g, '').trim()
+  if (!text) return null
+  const lines = text.split(/\r?\n/)
+  const first = lines[0].trim().replace(/^#+\s*/, '').replace(/^\*\*(.+?)\*\*\.?$/, '$1').trim()
+  const rest = lines.slice(1).join('\n').trim()
+  const title = (rest ? first : '').slice(0, 120)
+  return { title, message: (rest || first).slice(0, 3800) }
+}
 export const isScheduleInput = value => typeof value === 'string' && value.trimStart().startsWith(SCHEDULE_INPUT)
 // Scheduled reports are background turns. Hold their text until completion: a
 // trailing [SILENT] cannot safely be classified from an early streaming delta.
@@ -145,7 +163,11 @@ function latestInstant(job, now) {
 // One SQLite transaction claims an occurrence AND advances the high-water cursor.
 // Delivery is an outbox: only a confirmed ordinary chat admission acknowledges it.
 // There is deliberately no bounded seen-list and no log/file scanning for delivery.
-function scheduleInput(job) {
+function scheduleInput(job, deliver = 'thread') {
+  const base = scheduleBaseInput(job)
+  return deliver === 'notification' ? base.replace(/ in this thread/g, '') + NOTIFY_INSTRUCTION : base
+}
+function scheduleBaseInput(job) {
   const skill = job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''
   if ((job.kind ?? 'run') === 'remind') {
     return `${SCHEDULE_INPUT} reminder\nThe owner asked to be reminded, in this thread, about:\n${job.prompt}\n`
@@ -158,7 +180,7 @@ function scheduleInput(job) {
 }
 
 export class Scheduler {
-  constructor({ statePath, deliver, lookup = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, notifier = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -178,6 +200,9 @@ export class Scheduler {
     this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
     this.lookup = lookup
     this.deliver = deliver
+    // { available(): boolean, send({ title, message, key, priority }) }: the notifications slot. Absent or
+    // unavailable at claim time means a notification job falls back to its thread for that occurrence.
+    this.notifier = notifier
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -218,7 +243,9 @@ export class Scheduler {
     this.refreshing = (async () => {
       // Only the last occurrence can be shown. Never use unrelated chat activity.
       // Every unfinished admitted occurrence (bounded to 6 h) so the trickle's in-flight count is true.
-      const rows = this.db.prepare('SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND instant > ?').all(this.now() - 6 * 3600_000)
+      // A notification occurrence keeps being observed for 7 days, so a long run or a slot outage still sends it.
+      const rows = this.db.prepare(`SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL
+        AND (instant > ? OR (json_extract(data,'$.deliver')='notification' AND instant > ?))`).all(this.now() - 6 * 3600_000, this.now() - 7 * 86400_000)
       await Promise.all(rows.map(async row => {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
@@ -227,7 +254,22 @@ export class Scheduler {
           if (!run || !['queued', 'accepted', 'pending', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) return
           const terminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
           const output = typeof run.output === 'string' ? run.output : ''
-          const outcome = run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted') : terminal ? 'failed' : 'running'
+          let outcome = run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted') : terminal ? 'failed' : 'running'
+          const occurrence = JSON.parse(row.data)
+          if (occurrence.deliver === 'notification' && run.status === 'completed') {
+            const note = notificationFromOutput(output)
+            if (note) {
+              try {
+                if (!this.notifier) throw new Error('no notifier')
+                await this.notifier.send({ ...note, key: row.key })
+                outcome = 'notified'
+              } catch {
+                // Stay unfinished so the next refresh retries (notification rows are observed for 7 days).
+                this.db.prepare("UPDATE schedule_occurrences SET outcome='failed', error=? WHERE key=?").run('Notification not delivered; will retry', row.key)
+                return
+              }
+            } else outcome = 'silent'
+          }
           // Upstream errors can contain credentials. Only service-owned short copy is stored.
           const error = terminal && outcome === 'failed' ? (run.status === 'cancelled' ? 'Run cancelled' : run.status === 'interrupted' ? 'Run interrupted' : 'Run failed') : null
           const timestamp = value => {
@@ -246,7 +288,7 @@ export class Scheduler {
   save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
   normalize(input, prior = null) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('invalid schedule')
-    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target']
+    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target', 'deliver']
     if (Object.keys(input).some(key => !allowed.includes(key))) throw fail('unknown schedule field')
     const now = this.now()
     const job = { ...(prior ?? {}), ...input }
@@ -288,6 +330,9 @@ export class Scheduler {
     else delete job.model
     if (job.thread !== undefined && job.thread !== null && !id(job.thread)) throw fail('invalid thread')
     job.thread = job.thread || null
+    job.deliver = job.deliver ?? 'thread'
+    if (!DELIVERIES.includes(job.deliver)) throw fail(`deliver must be ${DELIVERIES.join(' or ')}`)
+    if (job.kind === 'return' && job.deliver !== 'thread') throw fail('a return always comes back as its thread')
     job.enabled = job.enabled ?? true
     if (typeof job.enabled !== 'boolean') throw fail('enabled must be boolean')
     job.createdAt = prior?.createdAt ?? iso(now)
@@ -323,11 +368,16 @@ export class Scheduler {
     // retries the same session id; a crashed admission retries the same frozen body/key.
     if (!job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
     const key = `schedule:${job.id}:${iso(instant)}`
+    // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
+    let deliver = 'thread'
+    if (job.deliver === 'notification' && job.kind !== 'return') {
+      try { if (this.notifier?.available()) deliver = 'notification' } catch { /* fall back to the thread */ }
+    }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`,
-      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}),
+      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
-        : { body: { session_id: job.thread, input: scheduleInput(job), ...(job.model ? { model: job.model } : {}) } }) }
+        : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))
     return occurrence
   }
