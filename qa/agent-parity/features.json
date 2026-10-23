@@ -763,6 +763,22 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "reminders-and-tips",
+      "description": "Set a reminder and opt in to the five-day tips from a chat",
+      "layer": "runtime",
+      "how_to_test": "From a chat on each agent kind, ask for a reminder and for the tips; verify wizard_remind/wizard_tips are listed on that agent's gateway, the jobs carry that agent's id, and each due occurrence is admitted into that agent's thread.",
+      "source_refs": [
+        "server/onboarding.mjs",
+        "server/scheduler.mjs",
+        "server/agent-bridge.mjs"
+      ],
+      "reference_tests": [
+        "tests/onboarding.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }
