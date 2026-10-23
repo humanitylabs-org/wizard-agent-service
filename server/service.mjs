@@ -4139,10 +4139,10 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '') => {
+  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
@@ -4228,6 +4228,13 @@ function buildWizardServer(options, lifetime) {
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+      }
+      // A notification job's own thread is history, not a chat: hidden from Chats. If the slot was down and this
+      // occurrence falls back to the thread, the thread is shown again so the alert is still seen.
+      if ((occurrence.deliver === 'notification' || occurrence.fallback) && occurrence.thread.startsWith('wizard_schedule_')) {
+        const hidden = occurrence.deliver === 'notification'
+        const marked = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, { hidden }, '', 'PATCH')
+        if (!marked.ok) throw Object.assign(new Error('schedule thread visibility failed'), { status: marked.status })
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
