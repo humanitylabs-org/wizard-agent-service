@@ -107,8 +107,12 @@ const PRESET = new Map(PRESETS.map((preset) => [preset.id, preset]))
  */
 export const PRIVATE_DEFAULT_SLOTS = Object.freeze(['transcript-redaction'])
 // James, 23 Oct 2026: "The whole point of Mizel was to be fully private so no public agent can read its transcripts."
-// Apps holding private recordings never join standard agents or the main agent on install; only an explicit tick does.
-export const PRIVATE_DATA_SLOTS = Object.freeze(['meeting-transcripts', 'meeting-recording'])
+// …"Rather than each app needing to declare itself, let's just make an optional one that tags it as private."
+// An app is private when its wizard.md says `privacy: private` (registry field `privacy`). Apps installed before the
+// tag existed are recognised by the slots they provide, so Mizel and Airlock stay private unchanged.
+export const PRIVATE_DATA_SLOTS = Object.freeze(['meeting-transcripts', 'meeting-recording', ...PRIVATE_DEFAULT_SLOTS])
+export const isPrivateApp = (app) => app?.privacy === 'private'
+  || (Array.isArray(app?.provides) && app.provides.some((slot) => PRIVATE_DATA_SLOTS.includes(slot)))
 export const DEFAULT_APPEARANCE = { private: { glyph: 'lock', hue: 160 }, standard: { glyph: 'spark', hue: 265 } }
 const GLYPH_RE = /^[a-z][a-z0-9-]{0,23}$/u
 
@@ -454,12 +458,15 @@ export function createAgentRegistry(options = {}) {
   const statusCache = new Map()
 
   const listIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id)) : [])
-  // The main agent is standard with every installed app ticked until the owner unticks one (#58, no regression).
+  // The main agent is standard with every installed standard app ticked until the owner unticks one (#58, no
+  // regression). Private apps are never implied: they need a tick (James, 23 Oct 2026).
   const mainApps = () => {
     const stored = readJson(mainPath)
     if (stored && stored.schema === 1) return { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
     const { wizardApps, agentApps } = installedApps()
-    return { wizard_apps: wizardApps.map((app) => app.id), agent_apps: agentApps.map((app) => app.id) }
+    const hidden = privateApps()
+    const open = (app) => !hidden.has(app.id)
+    return { wizard_apps: wizardApps.filter(open).map((app) => app.id), agent_apps: agentApps.filter(open).map((app) => app.id) }
   }
   // Resolved for every thread in a Chats list: rebuild only when .main-agent.json or apps.json changes.
   let mainMemo = { key: null, value: null }
@@ -507,7 +514,11 @@ export function createAgentRegistry(options = {}) {
     const { wizardApps, agentApps } = installedApps()
     return new Map([...wizardApps.map((app) => [app.id, 'wizard_apps']), ...agentApps.map((app) => [app.id, 'agent_apps'])])
   }
-  /** Runs when apps.json changed: apps not seen before are ticked for every standard agent (the main one too). */
+  /**
+   * Runs when apps.json changed. A new app joins one place only (James, 23 Oct 2026: "the user should have to enable
+   * things manually"): a standard app joins the main agent; a private app joins private agents. Every other agent
+   * starts unticked; the owner ticks it in the app's settings sheet.
+   */
   function syncApps() {
     if (!appsJsonPath) return
     const signature = appsJsonSignature()
@@ -519,15 +530,20 @@ export function createAgentRegistry(options = {}) {
     const seenFile = readJson(appsSeenPath)
     const seen = new Set(seenFile?.schema === 1 ? listIds(seenFile.apps) : current)
     const fresh = current.filter((id) => !seen.has(id))
+    // Apps already seen that have since become private (a privacy: private tag or a private-data slot added by an
+    // update). Recorded classifications start with this release: an older seen file adopts today's classes without
+    // revoking anything, since its grants cannot be told apart from explicit ticks.
+    const privateNow = privateApps()
+    const seenPrivate = seenFile?.schema === 1 && Array.isArray(seenFile.private) ? new Set(listIds(seenFile.private)) : null
+    const turnedPrivate = seenPrivate ? current.filter((id) => seen.has(id) && privateNow.has(id) && !seenPrivate.has(id)) : []
     try {
       if (fresh.length) {
-        const privateFresh = privateDefaultApps()
-        const sealedFresh = appsProviding(PRIVATE_DATA_SLOTS)
+        const privateFresh = privateApps()
         for (const id of folderIds()) {
           const agent = readRaw(id)
           if (!agent || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
-          if (agent.privacy !== 'standard' && agent.privacy !== 'private') continue
-          const joining = agent.privacy === 'private' ? fresh.filter((app) => privateFresh.has(app)) : fresh.filter((app) => !sealedFresh.has(app))
+          if (agent.privacy !== 'private') continue
+          const joining = fresh.filter((app) => privateFresh.has(app))
           if (!joining.length) continue
           const next = structuredClone(agent)
           for (const app of joining) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
@@ -545,24 +561,52 @@ export function createAgentRegistry(options = {}) {
         const stored = readJson(mainPath)
         if (stored?.schema === 1) {
           const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
-          for (const app of fresh) if (!sealedFresh.has(app) && !apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
+          for (const app of fresh) if (!privateFresh.has(app) && !apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
           writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
         }
       }
-      if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))) {
+      if (turnedPrivate.length) {
+        // A grant made while the app was standard was never consent to private data: take it back from the main
+        // agent and every non-private agent. Private agents keep theirs; the owner can tick any agent again.
+        const turned = new Set(turnedPrivate)
+        for (const id of folderIds()) {
+          const agent = readRaw(id)
+          if (!agent || agent.privacy === 'private' || agent.runtime.kind === 'profile' || agent.runtime?.admission === 'importing') continue
+          const wizard_apps = listIds(agent.permissions.wizard_apps).filter((app) => !turned.has(app))
+          const agent_apps = listIds(agent.permissions.agent_apps).filter((app) => !turned.has(app))
+          if (wizard_apps.length === listIds(agent.permissions.wizard_apps).length && agent_apps.length === listIds(agent.permissions.agent_apps).length) continue
+          const next = structuredClone(agent)
+          next.permissions.wizard_apps = wizard_apps
+          next.permissions.agent_apps = agent_apps
+          writeHarnessFiles(next)
+          writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+        }
+        const stored = readJson(mainPath)
+        if (stored?.schema === 1) {
+          writeJsonAtomic(mainPath, { ...stored, wizard_apps: listIds(stored.wizard_apps).filter((app) => !turned.has(app)), agent_apps: listIds(stored.agent_apps).filter((app) => !turned.has(app)) })
+        }
+        queueMicrotask(appsChanged)
+      }
+      const privateList = current.filter((id) => privateNow.has(id))
+      if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))
+        || !seenPrivate || privateList.length !== seenPrivate.size || privateList.some((id) => !seenPrivate.has(id))) {
         mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-        writeJsonAtomic(appsSeenPath, { schema: 1, apps: current })
+        writeJsonAtomic(appsSeenPath, { schema: 1, apps: current, private: privateList })
       }
     } catch { appsSignature = null }   // retry on the next read
   }
 
   /**
    * The app ids an agent may use through the gateway (#58). Unknown agent → empty. The main agent with no stored
-   * choice → null (every app, exactly the gateway's behaviour before #58).
+   * choice → every app except private ones (null when none is private: the gateway before #58).
    */
   function allowedApps(agentId) {
     if (readRaw(agentId)?.role === 'recovery') return new Set()
-    if (agentId === MAIN_AGENT_ID && readJson(mainPath)?.schema !== 1) { syncApps(); return null }
+    if (agentId === MAIN_AGENT_ID && readJson(mainPath)?.schema !== 1) {
+      syncApps()
+      const hidden = privateApps()
+      return hidden.size ? new Set([...appKinds().keys()].filter((app) => !hidden.has(app))) : null
+    }
     const agent = read(agentId)
     return agent ? agentAppIds(agent) : new Set()
   }
@@ -571,9 +615,13 @@ export function createAgentRegistry(options = {}) {
   function appAgents(appId) {
     const kind = appKinds().get(appId)
     if (!kind) fail(404, 'app_not_found', 'app.id')
+    const privateApp = privateApps().has(appId)
+    const all = list().filter(agent => agent.role !== 'recovery')
     return {
-      app_id: appId, kind,
-      agents: list().filter(agent => agent.role !== 'recovery').map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === defaultAgentId() })),
+      app_id: appId, kind, privacy: privateApp ? 'private' : 'standard',
+      // A private app on a box with no private agent: the install sheet offers to set one up (James, 23 Oct 2026).
+      ...(privateApp ? { needs_private_agent: !all.some((agent) => agent.privacy === 'private') } : {}),
+      agents: all.map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === defaultAgentId() })),
     }
   }
 
@@ -737,14 +785,11 @@ export function createAgentRegistry(options = {}) {
     return out
   }
 
-  /** Installed app ids that every private agent gets by default (PRIVATE_DEFAULT_SLOTS). */
-  function appsProviding(slots) {
+  /** Installed private apps (tagged `privacy: private`, or providing a private-data slot). Private agents get them by default. */
+  function privateApps() {
     const apps = readJson(appsJsonPath)?.apps
-    return new Set((Array.isArray(apps) ? apps : [])
-      .filter((app) => Array.isArray(app?.provides) && app.provides.some((slot) => slots.includes(slot)))
-      .map((app) => app.id))
+    return new Set((Array.isArray(apps) ? apps : []).filter(isPrivateApp).map((app) => app.id))
   }
-  function privateDefaultApps() { return appsProviding(PRIVATE_DEFAULT_SLOTS) }
 
   function installedApps() {
     const apps = readJson(appsJsonPath)?.apps
@@ -882,7 +927,7 @@ export function createAgentRegistry(options = {}) {
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
     if (preset.privacy === 'private') {
       const kinds = appKinds()
-      for (const app of privateDefaultApps()) {
+      for (const app of privateApps()) {
         const field = kinds.get(app)
         if (field && !agentAppIds({ permissions }).has(app)) permissions[field].push(app)
       }
@@ -1073,12 +1118,25 @@ export function createAgentRegistry(options = {}) {
     })) }
   })
   let pinsCache = null
+  // session id -> pinned agent ids, rebuilt whenever the pin table object changes. A linear scan per
+  // lookup made the private-thread filter quadratic (~15% of service CPU on seen-state reads).
+  let pinIndex = null
   const pins = () => {
     if (!pinsCache) pinsCache = readJson(threadsPath)?.threads ?? {}
     return pinsCache
   }
   function pinnedAgents(sessionId) {
-    return Object.values(pins()).filter(row => row.session_id === sessionId && ['runtime_verified', 'service_admission', 'migrated_pin'].includes(row.provenance)).map(row => row.agent_id)
+    const table = pins()
+    if (pinIndex?.table !== table) {
+      const bySession = new Map()
+      for (const row of Object.values(table)) {
+        if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(row?.provenance)) continue
+        if (!bySession.has(row.session_id)) bySession.set(row.session_id, [])
+        bySession.get(row.session_id).push(row.agent_id)
+      }
+      pinIndex = { table, bySession }
+    }
+    return [...(pinIndex.bySession.get(sessionId) ?? [])]
   }
   function pinnedAgent(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return ''

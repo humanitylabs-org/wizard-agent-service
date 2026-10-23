@@ -100,6 +100,15 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
   return { project, size: () => cache.size, clear: () => { cache = new Map(); epoch = null; sweptAt = null } }
 }
 
+/** Adds outside per-thread state (e.g. a saved background result) to the queue fingerprints, so a
+ * cached row is re-projected when that state appears, changes or clears. */
+export function mergeStamps(base, extra) {
+  if (!base || !extra?.size) return base
+  const out = new Map(base)
+  for (const [id, stamp] of extra) out.set(id, `${out.get(id) ?? ''}|bg:${stamp}`)
+  return out
+}
+
 /** Per-thread differences between two projected lists, ignoring order. */
 export function diffProjectedRows(expected, actual) {
   const key = (row) => JSON.stringify(row, Object.keys(row ?? {}).sort())

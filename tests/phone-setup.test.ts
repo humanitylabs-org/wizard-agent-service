@@ -242,6 +242,36 @@ describe('setup API (box-local listener)', () => {
     expect(await setup.phone()).toMatchObject({ step: 'unavailable', error: 'helper_forbidden' })
   })
 
+  it('shows the address for a host-managed box (no helper, network.base_url on the tailnet)', async () => {
+    const settingsPath = join(tempDir(), 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ network: { base_url: 'https://wizard.tail0000.ts.net' } }))
+    // The real helperCall with no socket on disk: the helper is genuinely absent.
+    const setup = createPhoneSetup({ settingsPath, socketPath: join(tempDir(), 'no-such.sock') })
+    expect(await setup.phone()).toMatchObject({ step: 'serving', wizard_url: 'https://wizard.tail0000.ts.net/', device_name: 'wizard.tail0000.ts.net', managed: 'host' })
+    // A helper whose socket exists but refuses (an outage) is reported, never shown as host-managed with a stale QR.
+    const refused = async () => { throw Object.assign(new Error('x'), { code: 'unavailable', absent: false }) }
+    const down = await createPhoneSetup({ settingsPath, socketPath: '/x', call: refused }).phone()
+    expect(down).toMatchObject({ step: 'unavailable', wizard_url: null, error: 'helper_unreachable' })
+    expect(down.managed).toBeUndefined()
+    // A public or empty base_url is not a private connection.
+    writeFileSync(settingsPath, JSON.stringify({ network: { base_url: 'https://example.com' } }))
+    expect(await createPhoneSetup({ settingsPath, socketPath: join(tempDir(), 'no-such.sock') }).phone()).toMatchObject({ step: 'unavailable', wizard_url: null })
+  })
+
+  it('treats a stale helper socket that refuses connections as an outage', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ network: { base_url: 'https://wizard.tail0000.ts.net' } }))
+    const sock = join(dir, 'stale.sock')
+    // A socket file left by a helper that has stopped: connect() gets ECONNREFUSED.
+    const { execFileSync } = await import('node:child_process')
+    execFileSync('python3', ['-c', 'import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1])', sock])
+    expect(existsSync(sock)).toBe(true)
+    const out = await createPhoneSetup({ settingsPath, socketPath: sock }).phone()
+    expect(out).toMatchObject({ step: 'unavailable', wizard_url: null, error: 'helper_unreachable' })
+    expect(out.managed).toBeUndefined()
+  })
+
   it('does not report serving until the owner is recorded', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
