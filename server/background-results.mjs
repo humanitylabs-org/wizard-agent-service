@@ -213,6 +213,14 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   }
   const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
   return {
+    // Thread id -> identity of its pending saved results. The Chats list cache fingerprints cached rows
+    // with this: a result that appears or clears re-projects its thread instead of serving a stale row
+    // (a stale wizard_background_result row tripped the cache self-check and turned the cache off).
+    stamps() {
+      const out = new Map()
+      for (const row of cache.records) if (!admitted(row.key)) out.set(row.sessionId, `${out.get(row.sessionId) ?? ''}${row.id};`)
+      return out
+    },
     async list() {
       // Deliver one settled generation even when the client's polling interval
       // exceeds refreshMs; otherwise every poll can restart 'scanning'.

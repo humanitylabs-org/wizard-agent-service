@@ -13,7 +13,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode } from './session-list-cache.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -3771,7 +3771,7 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = runQueue ? runQueue.sessionStamps() : null
+      const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
@@ -3787,8 +3787,11 @@ function buildWizardServer(options, lifetime) {
     }
     // Compare the cache with a full rebuild. Only rows the cache served unchanged count as a cache
     // fault; freshly projected rows may differ only because a turn moved between the two builds.
+    // A disabled cache keeps checking: it was serving the full rebuild on every poll forever, which
+    // saturated the service (Chats list 12 s, a thread open ~5 s). A clean check that compared real
+    // cached rows turns it back on.
     const check = async () => {
-      if (!canonicalSessionReader || disabled || configured === 'off') return null
+      if (!canonicalSessionReader || configured === 'off') return null
       const started = performance.now()
       const all = await humanSessions()
       const expected = await fullCore(all)
@@ -3801,7 +3804,12 @@ function buildWizardServer(options, lifetime) {
         last_check_ms: Math.round(performance.now() - started), last_check_at: new Date().toISOString() })
       if (faults.length) {
         alarm('mismatch', { mode: configured, faults: faults.slice(0, 20), fault_count: faults.length, live_differences: differences.length - faults.length })
-        if (configured === 'on') { disabled = 'mismatch'; stats.disabled = disabled; snapshot.clear(); alarm('disabled', { reason: 'self-check mismatch; serving the full rebuild' }) }
+        if (configured === 'on' && !disabled) { disabled = 'mismatch'; stats.disabled = disabled; snapshot.clear(); alarm('disabled', { reason: 'self-check mismatch; serving the full rebuild' }) }
+        // Drop every cached row: the next check rebuilds the cache, the one after validates it.
+        projector.clear(); messageMark = Number.NaN
+      } else if (disabled && hybrid.cachedIds.length) {
+        disabled = ''; stats.disabled = ''; snapshot.clear()
+        alarm('re-enabled', { reason: 'clean self-check', cached: hybrid.cachedIds.length })
       } else if (differences.length) {
         console.log(`[list-cache] check ok; ${differences.length} live rows moved during the check ${JSON.stringify(differences.slice(0, 5))}`)
       }
