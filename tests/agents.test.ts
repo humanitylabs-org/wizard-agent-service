@@ -100,7 +100,8 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
 }
 
 const json = (body: unknown, headers: Record<string, string> = {}) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
-const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+// Explicitly off: these tests switch standard-chat reading themselves (the default-on rule has its own test).
+const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private', read_standard_chats: false } }
 
 // Create the private agent and point it at a fake Hermes on the port the registry assigned.
 async function withPrivate(dir: string, base: string, privatePort?: number) {
@@ -816,6 +817,18 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','config.yaml'),'utf8')).not.toContain('readonly-relay')
+  })
+  it('private agents read standard chats by default when the transport exists; explicit false wins; none without transport',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main,{standardChatsUrl:'http://readonly-relay:18986/wizard/standard-chats/mcp'})
+    const on=await(await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private'}}))).json()
+    expect(on.agent.permissions.read_standard_chats).toBe(true)
+    const off=await(await fetch(base+'/wizard/v1/agents',json({...PRIVATE,label:'Diary',permissions:{preset:'private',read_standard_chats:false}}))).json()
+    expect(off.agent.permissions.read_standard_chats).toBe(false)
+    const std=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
+    expect(std.agent.permissions.read_standard_chats).toBe(false)
+    const dir2=box(),main2=await fakeHermes('main'),{base:base2}=await start(dir2,main2)
+    const bare=await fetch(base2+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private'}}))
+    expect(bare.status).toBe(201);expect((await bare.json()).agent.permissions.read_standard_chats).toBe(false)
   })
   it('refuses a nonfunctional grant before persisting when no retrieval transport is configured',async()=>{
     const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main);await withPrivate(dir,base)
