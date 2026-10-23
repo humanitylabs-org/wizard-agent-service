@@ -159,7 +159,17 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
   const view = (status, error = null) => {
     const saved = settings()
     const base = { step: 'unavailable', auth_url: null, https_enable_url: null, wizard_url: null, device_name: null, phones: [], install_url: INSTALL_URL, error }
-    if (!status) return base
+    if (!status) {
+      // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner
+      // runs Tailscale themselves) and network.base_url names that address: the phone can connect today, so
+      // show the address and QR instead of "phone setup isn't available".
+      const hosted = !error && validTailnetOrigin(saved.network?.base_url)
+      if (hosted) {
+        const seen = Boolean(saved.setup.phone_seen_at)
+        return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: `${hosted}/`, device_name: new URL(hosted).hostname, managed: 'host' }
+      }
+      return base
+    }
     const phones = (Array.isArray(status.peers) ? status.peers : []).filter(isPhone).slice(0, 16)
       .map((peer) => ({ name: cleanName(peer.name) || 'phone', os: cleanName(peer.os, 32), online: peer.online === true }))
     const out = { ...base, phones }

@@ -242,6 +242,17 @@ describe('setup API (box-local listener)', () => {
     expect(await setup.phone()).toMatchObject({ step: 'unavailable', error: 'helper_forbidden' })
   })
 
+  it('shows the address for a host-managed box (no helper, network.base_url on the tailnet)', async () => {
+    const settingsPath = join(tempDir(), 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ network: { base_url: 'https://wizard.tail0000.ts.net' } }))
+    const unavailable = async () => { throw Object.assign(new Error('x'), { code: 'unavailable' }) }
+    const setup = createPhoneSetup({ settingsPath, socketPath: '/x', call: unavailable })
+    expect(await setup.phone()).toMatchObject({ step: 'serving', wizard_url: 'https://wizard.tail0000.ts.net/', device_name: 'wizard.tail0000.ts.net', managed: 'host' })
+    // A public or empty base_url is not a private connection.
+    writeFileSync(settingsPath, JSON.stringify({ network: { base_url: 'https://example.com' } }))
+    expect(await createPhoneSetup({ settingsPath, socketPath: '/x', call: unavailable }).phone()).toMatchObject({ step: 'unavailable', wizard_url: null })
+  })
+
   it('does not report serving until the owner is recorded', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
