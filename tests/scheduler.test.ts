@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Scheduler, importHermesSchedules, isSilentResult, isScheduleInput, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
+import { Scheduler, notificationFromOutput, importHermesSchedules, isSilentResult, isScheduleInput, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createWizardServer, listen, latestVisibleSessionMessages, projectWizardMessageHistory } from '../server/service.mjs'
 import { projectStatusMarkers } from '../server/thread-status.mjs'
@@ -625,5 +625,58 @@ describe('Boomerang returns (kind return)', () => {
     expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
     s.delete(back.id)
     expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
+  })
+})
+
+describe('deliver: notification (alerts go to the notifications slot, not Chats)', () => {
+  const notifier = (up = true, fail = false) => {
+    const sent: any[] = []
+    return { sent, available: () => up, send: async (n: any) => { if (fail) throw Error('down'); sent.push(n); return { app: 'notifications' } } }
+  }
+  it('freezes a silent notification instruction into the run and sends the answer to the slot once', async () => {
+    const n = notifier(); let bodies: any[] = []
+    const s = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r1' } }, { notifier: n,
+      lookup: async () => ({ status: 'completed', output: '**Disk almost full**\nThales is at 93%. Free space or approve cleanup.\n[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' }))
+    expect(j.deliver).toBe('notification')
+    clock += 5 * 60_000; await s.tick()
+    expect(bodies[0].deliver).toBe('notification')
+    expect(bodies[0].body.input).toContain("the owner's Notifications, not this chat")
+    expect(isSilentResult('**Disk almost full**\nThales is at 93%.\n[SILENT]')).toBe(true)
+    await s.refreshRuns(); await s.refreshRuns()
+    expect(n.sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%. Free space or approve cleanup.', key: expect.stringMatching(/^schedule:/) }])
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('sends nothing for a [SILENT]-only answer', async () => {
+    const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => ({ status: 'completed', output: '[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    expect(n.sent).toEqual([]); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('silent')
+  })
+  it('falls back to the thread when the slot is empty or stopped, and retries a failed send', async () => {
+    let bodies: any[] = []
+    const s1 = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r' } }, { notifier: notifier(false) })
+    s1.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s1.tick()
+    expect(bodies[0].deliver).toBeUndefined()
+    expect(bodies[0].body.input).not.toContain('Notifications')
+    await s1.close(); schedulers.splice(schedulers.indexOf(s1), 1); rmSync(join(root, 'scheduler.sqlite3'), { force: true })
+    let fail = true; const sent: any[] = []
+    const flaky = { available: () => true, send: async (x: any) => { if (fail) throw Error('down'); sent.push(x) } }
+    const s2 = scheduler(undefined, { notifier: flaky, lookup: async () => ({ status: 'completed', output: 'Backup failed\nRestore check could not reach R2.\n[SILENT]' }) })
+    const j = s2.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s2.tick()
+    expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'failed', error: 'Notification not delivered; will retry', finishedAt: null })
+    fail = false; await s2.refreshRuns()
+    expect(sent).toHaveLength(1); expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('validates deliver and keeps returns as threads', () => {
+    const s = scheduler()
+    expect(s.create(job()).deliver).toBe('thread')
+    expect(() => s.create(job({ deliver: 'email' }))).toThrow(/deliver must be/)
+    expect(() => s.create({ name: 'R', kind: 'return', when: { once: '2026-10-22T00:00:00Z' }, thread: 'wizard_1_abc', deliver: 'notification' })).toThrow(/return always/)
+  })
+  it('extracts title and message from an answer', () => {
+    expect(notificationFromOutput('# Job done\nAll 3 renders finished.\n[SILENT]')).toEqual({ title: 'Job done', message: 'All 3 renders finished.' })
+    expect(notificationFromOutput('One line only [SILENT]')).toEqual({ title: '', message: 'One line only' })
+    expect(notificationFromOutput('[SILENT]')).toBeNull()
   })
 })
