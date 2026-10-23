@@ -39,7 +39,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { GATEWAY_MAIN_AGENT, ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { resumeHelper } from './helper-resume.mjs'
@@ -2381,13 +2381,17 @@ function buildWizardServer(options, lifetime) {
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
   // The agent registry (below) decides which apps each agent may use on the gateway (#58).
   let gatewayAgents = null
+  // agentBridge 'gateway': serve /wizard/mcp and the agent kernel to container agents (their own gateway token)
+  // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
+  const gatewayOnly = options.agentBridge === 'gateway'
+  const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
-      fetchImpl, writeSkills: options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
+      fetchImpl, writeSkills: !gatewayOnly && options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
     })
@@ -2395,7 +2399,7 @@ function buildWizardServer(options, lifetime) {
   if (bridge) lifetime.own(() => bridge.close())
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   const osInstructions = (sessionId) => {
-    if (!bridge) return ''
+    if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
     const { settings } = readSettings(settingsPath)
     if (settings.agent.adapter === 'hermes-plugin') {
@@ -4682,7 +4686,7 @@ function buildWizardServer(options, lifetime) {
         return
       }
       if (url.pathname === '/wizard/mcp') {
-        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!bridge || (gatewayOnly && !containerAgent(request))) { sendJson(response, 404, { error: 'not_found' }); return }
         await bridge.handle(request, response)
         return
       }
@@ -4736,6 +4740,7 @@ function buildWizardServer(options, lifetime) {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
         const tokenAgent = bridge.agentFor(request)
+        if (gatewayOnly && !containerAgent(request)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
         const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })

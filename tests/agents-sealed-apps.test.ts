@@ -354,3 +354,23 @@ describe('#59 private agents are sealed', () => {
     expect(std.status).toBe(200)
   })
 })
+
+// James, 23 Oct 2026: "give Philosopher full access to Wisdom" through the #58 tick. The daily box keeps the main
+// agent's runs unchanged (bridge off), which also turned off the gateway every container agent needs. 'gateway'
+// serves container agents their ticked apps and leaves the main agent exactly as 'off' does.
+describe('agentBridge gateway: container agents only', () => {
+  it('a ticked agent gets its apps; the main token, its kernel and its runs get nothing new', async () => {
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main, { agentBridge: 'gateway' })
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps'])
+    const allowed = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'notes__note_add', arguments: {} })
+    expect(allowed.json.result.content[0].text).toBe('ran note_add')
+    expect((await mcp(base, MAIN_TOKEN, 'tools/list')).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${MAIN_TOKEN}` } })).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${gatewayKey(dir, helper.id)}` } })).status).toBe(200)
+  })
+})
