@@ -11,7 +11,8 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, searchHermesSessionText, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
+import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
@@ -3454,14 +3455,15 @@ function buildWizardServer(options, lifetime) {
         if (q && listCache.mode() === 'on') {
           // Search reuses the shared list snapshot; only the message-text lookup is per query.
           // Rows are shared with other clients, so matches get a copy, never a mutation.
-          try {
-            const cached = await listCache.served()
-            const hits = new Map()
-            for (let i=0; i<cached.length; i+=200) {
-              for (const [id, text] of searchHermesSessionText(hermesStatePath, cached.slice(i,i+200).map(s=>s.id), q)) hits.set(id, text)
-            }
+          let cached
+          try { cached = await listCache.served() }
+          catch (error) { listCache.fellBack(error) }
+          if (cached) {
+            // Search failures are not cache failures: never retry a timed-out scan
+            // as a full projection plus one new search for every batch.
+            const hits = await searchHermesSessionTextAsync(hermesStatePath, cached.map(s => s.id), q)
             return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
-          } catch (error) { listCache.fellBack(error) }
+          }
         }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
         const rows = []
@@ -3470,7 +3472,7 @@ function buildWizardServer(options, lifetime) {
           const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
           const batch = JSON.parse(result.toString('utf8')).data
           if (searchParams.get('q')) {
-            const hits = searchHermesSessionText(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
+            const hits = await searchHermesSessionTextAsync(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
             for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
           }
           rows.push(...batch)
