@@ -386,7 +386,7 @@ export class Scheduler {
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
-      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : {}),
+      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))
