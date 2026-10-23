@@ -113,16 +113,17 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
     name = f"mcp__{MCP_SERVER_NAME}__<app>__<tool>" if hermes else "<app>__<tool>"
     id_note = " (<app> = app id, - as _)"
     text = [
-        "Wizard OS: you are the owner's agent on this box. Installed apps do jobs for the owner.",
-        *(["To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow."] if hermes else []),
+        "Wizard OS: you are the owner's agent on this box. Its apps do jobs for them.",
+        *(["To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.",
+           "Help, reminders, tips: load `wizard-guide`."] if hermes else []),
         f"Files root: {files_root}; app tool paths are relative to it.",
-        "When a request matches a wizard-job-<job> skill in your skills list:" if hermes else "When a request matches a job below:",
-        "1. Load that skill with skill_view for tool names and purposes." if hermes else "1. Use the app named for that job.",
+        "When a request matches a wizard-job-<job> skill in your skills:" if hermes else "When a request matches a job below:",
+        "1. Load it with skill_view for tool names and purposes." if hermes else "1. Use the app named for that job.",
         f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`{id_note}."
         + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
         "3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.",
         "Use the installed app for its job.",
-        f'"What apps do I have?": call `{meta}`. Report unreachable tools (`wam doctor`).',
+        f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
         "Save routing-only app-job skills.",
     ]
     if job_map or not hermes:

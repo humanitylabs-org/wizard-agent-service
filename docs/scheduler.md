@@ -158,6 +158,22 @@ compatibility. Both new fields are read-only and rejected in write bodies.
 Clients format these ISO instants in the owner's clock timezone and retain an
 unavailable fallback when connecting to older services without these fields.
 
+## Reminders and onboarding tips from chat (`server/onboarding.mjs`)
+
+The `wizard` MCP gateway serves two built-in tools beside `wizard_apps` whenever the scheduler has state, so any
+agent on any box (container agents included, which never load the host-only `wizard-schedule` Hermes plugin) can:
+
+- `wizard_remind` `set` / `list` / `cancel`: a `remind` job for the calling agent (`when` is `morning`,
+  `overnight` or an ISO timestamp with offset). It arrives in its own `Reminder · …` thread.
+- `wizard_tips` `start` / `stop` / `status`: the opt-in five-day drip. Five one-shot `remind` jobs share one
+  service-chosen thread titled `Wizard · Tips` (`group: wizard-tips`): tip 1 a minute after opting in, tips 2–5
+  at the next 08:30 owner-time mornings. Starting again while tips are pending is a no-op.
+
+The thread, title and group are set by the service (`Scheduler.create(input, placement)`); the HTTP body cannot
+supply them. When the timer is off (`WIZARD_SCHEDULER` is not `1`) both tools answer with an error instead of
+saving a job nothing would deliver. The Runtipi package sets `WIZARD_SCHEDULER=1`. The `wizard-guide` system
+skill (wizard-app-manager `system-skills/`) tells the agent when to use them.
+
 ## Silent reports
 
 `[SILENT]` at either boundary of the final answer (ignoring a Wizard status

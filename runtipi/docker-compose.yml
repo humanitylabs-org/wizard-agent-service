@@ -20,6 +20,9 @@ services:
       WIZARD_APPS_JSON_PATH: /wizard-os/apps.json
       WIZARD_APPS_MCP_ADDRESS: internal
       WIZARD_APPS_SKILLS_INLINE: "1"
+      # The one Wizard scheduler (docs/scheduler.md): reminders and the onboarding tips. It only runs jobs the
+      # owner asked for; a fresh box has none.
+      WIZARD_SCHEDULER: "1"
       WIZARD_AGENT_ARTIFACT_ROOTS: /hermes/cache/images:/media
       WIZARD_ROUTER_URL: ${WIZARD_ROUTER_URL}
       WIZARD_ROUTER_MODEL: ${WIZARD_ROUTER_MODEL}
