@@ -72,7 +72,10 @@ the thread stays quiet. On completion the service sends that text to the box's
 `notifications` slot (the `slots.notifications.default` app in `apps.json`, else
 the only running provider) through the agent bridge's `notify` tool. `lastRun.outcome`
 is `notified`. A failed send records `failed` with "Notification not delivered; will
-retry" and retries on the next refresh. An empty or stopped slot is checked when the
+retry" and retries on the next refresh. Notification occurrences stay observed for 7 days (other runs: 6 h), so a long run or a slot
+outage still sends. The scheduler reads the run with `X-Wizard-Schedule-Raw: 1` plus its internal token, so it sees the
+text before the `[SILENT]` display scrub; owners always get the scrubbed view. Delivery is at-least-once: ntfy has no
+client idempotency key, so a send whose reply is lost is sent again (a duplicate bell row beats a lost alert). An empty or stopped slot is checked when the
 occurrence is claimed: that occurrence is delivered to the thread instead, so nothing
 is lost. `kind: return` (Boomerang) is always a thread. Reports the owner replies in
 stay `thread`.

@@ -422,6 +422,26 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect((await api(f.origin, `/${created.id}/run`, 'POST')).status).toBe(404)
   })
 
+  it('deliver: notification reads the unscrubbed answer through the real run route and keeps the thread and owner views silent', async () => {
+    const f = await fixture({ fixtureOutput: '**Disk almost full**\nThales is at 93%.\n[SILENT]' })
+    const sent: any[] = []
+    f.server.scheduler.notifier = { available: () => true, send: async (n: any) => { sent.push(n); return { app: 'notifications' } } }
+    const created = await (await api(f.origin, '', 'POST', job({ enabled: false, deliver: 'notification' }))).json()
+    const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
+    await f.server.scheduler.tick(false); await f.server.scheduler.refreshRuns()
+    expect(f.bodies[0].input).toContain("the owner's Notifications, not this chat")
+    expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key }])
+    expect(f.server.scheduler.project(f.server.scheduler.get(created.id)).lastRun.outcome).toBe('notified')
+    const row = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
+    const runId = JSON.parse(row.receipt).run_id
+    // The raw view is internal-only: an owner asking for it still gets the scrubbed run.
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'X-Wizard-Schedule-Raw': '1' }
+    const run = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers })).json()
+    expect(run.output).toBe('')
+    const history = await (await fetch(`${f.origin}/wizard/hermes/api/sessions/${receipt.thread}/messages?view=wizard`, { headers })).json()
+    expect(history.messages).toEqual([])
+  })
+
   it.each(['fixture report', 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
     const f = await fixture({ fixtureOutput })
     const created = await (await api(f.origin, '', 'POST', job({ enabled: false }))).json()
@@ -667,6 +687,14 @@ describe('deliver: notification (alerts go to the notifications slot, not Chats)
     expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'failed', error: 'Notification not delivered; will retry', finishedAt: null })
     fail = false; await s2.refreshRuns()
     expect(sent).toHaveLength(1); expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('observes a notification occurrence past the 6 h run window', async () => {
+    let state: any = { status: 'running' }; const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => state })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    clock += 8 * 3600_000; state = { status: 'completed', output: 'Render done\nAll 3 clips exported.\n[SILENT]' }
+    await s.refreshRuns()
+    expect(n.sent).toHaveLength(1); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('notified')
   })
   it('validates deliver and keeps returns as threads', () => {
     const s = scheduler()
