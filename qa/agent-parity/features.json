@@ -242,6 +242,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "archive-placement",
+      "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
+      "layer": "ux",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
+      "source_refs": [
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-stopped-done.cjs",
+        "wizard-ux/qa-unified-chats.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "session-rename",
       "description": "Rename a thread",
       "layer": "server",
@@ -323,6 +341,21 @@
         "tests/restart-interrupt-recovery.test.ts"
       ],
       "fixture": "queue-restart",
+      "policy_exemptions": []
+    },
+    {
+      "id": "pending-steer-replay",
+      "description": "Replay a steer the run accepted but never consumed",
+      "layer": "server",
+      "how_to_test": "Finish a run whose terminal status carries pending_steer; verify exactly one same-thread turn on the locked model under a wizard-pending-steer- key, answered, and no second replay after restart.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/pending-steer-replay.test.ts"
+      ],
+      "fixture": "pending-steer-replay",
       "policy_exemptions": []
     },
     {
@@ -670,12 +703,14 @@
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",
-      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries.",
+      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries. For each agent kind, render the real chat list: empty Yesterday/Past week sections are absent, populated historical sections remain available.",
       "source_refs": [
-        "server/session-list-window.mjs"
+        "server/session-list-window.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "tests/chats-views.test.ts"
+        "tests/chats-views.test.ts",
+        "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
       "policy_exemptions": []

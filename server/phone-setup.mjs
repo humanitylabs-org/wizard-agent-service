@@ -91,9 +91,9 @@ export function mobileUserAgent(request) {
 }
 
 /**
- * @param {{ settingsPath: string, socketPath?: string, now?: () => number, call?: typeof helperCall, hostname?: string }} options
+ * @param {{ settingsPath: string, socketPath?: string, now?: () => number, call?: typeof helperCall, hostname?: string, accessPinned?: boolean, hostShellUrl?: () => string, launchMode?: string }} options
  */
-export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false }) {
+export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false, hostShellUrl = () => '', launchMode = process.env.WIZARD_SETUP_MODE }) {
   let chain = Promise.resolve()
   let lastServeAttempt = 0
   // Serialize every helper action and settings write from this service.
@@ -162,6 +162,11 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     const saved = settings()
     const base = { step: 'unavailable', auth_url: null, https_enable_url: null, wizard_url: null, device_name: null, phones: [], install_url: INSTALL_URL, error }
     if (!status) {
+      // A helper's clean stop can unlink its socket too. Saved enrollment is evidence
+      // this is NOT an unmanaged host, so never reclassify its stale address as ready.
+      if (absent && (saved.setup.phone_started_at || (saved.access.tailscale.origin && !accessPinned))) {
+        return { ...base, error: error || 'helper_unreachable' }
+      }
       // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner
       // runs Tailscale themselves) and network.base_url names that address: the phone can connect today, so
       // show the address and QR instead of "phone setup isn't available".
@@ -170,6 +175,13 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       if (hosted) {
         const seen = Boolean(saved.setup.phone_seen_at)
         return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: `${hosted}/`, device_name: new URL(hosted).hostname, managed: 'host' }
+      }
+      // Alongside installs: the installer runs host Tailscale itself (no helper) and records the shell's private
+      // https address in apps.json, but never writes network.base_url. That address is where the phone opens Wizard.
+      const shell = absent && !error ? hostShellLink(hostShellUrl) : null
+      if (shell) {
+        const seen = Boolean(saved.setup.phone_seen_at)
+        return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: shell.url, device_name: shell.host, managed: 'host' }
       }
       return base
     }
@@ -233,11 +245,24 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
 
   return {
     /** GET /wizard/v1/setup */
-    overview() {
+    async overview() {
       const saved = settings()
-      const state = saved.setup.phone_seen_at ? 'done'
+      // Host-managed private access is already configured outside Setup. Use the same validated
+      // readiness as the phone screen, without pretending we have actually seen a phone.
+      let ready = false
+      if (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url)) {
+        // The summary must not wait for a possibly hung helper (the shell's launch budget is 2.5 s).
+        // A present socket is never host-managed, whether it is healthy or currently unreachable.
+        const phone = view(null, null, !existsSync(socketPath))
+        // This flag is a checklist-copy hint for ready-but-not-yet-seen, not a general capability.
+        // Once a phone was seen, preserve the existing "connected" checklist state/copy instead.
+        ready = phone.managed === 'host' && phone.step === 'serving'
+      }
+      const state = saved.setup.phone_seen_at || ready ? 'done'
         : (saved.setup.phone_started_at || saved.access.tailscale.origin) ? 'in_progress' : 'todo'
-      return { first_run: !saved.setup.seen_at, items: [{ id: 'phone', title: PHONE_ITEM_TITLE, state }] }
+      return { first_run: !saved.setup.seen_at,
+        ...(launchMode === 'alongside' ? { launch_mode: 'alongside' } : {}),
+        items: [{ id: 'phone', title: PHONE_ITEM_TITLE, state, ...(ready ? { phone_ready: true } : {}) }] }
     },
     /** POST /wizard/v1/setup/seen */
     markSeen: () => serial(async () => {
@@ -284,13 +309,24 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     noteOwnerRequest(request) {
       if (!mobileUserAgent(request)) return
       const saved = settings()
-      if (saved.setup.phone_seen_at || !saved.access.tailscale.origin) return
+      if (saved.setup.phone_seen_at || (!saved.access.tailscale.origin && !accessPinned)) return
       serial(async () => {
         const again = settings()
-        if (!again.setup.phone_seen_at && again.access.tailscale.origin) markSetup('phone_seen_at', nowIso(now))
+        if (!again.setup.phone_seen_at && (again.access.tailscale.origin || accessPinned)) markSetup('phone_seen_at', nowIso(now))
       }).catch(() => {})
     },
   }
+}
+
+/** The shell's private tailnet link (https://<box>.<tailnet>.ts.net[:port]/path/) from apps.json, or null. */
+function hostShellLink(read) {
+  let value = ''
+  try { value = String(read() || '') } catch { return null }
+  let u
+  try { u = new URL(value) } catch { return null }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash) return null
+  if (!/^[a-z0-9.-]+\.ts\.net$/u.test(u.hostname)) return null
+  return { url: u.href, host: u.hostname }
 }
 
 function normalizeView(raw) {
