@@ -7,13 +7,16 @@
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
-import { privateChatMatches } from './private-chat-search.mjs'
+import { indexedSearchWords } from './session-truth.mjs'
+import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
+const agentListSnapshots = new WeakMap()
 const profileRunCache = new WeakMap()
 
 // Every runtime uses the same Wizard status/title projection. Fetch through the
@@ -628,7 +631,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (typeof request.headers.accept === 'string') headers.set('Accept', request.headers.accept)
   if (typeof request.headers['idempotency-key'] === 'string') headers.set('Idempotency-Key', request.headers['idempotency-key'])
   const query = new URLSearchParams(searchParams)
-  for (const key of ['window','q','overrides','snapshot','cursor']) query.delete(key)
+  for (const key of ['window','q','overrides','snapshot','cursor','fields','mode']) query.delete(key)
   query.delete('view')
   query.delete('snapshot')
   const controller = new AbortController()
@@ -700,52 +703,61 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
-        const payload = await listWindows.get(ctx)({ params: searchParams, scope: agent.id, load: async () => {
-          const all=[]; let offset=0
-          // Read only this already-authorized agent runtime. Gateway controls never reach it.
-          while (true) {
-            const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
-            const page=await registry.fetchAgent(agent, `/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
-            if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            const raw=Buffer.from(await page.arrayBuffer())
-            if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
-            const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
-            if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
-            if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
-            if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
-            offset+=rows.length
-          }
-          // Stock Hermes never lists archived threads; add them from this agent's own state.db, exactly as the
-          // main list does, so an agent's Archive is not silently empty (James, 24 Oct 2026: one Philosopher thread).
-          try {
-            const known=new Set(all.map(row=>row?.id))
-            for (const row of readArchivedSessions(join(registry.agentsDir, agent.id, 'home', 'state.db')))
-              if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
-          } catch { /* an unreadable archive never hides the live threads */ }
-          if (searchParams.get('q')) {
-            const fts = privateChatMatches(registry.agentsDir,agent.id,searchParams.get('q'))
-            if (fts) {
-              for (const row of all) if (fts.has(row.id)) { row.wizard_search_match = true; row.wizard_search_text = fts.get(row.id) }
-              return all
+        if (!agentListSnapshots.has(ctx)) agentListSnapshots.set(ctx,new Map())
+        const snapshots=agentListSnapshots.get(ctx)
+        let state=snapshots.get(agent.id)
+        if(!state) { state={rows:null,at:0,pending:null}; snapshots.set(agent.id,state) }
+        const secrets=[key,...ctx.mainSecrets].filter(Boolean)
+        const refresh=()=> {
+          if(!state.pending) state.pending=(async()=>{
+            const all=[]; let offset=0
+            while(true) {
+              const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
+              const page=await registry.fetchAgent(agent,`/api/sessions?${q}`,{headers,redirect:'manual',signal:AbortSignal.timeout(10000)})
+              if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+              const raw=Buffer.from(await page.arrayBuffer())
+              if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
+              const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
+              if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+              all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
+              if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
+              if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
+              offset+=rows.length
             }
-            const q=searchParams.get('q'), pending=all.filter(row=>!selectWindow([row],{q}).search_total);
-            let index=0;
-            await Promise.all(Array.from({length:Math.min(4,pending.length)},async()=>{
-              while(index<pending.length) {
-                const row=pending[index++];
-                row.wizard_search_text=await searchMessageText(async offset=>{
-                  const page=await registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
-                  if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
-                  const raw=Buffer.from(await page.arrayBuffer());
-                  if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
-                  return JSON.parse(raw.toString('utf8'));
-                },q);
-              }
-            }));
+            const known=new Set(all.map(row=>row.id))
+            for(const row of readArchivedSessions(join(registry.agentsDir,agent.id,'home','state.db')))
+              if(!known.has(row.id) && (!ctx.isThreadVisible||ctx.isThreadVisible(row))) all.push(row)
+            state.rows=await projectProfileSessions(ctx,agent,all,headers,secrets); state.at=Date.now()
+            return state.rows
+          })().finally(()=>{state.pending=null})
+          return state.pending
+        }
+        const load=async()=> {
+          if(!state.rows) return refresh()
+          if(Date.now()-state.at>20000) void refresh().catch(()=>undefined)
+          return state.rows
+        }
+        const started=performance.now(), q=searchParams.get('q')||''
+        const rows=await (searchParams.has('q') ? load() : refresh())
+        const list_ms=performance.now()-started
+        const localPath=join(registry.agentsDir,agent.id,'home','state.db')
+        if(searchParams.get('mode')==='body' && !existsSync(localPath)) { sendJson(response,501,{error:'body_search_unavailable'}); return }
+        const hits=q ? await searchHermesSessionTextAsync(join(registry.agentsDir,agent.id,'home','state.db'),rows.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || agent.id) : null
+        if(q && !searchParams.has('mode') && !existsSync(localPath) && indexedSearchWords(q).length) {
+          for(const row of rows) {
+            const text=await searchMessageText(async offset=>{
+              const hist=await registry.fetchAgent(agent,`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:AbortSignal.timeout(10000)})
+              if(!hist.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+              const raw=Buffer.from(await hist.arrayBuffer())
+              if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
+              return JSON.parse(raw.toString('utf8'))
+            },q)
+            if(text) hits.set(row.id,text.slice(0,200))
           }
-          return projectProfileSessions(ctx, agent, all, headers, secrets)
-        }})
+        }
+        const payload=searchParams.get('mode')==='body'
+          ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}
+          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,wizard_search_text:hits.get(row.id),wizard_search_match:true}:row)})
         result=Buffer.from(JSON.stringify(payload))
       }
       result = filterThreads(result, ctx.isThreadVisible)
