@@ -334,6 +334,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-steer-replay",
+      "description": "Replay a steer the run accepted but never consumed",
+      "layer": "server",
+      "how_to_test": "Finish a run whose terminal status carries pending_steer; verify exactly one same-thread turn on the locked model under a wizard-pending-steer- key, answered, and no second replay after restart.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/pending-steer-replay.test.ts"
+      ],
+      "fixture": "pending-steer-replay",
+      "policy_exemptions": []
+    },
+    {
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
