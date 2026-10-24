@@ -38,7 +38,7 @@ remove=[doc['Id'] for doc in docs if (doc['Config'].get('Labels') or {}).get('co
 if remove:subprocess.run(['docker','rm','-f',*remove],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 volumes=[n for n in subprocess.check_output(['docker','volume','ls','--format','{{.Name}}'],text=True).splitlines() if 'tinfoil' in n]
 for volume in volumes:subprocess.run(['docker','volume','rm',volume],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-roots=[h/'.wizard-os/agents',h/'runtipi/apps',h/'runtipi/app-data',h/'runtipi/user-config',h/'runtipi/repos/wizardapps/apps']
+roots=[h/'.wizard-os/agents',h/'runtipi/apps',h/'runtipi/app-data',h/'runtipi/user-config',h/'runtipi/user-config/wizardapps',h/'runtipi/app-data/wizardapps',h/'runtipi/apps/wizardapps',h/'runtipi/repos/wizardapps/apps']
 for base in roots:
  if not base.exists():continue
  for target in base.iterdir():

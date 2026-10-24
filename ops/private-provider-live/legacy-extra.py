@@ -56,7 +56,7 @@ elif phase=='remove':
  sys.path.insert(0,'/opt/pp-rig/src/wam');from wam import cli,registry
  from local_projection import projection
  rt=cli.Config().runtipi();urn='wizard-tinfoil_private:wizardapps';rt.uninstall(urn);assert rt.wait_status(urn,{'missing'},timeout=180)=='missing'
- with projection(registry):cli.write_registry(cli.Config(),rt)
+ cli.write_registry(cli.Config(),rt)
  assert not any(a.get('id')=='wizard-tinfoil' for a in json.loads((O/'apps.json').read_text()).get('apps',[]))
  aid='pp-test-legacy';c,b=req('/wizard/hermes/api/sessions?agent='+aid,{'source':'wizard-mobile'},'POST');assert c==503 and b.get('error')=='private_provider_unavailable',(c,b)
  c,status=req('/wizard/v1/agents/'+aid);assert c==200 and status['agent'].get('status_detail')=='private_provider_unavailable',status

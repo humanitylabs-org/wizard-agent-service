@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Run pp-rehearsal-3 phases under the shared worker lock; pp-rig only."""
-import sys,os,json,tarfile,io,time,subprocess,importlib.util
+import sys,os,json,tarfile,io,time,subprocess,importlib.util,inspect
 from pathlib import Path
 ROOT=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers');L=ROOT/'pp-launch/live'
 spec=importlib.util.spec_from_file_location('prepare',L/'rig-prepare.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
 r=mod.Rig(ROOT)
 phase=sys.argv[1]
 def run_guest(args,timeout=900,payload=None):
- script="from pathlib import Path;import subprocess,sys;args="+repr(args)+";p=subprocess.run(['python3','/home/rig/pp-launch-3/guest.py',*args],input=sys.stdin.buffer.read(),capture_output=True);q=Path('/home/rig/pp-launch-3/phase-'+args[0]+'.log');q.write_bytes(p.stdout+p.stderr);q.chmod(0o600);print(p.stdout.decode() if p.returncode==0 else 'PHASE_FAILED '+args[0]);sys.exit(p.returncode)"
+ script="import re\n"+inspect.getsource(mod.redact_diagnostic)+"\nfrom pathlib import Path;import subprocess,sys;args="+repr(args)+";p=subprocess.run(['python3','/home/rig/pp-launch-3/guest.py',*args],input=sys.stdin.buffer.read(),capture_output=True);q=Path('/home/rig/pp-launch-3/phase-'+args[0]+'.log');q.write_bytes(p.stdout+p.stderr);q.chmod(0o600);print(p.stdout.decode() if p.returncode==0 else 'PHASE_FAILED '+args[0]+'\\n'+redact_diagnostic(p.stdout+p.stderr));sys.exit(p.returncode)"
  return r.python(script,payload=payload,timeout=timeout)
 assert json.loads((L/'RIG-PREPARATION.json').read_text())['status']=='prepared'
 if phase in ['setup','setup-resume']:
+ r.python("from pathlib import Path;import sys,hashlib;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';p=Path('/opt/pp-rig/src/wam/wam/registry.py');assert not p.is_symlink();data=sys.stdin.buffer.read();p.write_bytes(data);print('wam_registry_sha256='+hashlib.sha256(p.read_bytes()).hexdigest())",root=True,payload=(L/'wam-registry.py').read_bytes())
  r.python("from pathlib import Path;import os;assert os.geteuid()==1000;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';Path('/home/rig/pp-launch-3').mkdir(exist_ok=True)")
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/guest.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'rehearse-guest.py').read_bytes())
  r.python(r'''

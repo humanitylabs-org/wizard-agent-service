@@ -130,21 +130,23 @@ elif step=='install':
  text=(T/'wizard.md').read_text();doc=wizardmd.front_matter(text);comp=yaml.safe_load((T/'runtipi/docker-compose.yml').read_text())
  cfg=json.loads((T/'runtipi/config.json').read_text());cfg.update(id=lid,source='local:'+lid)
  svc=comp['services']['wizard-tinfoil'];svc.update(image='pp-test-tinfoil:launch3',pull_policy='never',ports=['127.0.0.1:${APP_PORT}:18804'])
+ # WAM's portable-volume compiler deliberately rejects fixed names. Declare this
+ # provider-only credential volume in the owner API override, never app-data.
+ assert comp.pop('volumes')=={'tinfoil-private-data':{'name':'wizard-tinfoil-private-data'}},'unexpected provider volume recipe'
+ assert svc.pop('volumes')==['tinfoil-private-data:/data'],'unexpected provider data mount'
  # Immutable app source is built into this image; source provenance is exact pinned archive.
  (dst/'wizard.md').write_text(text);(dst/'config.json').write_text(json.dumps(cfg));(dst/'docker-compose.yml').write_text(yaml.safe_dump(comp,sort_keys=False))
  shutil.copy2(T/'runtipi/metadata/logo.jpg',dst/'metadata/logo.jpg');(dst/'metadata/description.md').write_text('Private relay-only provider rehearsal\n')
  (dst/'.wizard-commit').write_text('07eca5e30ca7873ab8cfda503175768fc55f66d4\n');(dst/'.wizard-source').write_text(json.dumps({'repo':'local:'+lid,'private':True}))
  prior=rt.req('GET','/user-config/'+urn)
- override='services:\n  wizard-tinfoil:\n    networks: !override\n      - provider-bootstrap\n'
+ override='services:\n  wizard-tinfoil:\n    networks: !override\n      - provider-bootstrap\n    volumes:\n      - tinfoil-private-data:/data\nvolumes:\n  tinfoil-private-data:\n    name: wizard-tinfoil-private-data\n'
  old_compose=prior.get('dockerCompose') or '';old_env=prior.get('appEnv') or ''
  # Fresh Runtipi GET returns commented templates, not necessarily empty strings.
  assert not any(l.strip() and not l.lstrip().startswith('#') for l in old_env.splitlines()),'unexpected provider env override'
- assert old_compose==override or yaml.safe_load(old_compose) in [None,{}, {'services':{}}, {'services':None}],'unexpected compose override'
- rt.req('PUT','/user-config/'+urn,{'dockerCompose':override,'appEnv':old_env});after=rt.req('GET','/user-config/'+urn);assert after['dockerCompose']==override and (after.get('appEnv') or '')==old_env
- rt.install(urn,{'openPort':False,'exposed':False,'exposedLocal':False,'port':18804,'WIZARD_TRUSTED_HOSTS':'127.0.0.1:18804,localhost:18804','WIZARD_TRUSTED_ORIGINS':'http://127.0.0.1:18804'});status=rt.wait_status(urn,{'running','missing','stopped'},timeout=180);assert status=='running',status
- from wam import registry
- from local_projection import projection
- with projection(registry):reg=cli.write_registry(c,rt)
+ assert old_compose.rstrip('\n')==override.rstrip('\n') or yaml.safe_load(old_compose) in [None,{}, {'services':{}}, {'services':None}],'unexpected compose override'
+ rt.req('PUT','/user-config/'+urn,{'dockerCompose':override,'appEnv':old_env});after=rt.req('GET','/user-config/'+urn);assert after['dockerCompose'].rstrip('\n')==override.rstrip('\n') and (after.get('appEnv') or '').rstrip('\n')==old_env.rstrip('\n'),'provider override API readback mismatch'
+ rt.install(urn,{'openPort':False,'exposed':False,'exposedLocal':False,'port':18804,'WIZARD_TRUSTED_HOSTS':'127.0.0.1:18804,localhost:18804','WIZARD_TRUSTED_ORIGINS':'http://127.0.0.1:18804','HERMES_DASHBOARD_BASIC_AUTH_PASSWORD':'relay-only-unused-local-value'});status=rt.wait_status(urn,{'running','stopped'},timeout=180);assert status=='running',status
+ reg=cli.write_registry(c,rt)
  assert any(x.get('private_inference') and x.get('urn')==urn for x in reg['apps'] if x.get('id')=='wizard-tinfoil')
  save('install',{'urn':urn,'source':'local:'+lid,'status':status,'override_api_readback':True,'uid':os.geteuid()})
 elif step=='connect':

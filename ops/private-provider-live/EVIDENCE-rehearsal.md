@@ -1,5 +1,12 @@
 # Private-provider launch rehearsal — BLOCKED
 
+## pp-install-fix continuation (current)
+- No-key replay on the exact daemon reproduced `yaml.constructor.ConstructorError` for Compose `!override`. The API appends a newline, defeating exact override-string equality. Both the prior-value guard and PUT/GET readback now normalize trailing newlines only; unexpected content still fails. Ten focused redaction/guard tests passed.
+- Reset previously missed `user-config/wizardapps/<id>`; cleanup now covers the nested store directories on pp-rig only.
+- Subsequent no-key replay reached real daemon installation. Missing legacy dashboard form data failed generation without a container; an explicitly unused relay-only form value allows generation to advance. The daemon then returned `Fixed volume name tinfoil-private-data` from WAM's portable-storage compiler. The installer now keeps the provider-only credential volume in the owner Compose override through API GET/PUT/GET instead of feeding it through the portable-volume compiler. `networks: !override` remains intact.
+- Found a genuine WAM registry integration bug: physical `_private` app URNs were excluded on ordinary registry rebuilds. WAM branch `fix/private-local-provider-projection`, commit `80c0a55c`, adds narrow provenance-checked canonical projection for installed attested local relays while retaining the physical lifecycle URN. Six real Python tests passed; the commit is pushed. Rehearsal uses that product implementation, not a one-off monkeypatch.
+- Service tooling diagnostic commit `69a5af6` is pushed on `ops/private-providers-live-run`. No live service lifecycle command has run; protected live metadata was read only. Full paid attempt 3 and checks b–f are still pending at this checkpoint.
+
 ## Current lane: pp-legacy-fix — a passed; remaining acceptance blocked/pending
 
 - Root cause (a) is the synthetic fixture, not a demonstrated #161 backend bug. Actual `legacy-fix-diagnose.log` on Thales shows private API health 200, sessions 200, nonexistent session **404**, fabricated-id Service creation **503 agent_unavailable / agent.history**, and server-minted creation **201**. A subsequent canonical legacy turn completed with PP_OK. The unavailable-main unit regression passes on both main `9a59bcd` and #161-derived tooling; backend source still matches `888ecee` unchanged.

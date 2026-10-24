@@ -7,7 +7,9 @@ s=importlib.util.spec_from_file_location('prep',L/'rig-prepare.py');assert s and
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
 key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
 ATTEMPT=int(sys.argv[1]) if len(sys.argv)>1 else 1;assert 1<=ATTEMPT<=4
-receipt={'lane':'pp-legacy-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Fixture-generated session IDs force strict collision scans of the absent main Hermes origin; server-minted IDs avoid that invalid prerequisite. Confirmed on main and #161-derived tooling, and reproduced directly on pp-rig.','tooling_commit':'94bcbbd','repair_attempt':ATTEMPT}
+receipt={'lane':'pp-install-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Legacy fixture session IDs were repaired separately; installer fixes normalize API trailing newlines without parsing !override, supply the legacy required dashboard form slot with an unused relay-only value, and wait for terminal install state.','tooling_commit':'69a5af6','repair_attempt':ATTEMPT}
+preparation=json.loads((L/'RIG-PREPARATION.json').read_text())
+for field in ['wam_image_id','wam_main_sha256','source']:receipt[field]=preparation[field]
 def save():
  for name in ['REHEARSAL-LEGACY-FIX.json','REHEARSAL-LEGACY-FIX-'+str(ATTEMPT)+'.json']:(L/name).write_text(json.dumps(receipt,indent=2)+'\n')
 def phase(name,args,payload=None):
