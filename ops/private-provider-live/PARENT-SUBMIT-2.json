@@ -1,0 +1,12 @@
+{
+  "key": "pp-rehearsal-2-prepare-parity",
+  "cwd": "/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live",
+  "argv": [
+    "/opt/homebrew/bin/python3",
+    "/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live/rig-prepare.py",
+    "--project-root",
+    "/Volumes/ThalesMedia/AI-Wizards/private-providers"
+  ],
+  "timeout_seconds": 3600,
+  "lane": "heavy"
+}

@@ -1,0 +1,22 @@
+{
+  "uid": 1000,
+  "rows": [
+    {"path":".","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"repos","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"repos/wizardapps","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"repos/wizardapps/apps","uid":1000,"gid":1000,"mode":493,"writable":true,"symlink":false,"directory":true},
+    {"path":"user-config","uid":0,"gid":0,"mode":511,"writable":true,"symlink":false,"directory":true},
+    {"path":"user-config/wizardapps","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"app-data","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"app-data/wizard-os","uid":1000,"gid":1000,"mode":493,"writable":true,"symlink":false,"directory":true},
+    {"path":"apps","uid":0,"gid":0,"mode":511,"writable":true,"symlink":false,"directory":true},
+    {"path":"state","uid":0,"gid":0,"mode":511,"writable":true,"symlink":false,"directory":true},
+    {"path":"cache","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"backups","uid":0,"gid":0,"mode":493,"writable":false,"symlink":false,"directory":true},
+    {"path":"logs","uid":0,"gid":0,"mode":511,"writable":true,"symlink":false,"directory":true},
+    {"path":"media","uid":1000,"gid":1000,"mode":493,"writable":true,"symlink":false,"directory":true},
+    {"path":"traefik","uid":0,"gid":0,"mode":511,"writable":true,"symlink":false,"directory":true},
+    {"path":".env","uid":0,"gid":1000,"mode":416,"writable":false,"symlink":false,"directory":false},
+    {"path":"docker-compose.yml","uid":0,"gid":0,"mode":436,"writable":false,"symlink":false,"directory":false}
+  ]
+}

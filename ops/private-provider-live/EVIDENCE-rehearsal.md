@@ -1,5 +1,16 @@
 # Private-provider launch rehearsal — BLOCKED
 
+## Resume: pp-rehearsal-2
+
+- Recovered guest is reachable, marker `pp-private-providers`, uid/gid 1000. Before any reset, saved seven remaining probe scripts plus SHA256 inventory to `pp-launch/live/guest-saved/` on Thales and the matching control-plane directory. `/home/rig/pp-candidates` is absent: the old request/migration/installer adapters and `live_candidate.py` / `live_ops.py` did not survive the baseline reset.
+- The recovered baseline is **not live-parity**: four Runtipi state directories are owner uid1000, while live directories are root-owned. Guest WAM is old `latest`, image `sha256:0a1f04fa318d05f02ae846440d5ac7b3e724e7025270bad7726cbda7494f1f6f`, main.mjs `27499acdf76556ede6181b0c067aad530070bf496f8da62d9ae603936a75e869`.
+- Fresh read-only live inspect confirms WAM `sha256:07df73e79ee3bea5465cd27d90f99191317075e7a669678a8d066c51473d4116`, main.mjs `6e2b3e410f1e54fce473452d79102edc3c11e36ae69237e4ab232e8f43ebef42`. This digest is **linux/amd64**, while the guest is aarch64 with a `rosetta` binfmt registration. Exact-digest parity must therefore explicitly use amd64 rather than silently substituting an arm64 build.
+- Staged `rig-prepare.py` for durable parent admission: marker/clean-fixture checks, immutable source validation/copy, exact pinned WAM/client pull, rig-only WAM replacement, root-owned metadata setup, and uid1000 read-back. This is prerequisite preparation, not a complete rehearsal or live-run orchestrator. Seven fake-orchestration safety tests passed. Thales `--validate` passed without VM mutation.
+- Fresh `DRY-RUN-2.json` remains honestly **blocked**, with two readiness blockers: missing exact-release acceptance and unfinished full live orchestration. The before/after protected-container, unit and Service/runtime fingerprints are equal. Authenticated Runtipi GET succeeded; no provider is installed live. No key was read/injected, no paid turn occurred, and no live restart/mutation or Private access occurred.
+- Checks (a)–(f) remain NOT RUN. The next required action is durable admission of `PARENT-SUBMIT-2.json`; do not bypass helper admission refusal with a foreground SSH VM job. No additional James authorization or Miguel realtime code is needed for this prerequisite.
+
+## Previous attempt
+
 ## Outcome
 No launch acceptance is claimed. The disposable `pp-rig` VM reports **Broken**: its Lima host-agent socket refuses connections and guest SSH resets during key exchange. Its existing disk is present. Do not reset it before recovering the old guest-side scripts: the external-volume tree retains only some host/parity wrappers, while the previous live-run implementation may exist only under the guest's `pp-candidates` directory.
 
