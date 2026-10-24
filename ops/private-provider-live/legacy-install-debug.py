@@ -18,7 +18,9 @@ try:
  else:
   print(p.stdout.decode(),flush=True)
   raw=r.python("import json;from pathlib import Path;r=Path('/home/rig/pp-launch-3');print(json.dumps({n:json.loads((r/(n+'.json')).read_text()) for n in ['install','install-api-template']}))")
-  receipt['evidence']=json.loads(raw);receipt['status']='passed'
+  receipt['evidence']=json.loads(raw)
+  r.python((L/'reconcile-no-key.py').read_text())
+  receipt['reconciliation_passed']=True;receipt['status']='passed'
 except Exception as e:
  receipt['diagnostic']=m.redact_diagnostic(type(e).__name__+': '+str(e));print(receipt['diagnostic'],flush=True)
 finally:

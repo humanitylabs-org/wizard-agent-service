@@ -50,7 +50,7 @@ def redact_diagnostic(data):
     text = data.decode(errors='replace') if isinstance(data, bytes) else str(data)
     text = re.sub(r'(?i)(bearer\s+)[^\s\"\'<>]+', r'\1[MASKED]', text)
     text = re.sub(r'(?im)([\"\']?[\w.-]*(?:key|token|password|secret|proof|authorization)[\w.-]*[\"\']?\s*[:=]\s*)[^\r\n,}]+', r'\1[MASKED]', text)
-    text = re.sub(r'\b[A-Za-z0-9_+=-]{32,}\b', '[MASKED]', text)
+    text = re.sub(r'\b[A-Za-z0-9_+=-]{32,}\b', lambda match: match.group() if re.fullmatch(r'(?:private_provider|provider|relay)_[a-z_]+', match.group()) else '[MASKED]', text)
     # Traceback source lines can contain literals: expose only frames and final exception.
     lines = [line for line in text.splitlines() if line.startswith(('Traceback', '  File ', 'PHASE_FAILED', 'FAILED')) or re.match(r'^[A-Za-z_][\w.]*(?:Error|Exception)(?::|$)', line)]
     return '\n'.join(lines)[-5000:] or 'nonzero exit (no safe exception diagnostic)'
