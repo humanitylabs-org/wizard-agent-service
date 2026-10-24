@@ -758,7 +758,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         }
         const payload=searchParams.get('mode')==='body'
           ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}
-          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,wizard_search_text:hits.get(row.id),wizard_search_match:true}:row)})
+          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
         result=Buffer.from(JSON.stringify(payload))
       }
       // Compact projections are already scope/visibility-filtered and carry explicit agent ids.
