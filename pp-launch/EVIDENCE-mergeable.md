@@ -16,9 +16,11 @@ EXTEND: installed-app private provider catalogue, explicit owner migration, rest
 NEW: provider protocol/egress modules and disposable rig from #88; no UI or parallel shared implementation.
 
 ## Verified locally (synthetic fixtures)
-- `npx vitest run tests/agents-json-cache.test.ts tests/legacy-private-compat.test.ts tests/private-provider-launch.test.ts tests/private-providers.test.ts tests/agents-legacy-migration.test.ts tests/agents.test.ts`: 6 files, **65 passed**.
-- `uv run --with pytest python -m pytest ops/agent-runtime -q`: **162 passed, 1609 subtests passed** (VPS, 17.54s).
-- First Quality run on `0c65fd1`: 1300 passed / 1 failed; inherited #88 cache test still expected automatic migration on start. Repaired it to exercise explicit owner migration, preserving cache assertions; targeted rerun above is green. Trunk Quality was green.
+- Focused Service Vitest (`agents-json-cache`, unchanged `legacy-private-compat`, `private-provider-launch`, `private-providers`, `agents-legacy-migration`, `agents`): 6 files, **66 passed**.
+- `uv run --with pytest python -m pytest ops/agent-runtime ops/private-provider-rig -q`: **175 passed, 1616 subtests passed** (VPS, 18.35s).
+- Four real-HTTP `private-provider-admission` matrix checks: **4/4 passed** (main, actual `/p/` profile, legacy TCP container, actual mode-0600 Unix restricted transport).
+- Quality `40116357281` on `67c3bab` **passed** after replacing #88's inherited auto-migration cache expectation. Full exact-new-head CI follows review fixes below.
+- Review repairs: avoid duplicate management-port publication by recreating the stopped provider without bindings before the ingress helper claims them; retain named/anonymous mount identity and internal endpoints, and send inspected configuration only through Engine stdin. Repeated reconciliation preserves management mapping. Skip malformed unrelated records, explicitly reject unsupported legacy deletion before RPC, add per-kind HTTP admission evidence, remove rig personal-path defaults, and distinguish scanner fixture bytes from secrets.
 - `git diff --check`: clean. `tests/legacy-private-compat.test.ts`: byte-for-byte unchanged from main.
 - Tests cover no app, install alone does not migrate, explicit migration, uid/gid/history preservation, unknown identity, missing/unhealthy capability, app removal/status/fail-closed admission, both vision routes, and Unix-only sealed edge.
 

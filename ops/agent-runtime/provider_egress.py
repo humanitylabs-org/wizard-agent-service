@@ -8,6 +8,7 @@ import ipaddress
 import json
 import re
 from pathlib import Path
+from provider_container import engine_create, sealed_create_spec
 from urllib.parse import urlsplit
 
 from importlib.util import module_from_spec, spec_from_file_location
@@ -157,9 +158,12 @@ class ProviderEgress:
                 self.docker(['network', 'disconnect', '-f', net, cid], timeout=60)
             self.docker(['network', 'connect', '--ip', address, net, cid], timeout=60)
             label = ['--label', 'wizard.private-egress=' + app['id']]
-            # Original provider PortBindings are inert on internal-only Docker networks.
-            # A narrow ingress-only TCP edge preserves owner/Agent Service reachability.
-            ports = info['HostConfig'].get('PortBindings') or {}
+            # Delegate management ports exactly once. Docker retains PortBindings even
+            # after disconnecting old bridges; recreate the stopped provider without them
+            # before the helper claims those ports. Preserve mounts and keep credentials
+            # on the Engine stdin transport, never argv or diagnostics.
+            retained_ports = info['HostConfig'].get('PortBindings') or {}
+            ports = retained_ports or json.loads((info['Config'].get('Labels') or {}).get('wizard.private-management-ports', '{}'))
             mappings, routes = [], []
             if ports:
                 local = urlsplit((app.get('view') or {}).get('local') or app.get('health') or '')
@@ -175,6 +179,22 @@ class ProviderEgress:
                             raise self.failure('provider_management_binding_unsafe', 409)
                         mappings += ['-p', '127.0.0.1:' + binding['HostPort'] + ':' + port]
                     routes.append([int(port), address, int(port)])
+            if retained_ports:
+                snapshot = self.inspect('container', cid)
+                spec = sealed_create_spec(snapshot, net, relays)
+                spec['Labels'] = {**(spec.get('Labels') or {}), 'wizard.private-management-ports': json.dumps(ports)}
+                original_name = info['Name'].lstrip('/')
+                held_name = original_name + '-pre-seal'
+                self.docker(['rename', cid, held_name], timeout=60)
+                try:
+                    replacement = engine_create(original_name, spec)
+                except Exception:
+                    self.docker(['rename', cid, original_name], check=False, timeout=60)
+                    raise self.failure('provider_container_recreation_failed', 503) from None
+                # No -v: provider data and anonymous volumes remain, and the replacement
+                # explicitly mounts their recorded identities. Both containers are stopped.
+                self.docker(['rm', cid], timeout=60)
+                cid = replacement
             if hosts or routes:
                 # One system edge per app: CONNECT + fixed ingress, not two uplinks.
                 helper = proxy if hosts else edge

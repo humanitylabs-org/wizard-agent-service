@@ -1216,6 +1216,7 @@ export function createAgentRegistry(options = {}) {
   async function remove(id) {
     const agent = read(id)
     if (!agent || id === MAIN_AGENT_ID) fail(404, 'agent_not_found', 'agent.id')
+    if (!agent.runtime?.private_client) fail(409, 'agent_delete_unsupported', 'agent.runtime')
     if (!runtime?.delete) fail(503, 'runtime_unavailable', 'agent.runtime')
     await runtime.delete(id)
     // Retain owner data; deleting de-registers the agent, not its history.

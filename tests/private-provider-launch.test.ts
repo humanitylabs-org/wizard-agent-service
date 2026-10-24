@@ -82,6 +82,13 @@ it.each([false, true])('vision helper stays on the agent own route, migrated=%s'
   if (migrated) expect(config).not.toMatch(/TINFOIL_API_KEY|key_env:/)
   else expect(config).toContain('key_env: TINFOIL_API_KEY')
 })
+it('legacy deletion is rejected before unsupported runtime RPCs', async () => {
+  const f = await box({ installed: false })
+  const before = readFileSync(f.file, 'utf8')
+  await expect(f.registry.remove('private')).rejects.toMatchObject({ error: 'agent_delete_unsupported', status: 409 })
+  expect(readFileSync(f.file, 'utf8')).toBe(before)
+  expect(f.calls).toEqual([])
+})
 it('unknown legacy IDs remain readable, listable and admitted without implicit migration', async () => {
   const f = await box({ installed: false })
   const raw = JSON.parse(readFileSync(f.file, 'utf8')); raw.model.provider = 'unknown-vendor'; writeFileSync(f.file, JSON.stringify(raw))

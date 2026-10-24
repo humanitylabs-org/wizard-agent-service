@@ -199,6 +199,15 @@ class PrivateProviderTest(unittest.TestCase):
         from private_providers import client_service
         self.assertEqual(client_service(self.provider.prepare(self.agent), ar.CLIENT_IMAGE)['environment']['PROFILE'], 'passthrough')
 
+    def test_startup_skips_malformed_unrelated_records(self):
+        for i, raw in enumerate(['{', 'null', '[]', '{}', '{"id":"bad","runtime":null,"model":{}}']):
+            folder = self.agents.root / ('broken-' + str(i))
+            folder.mkdir(parents=True)
+            (folder / 'agent.json').write_text(raw)
+        with patch.object(self.provider, 'docker', return_value=subprocess.CompletedProcess([], 0, '', '')), patch.object(self.provider, 'app', side_effect=ar.RuntimeFailure('private_provider_unavailable', 503)):
+            failures = self.provider.reconcile_installed()
+        self.assertEqual(failures, [{'app': 'wizard-tinfoil', 'error': 'private_provider_unavailable'}])
+
     def test_deprecated_key_file_is_never_read_or_copied(self):
         key = self.root / 'deprecated.env'
         key.write_text('TINFOIL_API_KEY=fixture-never-copy\n')

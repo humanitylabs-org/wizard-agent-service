@@ -213,9 +213,16 @@ class PrivateProviders:
             return []
         failures, desired = [], {}
         for path in self.agents.root.glob('*/agent.json'):
-            agent = json.loads(path.read_text())
-            if self.is_private(agent):
-                desired[agent['id']] = agent
+            try:
+                agent = json.loads(path.read_text())
+                if not isinstance(agent, dict) or agent.get('id') != path.parent.name or not re.fullmatch(r'[a-z][a-z0-9-]{0,30}', str(agent.get('id', ''))):
+                    continue
+                if not isinstance(agent.get('runtime'), dict) or not isinstance(agent.get('model'), dict):
+                    continue
+                if self.is_private(agent):
+                    desired[agent['id']] = agent
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
         ids = self.docker(['network', 'ls', '-q', '--filter', 'label=wizard.private-agent'], timeout=60).stdout.split()
         for value in (json.loads(self.docker(['network', 'inspect', *ids], timeout=60).stdout) if ids else []):
             labels = value.get('Labels') or {}

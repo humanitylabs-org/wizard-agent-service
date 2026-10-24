@@ -299,8 +299,8 @@ def main():
     p.add_argument('--provider-data', action='append', default=[])
     p.add_argument('--scan-root', action='append', default=[])
     p.add_argument('--deny-url', action='append', default=[])
-    p.add_argument('--os-home', default='/home/rig/.wizard-os')
-    p.add_argument('--runtipi-root', default='/home/rig/runtipi')
+    p.add_argument('--os-home', default=os.environ.get('WIZARD_OS_HOME'))
+    p.add_argument('--runtipi-root', default=os.environ.get('RUNTIPI_ROOT'))
     p.add_argument('--evidence-dir', default='/opt/pp-rig/evidence/private')
     p.add_argument('--relay-port', type=int, default=8090)
     p.add_argument('--trigger', help='executable adapter: success=0, verified terminal provider error=42; no output is printed')
@@ -317,6 +317,7 @@ def main():
         ids = docker('ps', '-aq').stdout.decode().split()
         print('DRY_RUN', a.check, 'prerequisites OK; containers=' + str(len(ids)) + '; no acceptance assertion made')
         return
+    require(a.os_home and a.runtipi_root, 'set --os-home/--runtipi-root or WIZARD_OS_HOME/RUNTIPI_ROOT for the disposable guest')
     {'relay': relay, 'hermes': hermes, 'client': client, 'key-location': key_location,
      'stop-provider': stop_provider, 'codeword': codeword}[a.check](a)
 

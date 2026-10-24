@@ -145,12 +145,26 @@ class PolicyTests(unittest.TestCase):
         value['NetworkSettings'] = {'Networks': {'wizard-egress-example':{}}}
         def inspect(kind, name):
             if kind == 'network': return {'IPAM':{'Config':[{'Subnet':'10.253.0.0/24'}]}, 'Containers':{'cid':{'Name':'provider'}}}
-            if name == 'cid': return copy.deepcopy(value)
+            if name in ('cid', 'replacement'): return copy.deepcopy(value)
             return None
         manager.inspect = inspect; manager.network = lambda app: 'wizard-egress-example'
         app = {'id':'example','view':None,'health':'http://127.0.0.1:18804/healthz','private_inference':{'kind':'attested-relay','relay_port':8090,'egress':['inference.tinfoil.sh']}}
-        self.assertEqual(manager.reconcile(app,'cid',[])['hosts'], ['inference.tinfoil.sh'])
-        self.assertIn(['start','cid'],calls)
+        with patch('provider_egress.engine_create', return_value='replacement') as create:
+            self.assertEqual(manager.reconcile(app,'cid',[])['hosts'], ['inference.tinfoil.sh'])
+        spec = create.call_args.args[1]
+        self.assertEqual(spec['HostConfig']['PortBindings'], {})
+        self.assertEqual(spec['HostConfig']['NetworkMode'], 'wizard-egress-example')
+        self.assertIn('wizard.private-management-ports', spec['Labels'])
+        self.assertLess(calls.index(['rm', 'cid']), calls.index(['start', 'wizard-egress-proxy-example']))
+        self.assertIn(['start', 'replacement'], calls)
+        self.assertNotIn(['start', 'cid'], calls)
+        value['HostConfig']['PortBindings'] = {}
+        value['Config']['Labels'] = spec['Labels']
+        calls.clear()
+        with patch('provider_egress.engine_create', side_effect=AssertionError('must not recreate twice')):
+            manager.reconcile(app, 'replacement', [])
+        helper_create = next(c for c in calls if c[0] == 'create')
+        self.assertIn('127.0.0.1:18804:18804', helper_create)
 
     def test_failure_stops_before_validation_and_never_starts(self):
         calls=[]

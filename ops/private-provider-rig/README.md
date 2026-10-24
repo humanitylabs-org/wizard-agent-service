@@ -28,18 +28,18 @@ On the Mac:
 
 ```sh
 export LIMA_HOME="<rig root>/lima"
-limactl shell --workdir /home/rig pp-rig
+limactl shell --workdir "<guest-home>" pp-rig
 ```
 
 Loopback forwards on the Mac: Agent Service `18787`, App Manager `17790`, runtime helper `17795`, Runtipi `18480`. No public or Tailscale binding. For another host, use SSH `-L` through the Mac. The generated `<rig root>/lima/pp-rig/ssh.config` also supports ordinary SSH.
 
 The worker stops **only this VM**, APFS-clones its raw disk and EFI into `<rig root>/baseline/`, then reboots and checks health. This clean baseline predates any candidate app or provider key. Reset is the same admitted heavy job plus `--reset`: stop this VM, replace only its own disk/EFI using APFS clones from the manifest, restart, verify health. This is intentionally destructive only to this disposable rig's post-baseline state. Never delete/rewrite another lane's VMs. VM baseline/reset must be proven by execution; these instructions are not runtime evidence.
 
-Guest source paths: `/opt/pp-rig/src/{service,wam}`. Units: `pp-agent-service`, `pp-agent-runtime`, `wizard-agent-firewall`; WAM also installs its user API service. State: `/home/rig/.wizard-os`; Runtipi: `/home/rig/runtipi`. Owner proof is generated mode 0600 in `.wizard-os/agent-runtime/owner-proof` and used as `x-wizard-owner-proof`; runtime token is a different file in that directory. Do not print either. Installing a service candidate means replacing `/opt/pp-rig/src/service` with a pushed frozen candidate archive, keeping its path, then restarting its two units; never do that on the live owner's box.
+Guest source paths: `/opt/pp-rig/src/{service,wam}`. Units: `pp-agent-service`, `pp-agent-runtime`, `wizard-agent-firewall`; WAM also installs its user API service. State: `<guest-home>/.wizard-os`; Runtipi: `<guest-home>/runtipi`. Owner proof is generated mode 0600 in `.wizard-os/agent-runtime/owner-proof` and used as `x-wizard-owner-proof`; runtime token is a different file in that directory. Do not print either. Installing a service candidate means replacing `/opt/pp-rig/src/service` with a pushed frozen candidate archive, keeping its path, then restarting its two units; never do that on the live owner's box.
 
 ## Six probes
 
-Run **inside this VM**, under sudo, from `/opt/pp-rig/checks`. Every wrapper accepts `--agent pp-test-<id> --provider-app wizard-tinfoil|wizard-local-model`. All require `/etc/pp-rig`'s exact marker. `--dry-run` checks installed prerequisites and Docker only; it does **not** claim a privacy check passed. The provisioning job executes all six dry runs on the clean box.
+Run **inside this VM**, under sudo, from `/opt/pp-rig/checks`. Every wrapper accepts `--agent pp-test-<id> --provider-app wizard-tinfoil|wizard-local-model`. For acceptance also pass `--os-home <guest-home>/.wizard-os --runtipi-root <guest-home>/runtipi` (or set `WIZARD_OS_HOME` / `RUNTIPI_ROOT`). All require `/etc/pp-rig`'s exact marker. `--dry-run` checks installed prerequisites and Docker only; it does **not** claim a privacy check passed. The provisioning job executes all six dry runs on the clean box.
 
 | Script | Additional inputs and assertion |
 |---|---|

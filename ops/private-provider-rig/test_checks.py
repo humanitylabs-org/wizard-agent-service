@@ -22,14 +22,14 @@ class ProbeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.secret = b'test-only-not-a-real-provider-key-0123456789'
-        self.fp = hashlib.sha256(self.secret).hexdigest()
+        self.fixture_bytes = b'test-only-not-a-real-provider-key-0123456789'
+        self.fp = hashlib.sha256(self.fixture_bytes).hexdigest()
 
     def test_fingerprint_plain_env_yaml_json_and_docker_env(self):
-        samples = [self.secret, self.secret + b'\n', b'API_KEY=' + self.secret,
-                   b'API_KEY="' + self.secret + b'"\n', b'key: ' + self.secret,
-                   b'{"secret":"' + self.secret + b'"}',
-                   b'{"Config":{"Env":["API_KEY=' + self.secret + b'"]}}']
+        samples = [self.fixture_bytes, self.fixture_bytes + b'\n', b'API_KEY=' + self.fixture_bytes,
+                   b'API_KEY="' + self.fixture_bytes + b'"\n', b'key: ' + self.fixture_bytes,
+                   b'{"secret":"' + self.fixture_bytes + b'"}',
+                   b'{"Config":{"Env":["API_KEY=' + self.fixture_bytes + b'"]}}']
         for sample in samples:
             with self.subTest(sample_format=sample[:8]):
                 self.assertTrue(check.fingerprint_match(sample, self.fp))
@@ -37,7 +37,7 @@ class ProbeTests(unittest.TestCase):
 
     def test_key_across_chunk_boundary(self):
         p = self.root / 'boundary'
-        p.write_bytes(b'\x00' * (1024 * 1024 - 4) + self.secret + b'\x00')
+        p.write_bytes(b'\x00' * (1024 * 1024 - 4) + self.fixture_bytes + b'\x00')
         self.assertTrue(check.scan_key(p, self.fp))
 
     def test_codeword_across_chunk_boundary(self):
