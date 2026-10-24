@@ -1415,18 +1415,35 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   // both, and the merged copy lands after the owner's newest question, reading as extra replies
   // to it. Drop that copy when it is the earlier message plus only text other rows on this page
   // already paint; anything else stays, so no text can disappear.
+  // Hermes stores one message either as a string (its text-only projection turns each image part
+  // into "[screenshot]") or as the original multipart list; a compaction replay can use the other
+  // form. Compare their text, whitespace-insensitive, so both forms count as the same message.
+  const replayText = (content) => {
+    if (typeof content === 'string') return content
+    if (!Array.isArray(content)) return null
+    const parts = content.slice(0, 64).map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      if (['image', 'image_url', 'input_image'].includes(part.type)) return '[screenshot]'
+      return typeof part.text === 'string' ? part.text : ''
+    })
+    return parts.join('\n')
+  }
+  const squash = (text) => String(text ?? '').replace(/\s+/g, '')
   const replayKey = (item) => {
     const role = item?.role ?? item?.author
     const at = item?.timestamp
-    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
-      ? `${role}\u0000${at}` : ''
+    return (role === 'user' || role === 'assistant') && typeof replayText(item?.content) === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${String(item?.session_id ?? '')}\u0000${role}\u0000${at}` : ''
   }
-  const mergedReplay = (earlier, later, pageTexts) => {
+  const mergedReplay = (earlierText, laterText, pageTexts) => {
+    const earlier = squash(earlierText)
+    const later = squash(laterText)
     if (later === earlier) return true
     if (!earlier || !later.startsWith(earlier)) return false
     let rest = later.slice(earlier.length)
-    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
-    return !rest.trim()
+    for (const text of pageTexts.map(squash)) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest
   }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
@@ -1442,14 +1459,15 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
         return key && firstByKey.get(key) !== index ? [index] : []
       }))
       const pageTexts = repeated.size
-        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [replayText(sourceOf(item, index).content)]))]
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
-          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+          const earlierText = replayText(earlier.content)
+          if (mergedReplay(earlierText, replayText(sourceItem.content), pageTexts.filter((text) => text !== earlierText))) return []
         }
         const role = sourceItem?.role ?? sourceItem?.author
         const content = historyContentStrings(sourceItem?.content ?? sourceItem?.text ?? sourceItem?.output).join('\n')
