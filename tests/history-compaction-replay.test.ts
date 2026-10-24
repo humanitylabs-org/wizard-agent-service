@@ -45,4 +45,17 @@ describe('compaction replays in Wizard history', () => {
     const replay = { ...question, id: 73, content: [{ type: 'text', text: 'A different question entirely.' }] }
     expect(ids(project([question, replay]))).toEqual([12, 73])
   })
+
+  it('drops a multipart replay when only one copy still carries recalled memory context', () => {
+    const restored = { ...question, id: 80, content: [
+      { type: 'text', text: 'Why fewer threads?\n' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+    ] }
+    const replay = { ...question, id: 81, content: [
+      { type: 'text', text: 'Why fewer threads?' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+      { type: 'text', text: '<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data.]\nfact\n</memory-context>' },
+    ] }
+    expect(ids(project([restored, replay]))).toEqual([80])
+  })
 })

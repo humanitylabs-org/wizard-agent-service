@@ -1418,8 +1418,9 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   // Hermes stores one message either as a string (its text-only projection turns each image part
   // into "[screenshot]") or as the original multipart list; a compaction replay can use the other
   // form. Compare their text, whitespace-insensitive, so both forms count as the same message.
+  // Recalled <memory-context> blocks are hidden from the owner and may be present in only one form.
   const replayText = (content) => {
-    if (typeof content === 'string') return content
+    if (typeof content === 'string') return visibleMemoryText(content)
     if (!Array.isArray(content)) return null
     const parts = content.slice(0, 64).map((part) => {
       if (typeof part === 'string') return part
@@ -1427,7 +1428,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       if (['image', 'image_url', 'input_image'].includes(part.type)) return '[screenshot]'
       return typeof part.text === 'string' ? part.text : ''
     })
-    return parts.join('\n')
+    return visibleMemoryText(parts.join('\n'))
   }
   const squash = (text) => String(text ?? '').replace(/\s+/g, '')
   const replayKey = (item) => {
