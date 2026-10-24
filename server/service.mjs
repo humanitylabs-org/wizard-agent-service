@@ -832,6 +832,36 @@ function durableScreenshotCandidate(record) {
   return { visibleText: visibleMemoryText(flattened), images, admittedAt }
 }
 
+// Hermes 0.22.5+ commits every API-server turn as a private-binding admission and stamps its user row
+// display_kind "internal_notification" (gateway/session_ingress.py sets event.internal for trust). For a Wizard
+// chat that row IS the owner's own message: its platform_message_id is the admission_id this queue recorded when
+// it admitted the run. Clear the kind on exactly those rows so the shell shows the owner's bubble and reconciles
+// its "Sent" outbox item; every other internal notification keeps its kind.
+export function restoreOwnerTurns(result, runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes('internal_notification')) return result
+  let admitted
+  try {
+    admitted = new Set(runQueue.admittedForSession('direct', sessionId)
+      .map((record) => record?.payload?.admission_id).filter((id) => typeof id === 'string' && id))
+  } catch { return result }
+  if (!admitted.size) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  let changed = false
+  const fix = (row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if ((row.role ?? row.author) !== 'user' || row.display_kind !== 'internal_notification') return row
+    if (row.session_id && row.session_id !== sessionId) return row
+    const id = row.platform_message_id ?? row.message_id
+    if (typeof id !== 'string' || !admitted.has(id)) return row
+    changed = true
+    const { display_kind: _kind, ...rest } = row
+    return rest
+  }
+  for (const key of ['data', 'messages', 'items']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].map(fix)
+  return changed ? Buffer.from(JSON.stringify(payload)) : result
+}
+
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
   let payload
@@ -5722,6 +5752,7 @@ function buildWizardServer(options, lifetime) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
+            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original
