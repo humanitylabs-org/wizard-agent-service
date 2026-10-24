@@ -14,7 +14,7 @@ function fixture() {
   const mainHome = join(root, 'main-home'); mkdirSync(mainHome)
   const appsJsonPath = join(root, 'apps.json'); writeFileSync(appsJsonPath, JSON.stringify({ apps: [] }))
   const runtime = { apply: vi.fn(async () => ({})), stop: vi.fn(async () => ({})), start: vi.fn(async () => ({})) }
-  const registry = createAgentRegistry({ agentsDir: join(root, 'agents'), mainHome, runtime, fetchImpl: async () => new Response(JSON.stringify({ data: [], has_more: false })) })
+  const registry = createAgentRegistry({ agentsDir: join(root, 'agents'), mainHome, localModels: ['fixture-local'], runtime, fetchImpl: async () => new Response(JSON.stringify({ data: [], has_more: false })) })
   const logs: string[] = []
   const bridge = (createAgentBridge as any)({ appsJsonPath, agents: () => registry, writeSkills: false, watchIntervalMs: 0, log: (line: string) => logs.push(line) })
   const create = async (label: string, permissions = {}, extra = {}) => (await registry.create({ label, model, permissions: { preset: 'standard', ...permissions }, ...extra })).agent
@@ -128,6 +128,26 @@ describe('standard-agent shared state', () => {
     writeFileSync(join(f.root, 'agents', priv.id, 'agent.json'), JSON.stringify(record))
     expect((await f.call('memory_read', priv.id, {}, b.id)).isError).toBe(true)
     expect(f.value(await f.call('list', '', {}, b.id)).agents.map((x: any) => x.id)).not.toContain(priv.id)
+  })
+
+  it.each(['container', 'profile', 'restricted'])('resolves %s source homes without granting writes or changing runtime configuration', async kind => {
+    const f = fixture(); const a = await f.create('Source', {}, { model: { provider: 'local', model: 'fixture-local' } })
+    const file = join(f.root, 'agents', a.id, 'agent.json')
+    const record = JSON.parse(readFileSync(file, 'utf8'))
+    if (kind === 'profile') {
+      record.runtime = { kind: 'profile', profile: 'profile-source' }
+      mkdirSync(join(f.registry.stateHome('hermes'), 'profiles', 'profile-source'), { recursive: true })
+    } else if (kind === 'restricted') record.runtime.isolation = 'restricted'
+    writeFileSync(file, JSON.stringify(record))
+    f.write(a.id, 'memories/MEMORY.md', `${kind}-memory-marker`)
+    expect(f.value(await f.call('memory_read', a.id)).memory).toBe(`${kind}-memory-marker`)
+    f.runtime.apply.mockClear()
+    await f.registry.update(a.id, { permissions: { shared_with_agents: false } })
+    expect((await f.call('memory_read', a.id)).isError).toBe(true)
+    expect(f.runtime.apply).not.toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(file, 'utf8')).runtime).toEqual(record.runtime)
+    f.write('hermes', 'memories/MEMORY.md', 'configured-main-home-marker')
+    expect(f.value(await f.call('memory_read', 'hermes', {}, a.id)).memory).toBe('configured-main-home-marker')
   })
 
   it('serves all six tools through authenticated /wizard/mcp and rechecks silo on an existing session', async () => {

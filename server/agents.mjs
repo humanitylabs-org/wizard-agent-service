@@ -1000,7 +1000,18 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
-    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are provisioned from files and configured in Hermes')
+    if (agent.runtime.kind === 'profile') {
+      // Sharing metadata is Service-owned even for a file-provisioned host profile.
+      if (Object.keys(body).some(key => !['permissions', 'notes_dir'].includes(key))
+        || Object.keys(body.permissions ?? {}).some(key => !['other_agents', 'shared_with_agents'].includes(key))) {
+        fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are configured in Hermes; only sharing metadata is set here')
+      }
+      const next = { ...agent, permissions: normalizePermissions(agent.permissions, body.permissions) }
+      if (body.notes_dir !== undefined) next.notes_dir = normalizeNotesDir(body.notes_dir)
+      assertPrivateWalls(next)
+      writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+      return read(id)
+    }
     if (id === MAIN_AGENT_ID) {
       if (body.role !== undefined) {
         if (!['standard', 'recovery'].includes(body.role)) fail(400, 'invalid_agent_role', 'agent.role')
