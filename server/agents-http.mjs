@@ -545,7 +545,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
 function modelAllowed(agent, value) {
   const model = typeof value?.model === 'string' ? value.model.trim() : ''
   const provider = typeof value?.provider === 'string' ? value.provider.trim() : ''
-  if (provider && migrateProvider(provider) !== migrateProvider(agent.model.provider) && !(provider === 'custom' && (agent.privacy === 'private' || agent.runtime?.private_client))) return false
+  if (provider && migrateProvider(provider) !== migrateProvider(agent.model.provider) && !(provider === 'custom' && (agent.model.provider === 'tinfoil' || agent.runtime?.private_client))) return false
   if (!model) return true
   if (agent.model.allowed_models.includes(model)) return true
   // `custom/glm-5-3` or `tinfoil/glm-5-3` name the same model through this agent's own provider.

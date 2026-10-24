@@ -16,8 +16,9 @@ EXTEND: installed-app private provider catalogue, explicit owner migration, rest
 NEW: provider protocol/egress modules and disposable rig from #88; no UI or parallel shared implementation.
 
 ## Verified locally (synthetic fixtures)
-- `npx vitest run tests/legacy-private-compat.test.ts tests/private-provider-launch.test.ts tests/private-providers.test.ts tests/agents-legacy-migration.test.ts tests/agents.test.ts`: 5 files, **64 passed**.
-- `uv run --with pytest python -m pytest ops/agent-runtime -q`: **162 passed, 1609 subtests passed** (VPS, 16.22s).
+- `npx vitest run tests/agents-json-cache.test.ts tests/legacy-private-compat.test.ts tests/private-provider-launch.test.ts tests/private-providers.test.ts tests/agents-legacy-migration.test.ts tests/agents.test.ts`: 6 files, **65 passed**.
+- `uv run --with pytest python -m pytest ops/agent-runtime -q`: **162 passed, 1609 subtests passed** (VPS, 17.54s).
+- First Quality run on `0c65fd1`: 1300 passed / 1 failed; inherited #88 cache test still expected automatic migration on start. Repaired it to exercise explicit owner migration, preserving cache assertions; targeted rerun above is green. Trunk Quality was green.
 - `git diff --check`: clean. `tests/legacy-private-compat.test.ts`: byte-for-byte unchanged from main.
 - Tests cover no app, install alone does not migrate, explicit migration, uid/gid/history preservation, unknown identity, missing/unhealthy capability, app removal/status/fail-closed admission, both vision routes, and Unix-only sealed edge.
 

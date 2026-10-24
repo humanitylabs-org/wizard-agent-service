@@ -49,7 +49,7 @@ from private_providers import CLIENT_IMAGE, PrivateProviders, client_service, mi
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
 DEFAULT_IMAGE = "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2"
-DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"  # deprecated --proxy-image spelling
+DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
 # The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
 RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
 RESTRICTED_SERVICE = "agent"
@@ -1295,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
     ap.add_argument("--tinfoil-key-file", type=Path)
     ap.add_argument("--image", default=DEFAULT_IMAGE)
-    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE, help='deprecated alias of --client-image')
+    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE, help='legacy Tinfoil sidecar image (not the sealed client image)')
     ap.add_argument('--client-image', default=None)
     ap.add_argument('--apps-json', type=Path, help='installed registry (default: agents-dir/../apps.json)')
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")

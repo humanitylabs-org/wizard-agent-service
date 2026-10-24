@@ -416,7 +416,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
 
 export function agentEnvFile({ apiKey, gatewayKey = '' }) {
   return [
-    '# Managed by the Wizard OS Agent Service. Secrets for this agent only; no provider keys.',
+    '# Managed by the Wizard OS Agent Service. Secrets for this agent only; the runtime adds provider keys below.',
     `API_SERVER_KEY=${apiKey}`,
     'API_SERVER_HOST=0.0.0.0',
     'API_SERVER_PORT=8642',
@@ -1145,7 +1145,6 @@ export function createAgentRegistry(options = {}) {
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
-    if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })

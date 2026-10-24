@@ -34,12 +34,9 @@ port 3301, uid/gid 1000, PROFILE `tinfoil` or `passthrough`, RELAY_URL, RELAY_TO
 `--proxy-image` and `--tinfoil-key-file` retain main's legacy meaning and are never read for migrated agents;
 `--client-image` configures the separate sealed client image.
 
-Run the service as the owner, with access to the Docker daemon. As for the existing restricted runtime,
-the Agent Service needs its agent-only listener (`WIZARD_AGENT_PORT`, default 8929) and the existing
-`agent-firewall.sh` installed by the trusted box installer. This unchanged host-INPUT
-policy does not depend on bridge netfilter. Private-agent peer isolation uses
-per-agent internal networks and address-bound listeners: no module, bridge sysctl,
-private-client firewall helper, or owner sudo action is required.
+Run the service as the owner, with access to the Docker daemon. Keep main's per-agent Unix gateway/ingress
+listener and socket ownership checks. Private-agent peer isolation uses per-agent internal networks and
+address-bound listeners: no module, bridge sysctl, private-client firewall helper, or owner sudo action is required.
 
 ## Isolation and lifecycle
 
@@ -52,8 +49,8 @@ not edited.
 
 - Hermes: only the per-agent internal sandbox, bridge `inhibit_ipv4=true`; no published API port,
   provider key, egress proxy, shared app network or internet route. A non-root uid owns only its home.
-- Edge: sandbox + uplink, gateway-token hash and a fixed gateway API allowlist; publishes only the
-  inbound API relay on host loopback. Restricted-mode home syncing remains unchanged. Owner-managed
+- Edge: sandbox only, gateway-token hash and a fixed gateway API allowlist; forwards the gateway and
+  inbound API over the agent's dedicated Unix sockets. Restricted-mode home syncing remains unchanged. Owner-managed
   homes retain their existing uid and share/upload behavior rather than silently changing permissions.
 - Client: per-agent sandbox + per-agent relay, read-only rootfs/token mount, uid 1000,
   cap_drop ALL, no-new-privileges. API listens on the sandbox IP only via LISTEN_HOST;
