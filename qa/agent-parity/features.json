@@ -260,6 +260,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "thread-follow-up-watchers",
+      "description": "Create, project, list and explicitly stop a same-thread one-shot watcher without crossing agent boundaries",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, authenticate as that runtime, create a watcher for its current thread, read back only that watcher in the owning thread list, explicitly stop it, and verify the list is empty.",
+      "source_refs": [
+        "server/scheduler.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/scheduler.test.ts",
+        "tests/agents.test.ts",
+        "tests/wizard-os-follow-up-plugin.node.mjs"
+      ],
+      "fixture": "thread-follow-up-watchers",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-rename",
       "description": "Rename a thread",
       "layer": "server",

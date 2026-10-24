@@ -102,6 +102,30 @@ export const checks = {
       assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.archived, archived)
     }
   },
+  'thread-follow-up-watchers': async s => {
+    const visible = await s.request('/api/sessions/wizard_parity', { ...post({ hidden: false }), method: 'PATCH' })
+    assert.equal(visible.status, 200)
+    const seeded = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic watcher seed' }))
+    assert.equal(seeded.status, 202)
+    const call = (action, body = {}) => {
+      const init = post({ session_id: 'wizard_parity', ...body })
+      init.headers.Authorization = `Bearer ${s.followUpToken}`
+      return s.raw(`/wizard/internal/follow-ups/${action}`, init)
+    }
+    const created = await call('create', { name: 'Parity dependency', instructions: 'Check the synthetic dependency.', every_minutes: 7 })
+    assert.equal(created.status, 201)
+    const watcher = await created.json(); assert.equal(watcher.kind, 'watch'); assert.equal(watcher.thread, 'wizard_parity')
+    const listed = await call('list'); assert.equal(listed.status, 200)
+    assert.deepEqual((await listed.json()).follow_ups.map(item => item.id), [watcher.id])
+    const sessions = await (await s.request('/api/sessions')).json()
+    const row = (sessions.data || sessions.sessions).find(item => item.id === 'wizard_parity')
+    assert.deepEqual({ active: row.wizard_follow_up.active, count: row.wizard_follow_up.count, names: row.wizard_follow_up.names },
+      { active: true, count: 1, names: ['Parity dependency'] })
+    assert.equal(typeof row.wizard_follow_up.nextRun, 'string')
+    const stopped = await call('stop', { watcher_id: watcher.id }); assert.equal(stopped.status, 200)
+    assert.deepEqual(await stopped.json(), { stopped: 1 })
+    assert.deepEqual((await (await call('list')).json()).follow_ups, [])
+  },
   'session-rename': async s => {
     const r = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Synthetic renamed thread' }), method: 'PATCH' }); assert.equal(r.status, 200)
     assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.title, 'Synthetic renamed thread')
@@ -127,7 +151,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind)
+  const s = await scene(kind, feature === 'thread-follow-up-watchers' ? { followUpParity: true } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)

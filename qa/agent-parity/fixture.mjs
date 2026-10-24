@@ -15,6 +15,9 @@ export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Typ
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
 export async function scene(kind, serverOptions = {}) {
+  const followUpParity = serverOptions.followUpParity === true
+  const optionOverrides = { ...serverOptions }
+  delete optionOverrides.followUpParity
   const root = mkdtempSync(join(tmpdir(), 'parity-'))
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
@@ -133,16 +136,23 @@ export async function scene(kind, serverOptions = {}) {
       await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(socketPath, resolve) }); chmodSync(socketPath, 0o600)
     }
   }
-  const options = { appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: false, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
+  const options = { appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
+    ...(followUpParity ? { mcpToken: 'parity-main-mcp-secret', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
   let wizard, base
-  const start = async () => { wizard = createWizardServer({ ...options, ...serverOptions }); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
+  const start = async () => {
+    const priorScheduler = process.env.WIZARD_SCHEDULER
+    if (followUpParity) process.env.WIZARD_SCHEDULER = '1'
+    try { wizard = createWizardServer({ ...options, ...optionOverrides }); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
+    finally { if (priorScheduler === undefined) delete process.env.WIZARD_SCHEDULER; else process.env.WIZARD_SCHEDULER = priorScheduler }
+  }
   await start()
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
   const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
   return { kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
+    followUpToken: kind === 'main' ? 'parity-main-mcp-secret' : 'parity-gateway-secret',
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },

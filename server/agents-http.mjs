@@ -743,6 +743,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         }})
         result=Buffer.from(JSON.stringify(payload))
       }
+      if (ctx.projectFollowUps) result = ctx.projectFollowUps(result, agent.id)
       result = filterThreads(result, ctx.isThreadVisible)
       result = decorateThreadAgent(result, info)
       // One thread already claimed by another agent must not break this agent's whole list.

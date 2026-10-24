@@ -72,9 +72,10 @@ const text = (value, max, field) => {
   return value.trim()
 }
 const id = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
-// run: agent work in a thread. remind: a short agent turn that reminds. return (Boomerang): no agent at all,
-// the thread or one message in it comes back to the owner's Ready list with a notification.
-export const KINDS = ['run', 'remind', 'return']
+// run: repeating or deferred agent work. remind: a short agent turn that reminds. watch: a quiet recurring
+// check which disables itself on its first visible result. return (Boomerang): no agent at all; the thread or one
+// message in it comes back to the owner's Ready list with a notification.
+export const KINDS = ['run', 'remind', 'watch', 'return']
 export const RETURN_RUN_PREFIX = 'wzb_'
 function normalizeTarget(target) {
   if (target === undefined || target === null) return { message: null, excerpt: '' }
@@ -151,6 +152,11 @@ function scheduleInput(job) {
     return `${SCHEDULE_INPUT} reminder\nThe owner asked to be reminded, in this thread, about:\n${job.prompt}\n`
       + 'Deliver the reminder now, briefly. You may cheaply check whether it is still relevant and add the current state. Do not start the work itself unless the reminder says to.'
   }
+  if (job.kind === 'watch') {
+    return `${SCHEDULE_INPUT} one-shot follow-up\nYou owe the owner this future result in the current thread:\n${skill}${job.prompt}\n`
+      + 'Check the dependency and do any work that is now unblocked. If it is still pending and there is no real blocker or owner decision, respond exactly [SILENT]. '
+      + 'Otherwise report only the finished result, a real blocker, or the decision the owner must make. A visible response ends this watcher.'
+  }
   if (job.when?.once) {
     return `${SCHEDULE_INPUT} deferred work\nThe owner asked for this to run later, in this thread:\n${skill}${job.prompt}\nDo the work now and report the result here.`
   }
@@ -158,7 +164,7 @@ function scheduleInput(job) {
 }
 
 export class Scheduler {
-  constructor({ statePath, deliver, lookup = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, onWatchResult = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -178,6 +184,7 @@ export class Scheduler {
     this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
     this.lookup = lookup
     this.deliver = deliver
+    this.onWatchResult = typeof onWatchResult === 'function' ? onWatchResult : null
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -225,9 +232,15 @@ export class Scheduler {
         try {
           const run = await this.lookup(JSON.parse(row.data), receipt)
           if (!run || !['queued', 'accepted', 'pending', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) return
-          const terminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
+          const job = this.get(row.job_id)
+          // An approval wait is a visible owner decision. For an ordinary schedule the run remains active; for a
+          // watcher it is the promised terminal result and must resurface the originating thread immediately.
+          const watcherDecision = job.kind === 'watch' && run.status === 'waiting_for_approval'
+          const terminal = watcherDecision || ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
           const output = typeof run.output === 'string' ? run.output : ''
-          const outcome = run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted') : terminal ? 'failed' : 'running'
+          const outcome = watcherDecision ? 'posted'
+            : run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted')
+              : terminal ? 'failed' : 'running'
           // Upstream errors can contain credentials. Only service-owned short copy is stored.
           const error = terminal && outcome === 'failed' ? (run.status === 'cancelled' ? 'Run cancelled' : run.status === 'interrupted' ? 'Run interrupted' : 'Run failed') : null
           const timestamp = value => {
@@ -236,6 +249,24 @@ export class Scheduler {
           }
           const started = row.started_at || timestamp(run.started_at) || (['running', 'waiting_for_approval', 'stopping'].includes(run.status) ? iso(this.now()) : null)
           const finished = terminal ? timestamp(run.finished_at || run.completed_at) || iso(this.now()) : null
+          // Restoring the hidden thread is part of watcher delivery. Do it before acknowledging completion so a
+          // transient failure remains an unfinished durable occurrence: later refreshes retry restoration without
+          // admitting a second check or posting another answer.
+          if (job.kind === 'watch' && job.enabled && outcome === 'posted') {
+            try {
+              await this.onWatchResult?.(job, run, receipt)
+              this.transaction(() => {
+                job.enabled = false; job.updatedAt = iso(this.now()); this.save(job)
+                this.db.prepare('UPDATE schedule_occurrences SET started_at=?, finished_at=?, outcome=?, error=NULL WHERE key=?')
+                  .run(started, finished, outcome, row.key)
+              })
+            } catch {
+              this.db.prepare("UPDATE schedule_occurrences SET started_at=?, finished_at=NULL, outcome='restoring', error=? WHERE key=?")
+                .run(started, 'Thread restoration pending', row.key)
+              console.error('[scheduler] watcher result restoration pending retry')
+            }
+            return
+          }
           this.db.prepare('UPDATE schedule_occurrences SET started_at=?, finished_at=?, outcome=?, error=? WHERE key=?')
             .run(started, finished, outcome, error, row.key)
         } catch { /* A lookup outage is not a failed run. Keep the last durable observation. */ }
@@ -277,6 +308,11 @@ export class Scheduler {
       job.skill = ''
       delete job.model
       job.target = normalizeTarget(job.target)
+    } else if (job.kind === 'watch') {
+      if (!job.thread || !id(job.thread)) throw fail('a watcher needs its thread')
+      if (job.when.once) throw fail('a watcher must be repeating until its one visible result')
+      if (Object.hasOwn(input, 'target')) throw fail('target is only for kind return')
+      delete job.target
     } else {
       if (Object.hasOwn(input, 'target')) throw fail('target is only for kind return')
       delete job.target
@@ -329,6 +365,17 @@ export class Scheduler {
       this.db.prepare('DELETE FROM schedule_occurrences WHERE job_id=? AND admitted=0').run(jobId)
     })
   }
+  followUps(thread, { agent = '' } = {}) {
+    if (!id(thread)) throw fail('invalid thread')
+    return this.list().filter(job => job.kind === 'watch' && job.enabled && job.thread === thread && (!agent || job.agent === agent))
+  }
+  stopFollowUps(thread, { watcherId = '', agent = '' } = {}) {
+    const active = this.followUps(thread, { agent })
+    const targets = watcherId ? active.filter(job => job.id === watcherId) : active
+    if (watcherId && !targets.length) throw fail('follow-up not found', 404)
+    for (const job of targets) this.update(job.id, { enabled: false })
+    return { stopped: targets.length }
+  }
   reserve(job, instant, manual = false) {
     // This identity is persisted before any external session/run call. A crashed create
     // retries the same session id; a crashed admission retries the same frozen body/key.
@@ -372,6 +419,10 @@ export class Scheduler {
       for (const job of this.list()) {
         if (!job.enabled || job.nextAt === null || job.nextAt > now) continue
         const pending = this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=0 LIMIT 1').get(job.id)
+        // A slow check cannot overlap its next poll. The terminal lookup below releases it; a genuinely lost run
+        // ages out with the scheduler's ordinary six-hour in-flight safety bound.
+        if (job.kind === 'watch' && this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=1 AND finished_at IS NULL AND instant > ? LIMIT 1')
+          .get(job.id, now - 6 * 3600_000)) continue
         if (!pending) this.reserve(job, latestInstant(job, now))
         // Skip every missed window, including when retrying a pending pre-downtime call.
         job.nextAt = nextInstant(job, now)
@@ -434,8 +485,32 @@ export class Scheduler {
     this.timer.unref?.()
     tick()
   }
+  running() { return Boolean(this.timer && !this.stopped) }
   quiesce() { this.stopped = true; clearInterval(this.timer); this.timer = null; return Promise.all([this.inflight, this.refreshing]) }
   async close() { await this.quiesce(); this.db.close() }
+}
+
+// Only service-owned watcher metadata reaches Chats. Never project the prompt/check instructions.
+export function projectFollowUps(result, scheduler, { agent = '' } = {}) {
+  if (!scheduler || !/^[a-z][a-z0-9-]{0,30}$/.test(agent)) return result
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    const rows = ['data', 'sessions', 'items'].map(key => payload[key]).find(Array.isArray)
+    if (!rows) return result
+    const byThread = new Map()
+    for (const job of scheduler.list()) {
+      if (job.kind !== 'watch' || !job.enabled || !job.thread || job.agent !== agent) continue
+      const list = byThread.get(job.thread) || []
+      list.push(scheduler.project(job)); byThread.set(job.thread, list)
+    }
+    for (const row of rows) {
+      const jobs = byThread.get(row?.id || row?.session_id)
+      if (!jobs?.length) continue
+      const next = jobs.map(job => job.nextRun).filter(Boolean).sort()[0] || null
+      row.wizard_follow_up = { active: true, count: jobs.length, names: jobs.map(job => job.name).slice(0, 3), ...(next ? { nextRun: next } : {}) }
+    }
+    return Buffer.from(JSON.stringify(payload))
+  } catch { return result }
 }
 
 export function importHermesSchedules(scheduler, { dryRun = true } = {}) {

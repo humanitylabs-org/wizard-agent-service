@@ -59,7 +59,7 @@ import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, cre
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
-import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
@@ -2582,6 +2582,7 @@ function buildWizardServer(options, lifetime) {
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -3789,6 +3790,7 @@ function buildWizardServer(options, lifetime) {
   }
   const decorateSessionList = (result, operator) => {
           result = decorateSessionTitles(result, operator)
+          if (!operator) result = projectFollowUps(result, scheduler, { agent: 'main' })
           if (agents && !operator) {
             const ids = []
             result = decorateThreadAgent(result, row => { ids.push(row.id); return agents.threadAgent(MAIN_AGENT_ID) })
@@ -4155,15 +4157,24 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '') => {
+  const deliveryCall = async (path, body, idempotencyKey = '', extraHeaders = {}) => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+      headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}), ...extraHeaders },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
     const raw = await result.text()
     let payload = {}
+    try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
+    return { status: result.status, ok: result.ok, payload }
+  }
+  const deliverySession = async (path, method = 'GET', body = null, extraHeaders = {}) => {
+    if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
+    const result = await fetchImpl(`${selfOrigin}${path}`, { method,
+      headers: { 'X-Wizard-Internal-Token': internalToken, ...(body ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
+      ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    const raw = await result.text(); let payload = {}
     try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
     return { status: result.status, ok: result.ok, payload }
   }
@@ -4226,6 +4237,14 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) { await result.body?.cancel(); return null }
       return result.json()
     },
+    onWatchResult: async job => {
+      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
+      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
+      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
+      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
+    },
     deliver: async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
@@ -4239,13 +4258,26 @@ function buildWizardServer(options, lifetime) {
       if (!agents && agent !== MAIN_AGENT_ID) throw Object.assign(new Error('agent unavailable'), { status: 404 })
       if (agents && (!agents.read(agent) || agents.read(agent)?.role === 'recovery')) throw Object.assign(new Error('agent unavailable'), { status: 409 })
       if (agent === MAIN_AGENT_ID && !runQueue) throw Object.assign(new Error('durable run queue required'), { status: 503 })
+      let wasArchived = false
+      if (occurrence.kind === 'watch') {
+        const state = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`)
+        if (!state.ok) throw Object.assign(new Error('watcher thread lookup failed'), { status: state.status })
+        const session = state.payload?.session ?? state.payload?.data ?? state.payload
+        wasArchived = session?.archived === true
+      }
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
       }
-      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
+      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, { 'X-Wizard-Schedule-Kind': occurrence.kind })
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
-      return { run_id: run.payload.run_id || run.payload.id }
+      // Hermes treats a run in an archived thread like an ordinary return. A pending watcher is not one:
+      // put Done back immediately, then only the terminal visible-result callback above restores it.
+      if (occurrence.kind === 'watch' && wasArchived) {
+        const kept = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, 'PATCH', { archived: true }, { 'X-Wizard-Watcher-Preserve': '1' })
+        if (!kept.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: kept.status })
+      }
+      return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
     },
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
@@ -4789,6 +4821,40 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
         return
       }
+      if (url.pathname.startsWith('/wizard/internal/follow-ups/')) {
+        // The first-party wizard-os plugin injects the current Hermes session id. It authenticates with the
+        // box-local Wizard MCP token; browsers and proxied requests never reach this scheduler write path.
+        if (!scheduler || request.method !== 'POST') { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.headers.origin || request.headers['sec-fetch-site'] || request.headers['x-forwarded-for'] || request.headers.forwarded
+          || request.headers['cf-connecting-ip'] || request.headers['tailscale-user-login']) { sendJson(response, 403, { error: 'box_only' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const mainToken = String(options.mcpToken || '')
+        const directMain = mainToken && supplied.length === mainToken.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(mainToken))
+        const callingAgent = bridge?.agentFor(request) || (directMain ? MAIN_AGENT_ID : '')
+        if (!callingAgent) { sendJson(response, 403, { error: 'follow-up access denied' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        const sessionId = typeof value?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value.session_id) ? value.session_id : ''
+        if (!sessionId) { sendJson(response, 400, { error: 'session required' }); return }
+        const action = url.pathname.slice('/wizard/internal/follow-ups/'.length)
+        const agent = callingAgent === MAIN_AGENT_ID ? 'main' : callingAgent
+        try {
+          if (action === 'create') {
+            if (!scheduler.running()) { sendJson(response, 503, { error: 'follow-up scheduler is not running' }); return }
+            const every = value.every_minutes === undefined ? 10 : Number(value.every_minutes)
+            if (!Number.isInteger(every) || every < 1 || every > 1440) { sendJson(response, 400, { error: 'every_minutes must be 1 to 1440' }); return }
+            const job = scheduler.create({ name: value.name, kind: 'watch', when: { every }, prompt: value.instructions,
+              thread: sessionId, agent, ...(value.model ? { model: value.model } : {}) })
+            sendJson(response, 201, scheduler.project(job))
+          } else if (action === 'list') {
+            await scheduler.refreshRuns()
+            sendJson(response, 200, { follow_ups: scheduler.followUps(sessionId, { agent }).map(job => scheduler.project(job)) })
+          } else if (action === 'stop') {
+            sendJson(response, 200, scheduler.stopFollowUps(sessionId, { watcherId: String(value.watcher_id || ''), agent }))
+          } else sendJson(response, 404, { error: 'not_found' })
+        } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'follow-up request failed' }) }
+        return
+      }
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {
         // The main agent's schedule tools (Hermes plugin wizard-schedule). Same loopback token and
         // refusal rules as heavy work; the thread is the calling session, injected by the plugin.
@@ -5247,6 +5313,28 @@ function buildWizardServer(options, lifetime) {
         return
       }
 
+      if (url.pathname === '/wizard/follow-ups/stop' && request.method === 'POST') {
+        if (!scheduler) { sendJson(response, 503, { error: 'follow-ups unavailable' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.headers.origin) {
+          let originHost
+          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          const publicHost = request.headers['x-forwarded-host'] || request.headers.host
+          if (originHost !== publicHost) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        }
+        const body = parseJsonBody(await readBoundedBody(request, 2048))
+        const sessionId = typeof body?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(body.session_id) ? body.session_id : ''
+        if (!sessionId || hiddenSession(request, sessionId)) { sendJson(response, sessionId ? 404 : 400, { error: sessionId ? 'not_found' : 'invalid_request' }); return }
+        const agentId = typeof body.agent_id === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(body.agent_id) ? body.agent_id : ''
+        const agent = !agentId || agentId === MAIN_AGENT_ID ? 'main' : agentId
+        try { sendJson(response, 200, { ok: true, ...scheduler.stopFollowUps(sessionId, { watcherId: String(body.watcher_id || ''), agent }) }) }
+        catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'follow-up stop failed' }) }
+        return
+      }
+
       if (url.pathname === '/wizard/thread-dispositions' && ['GET', 'PUT'].includes(request.method ?? '')) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
@@ -5482,11 +5570,14 @@ function buildWizardServer(options, lifetime) {
           return
         }
         let queuedAdmission = null
+        let quietWatcherAdmission = false
         let directAdmissionSessionId = ''
         let admissionContract
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
+          quietWatcherAdmission = principal.kind === 'service'
+            && request.headers['x-wizard-schedule-kind'] === 'watch'
           if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'
@@ -5531,7 +5622,7 @@ function buildWizardServer(options, lifetime) {
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
-          threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
+          if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
           return
         }
@@ -5698,7 +5789,8 @@ function buildWizardServer(options, lifetime) {
         if (upstream.ok && body) {
           // Both Close and explicit Restore supersede parking; Restore must also
           // repair a stale client that observes archived + deferred together.
-          if (request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath) && typeof parseJsonBody(body).archived === 'boolean') {
+          if (request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath) && typeof parseJsonBody(body).archived === 'boolean'
+            && !(principal.kind === 'service' && request.headers['x-wizard-watcher-preserve'] === '1')) {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', decodeURIComponent(upstreamPath.split('/')[3]))
           } else if (request.method === 'POST' && upstreamPath === '/v1/runs') {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', parseJsonBody(body).session_id)

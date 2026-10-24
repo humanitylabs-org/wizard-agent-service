@@ -26,6 +26,7 @@ async function readBody(req: IncomingMessage) {
 async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[], socketPath?: string) {
   const seen: Seen[] = []
   const known = new Set(sessions)
+  const rows = new Map(sessions.map(id => [id, { id, title: `${name} ${id}`, source: 'api_server', archived: false }]))
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://x')
     const body = await readBody(req)
@@ -38,13 +39,14 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
       { slug: 'openai-codex', name: 'Codex', authenticated: true, models: ['gpt-6.1-sol'] },
       { slug: 'nous', name: 'Nous', authenticated: false, models: [] },
     ] })
-    if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
+    if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => rows.get(id)) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
-    if (req.method === 'DELETE' && sessionMatch) return known.delete(decodeURIComponent(sessionMatch[1])) ? json(200,{ok:true}) : json(404,{error:'not found'})
-    if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
+    if (req.method === 'DELETE' && sessionMatch) { const id = decodeURIComponent(sessionMatch[1]); rows.delete(id); return known.delete(id) ? json(200,{ok:true}) : json(404,{error:'not found'}) }
+    if (req.method === 'GET' && sessionMatch) { const row = rows.get(decodeURIComponent(sessionMatch[1])); return row ? json(200, { session: row }) : json(404, { error: 'not found' }) }
+    if (req.method === 'PATCH' && sessionMatch) { const row = rows.get(decodeURIComponent(sessionMatch[1])); if (!row) return json(404, { error: 'not found' }); Object.assign(row, body); return json(200, { session: row }) }
     if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: messages ?? [{ role: 'assistant', content: `${name} says hi` }] })
-    if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
-    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
+    if (req.method === 'POST' && url.pathname === '/api/sessions') { const id = body?.id ?? 'generated_1'; known.add(id); rows.set(id, { ...body, id, archived: false }); return json(201, { session: rows.get(id) }) }
+    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); const row = rows.get(body.session_id) ?? { id: body.session_id, title: name, source: 'api_server', archived: false }; row.archived = false; rows.set(body.session_id, row); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
     if (req.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(url.pathname)) return json(200, { run_id: url.pathname.split('/').at(-1), status: 'completed', output: `${name} done` })
     json(404, { error: 'nope' })
   })
@@ -52,10 +54,10 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
   if (socketPath) {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
     chmodSync(socketPath, 0o600)
-    return { port: 0, origin: '', seen, known }
+    return { port: 0, origin: '', seen, known, rows }
   }
   const address = await listen(server) as import('node:net').AddressInfo
-  return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known }
+  return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known, rows }
 }
 
 function box() {
@@ -96,7 +98,7 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   })
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
-  return { base: `http://127.0.0.1:${address.port}`, calls, deliveries }
+  return { base: `http://127.0.0.1:${address.port}`, calls, deliveries, server: svc }
 }
 
 const json = (body: unknown, headers: Record<string, string> = {}) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
@@ -627,6 +629,44 @@ describe('per-agent threads and runs', () => {
     const unknown = await fetch(`${base}/wizard/hermes/api/sessions?agent=nobody`)
     expect(unknown.status).toBe(404)
     expect(await unknown.json()).toMatchObject({ check: 'agent.id' })
+  })
+
+  it('projects same-id follow-up watchers only inside their owning agent list', async () => {
+    const dir = box()
+    const main = await fakeHermes('main', ['wizard_shared'])
+    const priv = await fakeHermes('private', ['wizard_shared'])
+    const { base, server } = await start(dir, main, { schedulerStatePath: join(dir, 'schedules.sqlite3') })
+    await withPrivate(dir, base, priv.port)
+    server.scheduler.create({ name: 'Main dependency', kind: 'watch', when: { every: 5 }, prompt: 'Check main.', thread: 'wizard_shared', agent: 'main' })
+    server.scheduler.create({ name: 'Private dependency', kind: 'watch', when: { every: 5 }, prompt: 'Check private.', thread: 'wizard_shared', agent: 'private' })
+
+    const mainList = await (await fetch(`${base}/wizard/hermes/api/sessions`)).json()
+    const mainRow = (mainList.data ?? mainList.sessions).find((row: any) => row.id === 'wizard_shared')
+    expect(mainRow.wizard_follow_up).toMatchObject({ active: true, count: 1, names: ['Main dependency'] })
+
+    const privateList = await (await fetch(`${base}/wizard/hermes/api/sessions?agent=private`)).json()
+    const privateRow = privateList.data.find((row: any) => row.id === 'wizard_shared')
+    expect(privateRow.wizard_follow_up).toMatchObject({ active: true, count: 1, names: ['Private dependency'] })
+  })
+
+  it('delivers a routed watcher only through its owning agent and restores that same routed thread', async () => {
+    const dir = box()
+    const main = await fakeHermes('main', ['wizard_shared'])
+    const priv = await fakeHermes('private', ['wizard_shared'])
+    priv.rows.get('wizard_shared')!.archived = true
+    const { base, server } = await start(dir, main, { schedulerStatePath: join(dir, 'schedules.sqlite3'), runQueueStatePath: join(dir, 'queue.sqlite3'), runQueuePollIntervalMs: 20 })
+    await withPrivate(dir, base, priv.port)
+    const watch = server.scheduler.create({ name: 'Private result', kind: 'watch', when: { every: 5 }, prompt: 'Check private.', thread: 'wizard_shared', agent: 'private' })
+    server.scheduler.runNow(watch.id); await server.scheduler.tick(false)
+    expect(priv.seen.some((row) => row.method === 'POST' && row.path === '/v1/runs')).toBe(true)
+    expect(main.seen.some((row) => row.method === 'POST' && row.path === '/v1/runs')).toBe(false)
+    for (let i = 0; i < 100 && server.scheduler.get(watch.id).enabled; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20)); await server.scheduler.refreshRuns()
+    }
+    expect(server.scheduler.get(watch.id).enabled).toBe(false)
+    expect(priv.rows.get('wizard_shared')!.archived).toBe(false)
+    expect(priv.seen.filter((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared').map(row => row.body.archived)).toEqual([true, false])
+    expect(main.seen.some((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared')).toBe(false)
   })
 
   it('recap delivery: token required, goes through the runtime into the agent, pins the thread', async () => {
