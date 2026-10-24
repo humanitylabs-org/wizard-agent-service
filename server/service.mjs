@@ -4521,7 +4521,7 @@ function buildWizardServer(options, lifetime) {
           'POST /wizard/v1/setup/phone/start': () => phoneSetup.start(),
           'POST /wizard/v1/setup/phone/reset': () => phoneSetup.reset(),
         }
-        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, phoneSetup.overview()); return }
+        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, await phoneSetup.overview()); return }
         if (route === 'GET /wizard/v1/setup/phone') { sendJson(response, 200, await phoneSetup.phone()); return }
         if (!writes[route]) { sendJson(response, 404, { error: 'not_found' }); return }
         const refusal = setupWriteRefusal(request, tailnetIngress)

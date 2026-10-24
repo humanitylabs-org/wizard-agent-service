@@ -122,6 +122,22 @@ describe('Wizard OS settings for phone setup', () => {
 })
 
 describe('setup API (box-local listener)', () => {
+  it('advertises quiet launch only for explicitly configured alongside installs', async () => {
+    const dir = tempDir()
+    for (const launchMode of ['alongside', 'vm', '', 'unknown']) {
+      const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), launchMode })
+      expect((await setup.overview()).launch_mode).toBe(launchMode === 'alongside' ? 'alongside' : undefined)
+      expect(existsSync(join(dir, 'settings.json'))).toBe(false)
+    }
+  })
+
+  it('a helper outage never marks a stale host phone address ready', async () => {
+    const dir = tempDir()
+    const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), hostShellUrl: () => `${ORIGIN}:8796/wizard-os-home/`,
+      call: async () => { throw Object.assign(new Error('offline'), { code: 'unavailable', absent: false }) } })
+    expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'todo' })
+  })
+
   it('is unavailable without the helper socket, never crashes, and tracks first run', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
@@ -368,6 +384,9 @@ describe('setup API (box-local listener)', () => {
     expect(phone.body.wizard_url).toBe(shell)
     expect(phone.body.device_name).toBe(DNS)
     expect(phone.body.managed).toBe('host')
+    const overview = (await call(port, '/wizard/v1/setup')).body
+    expect(overview.items[0]).toMatchObject({ state: 'done', phone_ready: true })
+    expect(readSettings(join(dir, 'settings.json')).settings.setup.phone_seen_at).toBe('')
   })
 
   it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {
@@ -377,6 +396,7 @@ describe('setup API (box-local listener)', () => {
       writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url } }] }))
       const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
       expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('unavailable')
+      expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('todo')
     }
   })
 
