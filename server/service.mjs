@@ -39,6 +39,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
+import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
@@ -4224,6 +4225,23 @@ function buildWizardServer(options, lifetime) {
     }
   }
   // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
+  // Pages (pages.mjs, wizard-os spec/PAGES.md): <Files root>/Pages/<slug>/, served at /pages/ and versioned
+  // in a history repository kept in this service's own state.
+  let pages = null
+  {
+    const filesRoot = options.pagesRoot || ((options.userFilesRoot || options.mediaRoot) ? join(String(options.userFilesRoot || options.mediaRoot), PAGES_FOLDER) : '')
+    const stateDir = options.mediaIndexPath ? dirname(String(options.mediaIndexPath)) : uploadStatePath ? dirname(String(uploadStatePath)) : ''
+    const gitDir = options.pagesGitDir || (stateDir ? join(stateDir, 'pages-history.git') : '')
+    if (options.pages !== false && filesRoot && gitDir) {
+      try {
+        pages = createPages({ root: filesRoot, gitDir, watchDelayMs: options.pagesWatchDelayMs ?? 1500, log: (line) => console.error(line) })
+        if (options.pagesWatch !== false) pages.watch()
+      } catch (error) {
+        console.error(`[pages] disabled: ${error?.code || error?.message || 'unavailable'}`)
+        pages = null
+      }
+    }
+  }
   const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
   if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
@@ -4393,6 +4411,11 @@ function buildWizardServer(options, lifetime) {
     if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
+      // owner's API, whatever credentials ride along (spec/PAGES.md, Security).
+      if ((url.pathname === '/wizard' || url.pathname.startsWith('/wizard/')) && String(request.headers.origin ?? '').trim().toLowerCase() === 'null') {
+        sendJson(response, 403, { error: 'opaque_origin', check: 'origin.null' }); return
+      }
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
@@ -4643,6 +4666,68 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
+      }
+      if (url.pathname === '/pages' || url.pathname.startsWith('/pages/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }, { 'Content-Security-Policy': 'sandbox' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }, { 'Content-Security-Policy': 'sandbox' }); return }
+        servePage(request, response, url, pages?.root || '')
+        return
+      }
+      if (url.pathname === '/wizard/v1/pages' || url.pathname.startsWith('/wizard/v1/pages/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (!pages) { sendJson(response, 503, { error: 'pages_unavailable' }); return }
+        const write = !['GET', 'HEAD'].includes(request.method)
+        if (write) {
+          if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          if (request.headers.origin) {
+            let host
+            try { host = new URL(request.headers.origin).host } catch { host = '' }
+            if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          }
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || '').trim())) { sendJson(response, 415, { error: 'json_required' }); return }
+        }
+        const rest = url.pathname.slice('/wizard/v1/pages'.length).replace(/^\//u, '')
+        let parts
+        try { parts = rest ? rest.split('/').map(decodeURIComponent) : [] } catch { sendJson(response, 400, { error: 'invalid_path' }); return }
+        const who = principal.kind === 'owner' || principal.kind === 'service' ? 'owner' : 'agent'
+        try {
+          if (!parts.length) {
+            if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET' }); return }
+            sendJson(response, 200, pages.list({ includeArchived: url.searchParams.get('all') === '1' }), { 'Cache-Control': 'no-store' })
+            return
+          }
+          const [slug, ...fileParts] = parts
+          if (fileParts.length === 1 && fileParts[0] === 'history') {
+            if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET' }); return }
+            sendJson(response, 200, pages.history(slug, url.searchParams.get('file') || ''), { 'Cache-Control': 'no-store' })
+            return
+          }
+          if (fileParts.length === 1 && fileParts[0] === 'restore') {
+            if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'POST' }); return }
+            const input = parseJsonBody(await readBoundedBody(request, 4096))
+            sendJson(response, 200, pages.restore(slug, { commit: input?.commit, file: typeof input?.file === 'string' ? input.file : '' }, who))
+            return
+          }
+          if (!fileParts.length) { sendJson(response, 404, { error: 'not_found' }); return }
+          const file = fileParts.join('/')
+          if (request.method === 'GET') {
+            const found = pages.read(slug, file)
+            sendJson(response, found.exists ? 200 : 404, found.exists ? found : { error: 'file_not_found', ...found }, { 'Cache-Control': 'no-store', ...(found.version ? { ETag: `"${found.version}"` } : {}) })
+            return
+          }
+          if (request.method !== 'PUT') { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, PUT' }); return }
+          const input = parseJsonBody(await readBoundedBody(request, 3 * 1024 * 1024))
+          const ifMatch = String(request.headers['if-match'] || '').trim().replace(/^"|"$/gu, '')
+          const version = Object.hasOwn(input || {}, 'version') ? input.version : (ifMatch || null)
+          sendJson(response, 200, pages.save(slug, file, { text: input?.text, version: version === null ? null : String(version) }, who))
+        } catch (error) {
+          if (error instanceof PagesError) { sendJson(response, error.status, { error: error.code, ...error.extra }); return }
+          if (error?.status === 413) { sendJson(response, 413, { error: 'page_file_too_large' }); return }
+          if (error?.status === 400) { sendJson(response, 400, { error: 'invalid_request' }); return }
+          throw error
+        }
+        return
       }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
