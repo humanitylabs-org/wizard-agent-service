@@ -2430,6 +2430,7 @@ function buildWizardServer(options, lifetime) {
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
+      agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -2461,6 +2462,7 @@ function buildWizardServer(options, lifetime) {
     : null)
   let agentSockets
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
