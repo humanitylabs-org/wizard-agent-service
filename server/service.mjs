@@ -2569,6 +2569,7 @@ function buildWizardServer(options, lifetime) {
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
+    agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,

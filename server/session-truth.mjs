@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
@@ -165,15 +166,16 @@ export function createHermesTextSearcher(path) {
           if(hits.has(id)) continue
           for(const mid of values.slice(round*3,round*3+3)) {
             const row=found.get(mid); if(!row || row.session_id!==id || typeof row.content!=='string') continue
-            const visible=row.role==='user'?visibleUserRequest(row.content,row.display_kind):visibleAssistantReply(row.content,row.display_kind,row.finish_reason)
-            const low=row.content.toLowerCase()
+            const text=visibleMemoryText(row.content)
+            const visible=row.role==='user'?visibleUserRequest(text,row.display_kind):visibleAssistantReply(text,row.display_kind,row.finish_reason)
+            const low=text.toLowerCase()
             if(!visible || !words.every(w=>low.includes(w))) continue
-            const at=low.indexOf(words[0]), from=Math.max(0,at-60), to=Math.min(row.content.length,from+200)
-            hits.set(id,(from?'…':'')+row.content.slice(from,to)+(to<row.content.length?'…':'')); break
+            const at=low.indexOf(words[0]), from=Math.max(0,at-60), to=Math.min(text.length,from+200)
+            hits.set(id,(from?'…':'')+text.slice(from,to)+(to<text.length?'…':'')); break
           }
         }
       }
-      Object.assign(hits,{mode:'body',partial,timings:{fts_ms,read_ms:performance.now()-readStart,candidates:rows.length,sessions:hits.size}})
+      Object.assign(hits,{mode:'body',partial:partial || [...grouped].some(([id,values])=>!hits.has(id)&&values.length>6),timings:{fts_ms,read_ms:performance.now()-readStart,candidates:rows.length,sessions:hits.size}})
       return hits
     }
   }

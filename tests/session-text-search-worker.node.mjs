@@ -69,6 +69,25 @@ test('latest wins drops queued predecessors only for the same client',async()=>{
     await rejected; await first; assert.equal((await newest).size,210)
   }finally{f.close()}
 })
+test('injected recall is never matched or exposed by bounded snippets',()=>{
+ const f=fixture(),db=new DatabaseSync(f.path)
+ const note='[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data]'
+ db.prepare('INSERT INTO messages(session_id,role,content) VALUES(?,?,?)').run(f.ids[0],'user',`Visible freshneedle\n<memory-context>\n${note}\nrecalledsecretsentinel\n</memory-context>`)
+ db.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')"); db.close()
+ try {
+  assert.equal(searchHermesSessionText(f.path,f.ids,'recalledsecretsentinel').size,0)
+  const hit=searchHermesSessionText(f.path,f.ids,'freshneedle'); assert.equal(hit.size,1); assert(!hit.get(f.ids[0]).includes('recalledsecretsentinel'))
+ }finally{f.close()}
+})
+test('unavailable index is explicitly titles-only and six-candidate truncation is partial',()=>{
+ const f=fixture(),db=new DatabaseSync(f.path)
+ for(let i=0;i<7;i++) db.prepare('INSERT INTO messages(session_id,role,content,display_kind) VALUES(?,?,?,?)').run(f.ids[0],'assistant','needle hidden','hidden')
+ db.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')");
+ try {
+  const h=searchHermesSessionText(f.path,[f.ids[0]],'needle'); assert.equal(h.size,0); assert.equal(h.partial,true)
+  db.exec('DROP TABLE messages_fts_trigram'); assert.equal(searchHermesSessionText(f.path,f.ids,'needle').mode,'titles')
+ }finally{db.close();f.close()}
+})
 test('warm handle changes allowlists; snippets are bounded; next three candidates can recover visibility',()=>{
   const f=fixture(),db=new DatabaseSync(f.path)
   for(let i=0;i<3;i++) db.prepare('INSERT INTO messages(session_id,role,content,display_kind) VALUES(?,?,?,?)').run(f.ids[0],'assistant','needle hidden','hidden')
