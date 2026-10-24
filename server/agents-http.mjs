@@ -8,6 +8,8 @@
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
 import { privateChatMatches } from './private-chat-search.mjs'
+import { join } from 'node:path'
+import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
@@ -709,6 +711,13 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
             if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
             offset+=rows.length
           }
+          // Stock Hermes never lists archived threads; add them from this agent's own state.db, exactly as the
+          // main list does, so an agent's Archive is not silently empty (James, 24 Oct 2026: one Philosopher thread).
+          try {
+            const known=new Set(all.map(row=>row?.id))
+            for (const row of readArchivedSessions(join(registry.agentsDir, agent.id, 'home', 'state.db')))
+              if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
+          } catch { /* an unreadable archive never hides the live threads */ }
           if (searchParams.get('q')) {
             const fts = privateChatMatches(registry.agentsDir,agent.id,searchParams.get('q'))
             if (fts) {

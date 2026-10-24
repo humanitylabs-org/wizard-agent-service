@@ -2,11 +2,23 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, readyOrder: 'newest', subjectOrder: [], pinnedChats: [] })
-export const UI_PREFERENCES_MAX_BYTES = 32768
+export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })
+// 50 spaces × 500 thread ids (up to 180 chars), plus existing preferences.
+export const UI_PREFERENCES_MAX_BYTES = 5 * 1024 * 1024
+const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}$/
+const SPACE_ID = /^[a-z0-9-]{1,48}$/
+const validSpace = s => !!s && typeof s === 'object' && !Array.isArray(s)
+  && Object.keys(s).length === 4 && ['id', 'name', 'threads', 'createdAt'].every(k => Object.hasOwn(s, k))
+  && typeof s.id === 'string' && SPACE_ID.test(s.id)
+  && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(s.name)
+  && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length
+  && typeof s.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(s.createdAt) && Number.isFinite(Date.parse(s.createdAt))
 const validators = {
+  spaces: v => Array.isArray(v) && v.length <= 50 && v.every(validSpace) && new Set(v.map(s => s.id)).size === v.length,
   archiveAfterDays: v => Number.isInteger(v) && [0, 1, 3, 7, 14, 30].includes(v),
   compact: v => typeof v === 'boolean',
+  // Chats list layout: 'day' (Ready, Yesterday, Past week) or 'status' (Working, Ready, Archive).
+  chatLayout: v => v === 'day' || v === 'status',
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
   // Pinned Chats threads, in pin order, shared by every device of the owner.
@@ -23,7 +35,7 @@ export function validateUiPreferences(value) {
 // Lenient: the stored file may have been written by a newer or older service or shell.
 // Keep each known key whose value is valid here and default everything else, per key.
 export function sanitizeUiPreferences(stored) {
-  const out = { ...DEFAULT_UI_PREFERENCES, subjectOrder: [], pinnedChats: [] }
+  const out = { ...DEFAULT_UI_PREFERENCES, subjectOrder: [], pinnedChats: [], spaces: [] }
   if (!isPlainObject(stored)) return out
   for (const key of Object.keys(validators)) if (Object.hasOwn(stored, key) && validators[key](stored[key])) out[key] = stored[key]
   return out
@@ -53,6 +65,7 @@ export function updateUiPreferences(path, patch) {
   let next = { ...stored, ...patch }
   let text = JSON.stringify(next) + '\n'
   if (Buffer.byteLength(text) > UI_PREFERENCES_MAX_BYTES) { next = { ...sanitizeUiPreferences(stored), ...patch }; text = JSON.stringify(next) + '\n' }
+  if (Buffer.byteLength(text) > UI_PREFERENCES_MAX_BYTES) throw Object.assign(new Error('invalid_preferences'), { status: 400 })
   mkdirSync(dirname(path), { recursive: true })
   const temp = `${path}.${randomUUID()}.tmp`
   try {

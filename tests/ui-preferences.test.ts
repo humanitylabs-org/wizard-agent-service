@@ -19,18 +19,39 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect((await put(u, { archiveAfterDays: 0, compact: true })).status).toBe(200)
     expect((await put(u, { readyOrder: 'oldest' })).status).toBe(200)
     const u2 = await start(d)
-    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, readyOrder: 'oldest', subjectOrder: [], pinnedChats: [] })
+    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })
     expect(readFileSync(join(d, 'settings.json'), 'utf8')).toBe(original)
     expect((await fetch(u2)).headers.get('cache-control')).toBe('no-store')
   })
   it('validates strictly and never mutates on invalid payload', async () => {
     const u = await start(home())
-    for (const value of [null, [], { extra: true }, { compact: 1 }, { archiveAfterDays: -1 }, { archiveAfterDays: '7' }, { readyOrder: 'bad' }, { subjectOrder: [1] }, { subjectOrder: ['a', 'a'] }, { pinnedChats: ['a', 'a'] }, { pinnedChats: ['<x>'] }, { pinnedChats: 'wizard_a' }, JSON.parse('{"__proto__":{}}')]) expect((await put(u, value)).status).toBe(400)
+    for (const value of [null, [], { extra: true }, { compact: 1 }, { archiveAfterDays: -1 }, { archiveAfterDays: '7' }, { readyOrder: 'bad' }, { chatLayout: 'bad' }, { chatLayout: true }, { subjectOrder: [1] }, { subjectOrder: ['a', 'a'] }, { pinnedChats: ['a', 'a'] }, { pinnedChats: ['<x>'] }, { pinnedChats: 'wizard_a' }, JSON.parse('{"__proto__":{}}')]) expect((await put(u, value)).status).toBe(400)
     expect(await (await fetch(u)).json()).toEqual(DEFAULT_UI_PREFERENCES)
     for (const readyOrder of ['newest', 'oldest', 'priority', 'subject']) expect((await put(u, { readyOrder })).status).toBe(200)
+    for (const chatLayout of ['status', 'day']) expect((await put(u, { chatLayout })).status).toBe(200)
+    expect((await put(u, { chatLayout: 'status' })).status).toBe(200)
+    expect((await (await fetch(u)).json()).chatLayout).toBe('status')
     // Pinned chats are box-wide: one device pins, every device reads the same ordered list.
     expect((await put(u, { pinnedChats: ['wizard_1', 'wizardop_2'] })).status).toBe(200)
     expect((await (await fetch(u)).json()).pinnedChats).toEqual(['wizard_1', 'wizardop_2'])
+  })
+  it('validates owner-created spaces, persists membership and preserves other fields', async () => {
+    const u = await start(home())
+    const space = { id: 'launch', name: 'Wizard OS launch', threads: ['wizard_1', 'wizardop_2'], createdAt: '2026-10-24T12:00:00.000Z' }
+    expect((await put(u, { spaces: [space], compact: true })).status).toBe(200)
+    expect((await (await fetch(u)).json()).spaces).toEqual([space])
+    const invalid = [null, {}, 'x', Array(51).fill(space), [space, space],
+      ...[{ id: 'Bad ID' }, { id: 'a'.repeat(49) }, { name: '' }, { name: ' ' }, { name: 'x'.repeat(61) }, { name: 'bad\nname' },
+        { threads: ['a', 'a'] }, { threads: ['<x>'] }, { threads: Array.from({length:501}, (_,i)=>'id'+i) },
+        { createdAt: 'yesterday' }, { createdAt: '2026-10-24' }, { extra: true }, { id: undefined }].map(p => [{ ...space, ...p }])]
+    for (const spaces of invalid) expect((await put(u, { spaces })).status).toBe(400)
+    expect((await (await fetch(u)).json()).spaces).toEqual([space])
+    // Accepted maximum shape exceeds the former 32 KB file/body ceiling; it must survive a GET.
+    const large = Array.from({length:50}, (_,i) => ({...space, id:'space-'+i, threads:Array.from({length:500},(_,j)=>'wizard_'+String(j).padStart(173,'x'))}))
+    expect((await put(u, { spaces: large })).status).toBe(200)
+    expect((await (await fetch(u)).json()).spaces).toEqual(large)
+    expect((await put(u, { spaces: [] })).status).toBe(200)
+    expect((await (await fetch(u)).json()).compact).toBe(true)
   })
   it('requires owner access, JSON and same-site writes, rejects unsupported methods', async () => {
     const u = await start(home(), true); expect((await fetch(u)).status).toBe(403); expect((await put(u, { compact: true })).status).toBe(403)
@@ -53,7 +74,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   it('reads leniently: an invalid stored value defaults only that key', async () => {
     const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ archiveAfterDays: 9999, compact: true, readyOrder: 'chaos', subjectOrder: ['a', 'b'] }))
     const u = await start(d); const r = await fetch(u); expect(r.status).toBe(200)
-    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [] })
+    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })
     expect((await put(u, { archiveAfterDays: 9999 })).status).toBe(400)
   })
   it('unparseable stored state serves defaults without overwriting it until the next valid PUT', async () => {
@@ -67,6 +88,6 @@ describe('box-wide UI preferences HTTP contract', () => {
   })
   it('concurrent partial writes preserve all unrelated preferences', async () => {
     const u = await start(home()); await Promise.all([put(u, { compact: true }), put(u, { readyOrder: 'subject' }), put(u, { archiveAfterDays: 14 })])
-    expect(await (await fetch(u)).json()).toEqual({ compact: true, readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [] })
+    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
   })
 })
