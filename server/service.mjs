@@ -2016,6 +2016,22 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
 // Setup never opened. apps.json is written by the App Manager and mounted read-only; a page cannot change it.
+/** The first https view url of the app that provides `shell` in apps.json ('' when none). */
+export function shellUrlFromApps(appsJsonPath) {
+  if (!appsJsonPath) return ''
+  let doc = null
+  try {
+    if (statSync(appsJsonPath).size > 2 * 1024 * 1024) return ''
+    doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
+  } catch { return '' }
+  for (const app of Array.isArray(doc?.apps) ? doc.apps : []) {
+    if (!Array.isArray(app?.provides) || !app.provides.includes('shell')) continue
+    const url = typeof app.view === 'string' ? app.view : app.view?.url
+    if (typeof url === 'string' && url.startsWith('https://')) return url
+  }
+  return ''
+}
+
 export function shellHostsFromApps(appsJsonPath) {
   const hosts = new Set()
   if (!appsJsonPath) return hosts
@@ -2605,6 +2621,7 @@ function buildWizardServer(options, lifetime) {
   // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
   const phoneSetup = options.phoneSetup ?? (settingsPath ? createPhoneSetup({
     settingsPath, socketPath: options.privateAccessSocket || DEFAULT_PRIVATE_ACCESS_SOCKET, accessPinned: Boolean(options.tailnetAccessPinned),
+    hostShellUrl: () => shellUrlFromApps(appsJsonPath),
   }) : null)
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths

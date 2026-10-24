@@ -93,7 +93,7 @@ export function mobileUserAgent(request) {
 /**
  * @param {{ settingsPath: string, socketPath?: string, now?: () => number, call?: typeof helperCall, hostname?: string }} options
  */
-export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false }) {
+export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false, hostShellUrl = () => '' }) {
   let chain = Promise.resolve()
   let lastServeAttempt = 0
   // Serialize every helper action and settings write from this service.
@@ -170,6 +170,13 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       if (hosted) {
         const seen = Boolean(saved.setup.phone_seen_at)
         return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: `${hosted}/`, device_name: new URL(hosted).hostname, managed: 'host' }
+      }
+      // Alongside installs: the installer runs host Tailscale itself (no helper) and records the shell's private
+      // https address in apps.json, but never writes network.base_url. That address is where the phone opens Wizard.
+      const shell = absent && !error ? hostShellLink(hostShellUrl) : null
+      if (shell) {
+        const seen = Boolean(saved.setup.phone_seen_at)
+        return { ...base, step: seen ? 'phone_seen' : 'serving', wizard_url: shell.url, device_name: shell.host, managed: 'host' }
       }
       return base
     }
@@ -291,6 +298,17 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       }).catch(() => {})
     },
   }
+}
+
+/** The shell's private tailnet link (https://<box>.<tailnet>.ts.net[:port]/path/) from apps.json, or null. */
+function hostShellLink(read) {
+  let value = ''
+  try { value = String(read() || '') } catch { return null }
+  let u
+  try { u = new URL(value) } catch { return null }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash) return null
+  if (!/^[a-z0-9.-]+\.ts\.net$/u.test(u.hostname)) return null
+  return { url: u.href, host: u.hostname }
 }
 
 function normalizeView(raw) {

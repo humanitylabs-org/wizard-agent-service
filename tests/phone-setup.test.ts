@@ -357,6 +357,29 @@ describe('setup API (box-local listener)', () => {
     expect((await call(port, '/wizard/v1/setup', { headers: { host: `${DNS}:8796` } })).status).toBe(403)
   })
 
+  it('alongside box with host Tailscale and no helper: phone setup shows the shell link from apps.json', async () => {
+    const dir = tempDir()
+    const appsJsonPath = join(dir, 'apps.json')
+    const shell = `https://${DNS}:8796/wizard-os-home/`
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url: shell } }] }))
+    const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
+    const phone = await call(port, '/wizard/v1/setup/phone')
+    expect(phone.body.step).toBe('serving')
+    expect(phone.body.wizard_url).toBe(shell)
+    expect(phone.body.device_name).toBe(DNS)
+    expect(phone.body.managed).toBe('host')
+  })
+
+  it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {
+    const dir = tempDir()
+    for (const url of ['http://127.0.0.1:8796/wizard-os-home/', 'https://example.com/wizard-os-home/', 'https://u:p@box.tail1234.ts.net/']) {
+      const appsJsonPath = join(dir, 'apps.json')
+      writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url } }] }))
+      const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
+      expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('unavailable')
+    }
+  })
+
   it('is owner-only when the listener requires access', async () => {
     const dir = tempDir()
     const helper = await fakeHelper(dir)
