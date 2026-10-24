@@ -91,9 +91,9 @@ export function mobileUserAgent(request) {
 }
 
 /**
- * @param {{ settingsPath: string, socketPath?: string, now?: () => number, call?: typeof helperCall, hostname?: string }} options
+ * @param {{ settingsPath: string, socketPath?: string, now?: () => number, call?: typeof helperCall, hostname?: string, accessPinned?: boolean, hostShellUrl?: () => string, launchMode?: string }} options
  */
-export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false, hostShellUrl = () => '' }) {
+export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_ACCESS_SOCKET, now = () => Date.now(), call = helperCall, hostname = 'wizard', accessPinned = false, hostShellUrl = () => '', launchMode = process.env.WIZARD_SETUP_MODE }) {
   let chain = Promise.resolve()
   let lastServeAttempt = 0
   // Serialize every helper action and settings write from this service.
@@ -240,11 +240,25 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
 
   return {
     /** GET /wizard/v1/setup */
-    overview() {
+    async overview() {
       const saved = settings()
-      const state = saved.setup.phone_seen_at ? 'done'
+      // Host-managed private access is already configured outside Setup. Use the same validated
+      // readiness as the phone screen, without pretending we have actually seen a phone.
+      let ready = false
+      // A recorded Setup enrollment means the helper owns access: if its socket is gone, the saved
+      // address may be stale, so only boxes that never enrolled through the helper count as host-managed.
+      if (!saved.access.tailscale.origin && (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url))) {
+        const { status, error, absent } = await statusOrNull()
+        const phone = view(status, error, absent)
+        // This flag is a checklist-copy hint for ready-but-not-yet-seen, not a general capability.
+        // Once a phone was seen, preserve the existing "connected" checklist state/copy instead.
+        ready = phone.managed === 'host' && phone.step === 'serving'
+      }
+      const state = saved.setup.phone_seen_at || ready ? 'done'
         : (saved.setup.phone_started_at || saved.access.tailscale.origin) ? 'in_progress' : 'todo'
-      return { first_run: !saved.setup.seen_at, items: [{ id: 'phone', title: PHONE_ITEM_TITLE, state }] }
+      return { first_run: !saved.setup.seen_at,
+        ...(launchMode === 'alongside' ? { launch_mode: 'alongside' } : {}),
+        items: [{ id: 'phone', title: PHONE_ITEM_TITLE, state, ...(ready ? { phone_ready: true } : {}) }] }
     },
     /** POST /wizard/v1/setup/seen */
     markSeen: () => serial(async () => {
@@ -291,10 +305,12 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     noteOwnerRequest(request) {
       if (!mobileUserAgent(request)) return
       const saved = settings()
-      if (saved.setup.phone_seen_at || !saved.access.tailscale.origin) return
+      // Environment-pinned access (alongside installs) never writes access.tailscale.origin, but the
+      // verifier already proved this is the owner on the tailnet, so the visit still counts.
+      if (saved.setup.phone_seen_at || !(saved.access.tailscale.origin || accessPinned)) return
       serial(async () => {
         const again = settings()
-        if (!again.setup.phone_seen_at && again.access.tailscale.origin) markSetup('phone_seen_at', nowIso(now))
+        if (!again.setup.phone_seen_at && (again.access.tailscale.origin || accessPinned)) markSetup('phone_seen_at', nowIso(now))
       }).catch(() => {})
     },
   }
