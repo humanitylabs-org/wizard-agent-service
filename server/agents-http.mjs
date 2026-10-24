@@ -69,7 +69,7 @@ async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   return result
 }
 import { pipeline } from 'node:stream/promises'
-import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
+import { AgentError, MAIN_AGENT_ID, migrateProvider } from './agents.mjs'
 import { ownerLike, principalOf } from './principals.mjs'
 import { STATUS_INSTRUCTIONS, parseStatus, stripStatus } from './thread-status.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
@@ -271,6 +271,10 @@ export async function handleAgentsApi(ctx, url, request, response) {
       assertPrivacyChange(request, body)
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
+      return true
+    }
+    if (method === 'DELETE') {
+      sendJson(response, 200, await registry.remove(id))
       return true
     }
     throw new AgentError(405, 'method_not_allowed', 'agent.route')
@@ -541,12 +545,12 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
 function modelAllowed(agent, value) {
   const model = typeof value?.model === 'string' ? value.model.trim() : ''
   const provider = typeof value?.provider === 'string' ? value.provider.trim() : ''
-  if (provider && provider !== agent.model.provider && !(agent.model.provider === 'tinfoil' && provider === 'custom')) return false
+  if (provider && migrateProvider(provider) !== migrateProvider(agent.model.provider) && !(provider === 'custom' && (agent.privacy === 'private' || agent.runtime?.private_client))) return false
   if (!model) return true
   if (agent.model.allowed_models.includes(model)) return true
   // `custom/glm-5-3` or `tinfoil/glm-5-3` name the same model through this agent's own provider.
   const [prefix, bare, ...more] = model.split('/')
-  return !more.length && Boolean(bare) && [agent.model.provider, 'custom'].includes(prefix) && agent.model.allowed_models.includes(bare)
+  return !more.length && Boolean(bare) && [migrateProvider(agent.model.provider), 'custom'].includes(migrateProvider(prefix)) && agent.model.allowed_models.includes(bare)
 }
 
 /**
@@ -556,6 +560,7 @@ function modelAllowed(agent, value) {
  */
 export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead }) {
   const { registry, sendJson } = ctx
+  if (method === 'POST' && ['/v1/runs', '/api/sessions'].includes(upstreamPath)) await registry.assertProviderAvailable?.(agent)
   if (isPrivateAgent(registry,agent.id) && method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('q') && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   const deleting = method === 'DELETE' && /^\/api\/sessions\/[A-Za-z0-9._:-]{1,200}$/u.test(upstreamPath) && searchParams.size === 0
   if (deleting && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
