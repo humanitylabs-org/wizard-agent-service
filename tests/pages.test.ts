@@ -3,7 +3,8 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -238,6 +239,77 @@ describe('the Pages API', () => {
     expect(readFileSync(join(b.pages, 'new-doc', 'doc.md'), 'utf8')).toBe('# New')
     const versions = (await (await fetch(`${b.base}/wizard/v1/pages/new-doc/history`)).json()).versions
     expect(versions.map((v: any) => v.author)).toEqual(['owner'])
+  })
+})
+
+describe('review fixes (Codex P1s on #134)', () => {
+  it('refuses a save through a symlinked folder and writes nothing outside Pages', async () => {
+    const outside = tmp('wizard-pages-escape-')
+    const b = await box((files) => {
+      const dir = seed(files)
+      symlinkSync(outside, join(dir, 'linked'))
+      mkdirSync(join(dir, 'real'), { recursive: true })
+      symlinkSync(outside, join(dir, 'real', 'deeper'))
+    })
+    for (const file of ['linked/new.md', 'linked/sub/new.md', 'real/deeper/new.md']) {
+      const res = await json(b.base, `/wizard/v1/pages/q3-report/${file}`, 'PUT', { text: 'escaped', version: null })
+      expect([400, 404], file).toContain(res.status)
+    }
+    expect(readdirSync(outside)).toEqual([])
+    // A whole page folder that is a symlink is refused the same way.
+    symlinkSync(outside, join(b.pages, 'evil'))
+    expect([400, 404]).toContain((await json(b.base, '/wizard/v1/pages/evil/doc.md', 'PUT', { text: 'escaped', version: null })).status)
+    expect(readdirSync(outside)).toEqual([])
+    // Ordinary nested folders still work.
+    expect((await json(b.base, '/wizard/v1/pages/q3-report/real/notes.md', 'PUT', { text: 'fine', version: null })).status).toBe(200)
+  })
+
+  it('versions files a page .gitignore would hide, and restores them', async () => {
+    const b = await box((files) => seed(files, 'q3-report', { '.gitignore': '*.md\n*.html\n' }))
+    const read = await (await fetch(`${b.base}/wizard/v1/pages/q3-report/doc.md`)).json()
+    const saved = await json(b.base, '/wizard/v1/pages/q3-report/doc.md', 'PUT', { text: '# Q3\n\nv2\n', version: read.version })
+    expect(saved.status).toBe(200)
+    const versions = (await (await fetch(`${b.base}/wizard/v1/pages/q3-report/history?file=doc.md`)).json()).versions
+    expect(versions.map((v: any) => v.author)).toEqual(['owner', 'agent'])
+    const tracked = execFileSync('git', ['--git-dir', b.gitDir, 'ls-tree', '-r', '--name-only', 'HEAD']).toString()
+    expect(tracked).toContain('q3-report/index.html')
+    expect(tracked).not.toContain('.gitignore')
+    const back = await json(b.base, '/wizard/v1/pages/q3-report/restore', 'POST', { commit: versions[1].commit, file: 'doc.md' })
+    expect(back.status).toBe(200)
+    expect(readFileSync(join(b.pages, 'q3-report', 'doc.md'), 'utf8')).toBe('# Q3\n\nFirst draft.\n')
+  })
+
+  it('streams assets: HEAD never reads the body, GET returns exact bytes, ranges work', async () => {
+    const b = await box((files) => seed(files))
+    const big = join(b.pages, 'q3-report', 'assets', 'movie.mp4')
+    const chunk = Buffer.alloc(1024 * 1024)
+    for (let i = 0; i < chunk.length; i++) chunk[i] = i % 251
+    writeFileSync(big, Buffer.concat(Array(24).fill(chunk)))
+    const size = 24 * chunk.length
+    const sha = createHash('sha256').update(readFileSync(big)).digest('hex')
+    const get = await fetch(`${b.base}/pages/q3-report/assets/movie.mp4`)
+    expect(get.status).toBe(200)
+    expect(get.headers.get('content-length')).toBe(String(size))
+    expect(get.headers.get('content-type')).toBe('video/mp4')
+    expect(get.headers.get('accept-ranges')).toBe('bytes')
+    expect(createHash('sha256').update(Buffer.from(await get.arrayBuffer())).digest('hex')).toBe(sha)
+    const tag = get.headers.get('etag')!
+    expect((await fetch(`${b.base}/pages/q3-report/assets/movie.mp4`, { headers: { 'If-None-Match': tag } })).status).toBe(304)
+    const part = await fetch(`${b.base}/pages/q3-report/assets/movie.mp4`, { headers: { Range: 'bytes=10-19' } })
+    expect(part.status).toBe(206)
+    expect(part.headers.get('content-range')).toBe(`bytes 10-19/${size}`)
+    expect([...Buffer.from(await part.arrayBuffer())]).toEqual([10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+    expect((await fetch(`${b.base}/pages/q3-report/assets/movie.mp4`, { headers: { Range: `bytes=${size}-` } })).status).toBe(416)
+    // An unreadable file proves HEAD answers from stat alone (root can read anything, so skip there).
+    if (process.getuid?.() !== 0) {
+      chmodSync(big, 0o000)
+      try {
+        const head = await fetch(`${b.base}/pages/q3-report/assets/movie.mp4`, { method: 'HEAD' })
+        expect(head.status).toBe(200)
+        expect(head.headers.get('content-length')).toBe(String(size))
+        expect(head.headers.get('content-security-policy')).toBe(PAGES_CSP)
+      } finally { chmodSync(big, 0o644) }
+    }
   })
 })
 

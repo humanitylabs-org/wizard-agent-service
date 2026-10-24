@@ -19,7 +19,7 @@
 // page plant code that this service then runs. Every git call also ignores system and global config.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 
 export const PAGES_FOLDER = 'Pages'
@@ -141,6 +141,24 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
     } catch { return false }
   }
 
+  // A write target is safe only when every folder from the Pages folder down to its parent is a real
+  // directory (or not there yet) and the file itself, if present, is a plain file. A symlink anywhere on
+  // the way is refused, so `mkdir`/`rename` can never follow the agent's link out of the Pages folder.
+  const writable = (slug, file) => {
+    const target = pagePath(slug, file)
+    const parts = [slug, ...pageFileParts(file)]
+    let at = pagesRoot
+    if (existsSync(pagesRoot) && !statSync(pagesRoot).isDirectory()) throw new PagesError(404, 'page_not_found')
+    for (const [i, part] of parts.entries()) {
+      at = join(at, part)
+      let info
+      try { info = lstatSync(at) } catch (error) { if (error?.code === 'ENOENT') break; throw new PagesError(404, 'page_not_found') }
+      const last = i === parts.length - 1
+      if (info.isSymbolicLink() || (last ? !info.isFile() : !info.isDirectory())) throw new PagesError(404, 'page_not_found')
+    }
+    return target
+  }
+
   const threadOf = (slug) => {
     try { return str(JSON.parse(readFileSync(pagePath(slug, 'page.json'), 'utf8'))?.thread, 120) } catch { return '' }
   }
@@ -153,12 +171,23 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
     return `${lines.join('\n')}\n`
   }
 
+  // Stage every change under `spec` with only this service's own exclude list (dot files, editor scratch).
+  // Plain `git add` also honours a page's own `.gitignore`, so a page shipping `*.md` would silently drop
+  // doc.md from every commit; listing the paths without `--exclude-standard` and force-adding them skips
+  // in-tree ignore files while keeping our exclusions.
+  const stage = (spec) => {
+    const listed = gitText(['ls-files', '-z', '--others', '--modified', '--deleted', `--exclude-from=${join(historyDir, 'info', 'exclude')}`, '--', spec])
+    const paths = [...new Set(listed.split('\0').filter(Boolean))]
+    if (!paths.length) return
+    git(['--literal-pathspecs', 'add', '-A', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: `${paths.join('\0')}\0` })
+  }
+
   /** Commit whatever changed in the folder since the last commit (the agent's own file writes). */
   const sync = () => {
     if (!existsSync(pagesRoot)) return null
     ensure()
     if (watching) api.watch()
-    git(['add', '-A', '--', '.'])
+    stage('.')
     const changed = gitText(['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean)
     if (!changed.length) return null
     const slugs = [...new Set(changed.map(path => path.split('/')[0]))]
@@ -168,7 +197,7 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
   }
 
   const commitPaths = (who, verb, slug, files, extra = '') => {
-    git(['add', '-A', '--', slug])
+    stage(slug)
     const staged = gitText(['diff', '--cached', '--name-only', '-z', '--', slug]).split('\0').filter(Boolean)
     if (!staged.length) return headCommit()
     git(['commit', '-q', '--no-verify', '-F', '-', '--', slug], { input: message(verb, files.length ? files : staged, threadOf(slug), extra), env: identityEnv(who) })
@@ -191,6 +220,7 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
   const touchPageJson = (slug) => {
     const meta = readPageJson(slug)
     if (!meta) return
+    try { writable(slug, 'page.json') } catch { return }
     meta.updated = now().toISOString()
     writeAtomic(pagePath(slug, 'page.json'), `${JSON.stringify(meta, null, 2)}\n`)
   }
@@ -272,7 +302,7 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
       if (body.length > PAGE_TEXT_MAX_BYTES) throw new PagesError(413, 'page_file_too_large')
       const path = pagePath(slug, file)
       if (!EDITABLE.has(extname(path).toLowerCase())) throw new PagesError(415, 'not_a_text_file')
-      if (existsSync(pagePath(slug)) && !inside(pagePath(slug))) throw new PagesError(404, 'page_not_found')
+      writable(slug, file)
       sync()
       const current = existsSync(path) ? readFileSync(path) : null
       if (current && (!inside(path) || !lstatSync(path).isFile())) throw new PagesError(404, 'page_not_found')
@@ -288,6 +318,7 @@ export function createPages({ root, gitDir, watchDelayMs = 1500, now = () => new
         })
       }
       if (current && currentVersion === pageVersion(body)) return { slug, file, version: currentVersion, commit: headCommit(), changed: false }
+      writable(slug, file) // again, right before writing: sync() and the version check took time
       writeAtomic(path, body)
       ensure()
       if (file !== 'page.json') touchPageJson(slug)
@@ -407,12 +438,47 @@ export function servePage(request, response, url, pagesRoot) {
       path = pick
     }
     if (!info.isFile()) return fail(404, 'not_found')
-    const body = readFileSync(real)
-    const tag = `"${pageVersion(body)}"`
-    const headers = { ...base, 'Content-Type': TYPES[extname(path).toLowerCase()] || 'application/octet-stream', ETag: tag }
+    // Answer from stat and stream the body, so a large video or PDF never sits whole in memory and HEAD
+    // never opens the file. The ETag names this exact file state (inode, size, modification time).
+    const size = info.size
+    const tag = `"${info.ino.toString(16)}-${size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`
+    const headers = { ...base, 'Content-Type': TYPES[extname(path).toLowerCase()] || 'application/octet-stream', ETag: tag, 'Accept-Ranges': 'bytes', 'Last-Modified': info.mtime.toUTCString() }
     if (String(request.headers['if-none-match'] ?? '') === tag) { response.writeHead(304, headers); response.end(); return true }
-    response.writeHead(200, { ...headers, 'Content-Length': String(body.length) })
-    response.end(request.method === 'HEAD' ? undefined : body)
+    let start = 0
+    let end = size - 1
+    let status = 200
+    const range = String(request.headers.range ?? '')
+    const ifRange = request.headers['if-range']
+    if (range && (!ifRange || String(ifRange) === tag)) {
+      const match = /^bytes=(\d*)-(\d*)$/u.exec(range.trim())
+      if (match && (match[1] || match[2])) {
+        if (match[1]) { start = Number(match[1]); end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1 }
+        else { start = Math.max(0, size - Number(match[2])); end = size - 1 }
+        if (start > end || start >= size) {
+          response.writeHead(416, { ...base, 'Content-Range': `bytes */${size}`, 'Content-Length': '0' })
+          response.end()
+          return true
+        }
+        status = 206
+        headers['Content-Range'] = `bytes ${start}-${end}/${size}`
+      }
+    }
+    const length = size === 0 ? 0 : end - start + 1
+    if (request.method === 'HEAD' || length === 0) {
+      response.writeHead(status, { ...headers, 'Content-Length': String(length) })
+      response.end()
+      return true
+    }
+    const stream = createReadStream(real, { start, end })
+    stream.once('open', () => {
+      response.writeHead(status, { ...headers, 'Content-Length': String(length) })
+      stream.pipe(response)
+    })
+    stream.once('error', () => {
+      if (!response.headersSent) fail(404, 'not_found')
+      else response.destroy()
+    })
+    response.once('close', () => stream.destroy())
     return true
   } catch { return fail(404, 'not_found') }
 }
