@@ -162,6 +162,11 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     const saved = settings()
     const base = { step: 'unavailable', auth_url: null, https_enable_url: null, wizard_url: null, device_name: null, phones: [], install_url: INSTALL_URL, error }
     if (!status) {
+      // A helper's clean stop can unlink its socket too. Saved enrollment is evidence
+      // this is NOT an unmanaged host, so never reclassify its stale address as ready.
+      if (absent && (saved.setup.phone_started_at || (saved.access.tailscale.origin && !accessPinned))) {
+        return { ...base, error: error || 'helper_unreachable' }
+      }
       // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner
       // runs Tailscale themselves) and network.base_url names that address: the phone can connect today, so
       // show the address and QR instead of "phone setup isn't available".
@@ -245,11 +250,10 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       // Host-managed private access is already configured outside Setup. Use the same validated
       // readiness as the phone screen, without pretending we have actually seen a phone.
       let ready = false
-      // A recorded Setup enrollment means the helper owns access: if its socket is gone, the saved
-      // address may be stale, so only boxes that never enrolled through the helper count as host-managed.
-      if (!saved.access.tailscale.origin && (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url))) {
-        const { status, error, absent } = await statusOrNull()
-        const phone = view(status, error, absent)
+      if (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url)) {
+        // The summary must not wait for a possibly hung helper (the shell's launch budget is 2.5 s).
+        // A present socket is never host-managed, whether it is healthy or currently unreachable.
+        const phone = view(null, null, !existsSync(socketPath))
         // This flag is a checklist-copy hint for ready-but-not-yet-seen, not a general capability.
         // Once a phone was seen, preserve the existing "connected" checklist state/copy instead.
         ready = phone.managed === 'host' && phone.step === 'serving'
@@ -305,9 +309,7 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     noteOwnerRequest(request) {
       if (!mobileUserAgent(request)) return
       const saved = settings()
-      // Environment-pinned access (alongside installs) never writes access.tailscale.origin, but the
-      // verifier already proved this is the owner on the tailnet, so the visit still counts.
-      if (saved.setup.phone_seen_at || !(saved.access.tailscale.origin || accessPinned)) return
+      if (saved.setup.phone_seen_at || (!saved.access.tailscale.origin && !accessPinned)) return
       serial(async () => {
         const again = settings()
         if (!again.setup.phone_seen_at && (again.access.tailscale.origin || accessPinned)) markSetup('phone_seen_at', nowIso(now))
