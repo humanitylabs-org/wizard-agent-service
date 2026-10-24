@@ -5534,7 +5534,8 @@ function buildWizardServer(options, lifetime) {
             }
             if (request.method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) && agentResolution.body) {
               const value = JSON.parse(agentResolution.body.toString('utf8'))
-              if (value.wizard_file_ids) {
+              if (Array.isArray(value.wizard_file_ids) && value.wizard_file_ids.some(id => typeof id === 'string' && id.startsWith('af_'))) {
+                if (principalOf(request).kind !== 'owner') throw new UploadError(403, 'owner_required')
                 await resolveShareAgent(agentResolution.agentId, { delivering: true })
                 if (inputContainsMarker(value.input)) throw new UploadError(400, 'reserved_file_marker')
                 const files = shareRouting.filesForAgent(agentResolution.agentId, value.wizard_file_ids).map(({ file }) => ({
@@ -5957,11 +5958,10 @@ function buildWizardServer(options, lifetime) {
         if (!file.startsWith(`${uxDir}${sep}`) || !existsSync(file) || !(await stat(file)).isFile()) { sendJson(response, 404, { error: 'not_found' }); return }
         const details = await stat(file)
         // Wizard UX plays recorded audio and shows blob: images (voice, attachments), so its pages
-        // get the shell's own policy rather than the legacy client's. frame-ancestors 'self': the shell opens its
-        // own Store/System pages as windows; other origins and opaque-origin (sandboxed) app documents can't frame them.
+        // get the shell's own media policy; only nested app documents can be framed, never the outer shell.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src ${appFrameSources}; frame-ancestors 'self'`,
+          'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src ${appFrameSources}; frame-ancestors 'none'`,
           'X-Robots-Tag': 'noindex, nofollow',
         }
         // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
