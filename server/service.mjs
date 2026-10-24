@@ -33,7 +33,7 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -48,6 +48,7 @@ import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
+import { createSkins, SkinsError } from './skins.mjs'
 import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
@@ -69,6 +70,8 @@ import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isA
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
+import { readArchivedSessions } from './archived-sessions.mjs'
+export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 // Marks a request that arrived on the dedicated Tailscale Serve listener (createTailnetIngress). A symbol
@@ -405,31 +408,6 @@ export function readSessionArchived(sessionDbPath, sessionId) {
   }
 }
 
-export function readArchivedSessions(sessionDbPath) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    return database.prepare(`
-      SELECT id, source, model, title, started_at, ended_at, end_reason,
-             message_count, parent_session_id, last_activity_at AS last_active,
-             pinned, archived, hidden
-        FROM sessions
-       WHERE archived = 1
-         AND hidden = 0
-         AND parent_session_id IS NULL
-         AND message_count > 0
-       ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
-    `).all().map((session) => ({
-      ...session,
-      pinned: Boolean(session.pinned),
-      archived: Boolean(session.archived),
-      hidden: Boolean(session.hidden),
-    }))
-  } finally {
-    database.close()
-  }
-}
 
 export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return null
@@ -2041,6 +2019,12 @@ export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, lega
 // localhost app origins), and an Origin, when present, must be this host.
 // On the box-local listener a trusted local proxy may forward the browser-facing Host as X-Forwarded-Host (as
 // for /wizard/thread-dispositions); requests through Serve are judged on their own Host only.
+function skinOriginRefused(request) {
+  if (['cross-site', 'same-site'].includes(request.headers['sec-fetch-site'])) return true
+  if (!request.headers.origin) return false
+  try { return new URL(request.headers.origin).host !== (request.headers['x-forwarded-host'] || request.headers.host) } catch { return true }
+}
+
 function setupWriteRefusal(request, tailnetIngress) {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return 415
   const site = request.headers['sec-fetch-site']
@@ -2055,6 +2039,28 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+// The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
+// (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+export function scheduleNotifier({ bridge, appsJsonPath }) {
+  const pick = () => {
+    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+    let chosen = ''
+    try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
+    const running = providers.filter(app => app.status === 'running')
+    return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
+  }
+  return {
+    available: () => pick()?.status === 'running',
+    send: async ({ title, message }) => {
+      const app = pick()
+      if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      if (!result || result.isError) throw new Error('notify failed')
+      return { app: app.id }
+    },
+  }
+}
+
 // The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
@@ -3938,9 +3944,9 @@ function buildWizardServer(options, lifetime) {
     }
   })()
 
-  const safeQueueValue = (value, record) => {
+  const safeQueueValue = (value, record, raw = false) => {
     let result = Buffer.from(JSON.stringify(value))
-    result = projectStatusMarkers(result)
+    if (!raw) result = projectStatusMarkers(result)
     result = projectWizardFileMarkers(result)
     const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
     if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
@@ -3949,8 +3955,11 @@ function buildWizardServer(options, lifetime) {
     return JSON.parse(result.toString('utf8'))
   }
 
-  const safeQueuedRunPayload = (record) => safeQueueValue(runQueue.publicPayload(record), record)
-  const sendQueuedRun = (response, status, record, headers = {}) => sendJson(response, status, safeQueuedRunPayload(record), headers)
+  const safeQueuedRunPayload = (record, raw = false) => safeQueueValue(runQueue.publicPayload(record), record, raw)
+  const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
+  // The scheduler's own read of a `deliver: notification` run: its answer ends in [SILENT] (quiet thread), so the
+  // display scrub would erase the notification text. Internal token only; owners always get the scrubbed view.
+  const scheduleRawRead = (request) => request.headers['x-wizard-schedule-raw'] === '1' && internalCall(request)
 
   const streamQueuedRunEvents = async (initialRecord, operator, request, response) => {
     const queuedPayload = safeQueuedRunPayload(initialRecord)
@@ -4178,10 +4187,10 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '') => {
+  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
@@ -4239,12 +4248,14 @@ function buildWizardServer(options, lifetime) {
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
       if (!selfOrigin) return null
       const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
-        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
+        headers: { 'X-Wizard-Internal-Token': internalToken, ...(occurrence.deliver === 'notification' ? { 'X-Wizard-Schedule-Raw': '1' } : {}) }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
       })
       if (!result.ok) { await result.body?.cancel(); return null }
       return result.json()
@@ -4265,6 +4276,13 @@ function buildWizardServer(options, lifetime) {
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+      }
+      // A notification job's own thread is history, not a chat: hidden from Chats. If the slot was down and this
+      // occurrence falls back to the thread, the thread is shown again so the alert is still seen.
+      if ((occurrence.deliver === 'notification' || occurrence.fallback) && occurrence.thread.startsWith('wizard_schedule_')) {
+        const hidden = occurrence.deliver === 'notification'
+        const marked = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, { hidden }, '', 'PATCH')
+        if (!marked.ok) throw Object.assign(new Error('schedule thread visibility failed'), { status: marked.status })
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
@@ -4293,6 +4311,13 @@ function buildWizardServer(options, lifetime) {
   // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
   const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
   if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
+  const skins = options.mySkin === false ? null : createSkins({
+    root: options.userFilesRoot || options.mediaRoot || '',
+    stateDir: options.skinsStateDir || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'skins') : join(bridgeOsHome || wizardOsHome(), 'skins')),
+    ...(options.skins || {}),
+  })
+  // Lazy migration keeps unavailable/symlinked Files roots from preventing service startup.
+  try { skins?.migrate() } catch { /* API reads report unavailable; the shell still renders */ }
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -4696,7 +4721,7 @@ function buildWizardServer(options, lifetime) {
         let patch
         if (request.method === 'PUT') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
-          try { patch = JSON.parse((await readBoundedBody(request, 32768)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
+          try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
           sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
@@ -4710,6 +4735,44 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
+      }
+      if (url.pathname === '/wizard/v1/skins' || url.pathname.startsWith('/wizard/v1/skins/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (!skins) { sendJson(response, 503, { error: 'skins_unavailable' }); return }
+        try {
+          const route = url.pathname.slice('/wizard/v1/skins'.length)
+          const action = /^\/([^/]+)\/(pack|publish)$/.exec(route)
+          const blob = /^\/store\/blob\/([a-f0-9]{64})$/.exec(route)
+          const allowed = route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || action ? ['POST'] : []
+          if (!allowed.length) { sendJson(response, 404, { error: 'not_found' }); return }
+          if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
+          let input = {}
+          if (request.method !== 'GET') {
+            if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+            try { input = JSON.parse((await readBoundedBody(request, 768 * 1024)).toString('utf8')) } catch (e) { throw new SkinsError(e?.status === 413 ? 413 : 400, e?.status === 413 ? 'body_too_large' : 'invalid_request') }
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SkinsError(400, 'invalid_request')
+          }
+          let output
+          if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css })
+          else if (route === '/active') output = skins.setActive(input.id)
+          else if (route === '/store') output = await skins.store({ refresh: url.searchParams.get('refresh') === '1', authors: url.searchParams.get('authors') || '' })
+          else if (blob) {
+            const value = await skins.blob(blob[1])
+            response.writeHead(200, { 'Content-Type': value.mime, 'Content-Length': String(value.body.length), 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" })
+            response.end(value.body); return
+          }
+          else if (route === '/store/add') output = await skins.add(input.a)
+          else if (route === '/store/report') output = await skins.report(input)
+          else if (action) {
+            let id
+            try { id = decodeURIComponent(action[1]) } catch { throw new SkinsError(400, 'invalid_skin_id') }
+            output = action[2] === 'pack' ? await skins.pack(id, input) : await skins.publish(id, input.event)
+          }
+          sendJson(response, 200, output, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, error instanceof SkinsError ? error.status : 503, { error: error instanceof SkinsError ? error.code : 'skins_unavailable' }) }
+        return
       }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -4741,12 +4804,7 @@ function buildWizardServer(options, lifetime) {
         // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
         // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        if (request.headers.origin) {
-          let host
-          try { host = new URL(request.headers.origin).host } catch { host = '' }
-          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
         try {
           if (request.method === 'DELETE') mySkin.reset()
@@ -5449,7 +5507,7 @@ function buildWizardServer(options, lifetime) {
         }
         if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
           await runQueue.tick(true)
-          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId))
+          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId), {}, scheduleRawRead(request))
           return
         }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop' && !queuedProxyRecord.upstreamRunId) {
@@ -5798,7 +5856,8 @@ function buildWizardServer(options, lifetime) {
           // the existing marker/media/shareability projection order.
           const historySource = result
           result = projectWizardFileMarkers(result, messageHistory)
-          if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
+          const scheduleRaw = !messageHistory && scheduleRawRead(request)
+          if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
