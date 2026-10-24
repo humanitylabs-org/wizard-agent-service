@@ -116,12 +116,13 @@ const messageProbe = (text) => {
   const raw = typeof text === 'string' ? text : Array.isArray(text)
     ? text.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text).join('\n') : ''
   const words = raw.split('[WIZARD_FILES_V1]')[0].replace(/\s+/g, ' ').trim()
-  return (words || raw.replace(/\s+/g, ' ').trim()).slice(0, 200)
+  return words || raw.replace(/\s+/g, ' ').trim()
 }
 
 /**
  * Pending steer replay guard: true when the thread already holds a user turn carrying the steer's
  * text since the steered run started (the owner resent it by hand), other than the run's own request.
+ * Main and routed agents share it; `request` is that agent's own authenticated history read.
  * Hermes injects a consumed steer into a tool result, never as a user row, so a user row means a resend.
  */
 export async function readSteerResentHttp(request, sessionId, startedAt, steerText, originalText = '') {
@@ -133,7 +134,8 @@ export async function readSteerResentHttp(request, sessionId, startedAt, steerTe
     if (Number(row?.timestamp ?? 0) < since) break
     if (row?.role !== 'user') continue
     const text = messageProbe(row?.content)
-    if (text && text !== original && text.includes(probe)) return true
+    // Equal words only: a short steer ("yes") must never match an unrelated turn ("yesterday's report").
+    if (text && text !== original && text === probe) return true
   }
   return false
 }

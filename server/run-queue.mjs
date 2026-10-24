@@ -95,10 +95,11 @@ const queuedInputText = (value) => {
 // The undelivered steer Hermes returns on a terminal run, or '' when there is none.
 export const pendingSteerText = (payload) => (typeof payload?.pending_steer === 'string' ? payload.pending_steer.trim() : '')
 
-// Comparable form of a message: its words before any Wizard file block, whitespace collapsed.
+// Comparable form of a message: its words before any Wizard file block, whitespace collapsed. Two
+// messages are the same only when these are equal (never a substring: "yes" is not "yesterday").
 export const steerProbe = (text) => {
   const words = String(text ?? '').split('[WIZARD_FILES_V1]')[0].replace(/\s+/g, ' ').trim()
-  return (words || String(text ?? '').replace(/\s+/g, ' ').trim()).slice(0, 200)
+  return words || String(text ?? '').replace(/\s+/g, ' ').trim()
 }
 
 // Files the steer attached that are not the owner's visible files stay redacted in the replay's output.
@@ -606,6 +607,12 @@ export class DurableRunQueue {
     }
   }
 
+  _notePendingSteer(record, status, payload) {
+    if (!TERMINAL.has(status) || !pendingSteerText(payload)) return
+    this.database.prepare("INSERT OR IGNORE INTO wizard_pending_steer_replay(public_run_id, state, at) VALUES(?, 'pending', ?)")
+      .run(record.publicRunId, nowSeconds())
+  }
+
   pendingSteerReplay(publicRunId) {
     return this.database.prepare('SELECT * FROM wizard_pending_steer_replay WHERE public_run_id = ?').get(publicRunId) ?? null
   }
@@ -640,7 +647,7 @@ export class DurableRunQueue {
       const probe = steerProbe(text)
       const resent = this.database.prepare(`SELECT body FROM wizard_run_queue WHERE runtime = ? AND session_id = ?
         AND created_at > ? AND idempotency_key <> ?`).all(record.runtime, record.sessionId, record.createdAt, key)
-        .some(row => steerProbe(queuedInputText(parseJson(row.body, {}))).includes(probe))
+        .some(row => steerProbe(queuedInputText(parseJson(row.body, {}))) === probe)
       if (resent) { finish('skipped', 'already_resent'); continue }
       if (this.steerDelivered) {
         let delivered
@@ -747,10 +754,7 @@ export class DurableRunQueue {
         this.database.prepare("INSERT OR IGNORE INTO wizard_interrupt_recovery(public_run_id, state, at) VALUES(?, 'pending', ?)")
           .run(record.publicRunId, nowSeconds())
       }
-      if (TERMINAL.has(capacityStatus) && pendingSteerText(nextPayload)) {
-        this.database.prepare("INSERT OR IGNORE INTO wizard_pending_steer_replay(public_run_id, state, at) VALUES(?, 'pending', ?)")
-          .run(record.publicRunId, nowSeconds())
-      }
+      this._notePendingSteer(record, capacityStatus, nextPayload)
       return this._update(record.publicRunId, {
         status: capacityStatus,
         payload: nextPayload,
@@ -773,6 +777,8 @@ export class DurableRunQueue {
       const payload = record.runtime === 'direct' ? normalizeProviderPreflightFailure(result?.payload) : result?.payload
       if (payload !== result?.payload) { result.payload = payload; result.capacityStatus = 'failed' }
       const status = safeStatus(result?.capacityStatus ?? result?.status ?? result?.payload?.status)
+      // An idempotent re-admission can answer with the run already finished: never refreshed again.
+      this._notePendingSteer(record, status, result?.payload)
       current = this._update(record.publicRunId, {
         status,
         upstreamRunId: String(result?.upstreamRunId ?? ''),

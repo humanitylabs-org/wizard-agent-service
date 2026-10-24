@@ -162,6 +162,43 @@ describe('a steer the run never consumed', () => {
     expect(queue.pendingSteerReplay(record.publicRunId)).toMatchObject({ state: 'skipped', reason: 'owner_stopped' })
   })
 
+  it('a short steer is not mistaken for a newer turn that merely contains it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wizard-pending-steer-'))
+    directories.push(directory)
+    const upstream: Upstream = new Map()
+    const launched: Array<{ key: string, body: string }> = []
+    const queue = serviceProcess(join(directory, 'q.sqlite3'), upstream, launched, { delivered: () => false })
+    await queue.initialize()
+    const { record } = await queue.admit(send('wizard_thread', 'wos-1', 'first'))
+    await queue.admit(send('wizard_thread', 'wos-2', "yesterday's report"))
+    Object.assign(upstream.get('run_1')!, { status: 'completed', output: 'done', pending_steer: 'yes' })
+    await queue.tick(true)
+    expect(queue.pendingSteerReplay(record!.publicRunId)).toMatchObject({ state: 'admitted' })
+  })
+
+  it('captures a pending steer on a run that is already terminal when admission answers', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wizard-pending-steer-'))
+    directories.push(directory)
+    const launched: string[] = []
+    const queue = new DurableRunQueue({
+      statePath: join(directory, 'q.sqlite3'), maxActive: 8, pollIntervalMs: 0,
+      activeSessionIds: async () => [], canDispatch: () => true, steerDelivered: async () => false,
+      // A lost admission receipt retried with the same key: Hermes answers with the finished run.
+      launch: async (record) => {
+        launched.push(record.idempotencyKey)
+        return launched.length === 1
+          ? { upstreamRunId: 'run_1', status: 'completed', payload: { status: 'completed', run_id: 'run_1', output: 'done', pending_steer: 'and the disk' } }
+          : { upstreamRunId: 'run_2', status: 'running', payload: { status: 'running', run_id: 'run_2' } }
+      },
+      lookup: async (record) => ({ capacityStatus: 'running', payload: { status: 'running', run_id: record.upstreamRunId } }),
+    })
+    queues.push(queue)
+    await queue.initialize()
+    const { record } = await queue.admit(send('wizard_thread', 'wos-1', 'first'))
+    await queue.tick(true)
+    expect(launched).toEqual(['wos-1', PENDING_STEER_REPLAY_PREFIX + record!.publicRunId])
+  })
+
   it('does nothing for a run that ends without a pending steer', async () => {
     const t = await steeredRunFinishes({ delivered: () => false }, '')
     expect(t.launched).toHaveLength(1)
@@ -197,6 +234,11 @@ describe('readSteerResentHttp', () => {
       { role: 'user', content: 'Please try to SSH via Tailscale.\n\n[WIZARD_FILES_V1]\n[]\n[/WIZARD_FILES_V1]', timestamp: 120 },
     )
     expect(await readSteerResentHttp(request, 'wizard_thread', 99, VOICE, 'Check the mail server')).toBe(true)
+  })
+
+  it('never matches a turn that only contains the steer\'s words', async () => {
+    const request = rows({ role: 'user', content: "yesterday's report", timestamp: 120 })
+    expect(await readSteerResentHttp(request, 'wizard_thread', 99, 'yes', 'first')).toBe(false)
   })
 
   it('does not count the steered run\'s own request, older turns or tool rows', async () => {
