@@ -187,6 +187,11 @@ server = createWizardServer({
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
+  // Pages (spec/PAGES.md): <Files root>/Pages/ served at /pages/, history in <state>/pages-history.git.
+  // WIZARD_PAGES_ROOT / WIZARD_PAGES_GIT_DIR override the two paths; WIZARD_PAGES=off turns Pages off.
+  ...(process.env.WIZARD_PAGES_ROOT ? { pagesRoot: process.env.WIZARD_PAGES_ROOT } : {}),
+  ...(process.env.WIZARD_PAGES_GIT_DIR ? { pagesGitDir: process.env.WIZARD_PAGES_GIT_DIR } : {}),
+  ...(process.env.WIZARD_PAGES === 'off' ? { pages: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).
