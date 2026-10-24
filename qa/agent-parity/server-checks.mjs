@@ -17,6 +17,17 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'chats-spaces': async s => {
+    const space = { id: 'parity-space', name: 'Synthetic Space', threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
+    const put = spaces => s.raw('/wizard/v1/ui-preferences', { ...post({ spaces }), method: 'PUT' })
+    assert.equal((await put([space])).status, 200)
+    await s.restart()
+    const prefs = await (await s.raw('/wizard/v1/ui-preferences')).json()
+    assert.deepEqual(prefs.spaces, [space])
+    assert.equal((await put([])).status, 200)
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [])
+    assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
+  },
   'nonimage-files': async s => {
     const bytes = Buffer.from('PARITY_DOCUMENT_UNDISCLOSED_TOKEN\n')
     const r = await s.upload(bytes, 'fixture.txt', 'text/plain'); assert.equal(r.status, 201)
