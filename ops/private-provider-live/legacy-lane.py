@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""pp-legacy-fix single shared-lease attempt, always resetting pp-rig."""
+import importlib.util,sys,json,subprocess,traceback,time,hashlib
+from pathlib import Path
+L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live')
+s=importlib.util.spec_from_file_location('prep',L/'rig-prepare.py');assert s and s.loader
+m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
+key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
+receipt={'lane':'pp-legacy-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Fixture-generated session IDs force strict collision scans of the absent main Hermes origin; server-minted IDs avoid that invalid prerequisite. Confirmed in focused tests on main and #161-derived tooling; rig comparison pending.','tooling_commit':'c309268','repair_attempt':1}
+def save():
+ (L/'REHEARSAL-LEGACY-FIX.json').write_text(json.dumps(receipt,indent=2)+'\n')
+def phase(name,args,payload=None):
+ p=subprocess.run([sys.executable,*args],input=payload,capture_output=True)
+ log=L/('legacy-fix-'+name+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
+ print(name,'passed' if p.returncode==0 else 'failed',flush=True)
+ if p.returncode:raise RuntimeError('phase failed: '+name+'; see private log')
+ return p.stdout.decode()
+def host(name,*args,payload=None):return phase(name,[str(L/'rig-rehearse-3.py'),*args],payload)
+def extra(name,*args):return phase(name,[str(L/'legacy-host.py'),'legacy-extra.py',*args])
+save()
+try:
+ host('setup','setup-resume')
+ r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/legacy-extra.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'legacy-extra.py').read_bytes())
+ r.python("from pathlib import Path; r=Path('/home/rig/pp-launch-3'); names=['minted-session','baseline-start','baseline-prepared','chat-pp-test-legacy','run-pp-test-legacy','trigger-pp-test-legacy','trigger-pp-test-probe','trigger-pp-test-other','legacy-checkpoint','migration','privacy','install','provider-connected','probe-created','d-verified','e-verified','f-verified'];[(r/(n+'.json')).unlink(missing_ok=True) for n in names]")
+ host('key','key',payload=key);key=b''
+ phase('diagnose',[str(L/'legacy-host.py'),'legacy-diagnose.py'])
+ host('legacy-chat','chat','pp-test-legacy');receipt['checks']['a']='passed';receipt['root_cause_rig_log']='legacy-fix-diagnose.log';save()
+ host('install','install');host('connect','connect');receipt['checks']['b']='passed';save()
+ host('create-probe','create-probe')
+ # No legacy key may remain in any container or state while scanning the sealed fixture.
+ host('quarantine','quarantine-legacy-key')
+ host('privacy','privacy');receipt['checks']['c']='passed';receipt['privacy_checks_passed']=6;save()
+ host('migrate','migrate');extra('verify-migrated','verify-migrated');receipt['checks']['d']='passed';save()
+ # Regression needs the installed provider; removal is deliberately the last destructive check.
+ extra('regression','regression');receipt['checks']['f']='passed';save()
+ extra('remove','remove');receipt['checks']['e']='passed';receipt['status']='passed';save()
+except Exception as e:
+ receipt['status']='blocked';receipt['blocker']=str(e);save();print('BLOCKED',str(e),flush=True)
+finally:
+ key=b''
+ try:
+  phase('reset',[str(L/'rig-reset-3.py')]);receipt['reset']=json.loads((L/'RESET-3.json').read_text())
+ except Exception as e:receipt['reset_error']=str(e);receipt['status']='blocked'
+ try:
+  raw=r.python("from pathlib import Path;import json; r=Path('/home/rig/pp-launch-3'); names=['baseline-start','chat-pp-test-legacy','install','provider-connected','privacy','legacy-checkpoint','migration','d-verified','e-verified','f-verified']; print(json.dumps({n:json.loads((r/(n+'.json')).read_text()) for n in names if (r/(n+'.json')).exists()}))")
+  receipt['evidence']=json.loads(raw)
+  if 'privacy' in receipt['evidence']:receipt['privacy_checks_passed']=receipt['evidence']['privacy']['privacy_checks_passed']
+ except Exception as e:receipt['evidence_error']=str(e)
+ save()
+print(json.dumps(receipt,indent=2),flush=True)
+assert receipt['status']=='passed' and all(v=='passed' for v in receipt['checks'].values())

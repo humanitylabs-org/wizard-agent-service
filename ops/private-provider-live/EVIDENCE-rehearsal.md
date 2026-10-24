@@ -1,6 +1,16 @@
 # Private-provider launch rehearsal — BLOCKED
 
-## Current lane: pp-rehearsal-3 — BLOCKED after two baseline repairs
+## Current lane: pp-legacy-fix — fixture repaired; rig acceptance in progress
+
+- Tooling repair pushed as `c309268` on `ops/private-providers-live-run`. No backend change was made to #161.
+- Focused actual regression reproduces the original `503 agent_unavailable` / `agent.history` with an invented session id and an unavailable main upstream. The same regression passes on main `9a59bcd` and #161-derived tooling: canonical server-minted session creation followed by a routed run is accepted. The rig provisioner points main at `127.0.0.1:8642` but does not start a main Hermes there; fabricated ids unnecessarily invoke its strict cross-agent collision lookup.
+- Replaced hand-written legacy agent creation with the product create API, and changed both paid-turn adapters to create a canonical session without supplying an id before using its returned id. No history-admission policy was weakened. Added fail-closed adapter coverage and removal of bearer-bearing pcaps during final reset.
+- Executed checks: focused Node suites **14/14 passed** (including unchanged legacy compatibility and provider launch suites); the unavailable-main regression on main **1/1 passed**; Python host-wrapper/adapter/orchestration/projection suites **19/19 passed**. These are synthetic unit proofs, not paid inference or privacy acceptance.
+- On Thales, exact-pinned setup succeeded as uid1000; all three cached runtime/provider images were reused only after exact copied-source hash verification. The provider key was piped from VPS stdin to the disposable guest only, never printed or written to Thales disk.
+- Shared-worker contention intervened between setup/key and diagnostics. Cancelled only the childless diagnostic lock waiter and consolidated the complete a–f attempt plus `finally` reset into a single direct `run-locked.py` invocation (`legacy-lane.py`). It is waiting for that lease; do not start a duplicate. The runner writes `REHEARSAL-LEGACY-FIX.json` and per-phase private logs on Thales.
+- Fresh rig check a is **PENDING**, b–f are **NOT RUN**, privacy acceptance **0/6** so far. The old `RESET-3.json` is not a reset receipt for this ongoing lane: the guest currently has an attempt-scoped key until the single-lease runner performs its guarded final reset. No live mutation, protected VPS service restart, Private data read, or Private message occurred.
+
+## Previous lane: pp-rehearsal-3 — BLOCKED after two baseline repairs
 
 - Authorized route for this helper is the direct shared `run-locked.py` worker lease on Thales; no durable-helper admission is attempted. Other threads' VMs are untouched.
 - Parent preparation completed: exact live amd64 WAM image and daemon-source hash match, owner uid1000 and all recorded root-owned/writability metadata match. `RIG-PREPARATION.json` is preparation-only evidence, not acceptance.
