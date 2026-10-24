@@ -141,6 +141,9 @@ describe('standard-agent shared state', () => {
     writeFileSync(file, JSON.stringify(record))
     f.write(a.id, 'memories/MEMORY.md', `${kind}-memory-marker`)
     expect(f.value(await f.call('memory_read', a.id)).memory).toBe(`${kind}-memory-marker`)
+    // Hand-editing isolation leaves harness files stale; settle that first so only the silo toggle is measured.
+    await f.registry.update(a.id, {})
+    Object.assign(record, JSON.parse(readFileSync(file, 'utf8')))
     f.runtime.apply.mockClear()
     await f.registry.update(a.id, { permissions: { shared_with_agents: false } })
     expect((await f.call('memory_read', a.id)).isError).toBe(true)
