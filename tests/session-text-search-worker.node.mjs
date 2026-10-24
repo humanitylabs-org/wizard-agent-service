@@ -27,7 +27,9 @@ test('single indexed pass covers all approved roots past 200; visibility and cro
   try {
     const expected=searchHermesSessionText(f.path,f.ids,'needle')
     const actual=await searchHermesSessionTextAsync(f.path,f.ids,'needle')
-    assert.deepEqual([...actual],[...expected]); assert.equal(actual.size,210)
+    // Snippets for the 60 threads with the newest match; ids past position 200 are reachable (newest rows here).
+    assert.deepEqual([...actual],[...expected]); assert.equal(actual.size,60); assert.equal(actual.partial,true)
+    assert(actual.has('wizard_fixture_209'))
     assert(!actual.has('other-agent')); assert([...actual.values()].every(t=>t==='owner-visible needle'))
     assert.equal((await searchHermesSessionTextAsync(f.path,f.ids,'privateword')).size,0)
     assert.equal((await searchHermesSessionTextAsync(f.path,['other-agent'],'privateword')).size,1)
@@ -40,7 +42,7 @@ test('bounded admission and recovery across independent client scopes',async()=>
     const jobs=Array.from({length:17},(_,i)=>searchHermesSessionTextAsync(f.path,f.ids,`absent-${i}`,`client-${i}`))
     await assert.rejects(searchHermesSessionTextAsync(f.path,f.ids,'overflow','overflow'),e=>e.status===503)
     assert((await Promise.all(jobs)).every(h=>h.size===0))
-    assert.equal((await searchHermesSessionTextAsync(f.path,f.ids,'needle')).size,210)
+    assert.equal((await searchHermesSessionTextAsync(f.path,f.ids,'needle')).size,60)
   }finally{f.close()}
 })
 test('isolated indexed search leaves HTTP event loop runnable and deduplicates reads',async()=>{
@@ -66,7 +68,7 @@ test('latest wins drops queued predecessors only for the same client',async()=>{
     const older=searchHermesSessionTextAsync(f.path,f.ids,'absent-two','client')
     const rejected=assert.rejects(older,e=>e.status===503&&/superseded/.test(e.message))
     const newest=searchHermesSessionTextAsync(f.path,f.ids,'needle','client')
-    await rejected; await first; assert.equal((await newest).size,210)
+    await rejected; await first; assert.equal((await newest).size,60)
   }finally{f.close()}
 })
 test('injected recall is never matched or exposed by bounded snippets',()=>{
