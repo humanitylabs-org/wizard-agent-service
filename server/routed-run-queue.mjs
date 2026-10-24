@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { DurableRunQueue } from './run-queue.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8 }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -29,7 +29,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:JSON.stringify(input)})
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
-        lookup:async record=>({payload:await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)}),
+        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(payload.status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },
       })
       const ready = queue.initialize()
       entries.set(agent.id,{queue,ready,direct})

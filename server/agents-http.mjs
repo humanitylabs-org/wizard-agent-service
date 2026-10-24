@@ -269,6 +269,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
     if (method === 'PATCH') {
       const body = await readJson(ctx, request)
       assertPrivacyChange(request, body)
+      if (Object.hasOwn(body, 'hidden') && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'agent.hidden')
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
@@ -661,6 +662,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (secrets.some((secret) => result.includes(Buffer.from(secret)))) { sendJson(response, 502, { error: 'unsafe_upstream_response', check: 'agent.response' }); return }
   if (upstream.ok && contentType.includes('application/json')) {
     const info = registry.threadAgent(agent)
+    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) {
+      const run = JSON.parse(result.toString('utf8'))
+      if (!['queued', 'running', 'waiting', 'paused'].includes(run.status)) ctx.routedPresentation?.fileStatus(agent, run.session_id || registry.runThread?.(agent.id, runIdFromPath(upstreamPath))?.session_id, parseStatus(run.output))
+    }
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
         const admission = JSON.parse(result.toString('utf8'))

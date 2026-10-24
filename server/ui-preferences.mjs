@@ -8,7 +8,8 @@ export const UI_PREFERENCES_MAX_BYTES = 5 * 1024 * 1024
 const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}$/
 const SPACE_ID = /^[a-z0-9-]{1,48}$/
 const validSpace = s => !!s && typeof s === 'object' && !Array.isArray(s)
-  && Object.keys(s).length === 4 && ['id', 'name', 'threads', 'createdAt'].every(k => Object.hasOwn(s, k))
+  && Object.keys(s).every(k => ['id', 'name', 'threads', 'createdAt', 'agent'].includes(k)) && ['id', 'name', 'threads', 'createdAt'].every(k => Object.hasOwn(s, k))
+  && (!Object.hasOwn(s, 'agent') || (typeof s.agent === 'string' && /^[a-z0-9][a-z0-9-]{0,47}(?![\s\S])/u.test(s.agent)))
   && typeof s.id === 'string' && SPACE_ID.test(s.id)
   && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(s.name)
   && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length
