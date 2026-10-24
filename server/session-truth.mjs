@@ -142,16 +142,22 @@ export function createHermesTextSearcher(path) {
       const version=db.prepare('PRAGMA data_version').get().data_version
       if(version!==dataVersion) { bodies.clear(); bodyBytes=0; dataVersion=version }
       const start = performance.now()
+      // Newest 8,000 matching messages only: each is a random lookup in a 30 GB store, and a common 3-letter word
+      // ("nos": 30k rows) blew the deadline. Older matches still come from titles; the response says partial.
       candidates ||= db.prepare(`WITH c AS MATERIALIZED (
-        SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 50000
+        SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 8000
       ) SELECT m.session_id AS session_id, m.id AS id, (SELECT count(*) FROM c) AS candidate_count
         FROM c JOIN messages m ON m.id=c.id JOIN temp.wizard_roots r ON r.session_id=m.session_id
         WHERE m.role IN ('user','assistant')
         UNION ALL SELECT NULL,NULL,count(*) FROM c ORDER BY session_id,id DESC`)
       const result = candidates.all(words.filter(w=>w.length>=3).map(w=>`"${w.replace(/"/g,'""')}"`).join(' AND '))
-      const rows=result.filter(r=>r.session_id!==null), partial=result.some(r=>r.candidate_count>=50000)
+      const rows=result.filter(r=>r.session_id!==null), partial=result.some(r=>r.candidate_count>=8000)
       const fts_ms = performance.now()-start, readStart=performance.now(), grouped=new Map()
       for (const row of rows) { if(!grouped.has(row.session_id)) grouped.set(row.session_id,[]); grouped.get(row.session_id).push(row.id) }
+      // Snippets for the 60 threads with the newest matching message: reading text is the slow part (a common
+      // word matched 467 threads and took 5 s). The rest still count as partial, and titles cover them.
+      const ranked=[...grouped].sort((a,b)=>b[1][0]-a[1][0]), skipped=ranked.length>60
+      grouped.clear(); for(const [id,values] of ranked.slice(0,60)) grouped.set(id,values)
       for (let round=0; round<2; round++) {
         const wanted=[]
         for (const [id, values] of grouped) if(!hits.has(id)) wanted.push(...values.slice(round*3,round*3+3))
@@ -175,7 +181,7 @@ export function createHermesTextSearcher(path) {
           }
         }
       }
-      Object.assign(hits,{mode:'body',partial:partial || [...grouped].some(([id,values])=>!hits.has(id)&&values.length>6),timings:{fts_ms,read_ms:performance.now()-readStart,candidates:rows.length,sessions:hits.size}})
+      Object.assign(hits,{mode:'body',partial:partial || skipped || [...grouped].some(([id,values])=>!hits.has(id)&&values.length>6),timings:{fts_ms,read_ms:performance.now()-readStart,candidates:rows.length,sessions:hits.size}})
       return hits
     }
   }

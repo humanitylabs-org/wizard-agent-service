@@ -115,7 +115,7 @@ async function mcp(base: string, token: string, method: string, params: unknown 
   const r = await fetch(`${base}/wizard/mcp`, { method: 'POST', headers: { ...headers, 'Mcp-Session-Id': session }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params }) })
   return { status: r.status, json: await r.json() as any, session }
 }
-const toolNames = async (base: string, token: string) => ((await mcp(base, token, 'tools/list')).json?.result?.tools ?? []).map((t: any) => t.name).sort()
+const toolNames = async (base: string, token: string) => ((await mcp(base, token, 'tools/list')).json?.result?.tools ?? []).map((t: any) => t.name).filter((name: string) => !name.startsWith('spaces_')).sort()
 
 describe('#58 which agents can use an app', () => {
   it('the gateway serves each agent only the apps on its own list; the main agent keeps every app', async () => {
@@ -178,14 +178,14 @@ describe('#58 which agents can use an app', () => {
     await fetch(`${base}/wizard/v1/agents/${helper.id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))
     const again = (await (await fetch(`${base}/wizard/v1/agents/${helper.id}`)).json()).agent
     expect(again.permissions.wizard_apps).toEqual([])
-    // Harness config: standard agents get the gateway with their own token; a private agent without apps does not.
+    // Every agent gets its own gateway token for Spaces; app permissions stay unticked.
     const helperConfig = readFileSync(join(dir, 'agents', helper.id, 'home', 'config.yaml'), 'utf8')
     expect(helperConfig).toContain('url: "http://wizard-agent-service:8923/wizard/mcp"')
     expect(helperConfig).toContain('Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     expect(readFileSync(join(dir, 'agents', helper.id, 'home', '.env'), 'utf8')).toContain(`WIZARD_MCP_TOKEN=${gatewayKey(dir, helper.id)}`)
     const privConfig = readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')
-    expect(privConfig).toContain('mcp_servers: {}')
-    expect(readFileSync(join(dir, 'agents', 'private', 'home', '.env'), 'utf8')).not.toContain('WIZARD_MCP_TOKEN')
+    expect(privConfig).toContain('/wizard/mcp')
+    expect(readFileSync(join(dir, 'agents', 'private', 'home', '.env'), 'utf8')).toContain('WIZARD_MCP_TOKEN')
     // The main agent's other settings stay read-only here.
     const label = await fetch(`${base}/wizard/v1/agents/hermes`, json({ label: 'x' }, 'PATCH'))
     expect(await label.json()).toMatchObject({ check: 'agent.main' })
