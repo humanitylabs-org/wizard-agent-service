@@ -54,8 +54,27 @@ def releases(home):
     return result
 
 
+def ui_fingerprint(home):
+    root = home / 'apps/wizard-mobile/.ui-live'
+    digest = hashlib.sha256()
+    count = 0
+    if not root.exists():
+        return {'present': False}
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            path = Path(folder) / name
+            relative = str(path.relative_to(root))
+            if path.is_symlink():
+                digest.update((relative + '\0link\0' + os.readlink(path)).encode())
+            elif path.is_file():
+                digest.update(relative.encode() + b'\0' + hashlib.sha256(path.read_bytes()).digest())
+                count += 1
+    return {'present': True, 'resolved': str(root.resolve()), 'files': count, 'sha256': digest.hexdigest()}
+
+
 def fingerprint(home):
-    return {'containers': inspect(), 'units': units(), 'releases': releases(home)}
+    return {'containers': inspect(), 'units': units(), 'releases': releases(home), 'ui': ui_fingerprint(home)}
 
 
 def main():

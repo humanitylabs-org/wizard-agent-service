@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Synthetic rig request adapter: completed=0, visible provider closure=42."""
+import json,sys,time,urllib.request,urllib.error
+from pathlib import Path
+assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers'
+H=Path('/home/rig');R=H/'pp-launch-3';O=H/'.wizard-os';agent=sys.argv[1];assert agent.startswith('pp-test-')
+proof=(O/'agent-runtime/owner-proof').read_text().strip()
+def req(path,body=None):
+ q=urllib.request.Request('http://127.0.0.1:8787'+path,json.dumps(body).encode() if body is not None else None,{'Content-Type':'application/json','x-wizard-owner-proof':proof},method='POST' if body is not None else 'GET')
+ try:
+  with urllib.request.urlopen(q,timeout=120) as f:return f.status,json.load(f)
+ except urllib.error.HTTPError as e:
+  try:data=json.load(e)
+  except:data={}
+  return e.code,data
+codeword=(R/'codeword').read_text().strip();session='wizard_pp_'+agent.replace('-','_')+'_'+str(time.time_ns())
+c,b=req('/wizard/hermes/v1/runs?agent='+agent,{'session_id':session,'agent':agent,'input':'Reply with only PP_OK. Do not use tools. Unique test codeword to ignore: '+codeword})
+if c==503 and b.get('error')=='private_provider_unavailable':sys.exit(42)
+if c not in [200,202]:sys.exit(1)
+rid=b.get('run_id') or b.get('id')
+if not rid:sys.exit(2)
+for _ in range(180):
+ c,b=req('/wizard/hermes/v1/runs/'+rid+'?agent='+agent)
+ if c!=200:sys.exit(3)
+ state=b.get('status') or b.get('state')
+ if state in ['completed','done','succeeded']:
+  if 'PP_OK' not in json.dumps(b):
+   c,m=req('/wizard/hermes/api/sessions/'+session+'/messages?agent='+agent)
+   if c!=200 or 'PP_OK' not in json.dumps(m):sys.exit(4)
+  (R/('trigger-'+agent+'.json')).write_text(json.dumps({'completed':True,'session_id':session,'run_id':rid})+'\n');sys.exit(0)
+ if state in ['failed','error','cancelled']:
+  sys.exit(42 if 'private_provider_unavailable' in json.dumps(b) else 5)
+ time.sleep(2)
+sys.exit(6)

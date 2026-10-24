@@ -1,0 +1,8 @@
+{
+  "command": "python3 -m unittest discover -s ops/private-provider-live -p test_*.py -v",
+  "status": "passed",
+  "tests_run": 32,
+  "duration_seconds": 0.059,
+  "scope": "unit/fake orchestration only; not rig acceptance",
+  "returncode": 0
+}

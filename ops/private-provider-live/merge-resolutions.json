@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "reviewed_live_base": "b4114746e0373cd6aacae0f44655dd707eb10731",
+  "provider_sha": "888ecee067cde661f069875dc5915a7abe341103",
+  "resolutions": [
+    {
+      "path": "docs/ui-preferences.md",
+      "sha256": "b8febe7f83f68861e097f08b64f9a38665391a0de30e23649de8c93d6e363cdd",
+      "replacement": "{\"archiveAfterDays\":7,\"compact\":false,\"chatLayout\":\"day\",\"readyOrder\":\"newest\",\"subjectOrder\":[],\"pinnedChats\":[],\"spaces\":[]}\n"
+    },
+    {
+      "path": "qa/agent-parity/features.json",
+      "sha256": "e8bd0f15046f00441f48d90896bcbefbb482c6032b6589addfcda2b78d080d5b",
+      "replacement": "      \"id\": \"private-provider-admission\",\n      \"description\": \"Provider loss rejects new sessions/runs only for already migrated agents, without affecting other runtime kinds\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"Use real Wizard HTTP for main, host-profile, legacy container and Unix restricted kinds. Admit a normal run with no provider app, then install a stopped capability and mark the synthetic container/restricted record as previously migrated. Assert 503 before upstream dispatch for marked agents; main/profile remain usable. Migration lifecycle is covered independently.\",\n      \"source_refs\": [\"server/agents-http.mjs\", \"server/agents.mjs\"],\n      \"reference_tests\": [\"tests/legacy-private-compat.test.ts\", \"tests/private-provider-launch.test.ts\"],\n      \"fixture\": \"private-provider-admission\",\n      \"policy_exemptions\": []\n    },\n    {\n      \"id\": \"chats-spaces\",\n      \"description\": \"Agent-owned thread collections persist independently of agent runtime kind\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.\",\n      \"source_refs\": [\"server/ui-preferences.mjs\"],\n      \"reference_tests\": [\"tests/ui-preferences.test.ts\", \"tests/thread-spaces.test.ts\", \"tests/thread-spaces-http.test.ts\"],\n"
+    },
+    {
+      "path": "server/routed-run-queue.mjs",
+      "sha256": "d3d8108d78dfb994f21ac46f0803fc83f8983062e94e5d68db259d77a0e96524",
+      "replacement": "        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(payload.status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },\n        // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.\n        steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),\n"
+    },
+    {
+      "path": "server/service.mjs",
+      "sha256": "0ab2fee8167bde305baa17d03dca720eb05aba9c1f68365c626edab4ce680511",
+      "replacement": "import { createSpaceFiling } from './thread-spaces.mjs'\n"
+    },
+    {
+      "path": "server/ui-preferences.mjs",
+      "sha256": "60343d0b6cdbe74e00fb5aab91b817386a7ead9a5f8d6e84e747a7e0dcd9a434",
+      "replacement": "export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })\n"
+    },
+    {
+      "path": "server/ui-preferences.mjs",
+      "sha256": "bd971249db8b24745ec3d9b97bb4c1ad092f64babb08b3256e03fa8740979cdd",
+      "replacement": "  && Object.keys(s).every(k => ['id', 'name', 'threads', 'createdAt', 'agent'].includes(k)) && ['id', 'name', 'threads', 'createdAt'].every(k => Object.hasOwn(s, k))\n  && (!Object.hasOwn(s, 'agent') || (typeof s.agent === 'string' && /^[a-z0-9][a-z0-9-]{0,47}(?![\\s\\S])/u.test(s.agent)))\n  && typeof s.id === 'string' && SPACE_ID.test(s.id)\n  && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\\u0000-\\u001f\\u007f]/u.test(s.name)\n  && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length\n  && typeof s.createdAt === 'string' && /^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,3})?(?:Z|[+-]\\d\\d:\\d\\d)$/.test(s.createdAt) && realDate(s.createdAt)\n"
+    },
+    {
+      "path": "tests/agent-archive-list.node.mjs",
+      "sha256": "a2345b34e146496c158b35bbc05893526b35843199ea94ae30b06a2e51d37914",
+      "replacement": "  catch(e){res.writeHead(e.status||500,{'Content-Type':'text/plain'});res.end(String(e.message))}});\n"
+    },
+    {
+      "path": "tests/ui-preferences.test.ts",
+      "sha256": "18be2368ca350ee5898667b24614de38b58b751e90ee2659ecc63ac6ce2223ac",
+      "replacement": "    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })\n"
+    },
+    {
+      "path": "tests/ui-preferences.test.ts",
+      "sha256": "34c7f5de932f67e1c9f54eecea87953be3cf47fdcb0b46abf19e684ec5d69ed5",
+      "replacement": "        { createdAt: 'yesterday' }, { createdAt: '2026-10-24' }, { createdAt: '2026-02-31T00:00:00Z' }, { createdAt: '2026-10-24T25:00:00Z' }, { extra: true }, { id: undefined }].map(p => [{ ...space, ...p }])]\n"
+    },
+    {
+      "path": "tests/ui-preferences.test.ts",
+      "sha256": "80d0b97df0c8dc7fbce92b2d2b16dc1735116f27eb753ae039cf51e1d032a1bb",
+      "replacement": "    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })\n"
+    },
+    {
+      "path": "tests/ui-preferences.test.ts",
+      "sha256": "ff1faeced2b624b737e71b85564bb38755937984fdb0383651c41e95609f6be8",
+      "replacement": "    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })\n"
+    }
+  ]
+}
