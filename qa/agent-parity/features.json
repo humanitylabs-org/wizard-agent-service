@@ -219,19 +219,34 @@
     },
     {
       "id": "session-archive",
-      "description": "Archive and restore a disposable thread while ensuring archived stale-running threads stay out of Working",
+      "description": "Archive and restore the disposable thread, reading back both changes",
       "layer": "server",
-      "how_to_test": "Archive and restore the disposable thread, reading back both changes for every runtime kind. In Wizard UX, also verify archived stale-running rows appear in Archive, never Working, for both the main list and a routed agent list.",
+      "how_to_test": "Archive and restore the disposable thread, reading back both changes.",
       "source_refs": [
-        "server/agents-http.mjs",
-        "wizard-ux/web/live.js"
+        "server/agents-http.mjs"
       ],
       "reference_tests": [
-        "tests/agents.test.ts",
-        "wizard-ux/tests/archived-working-threads.test.mjs",
-        "wizard-ux/qa-unified-chats.cjs"
+        "tests/agents.test.ts"
       ],
       "fixture": "session-archive",
+      "policy_exemptions": []
+    },
+    {
+      "id": "archive-placement",
+      "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
+      "layer": "ux",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
+      "source_refs": [
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-stopped-done.cjs",
+        "wizard-ux/qa-unified-chats.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
       "policy_exemptions": []
     },
     {
