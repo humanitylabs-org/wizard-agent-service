@@ -205,9 +205,13 @@ Agent jobs with a pre-run `script` get an instruction to run its shell-quoted,
 absolute path under `<HERMES_HOME>/scripts/` first in the terminal and use full
 stdout as context. Paths escaping that directory (including existing symlinks)
 are rejected. `.sh`/`.bash` use `bash`; other extensions use the row's Python
-`interpreter` when supplied, otherwise `python3`. The command uses an existing
-absolute row `workdir` or the script's parent directory. The prompt requests the
-configured `cron.script_timeout_seconds` (default 3600), reports script errors,
+`interpreter` when supplied, otherwise `python3`; existing interpreter symlink
+targets must also have a Python executable name. The command uses an existing
+absolute row `workdir` or the script's parent directory. An explicit usable
+workdir also becomes a whole-turn instruction: resolve relative paths there,
+explicitly cd for later commands, and load the project's applicable AGENTS.md.
+This establishes context by instruction, not a persistent runtime cwd change.
+The prompt requests configured `cron.script_timeout_seconds` (default 3600), reports script errors,
 and suppresses empty output or a final JSON `{"wakeAgent":false}` gate.
 
 Every imported prompt ends with a generic delivery override: the final answer
