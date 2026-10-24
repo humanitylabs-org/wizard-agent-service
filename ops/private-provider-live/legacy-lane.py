@@ -6,12 +6,13 @@ L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live')
 s=importlib.util.spec_from_file_location('prep',L/'rig-prepare.py');assert s and s.loader
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
 key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
-receipt={'lane':'pp-legacy-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Fixture-generated session IDs force strict collision scans of the absent main Hermes origin; server-minted IDs avoid that invalid prerequisite. Confirmed in focused tests on main and #161-derived tooling; rig comparison pending.','tooling_commit':'c309268','repair_attempt':1}
+ATTEMPT=int(sys.argv[1]) if len(sys.argv)>1 else 1;assert 1<=ATTEMPT<=4
+receipt={'lane':'pp-legacy-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Fixture-generated session IDs force strict collision scans of the absent main Hermes origin; server-minted IDs avoid that invalid prerequisite. Confirmed on main and #161-derived tooling, and reproduced directly on pp-rig.','tooling_commit':'94bcbbd','repair_attempt':ATTEMPT}
 def save():
- (L/'REHEARSAL-LEGACY-FIX.json').write_text(json.dumps(receipt,indent=2)+'\n')
+ for name in ['REHEARSAL-LEGACY-FIX.json','REHEARSAL-LEGACY-FIX-'+str(ATTEMPT)+'.json']:(L/name).write_text(json.dumps(receipt,indent=2)+'\n')
 def phase(name,args,payload=None):
  p=subprocess.run([sys.executable,*args],input=payload,capture_output=True)
- log=L/('legacy-fix-'+name+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
+ log=L/('legacy-fix-'+str(ATTEMPT)+'-'+name+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
  print(name,'passed' if p.returncode==0 else 'failed',flush=True)
  if p.returncode:raise RuntimeError('phase failed: '+name+'; see private log')
  return p.stdout.decode()
@@ -24,7 +25,7 @@ try:
  r.python("from pathlib import Path; r=Path('/home/rig/pp-launch-3'); names=['minted-session','baseline-start','baseline-prepared','chat-pp-test-legacy','run-pp-test-legacy','trigger-pp-test-legacy','trigger-pp-test-probe','trigger-pp-test-other','legacy-checkpoint','migration','privacy','install','provider-connected','probe-created','d-verified','e-verified','f-verified'];[(r/(n+'.json')).unlink(missing_ok=True) for n in names]")
  host('key','key',payload=key);key=b''
  phase('diagnose',[str(L/'legacy-host.py'),'legacy-diagnose.py'])
- host('legacy-chat','chat','pp-test-legacy');receipt['checks']['a']='passed';receipt['root_cause_rig_log']='legacy-fix-diagnose.log';save()
+ host('legacy-chat','chat','pp-test-legacy');receipt['checks']['a']='passed';receipt['root_cause_rig_log']='legacy-fix-'+str(ATTEMPT)+'-diagnose.log';save()
  host('install','install');host('connect','connect');receipt['checks']['b']='passed';save()
  host('create-probe','create-probe')
  # No legacy key may remain in any container or state while scanning the sealed fixture.

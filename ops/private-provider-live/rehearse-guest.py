@@ -134,9 +134,13 @@ elif step=='install':
  (dst/'wizard.md').write_text(text);(dst/'config.json').write_text(json.dumps(cfg));(dst/'docker-compose.yml').write_text(yaml.safe_dump(comp,sort_keys=False))
  shutil.copy2(T/'runtipi/metadata/logo.jpg',dst/'metadata/logo.jpg');(dst/'metadata/description.md').write_text('Private relay-only provider rehearsal\n')
  (dst/'.wizard-commit').write_text('07eca5e30ca7873ab8cfda503175768fc55f66d4\n');(dst/'.wizard-source').write_text(json.dumps({'repo':'local:'+lid,'private':True}))
- prior=rt.req('GET','/user-config/'+urn);assert not (prior.get('dockerCompose') or '').strip() and not (prior.get('appEnv') or '').strip()
+ prior=rt.req('GET','/user-config/'+urn)
  override='services:\n  wizard-tinfoil:\n    networks: !override\n      - provider-bootstrap\n'
- rt.req('PUT','/user-config/'+urn,{'dockerCompose':override,'appEnv':''});after=rt.req('GET','/user-config/'+urn);assert after['dockerCompose']==override
+ old_compose=prior.get('dockerCompose') or '';old_env=prior.get('appEnv') or ''
+ # Fresh Runtipi GET returns commented templates, not necessarily empty strings.
+ assert not any(l.strip() and not l.lstrip().startswith('#') for l in old_env.splitlines()),'unexpected provider env override'
+ assert old_compose==override or yaml.safe_load(old_compose) in [None,{}, {'services':{}}, {'services':None}],'unexpected compose override'
+ rt.req('PUT','/user-config/'+urn,{'dockerCompose':override,'appEnv':old_env});after=rt.req('GET','/user-config/'+urn);assert after['dockerCompose']==override and (after.get('appEnv') or '')==old_env
  rt.install(urn,{'openPort':False,'exposed':False,'exposedLocal':False,'port':18804,'WIZARD_TRUSTED_HOSTS':'127.0.0.1:18804,localhost:18804','WIZARD_TRUSTED_ORIGINS':'http://127.0.0.1:18804'});status=rt.wait_status(urn,{'running','missing','stopped'},timeout=180);assert status=='running',status
  from wam import registry
  from local_projection import projection

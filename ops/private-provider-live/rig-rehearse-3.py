@@ -65,4 +65,4 @@ elif phase=='key':print(r.run(['python3','/home/rig/pp-launch-3/guest.py','key']
 else:
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/guest.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'rehearse-guest.py').read_bytes())
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/local_projection.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'local_projection.py').read_bytes())
- print(r.run(['python3','/home/rig/pp-launch-3/guest.py',phase,*sys.argv[2:]],timeout=900),flush=True)
+ print(run_guest([phase,*sys.argv[2:]]),flush=True)

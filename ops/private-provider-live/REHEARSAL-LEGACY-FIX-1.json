@@ -1,0 +1,36 @@
+{
+  "lane": "pp-legacy-fix",
+  "status": "blocked",
+  "checks": {
+    "a": "passed",
+    "b": "not_run",
+    "c": "not_run",
+    "d": "not_run",
+    "e": "not_run",
+    "f": "not_run"
+  },
+  "privacy_checks_passed": 0,
+  "root_cause": "Fixture-generated session IDs force strict collision scans of the absent main Hermes origin; server-minted IDs avoid that invalid prerequisite. Confirmed in focused tests on main and #161-derived tooling; rig comparison pending.",
+  "tooling_commit": "c309268",
+  "repair_attempt": 1,
+  "root_cause_rig_log": "legacy-fix-diagnose.log",
+  "blocker": "phase failed: install; see private log",
+  "reset": {
+    "provider_key_present": false,
+    "provider_volumes": [],
+    "apps": 0,
+    "remaining_synthetic_agent_dirs": [],
+    "reset_scope": "pp-rig / pp-rehearsal-3"
+  },
+  "evidence": {
+    "baseline-start": {
+      "status": 201,
+      "product_create": true,
+      "legacy_route": true
+    },
+    "chat-pp-test-legacy": {
+      "completed": true,
+      "session_id": "wizard_1792875965708_e0285fc99bf14979a0e0e52dcd2703c0"
+    }
+  }
+}

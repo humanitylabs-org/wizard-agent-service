@@ -1,0 +1,22 @@
+# pp-legacy-fix continuation
+
+## Verified result
+- Root cause (a) is fixture, not a demonstrated #161 product bug. `legacy-fix-diagnose.log` on Thales records private GET missing session 404, fabricated-id Service POST 503 agent_unavailable/agent.history, and server-minted POST 201. The subsequent canonical legacy chat completed (`PP_OK`). Product-created legacy agent was unsealed tinfoil, apps absent. Exact backend remains 888ecee; main comparison test passes too.
+- Attempt 1 receipt: `REHEARSAL-LEGACY-FIX-1.json` in the local scratch live directory (copied from actual remote latest receipt). Its final reset readback has key absent, provider volumes [], apps 0, synthetic agent dirs []. Only one paid legacy turn was completed.
+- b failed before any provider install, at the assertion that API GET user-config strings must be empty. Actual error was reproduced without a key. Guard now accepts semantically empty/comment-only defaults or our exact existing bootstrap override, preserves comment-only appEnv, and refuses meaningful unexpected configuration. Five guard AST tests pass; actual fresh API shape/installation retry remains pending.
+
+## Active direct jobs — do not duplicate
+- `proc_cdfbff82aa4d`: a NO-KEY API metadata debug, waiting shared lease. Runs `legacy-install-debug.py`, prints parsed prior compose and only appEnv key names, then resets. Its output may confirm/comment on the guard assumption. No provider key is read by it.
+- `proc_711c68797608`: full attempt 2, already invoked directly through run-locked.py with credential stdin; waiting shared lease at last poll. Runs `legacy-lane.py 2`. It handles setup, key pipe to guest, product legacy creation, diagnostic, canonical paid legacy turn, provider install/connect, throwaway privacy 6, migration, migrated history/home/topology/turn verification, other-agent chat+vision helper, removal/fail-close, and unconditional reset. f runs before destructive e so the provider is available for the actual regression. No parent submission is needed.
+- Every `legacy-lane.py` completion writes latest `REHEARSAL-LEGACY-FIX.json`, attempt-specific `REHEARSAL-LEGACY-FIX-2.json`, and private `legacy-fix-2-<phase>.log`. Inspect latest actual receipt first, never start duplicate work. A failure returns nonzero only after reset/readback.
+- `rig-rehearse-3.py` was changed to use `run_guest` for ordinary phases, preserving guest `phase-<phase>.log` privately instead of discarding useful stderr. `legacy-host.py` similarly preserves `<script>.log` on guest. Read only synthetic rig logs; never owner Private data.
+
+## Scope / remaining repairs
+- Up to 4 repair attempts authorized. One full attempt completed; attempt 2 is pending. The two no-key diagnostic jobs were not full paid attempts. Preserve attempts 3/4 for actual failures.
+- Need update EVIDENCE-rehearsal.md with final a-f results, six privacy checks, actual attestation/egress evidence and final clean reset. Existing extra steps are staged but NOT YET EXERCISED. No backend #161 change has been necessary.
+- `legacy-extra.py` d verifies returned legacy thread still contains PP_OK, uid/gid/home inode1000, internal networks, no key, actual post-migration EHBP request; f creates a standard second agent and calls its actual configured `tools.vision_tools.vision_analyze_tool` on a red PNG, asserting red; e uninstalls physical provider URN, reads registry + clear status + 503 private_provider_unavailable + persistent sealed marker + no legacy fallback.
+- If raw sqlite hash equality in `migrate` fails after startup, preserve the acceptance intent: compare existing semantic session/messages via canonical history and home identity, not a silently weakened history test. `legacy-extra.py` already reads that exact old thread.
+- Production live-run adapters/promotion/rollback remain unfinished; no restart/promotion is authorized by partial rehearsal. Do not touch live services or send anything to Private. Keep using the user's direct run-locked route, never nest locks.
+
+## Files and tests
+Tooling branch ops/private-providers-live-run has c309268 (product-created agent/server-minted sessions/tests), 94bcbbd (single-lease runner/evidence/helpers). Current guard, phase-log preservation, attempt-specific receipts and updated evidence are being committed next. Focused Node 14/14; main regression 1/1; Python orchestration/projection/host/adapters 19/19 plus focused guard/host/adapter 8/8 (overlap, do not sum as unique).
