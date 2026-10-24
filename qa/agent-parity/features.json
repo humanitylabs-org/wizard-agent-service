@@ -39,9 +39,9 @@
       "id": "chats-spaces",
       "description": "Agent-owned thread collections persist independently of agent runtime kind",
       "layer": "server",
-      "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.",
-      "source_refs": ["server/ui-preferences.mjs"],
-      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts"],
+      "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "source_refs": ["server/ui-preferences.mjs", "server/spaces-tools.mjs", "server/thread-spaces.mjs"],
+      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts", "tests/spaces-tools.test.ts"],
       "fixture": "chats-spaces",
       "policy_exemptions": []
     },

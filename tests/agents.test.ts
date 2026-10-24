@@ -785,7 +785,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(config).toContain('standard_chats:')
     expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
     expect(config).not.toContain(token)
-    expect(config).not.toContain('  wizard:')
+    expect(config).toContain('  wizard:') // own Spaces are available without ticking apps
     const reply=await call({Authorization:`Bearer ${token}`})
     expect(reply.status).toBe(200)
     expect(JSON.stringify(await reply.json())).toContain('lighthouse')
@@ -830,7 +830,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const created=await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private',read_standard_chats:true}}))
     expect(created.status).toBe(201)
     const config=readFileSync(join(dir,'agents','private','home','config.yaml'),'utf8')
-    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
+    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:') // no app gateway URL configured
     expect(readFileSync(join(dir,'agents','private','home','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
     const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')

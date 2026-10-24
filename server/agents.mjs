@@ -311,7 +311,7 @@ export function agentAppIds(agent) {
 
 /**
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
- * later appear without a restart); a private agent only once the owner ticks an app for it.
+ * later appear without a restart). Every private agent also gets its own scoped Spaces tools without ticking apps.
  */
 /** What a restricted agent's harness calls: its edge sidecar, forwarding only to its own Service socket. */
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
@@ -328,7 +328,7 @@ export function assertIsolationSupports(agent) {
 
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
-  return agent.privacy === 'standard' || agentAppIds(agent).size > 0 || agent.permissions.read_standard_chats === true
+  return true // Own Spaces are built-in, including private agents with no ticked apps.
 }
 
 const standardChatsEndpoint = (gatewayUrl, explicit = '') => {
@@ -390,7 +390,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   const standardUrl = standardChatsEndpoint(gatewayUrl,standardChatsUrl)
   if (wantsGateway(agent, gatewayUrl) || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
     lines.push('mcp_servers:')
-    if (gatewayUrl && (agent.privacy === 'standard' || agentAppIds(agent).size)) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    if (gatewayUrl) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     }
