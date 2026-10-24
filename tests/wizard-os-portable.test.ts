@@ -205,8 +205,8 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, uxDir: ux })
     expect(await (await fetch(`${wizard}/wizard-os-home/`)).text()).toContain('Wizard UX')
     expect(await (await fetch(`${wizard}/wizard-os-home/core/core.js`)).text()).toBe('ok')
-    // The shell frames its own Store/System pages; nothing else may frame UX pages.
-    expect((await fetch(`${wizard}/wizard-os-home/`)).headers.get('content-security-policy')).toMatch(/frame-ancestors 'self'(;|$)/u)
+    // Nested app documents can be framed; the outer shell cannot (trunk agents security contract).
+    expect((await fetch(`${wizard}/wizard-os-home/`)).headers.get('content-security-policy')).toMatch(/frame-ancestors 'none'(;|$)/u)
     expect((await fetch(`${wizard}/wizard-os-home/.env`)).status).toBe(404)
     expect((await fetch(`${wizard}/wizard-os-home/%2e%2e/%2e%2e/etc/passwd`)).status).toBe(404)
     const root = await fetch(`${wizard}/`, { redirect: 'manual' })
@@ -220,7 +220,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     const csp = (await fetch(`${wizard}/wizard-os-home/`)).headers.get('content-security-policy')
     expect(csp).toContain("frame-src 'self' http://localhost:48023;")
     expect(csp).toContain("connect-src 'self' blob: data:;")
-    expect(csp).toContain("frame-ancestors 'self'")
+    expect(csp).toContain("frame-ancestors 'none'")
     expect(csp).not.toContain('*')
   })
 })
