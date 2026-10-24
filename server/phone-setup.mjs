@@ -164,7 +164,7 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     if (!status) {
       // A helper's clean stop can unlink its socket too. Saved enrollment is evidence
       // this is NOT an unmanaged host, so never reclassify its stale address as ready.
-      if (absent && (saved.setup.phone_started_at || saved.access.tailscale.origin) && !accessPinned) {
+      if (absent && (saved.setup.phone_started_at || (saved.access.tailscale.origin && !accessPinned))) {
         return { ...base, error: error || 'helper_unreachable' }
       }
       // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner

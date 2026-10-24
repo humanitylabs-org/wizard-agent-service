@@ -142,14 +142,14 @@ describe('setup API (box-local listener)', () => {
     expect(calls).toBe(0)
   })
 
-  it('an unlinked helper socket never reclassifies a prior enrollment as host-managed', async () => {
+  it.each([false,true])('an unlinked helper socket never reclassifies a prior enrollment (pinned=%s)', async (accessPinned) => {
     const dir = tempDir(), settingsPath = join(dir, 'settings.json')
     updateSettings(settingsPath, (raw: any) => {
       raw.network = {base_url: ORIGIN}
       raw.access = {tailscale:{origin:ORIGIN,owner_logins:[OWNER]}}
       raw.setup = {phone_started_at:new Date().toISOString()}
     })
-    const setup = createPhoneSetup({settingsPath, socketPath:join(dir,'missing.sock'), hostShellUrl:()=>`${ORIGIN}:8796/wizard-os-home/`})
+    const setup = createPhoneSetup({settingsPath, accessPinned, socketPath:join(dir,'missing.sock'), hostShellUrl:()=>`${ORIGIN}:8796/wizard-os-home/`})
     expect(await setup.phone()).toMatchObject({step:'unavailable'})
     expect((await setup.overview()).items[0]).toEqual({id:'phone',title:'Use Wizard on your phone',state:'in_progress'})
   })
