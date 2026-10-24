@@ -33,7 +33,7 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -69,6 +69,8 @@ import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isA
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
+import { readArchivedSessions } from './archived-sessions.mjs'
+export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 // Marks a request that arrived on the dedicated Tailscale Serve listener (createTailnetIngress). A symbol
@@ -405,31 +407,6 @@ export function readSessionArchived(sessionDbPath, sessionId) {
   }
 }
 
-export function readArchivedSessions(sessionDbPath) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    return database.prepare(`
-      SELECT id, source, model, title, started_at, ended_at, end_reason,
-             message_count, parent_session_id, last_activity_at AS last_active,
-             pinned, archived, hidden
-        FROM sessions
-       WHERE archived = 1
-         AND hidden = 0
-         AND parent_session_id IS NULL
-         AND message_count > 0
-       ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
-    `).all().map((session) => ({
-      ...session,
-      pinned: Boolean(session.pinned),
-      archived: Boolean(session.archived),
-      hidden: Boolean(session.hidden),
-    }))
-  } finally {
-    database.close()
-  }
-}
 
 export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return null
@@ -4696,7 +4673,7 @@ function buildWizardServer(options, lifetime) {
         let patch
         if (request.method === 'PUT') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
-          try { patch = JSON.parse((await readBoundedBody(request, 32768)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
+          try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
           sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
