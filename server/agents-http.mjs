@@ -763,7 +763,11 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
-    if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
+    // The scheduler's authenticated internal read needs a silent answer before
+    // display projection, just like main. Neither owner headers nor history get
+    // this bypass; path/media and secret guards still apply below/above.
+    const scheduleRaw = !messageHistory && ctx.scheduleRawRead?.(request)
+    if ((messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) && !scheduleRaw) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
     if (messageHistory && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
     // A finished run's output carries the same MEDIA lines the history will; project it identically.

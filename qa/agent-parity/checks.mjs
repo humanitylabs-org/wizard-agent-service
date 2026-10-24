@@ -2,10 +2,14 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
+import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
+
+const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true) }
 
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'scheduler-notifications': checkBoundNotification,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')
@@ -127,7 +131,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind)
+  const s = await (featureScenes[feature] || scene)(kind)
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)
