@@ -139,6 +139,7 @@ elif step=='install':
  shutil.copy2(T/'runtipi/metadata/logo.jpg',dst/'metadata/logo.jpg');(dst/'metadata/description.md').write_text('Private relay-only provider rehearsal\n')
  (dst/'.wizard-commit').write_text('07eca5e30ca7873ab8cfda503175768fc55f66d4\n');(dst/'.wizard-source').write_text(json.dumps({'repo':'local:'+lid,'private':True}))
  prior=rt.req('GET','/user-config/'+urn)
+ save('install-api-template',{'compose_null':prior.get('dockerCompose') is None,'env_null':prior.get('appEnv') is None,'compose_noncomment_lines':sum(bool(x.strip()) and not x.lstrip().startswith('#') for x in (prior.get('dockerCompose') or '').splitlines()),'app_env_names':[x.split('=',1)[0] for x in (prior.get('appEnv') or '').splitlines() if x.strip() and not x.lstrip().startswith('#')]})
  override='services:\n  wizard-tinfoil:\n    networks: !override\n      - provider-bootstrap\n    volumes:\n      - tinfoil-private-data:/data\nvolumes:\n  tinfoil-private-data:\n    name: wizard-tinfoil-private-data\n'
  old_compose=prior.get('dockerCompose') or '';old_env=prior.get('appEnv') or ''
  # Fresh Runtipi GET returns commented templates, not necessarily empty strings.
@@ -165,6 +166,9 @@ elif step=='quarantine-legacy-key':
  assert os.geteuid()==1000
  # The old fixture remains reversible and its home/history are not discarded.
  aid='pp-test-legacy';d=A/aid
+ session=json.loads((R/('chat-'+aid+'.json')).read_text())['session_id'];code,body=req('/wizard/hermes/api/sessions/'+session+'/messages?agent='+aid);assert code==200,'legacy canonical history unavailable'
+ messages=body.get('messages',body.get('data'));assert isinstance(messages,list) and messages,'legacy canonical history empty'
+ canonical_history={'session_id':session,'message_count':len(messages),'sha256':hashlib.sha256(json.dumps(messages,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
  ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.service=agent-'+aid]).decode().split();assert len(ids)==1
  inspect=json.loads(run(['docker','inspect',ids[0]]))[0];env=dict(x.split('=',1) for x in inspect['Config']['Env'] if '=' in x);u=inspect['Config'].get('User','')
  pair=[env.get('HERMES_UID'),env.get('HERMES_GID')] if u in ['', 'root','0','0:0'] else u.split(':');assert [int(x) for x in pair]==[1000,1000]
@@ -180,13 +184,14 @@ elif step=='quarantine-legacy-key':
  if p.exists():p.write_text('\n'.join(l for l in p.read_text().splitlines() if not l.startswith('TINFOIL_API_KEY='))+'\n')
  (R/'legacy-key.env').unlink()
  history={str(p.relative_to(d/'home')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (d/'home').rglob('*') if p.is_file() and p.name.endswith(('.db','.sqlite','.sqlite3'))}
- home=(d/'home').stat();save('legacy-checkpoint',{'uid':home.st_uid,'gid':home.st_gid,'inode':home.st_ino,'history':history,'recorded_identity':[1000,1000],'legacy_key_quarantined':True})
+ home=(d/'home').stat();save('legacy-checkpoint',{'uid':home.st_uid,'gid':home.st_gid,'inode':home.st_ino,'history':history,'canonical_history':canonical_history,'recorded_identity':[1000,1000],'legacy_key_quarantined':True})
 elif step=='migrate':
  assert os.geteuid()==1000
  checkpoint=json.loads((R/'legacy-checkpoint.json').read_text());d=A/'pp-test-legacy';before=(d/'home').stat()
  c,b=req('/wizard/v1/agents/pp-test-legacy',{'migrate_private_provider':True},'PATCH');assert c==200,(c,b)
  record=json.loads((d/'agent.json').read_text());assert record['runtime']['private_client'] is True and record['runtime']['uid']==record['runtime']['gid']==1000
  after=(d/'home').stat();assert (before.st_ino,before.st_uid,before.st_gid)==(after.st_ino,after.st_uid,after.st_gid)
- assert checkpoint['history'] and all(hashlib.sha256((d/'home'/n).read_bytes()).hexdigest()==h for n,h in checkpoint['history'].items())
- save('migration',{'product_path':'PATCH migrate_private_provider','home_inode_retained':True,'uid':after.st_uid,'gid':after.st_gid,'history_retained':True})
+ assert checkpoint['history'] and checkpoint['canonical_history']['message_count']>0
+ raw_hashes_unchanged=all(hashlib.sha256((d/'home'/n).read_bytes()).hexdigest()==h for n,h in checkpoint['history'].items())
+ save('migration',{'product_path':'PATCH migrate_private_provider','home_inode_retained':True,'uid':after.st_uid,'gid':after.st_gid,'raw_sqlite_hashes_unchanged':raw_hashes_unchanged,'canonical_history_verification':'required by verify-migrated'})
 else:raise RuntimeError('unknown phase')

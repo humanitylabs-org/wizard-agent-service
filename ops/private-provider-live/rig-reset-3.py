@@ -53,7 +53,11 @@ for path in [r/'legacy-key.env',r/'key-sha256',h/'.wizard-os/agent-runtime/tinfo
 for path in (r/'privacy-evidence').glob('*.pcap'):
  assert path.parent==r/'privacy-evidence';path.unlink()
 code="from wam import cli; c=cli.Config();cli.write_registry(c,c.runtipi())"
-subprocess.run(['sudo','-u','rig','env','HOME=/home/rig','PYTHONPATH=/opt/pp-rig/src/wam','python3','-c',code],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+registry_reset=subprocess.run(['sudo','-u','rig','env','HOME=/home/rig','PYTHONPATH=/opt/pp-rig/src/wam','python3','-c',code],capture_output=True)
+if registry_reset.returncode:
+ log=r/'reset-registry.log';log.write_bytes(registry_reset.stdout+registry_reset.stderr);log.chmod(0o600)
+ errors=[x for x in registry_reset.stderr.decode(errors='replace').splitlines() if x.startswith(('ImportError:','ModuleNotFoundError:','PermissionError:','FileNotFoundError:','AttributeError:','TypeError:','ValueError:'))]
+ raise RuntimeError('registry reset failed: '+(errors[-1] if errors else 'see private reset-registry.log'))
 key_paths=[r/'legacy-key.env',h/'.wizard-os/agent-runtime/tinfoil.env']
 remaining=[n for n in subprocess.check_output(['docker','volume','ls','--format','{{.Name}}'],text=True).splitlines() if 'tinfoil' in n]
 apps=json.loads((h/'.wizard-os/apps.json').read_text()).get('apps',[])

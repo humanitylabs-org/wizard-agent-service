@@ -10,13 +10,19 @@ ATTEMPT=int(sys.argv[1]) if len(sys.argv)>1 else 1;assert 1<=ATTEMPT<=4
 receipt={'lane':'pp-install-fix','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Legacy fixture session IDs were repaired separately; installer fixes normalize API trailing newlines without parsing !override, supply the legacy required dashboard form slot with an unused relay-only value, and wait for terminal install state.','tooling_commit':'69a5af6','repair_attempt':ATTEMPT}
 preparation=json.loads((L/'RIG-PREPARATION.json').read_text())
 for field in ['wam_image_id','wam_main_sha256','source']:receipt[field]=preparation[field]
+receipt['wam_registry_commit']='0a1e0192'
+receipt['tooling_files_sha256']={n:hashlib.sha256((L/n).read_bytes()).hexdigest() for n in ['rehearse-guest.py','rig-rehearse-3.py','legacy-extra.py','rig-reset-3.py','wam-cli.tar']}
 def save():
  for name in ['REHEARSAL-LEGACY-FIX.json','REHEARSAL-LEGACY-FIX-'+str(ATTEMPT)+'.json']:(L/name).write_text(json.dumps(receipt,indent=2)+'\n')
 def phase(name,args,payload=None):
  p=subprocess.run([sys.executable,*args],input=payload,capture_output=True)
  log=L/('legacy-fix-'+str(ATTEMPT)+'-'+name+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
  print(name,'passed' if p.returncode==0 else 'failed',flush=True)
- if p.returncode:raise RuntimeError('phase failed: '+name+'; see private log')
+ if p.returncode:
+  check={'legacy-chat':'a','install':'b','connect':'b','create-probe':'c','quarantine':'c','privacy':'c','migrate':'d','verify-migrated':'d','regression':'f','remove':'e'}.get(name)
+  if check:receipt['checks'][check]='failed'
+  receipt['failed_phase']=name
+  raise RuntimeError('phase failed: '+name+'; see private log')
  return p.stdout.decode()
 def host(name,*args,payload=None):return phase(name,[str(L/'rig-rehearse-3.py'),*args],payload)
 def extra(name,*args):return phase(name,[str(L/'legacy-host.py'),'legacy-extra.py',*args])

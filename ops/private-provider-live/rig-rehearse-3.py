@@ -11,7 +11,7 @@ def run_guest(args,timeout=900,payload=None):
  return r.python(script,payload=payload,timeout=timeout)
 assert json.loads((L/'RIG-PREPARATION.json').read_text())['status']=='prepared'
 if phase in ['setup','setup-resume']:
- r.python("from pathlib import Path;import sys,hashlib;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';p=Path('/opt/pp-rig/src/wam/wam/registry.py');assert not p.is_symlink();data=sys.stdin.buffer.read();p.write_bytes(data);print('wam_registry_sha256='+hashlib.sha256(p.read_bytes()).hexdigest())",root=True,payload=(L/'wam-registry.py').read_bytes())
+ r.python("from pathlib import Path;import sys,hashlib,tarfile,io;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';p=Path('/opt/pp-rig/src/wam');assert not p.is_symlink();data=sys.stdin.buffer.read();tf=tarfile.open(fileobj=io.BytesIO(data));assert all((x.name=='wam' or x.name.startswith('wam/')) and not x.issym() and not x.islnk() for x in tf);tf.extractall(p,filter='data');print('wam_cli_archive_sha256='+hashlib.sha256(data).hexdigest())",root=True,payload=(L/'wam-cli.tar').read_bytes())
  r.python("from pathlib import Path;import os;assert os.geteuid()==1000;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';Path('/home/rig/pp-launch-3').mkdir(exist_ok=True)")
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/guest.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'rehearse-guest.py').read_bytes())
  r.python(r'''
@@ -39,6 +39,8 @@ elif phase=='privacy':
 from pathlib import Path
 import os,json,subprocess
 assert os.geteuid()==0 and Path('/etc/pp-rig').read_text().strip()=='pp-private-providers'
+if Path('/sys/module/br_netfilter').exists():subprocess.run(['rmmod','br_netfilter'],check=True)
+assert not Path('/sys/module/br_netfilter').exists() and not Path('/proc/sys/net/bridge/bridge-nf-call-iptables').exists(),'fixture bridge filtering still active'
 R=Path('/home/rig/pp-launch-3');aid='pp-test-probe'
 ids=subprocess.check_output(['docker','ps','-aq'],text=True).split();docs=json.loads(subprocess.check_output(['docker','inspect',*ids]))
 main=[x for x in docs if any(m.get('Source')=='/home/rig/.wizard-os/agents/'+aid+'/home' and m.get('Destination')=='/opt/data' for m in x.get('Mounts',[])) and x['State']['Running']]
@@ -53,7 +55,7 @@ for name in ['relay','hermes','client','key-location','stop-provider','codeword'
  log=R/('check-'+name+'.log');log.write_text(p.stdout+p.stderr);log.chmod(0o600)
  checks[name]='passed' if p.returncode==0 else 'failed';print('CHECK',name,checks[name],flush=True)
  if p.returncode:break
-out={'checks':checks,'privacy_checks_passed':sum(v=='passed' for v in checks.values())};(R/'privacy.json').write_text(json.dumps(out,indent=2)+'\n');assert len(checks)==6 and all(v=='passed' for v in checks.values())
+out={'checks':checks,'privacy_checks_passed':sum(v=='passed' for v in checks.values()),'br_netfilter_absent':not Path('/sys/module/br_netfilter').exists(),'bridge_filter_sysctl_absent':not Path('/proc/sys/net/bridge/bridge-nf-call-iptables').exists()};(R/'privacy.json').write_text(json.dumps(out,indent=2)+'\n');assert len(checks)==6 and all(v=='passed' for v in checks.values()) and out['br_netfilter_absent'] and out['bridge_filter_sysctl_absent']
 ''',root=True,timeout=1800),flush=True)
 elif phase=='baseline-resume':
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/guest.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'rehearse-guest.py').read_bytes())

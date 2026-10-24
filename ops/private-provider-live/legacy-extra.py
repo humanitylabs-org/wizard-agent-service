@@ -34,7 +34,9 @@ if phase=='verify-migrated':
  aid='pp-test-legacy';running(aid)
  checkpoint=json.loads((R/'legacy-checkpoint.json').read_text());d=A/aid;st=(d/'home').stat();record=json.loads((d/'agent.json').read_text())
  assert [st.st_uid,st.st_gid]==[1000,1000] and st.st_ino==checkpoint['inode'] and record['runtime']['uid']==record['runtime']['gid']==1000 and record['runtime']['private_client'] is True
- session=json.loads((R/('chat-'+aid+'.json')).read_text())['session_id'];c,b=req('/wizard/hermes/api/sessions/'+session+'/messages?agent='+aid);assert c==200 and 'PP_OK' in json.dumps(b)
+ session=checkpoint['canonical_history']['session_id'];c,b=req('/wizard/hermes/api/sessions/'+session+'/messages?agent='+aid);assert c==200 and 'PP_OK' in json.dumps(b)
+ messages=b.get('messages',b.get('data'));assert isinstance(messages,list) and len(messages)==checkpoint['canonical_history']['message_count'],'legacy message count changed'
+ assert hashlib.sha256(json.dumps(messages,sort_keys=True,separators=(',',':')).encode()).hexdigest()==checkpoint['canonical_history']['sha256'],'legacy canonical messages changed'
  main=hermes(aid);assert main['Config']['User']=='1000:1000';assert all(not e.startswith('TINFOIL_API_KEY=') for e in main['Config']['Env'])
  networks=main['NetworkSettings']['Networks'];assert networks
  for n in networks:assert json.loads(run(['docker','network','inspect',n]))[0]['Internal'] is True
