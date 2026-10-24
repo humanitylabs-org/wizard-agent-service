@@ -43,6 +43,7 @@ import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
+import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -616,7 +617,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -3240,6 +3241,13 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
+  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
+  let heavyRowsAt = 0, heavyRowsCache = []
+  const heavyJobRows = () => {
+    if (!heavyWork?.queue?.rows) return []
+    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
+    return heavyRowsCache
+  }
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -3770,6 +3778,14 @@ function buildWizardServer(options, lifetime) {
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
+          if (!operator) {
+            // A thread whose own Thales job is still owed stays in Working, not Ready.
+            try {
+              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(heavyJobRows(), listedSessionIds))) {
+                const t = sessionTruth.get(id); if (t) t.heavyPending = true
+              }
+            } catch { /* heavy queue unreadable: no wait projection */ }
+          }
           result = filterSessionList(
             result,
             operator,
@@ -3854,6 +3870,7 @@ function buildWizardServer(options, lifetime) {
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
+      for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
       const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
