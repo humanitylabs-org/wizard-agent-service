@@ -26,11 +26,12 @@ function cleanName(value) {
 export function createShareAgentRouting({ registry, homeMount = '/opt/data', now = () => new Date(), mainThreadExists, sessionExists }) {
   const agentDir = (id) => join(registry.agentsDir, id)
   const inboxRoot = (id) => join(agentDir(id), 'home', 'inbox')
-  const stagingDir = (id) => join(agentDir(id), 'upload-staging')
+  const stagingDir = (id) => join(agentDir(id), 'home', '.wizard-upload-staging')
   // Upload id → stored file, so a completion retried after a crash finds what was already stored.
-  const ledgerPath = (id) => join(stagingDir(id), 'stored.json')
+  const ledgerPath = (id) => join(agentDir(id), 'upload-state', 'stored.json')
   const readLedger = (id) => { try { return JSON.parse(readFileSync(ledgerPath(id), 'utf8')) } catch { return {} } }
   const writeLedger = (id, value) => {
+    mkdirSync(join(agentDir(id), 'upload-state'), { recursive: true, mode: 0o700 })
     const tmp = `${ledgerPath(id)}.${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 })
     renameSync(tmp, ledgerPath(id))
@@ -90,6 +91,22 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
   }
 
   return {
+    locateFile(key, expectedAgent = '') {
+      if (!expectedAgent || expectedAgent === MAIN_AGENT_ID) throw new UploadError(404, 'file_not_found')
+      const candidates = registry.list().filter(a => a.id !== MAIN_AGENT_ID && (!expectedAgent || a.id === expectedAgent))
+        .flatMap(a => Object.values(readLedger(a.id)).filter(f => f.id === key).map(file => ({ agent: a.id, file })))
+      if (candidates.length !== 1) throw new UploadError(404, 'file_not_found')
+      return candidates[0]
+    },
+    filesForAgent(id, ids) {
+      if (!Array.isArray(ids) || ids.length > 8 || ids.some(x => typeof x !== 'string')) throw new UploadError(400, 'invalid_files')
+      const ledger = Object.values(readLedger(id))
+      return ids.map(key => {
+        const file = ledger.find(f => f.id === key)
+        if (!file || !/^inbox\/\d{4}-\d{2}-\d{2}\/[^/]+$/u.test(file.path) || file.path.includes('..') || !existsSync(join(agentDir(id), 'home', file.path))) throw new UploadError(409, 'file_agent_mismatch')
+        return { file }
+      })
+    },
     uploadTarget(key) {
       const match = AGENT_TARGET.exec(String(key))
       if (!match || match[1] === MAIN_AGENT_ID || !registry.read(match[1])) return null
@@ -108,7 +125,7 @@ export function createShareAgentRouting({ registry, homeMount = '/opt/data', now
         // The agent's own Hermes knows nothing of wizard_file_ids: name the files by their path in its home.
         runFields: (text, files) => {
           const listed = files.map(({ file }) => ({
-            id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+            id: file.id, agent: agent.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
             trusted_path: posix.join(homeMount, file.path),
           }))
           return { input: `${text}\n\n[WIZARD_FILES_V1]\n${JSON.stringify(listed)}\n[/WIZARD_FILES_V1]` }

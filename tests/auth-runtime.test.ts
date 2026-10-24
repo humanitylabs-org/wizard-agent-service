@@ -37,7 +37,9 @@ async function start(env: Record<string, string> = {}, failure = false) {
       HERMES_ORIGIN: 'http://127.0.0.1:9', WIZARD_HELM_ORIGIN: 'http://127.0.0.1:9',
       WIZARD_STT_ORIGIN: 'http://127.0.0.1:9', WIZARD_INBOX_ORIGIN: 'http://127.0.0.1:9',
       WIZARD_FOLLOW_THROUGH: 'off', WIZARD_AGENT_BRIDGE: 'off', WIZARD_UX_API_COMPAT: '1',
-      WIZARD_ACCESS_TEAM_DOMAIN: 'fixture.cloudflareaccess.com', WIZARD_ACCESS_AUDIENCE: 'fixture-audience', ...env },
+      WIZARD_ACCESS_TEAM_DOMAIN: 'fixture.cloudflareaccess.com', WIZARD_ACCESS_AUDIENCE: 'fixture-audience',
+      // Optional auth does not replace the Mac lifecycle owner/Host boundary.
+      WIZARD_ALLOWED_HOSTS: host, WIZARD_APP_OWNER_LOGINS: login, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   children.push(child)

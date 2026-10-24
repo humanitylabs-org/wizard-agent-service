@@ -168,7 +168,7 @@ export function createUploadStore(options) {
   const publicUpload = (record, mapFile = (file) => file) => {
     const file = record.status === 'complete' ? fileOf(record) : null
     return {
-      upload_id: record.id, offset: record.offset, bytes: record.bytes, chunk_bytes: chunkBytes,
+      upload_id: record.id, agent: record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes', offset: record.offset, bytes: record.bytes, chunk_bytes: chunkBytes,
       status: record.status === 'complete' ? 'complete' : record.status === 'uploading' ? 'uploading' : 'failed',
       ...(file ? { file: mapFile(file) } : {}),
       ...(record.status !== 'complete' && record.status !== 'uploading' ? { error: record.error || record.status } : {}),
@@ -227,10 +227,12 @@ export function createUploadStore(options) {
   async function createUpload(input, { targetKey = 'files' } = {}) {
     const spec = fileSpec(input)
     const existing = existingUpload(spec)
+    if (existing && existing.target !== targetKey) throw new UploadError(409, 'client_upload_id_conflict')
     if (existing) return { record: existing, replayed: true }
     ensureSpace(target(targetKey).stagingDir, [spec.bytes])
     const prepared = await prepareUpload(spec, targetKey)
     const raced = existingUpload(spec)
+    if (raced && raced.target !== targetKey) throw new UploadError(409, 'client_upload_id_conflict')
     if (raced) return { record: raced, replayed: true }
     return { record: insertUpload(prepared, { clientUploadId: spec.clientUploadId }), replayed: false }
   }

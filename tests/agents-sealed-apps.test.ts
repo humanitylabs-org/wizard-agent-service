@@ -140,6 +140,12 @@ describe('#58 which agents can use an app', () => {
     expect(allowed.json.result.content[0].text).toBe('ran note_add')
     const listed = await mcp(base, gatewayKey(dir, 'private'), 'tools/call', { name: 'wizard_apps', arguments: {} })
     expect(listed.json.result.content[0].text).not.toContain('notes')
+    // Mac lifecycle actions are owner-global; a per-agent gateway token cannot install or search the global catalog.
+    for (const action of ['install', 'remove', 'search']) {
+      const denied = await mcp(base, gatewayKey(dir, 'private'), 'tools/call', { name: 'wizard_apps', arguments: { action, app: 'notes', query: 'notes' } })
+      expect(denied.json.result.isError).toBe(true)
+      expect(denied.json.result.content[0].text).toContain('Only the main owner agent')
+    }
     // A session opened by one agent cannot be used with another agent's token.
     const opened = await mcp(base, gatewayKey(dir, 'private'), 'tools/list')
     const hijack = await fetch(`${base}/wizard/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gatewayKey(dir, helper.id)}`, 'Mcp-Session-Id': opened.session }, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }) })

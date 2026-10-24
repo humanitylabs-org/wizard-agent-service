@@ -58,7 +58,7 @@ it('headless voice retains cross-origin rejection without contacting the transcr
   const f = await fixture()
   const response = await fetch(f.url, { method: 'POST', headers: { Origin: 'https://not-the-shell.invalid' }, body: recording() })
   expect(response.status).toBe(403)
-  expect(await response.json()).toEqual({ error: 'cross_origin_request' })
+  expect(await response.json()).toEqual({ error: 'same_origin_required' })
   expect(f.upstream).not.toHaveBeenCalled()
 })
 it('headless multipart endpoint rejects raw non-multipart requests without upstream calls', async () => {

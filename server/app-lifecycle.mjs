@@ -1,0 +1,278 @@
+// Owner app lifecycle + installed-app routing for the Agent Service.
+//
+// Authority model (docs/app-installation-integration.md):
+// - The control origin (the Wizard UX origin) carries the owner session. Lifecycle writes need that origin, an
+//   HttpOnly SameSite=Strict session cookie, its CSRF token and a stable Idempotency-Key. The App Manager bearer
+//   and Runtipi's CLI JWT never reach the browser or an app.
+// - Installed app documents never run on the control origin. With an apps origin configured (a second Service
+//   listener, e.g. Tailscale Serve on its own HTTPS port), /apps/<id>/ on the control origin redirects there and
+//   that listener serves only app routes. Without one, app documents are served with a CSP sandbox (opaque
+//   origin, no allow-same-origin), so an app script can't read the session/CSRF or drive lifecycle routes.
+// - Every route checks the Host header against the configured trusted hosts first (DNS-rebinding fence).
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { isIP } from 'node:net'
+import { adaptAppView } from './app-view-adapters.mjs'
+
+const ID = '[a-z0-9][a-z0-9-]{0,63}'
+const LIFE = new RegExp(`^/api/app-lifecycle/(${ID})(?::wizardapps)?/(install|start|stop|restart|update|uninstall)$`, 'u')
+const READ = new RegExp(`^/api/(?:apps/installed|system/load|apps/${ID}(?::wizardapps)?|marketplace/apps/${ID}(?::wizardapps)?(?:/image)?)$`, 'u')
+const APP = new RegExp(`^/apps/(${ID})(/.*)?$`, 'u')
+const METHOD = { install: 'POST', start: 'POST', stop: 'POST', restart: 'POST', update: 'PATCH', uninstall: 'DELETE' }
+const IDEMPOTENCY = /^[A-Za-z0-9_-]{16,128}$/u
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1', '[::1]']
+const SESSION_TTL_MS = 3600_000
+const SESSION_ROTATE_MS = 120_000
+const APP_SANDBOX = 'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals'
+
+const same = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
+const loopbackIp = (ip) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)
+const hostName = (host) => { try { return new URL(`http://${String(host || '')}`).hostname.toLowerCase() } catch { return '' } }
+
+/** The owner without Cloudflare Access: a direct loopback caller, or a reverse proxy (Tailscale Serve) that names a
+ * tailnet principal listed in `owners`. The proxy must strip client-supplied identity headers. A forwarded identity
+ * never counts without an explicit owner list.
+ * A non-loopback `trustedProxyIps` peer (the Docker gateway in front of a container's 127.0.0.1-published port) is
+ * also where hairpinned container traffic would arrive, so it is never the owner by itself: only a named owner. */
+export function localOwnerAccess(request, owners = [], trustedProxyIps = []) {
+  const peer = String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  const h = request.headers
+  const forwarded = h.forwarded || h['x-forwarded-for'] || h['x-forwarded-host']
+  const login = String(h['tailscale-user-login'] || '').trim().toLowerCase()
+  const named = Boolean(login) && owners.includes(login)
+  if (loopbackIp(peer)) return (!forwarded && !login) || named
+  return trustedProxyIps.some(ip => isIP(ip) && ip === peer) && named
+}
+
+/** Hostnames this Service answers to: loopback, plus every configured origin/host. */
+export function trustedHostnames({ allowedHosts = [], origins = [] } = {}) {
+  const set = new Set(LOOPBACK_HOSTS)
+  for (const h of allowedHosts) { const n = hostName(h); if (n) set.add(n) }
+  for (const o of origins) { try { if (o) set.add(new URL(o).hostname.toLowerCase()) } catch {} }
+  return set
+}
+
+function decodePath(path) { try { return decodeURIComponent(path) } catch { return '' } }
+function send(res, status, data, headers = {}) {
+  const body = Buffer.from(JSON.stringify(data))
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers })
+  res.end(body)
+}
+async function readBody(req, max) {
+  const chunks = []; let n = 0
+  for await (const c of req) { n += c.length; if (n > max) throw new Error('too_large'); chunks.push(c) }
+  return Buffer.concat(chunks)
+}
+function sameOrigin(req, hosts) {
+  // Browsers send Origin on every non-GET fetch; it must name this very host (already fenced) over a sane scheme.
+  if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) return false
+  const origin = req.headers.origin
+  if (!origin) return false
+  try {
+    const u = new URL(origin)
+    if (u.username || u.password || u.host !== String(req.headers.host || '').toLowerCase()) return false
+    if (!hosts.has(u.hostname.toLowerCase())) return false
+    return u.protocol === 'https:' || (u.protocol === 'http:' && LOOPBACK_HOSTS.includes(u.hostname))
+  } catch { return false }
+}
+
+/** The App Manager bridge origin: plain HTTP on loopback, or a declared bridge host (fresh mode). Throws otherwise. */
+export function managerOrigin(managerUrl, managerHosts = []) {
+  const u = new URL(managerUrl)
+  if (u.protocol !== 'http:' || ![...LOOPBACK_HOSTS, ...managerHosts].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/') throw new Error('App Manager bridge must be a loopback HTTP origin')
+  return u.origin
+}
+
+export function createAppLifecycleRoutes({
+  managerUrl = '', managerToken = '', appsJsonPath = '', access = localOwnerAccess, fetchImpl = fetch,
+  refresh = () => {}, now = Date.now, allowedHosts = [], controlOrigins = [], appsOrigin = '',
+  upstreamHosts = [], managerHosts = [], reservedPorts = [], role = 'control',
+} = {}) {
+  if (managerUrl) managerUrl = managerOrigin(managerUrl, managerHosts)
+  if (appsOrigin) {
+    const u = new URL(appsOrigin)
+    if (!['https:', 'http:'].includes(u.protocol) || u.username || u.password || u.pathname !== '/' || u.search || u.hash) throw new Error('apps origin must be a bare origin')
+    appsOrigin = u.origin
+  }
+  const hosts = trustedHostnames({ allowedHosts, origins: [...controlOrigins, appsOrigin] })
+  const upstreamOk = new Set([...LOOPBACK_HOSTS, ...upstreamHosts.map((h) => String(h).toLowerCase())])
+  // An app upstream on loopback must never be this Service (or its bridge): its requests would arrive as the owner.
+  const reserved = new Set([...reservedPorts, managerUrl && (new URL(managerUrl).port || '80')].filter(Boolean).map(String))
+  const sessions = new Map()
+  const cookieName = 'wizard_lifecycle'
+  const views = new Map()
+  // Any valid cookie of that name counts: another origin on the same host can plant one with a longer path.
+  const session = (req) => {
+    for (const c of String(req.headers.cookie || '').split(';').map((x) => x.trim()).filter((x) => x.startsWith(`${cookieName}=`))) {
+      const sid = c.slice(cookieName.length + 1), s = sessions.get(sid)
+      if (!s) continue
+      if (now() - s.at >= SESSION_TTL_MS) { sessions.delete(sid); continue }
+      return s
+    }
+    return null
+  }
+  const refreshSafely = async () => { try { await refresh() } catch { /* a projection refresh never changes the outcome */ } }
+
+  async function managerJson(path, init = {}) {
+    const r = await fetchImpl(managerUrl + path, { redirect: 'error', ...init, headers: { Authorization: `Bearer ${managerToken}`, Accept: 'application/json', ...(init.headers || {}) } })
+    const raw = await r.text()
+    if (raw.length > 4 * 1024 * 1024) throw new Error('too_large')
+    let data; try { data = JSON.parse(raw) } catch { throw new Error('invalid_json') }
+    return { r, data }
+  }
+
+  async function viewUpstream(id) {
+    let running = false
+    try { running = JSON.parse(readFileSync(appsJsonPath, 'utf8')).apps.some((a) => a?.id === id && a.status === 'running') } catch {}
+    if (!running || !managerUrl || !managerToken) return null
+    const hit = views.get(id)
+    if (hit && now() - hit.at < 5000) return hit.url
+    let url = null
+    try {
+      const { r, data } = await managerJson(`/api/internal/apps/${id}/view`, { signal: AbortSignal.timeout(5000) })
+      if (r.ok && data?.path === `/apps/${id}/`) {
+        const u = new URL(data.upstream)
+        // Internal fresh-mode routing names this installed app's own Runtipi service; never a caller-chosen host.
+        const loop = LOOPBACK_HOSTS.includes(u.hostname.toLowerCase())
+        if (u.protocol === 'http:' && (upstreamOk.has(u.hostname.toLowerCase()) || u.hostname === id) && u.port && !(loop && reserved.has(u.port)) && !u.username && !u.password && !u.search && !u.hash) url = u
+      }
+    } catch {}
+    views.set(id, { url, at: now() })
+    return url
+  }
+
+  async function proxyApp(req, res, url, id, rest, sandbox) {
+    if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) { send(res, 405, { error: 'method_not_allowed' }); return }
+    const write = !['GET', 'HEAD'].includes(req.method)
+    // A sandboxed (opaque-origin) document can't write: writes need a real same-origin app document.
+    if (write && (sandbox || !sameOrigin(req, hosts))) { send(res, 403, { error: 'same_origin_required' }); return }
+    const path = decodePath(url.pathname)
+    if (!path || path.includes('\\') || path.includes('\0') || path.split('/').includes('..')) { send(res, 400, { error: 'invalid_app_path' }); return }
+    const upstream = await viewUpstream(id)
+    if (!upstream) { send(res, 404, { error: 'app_not_available' }); return }
+    if (!rest) { res.writeHead(302, { Location: `/apps/${id}/${url.search}` }); res.end(); return }
+    const root = upstream.pathname.endsWith('/') ? upstream.pathname : `${upstream.pathname}/`
+    const target = new URL(root + url.pathname.slice(`/apps/${id}/`.length) + url.search, upstream.origin)
+    if (target.origin !== upstream.origin || !target.pathname.startsWith(root)) { send(res, 400, { error: 'invalid_app_path' }); return }
+    try {
+      const headers = { Accept: String(req.headers.accept || '*/*') }
+      // File Browser's own per-app session token (not Wizard's owner cookie or server-side Hermes token).
+      if (id === 'files' && req.headers['x-auth']) headers['X-Auth'] = String(req.headers['x-auth'])
+      let body
+      if (write) {
+        body = await readBody(req, 2 * 1024 * 1024)
+        if (req.headers['content-type']) headers['Content-Type'] = String(req.headers['content-type'])
+      }
+      // HEAD (the shell's frame confirmation) is answered from an upstream GET: many app servers 405 a HEAD.
+      const r = await fetchImpl(target, { method: req.method === 'HEAD' ? 'GET' : req.method, redirect: 'manual', signal: AbortSignal.timeout(15000), headers, ...(write ? { body } : {}) })
+      if (r.status >= 300 && r.status < 400) {
+        const loc = new URL(r.headers.get('location') || '/', target)
+        if (loc.origin !== upstream.origin || !loc.pathname.startsWith(root)) { send(res, 502, { error: 'app_redirect_refused' }); return }
+        res.writeHead(r.status, { Location: `/apps/${id}/${loc.pathname.slice(root.length)}${loc.search}${loc.hash}` }); res.end(); return
+      }
+      if (req.method === 'HEAD') await r.body?.cancel().catch(() => undefined)
+      let bytes = req.method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer())
+      if (bytes.length > 16 * 1024 * 1024) throw new Error('too_large')
+      if (req.method !== 'HEAD') bytes = adaptAppView(id, url.pathname, r.headers.get('content-type') || '', bytes)
+      res.writeHead(r.status, {
+        'Content-Type': r.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
+        ...(sandbox ? { 'Content-Security-Policy': APP_SANDBOX } : {}),
+      })
+      res.end(bytes)
+    } catch { send(res, 502, { error: 'app_unavailable' }) }
+  }
+
+  return async function handle(req, res, url) {
+    const path = decodePath(url.pathname)
+    const bootstrap = path === '/wizard/v1/app-lifecycle/session'
+    const life = LIFE.exec(path)
+    const read = READ.test(path)
+    const app = APP.exec(path)
+    // The apps listener answers app routes only, so nothing an app runs can reach the control plane there.
+    if (role === 'apps') {
+      if (!hosts.has(hostName(req.headers.host))) { send(res, 421, { error: 'untrusted_host' }); return true }
+      if (!app) { send(res, 404, { error: 'not_found' }); return true }
+      if (!await access(req)) { send(res, 403, { error: 'access_required' }); return true }
+      await proxyApp(req, res, url, app[1], app[2], false)
+      return true
+    }
+    const mine = bootstrap || path.startsWith('/api/app-lifecycle/') || read || app
+    if (!mine) return false
+    if (!hosts.has(hostName(req.headers.host))) { send(res, 421, { error: 'untrusted_host' }); return true }
+    if (!await access(req)) { send(res, 403, { error: 'access_required' }); return true }
+
+    if (app) {
+      if (appsOrigin) {
+        if (!['GET', 'HEAD'].includes(req.method)) { send(res, 405, { error: 'method_not_allowed' }); return true }
+        // The launcher confirms with fetch(HEAD). Following a cross-origin redirect
+        // taints its Origin to null; do not authorize null origins to make it pass.
+        // Confirm the real upstream status here with HEAD's empty body. App GET
+        // documents still redirect and never execute on the control origin.
+        if (req.method === 'HEAD') {
+          await proxyApp(req, res, url, app[1], app[2], true)
+          return true
+        }
+        res.writeHead(302, { Location: `${appsOrigin}${url.pathname}${url.search}`, 'Cache-Control': 'no-store' }); res.end(); return true
+      }
+      await proxyApp(req, res, url, app[1], app[2], true)
+      return true
+    }
+
+    if (bootstrap) {
+      if (req.method !== 'GET') { send(res, 405, { error: 'method_not_allowed' }); return true }
+      if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers['sec-fetch-site'] === 'same-site' || (req.headers.origin && !sameOrigin(req, hosts))) { send(res, 403, { error: 'same_origin_required' }); return true }
+      if (!managerUrl || !managerToken) { send(res, 503, { error: 'app_manager_not_configured' }); return true }
+      for (const [id, s] of sessions) if (now() - s.at >= SESSION_TTL_MS) sessions.delete(id)
+      let s = session(req)
+      // Rotate a session in its last two minutes, so a write never starts on one about to expire.
+      if (!s || SESSION_TTL_MS - (now() - s.at) < SESSION_ROTATE_MS) {
+        s = { id: randomBytes(32).toString('hex'), csrf: randomBytes(32).toString('hex'), at: now() }
+        sessions.set(s.id, s)
+        if (sessions.size > 500) sessions.delete(sessions.keys().next().value)
+      }
+      const left = Math.max(1, Math.floor((SESSION_TTL_MS - (now() - s.at)) / 1000))
+      const secure = String(req.headers['x-forwarded-proto'] || '') === 'https' || String(req.headers.origin || '').startsWith('https:') || !LOOPBACK_HOSTS.includes(hostName(req.headers.host))
+      send(res, 200, { csrf: s.csrf, expires_in: left }, { 'Set-Cookie': `${cookieName}=${s.id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${left}${secure ? '; Secure' : ''}` })
+      return true
+    }
+
+    if (!managerUrl || !managerToken) { send(res, 503, { error: 'app_manager_not_configured' }); return true }
+    if (!read && !life) { send(res, 404, { error: 'not_found' }); return true }
+    const init = { method: req.method, headers: {}, signal: AbortSignal.timeout(life ? 900_000 : 15_000) }
+    if (life) {
+      if (req.method !== METHOD[life[2]]) { send(res, 405, { error: 'method_not_allowed' }); return true }
+      const s = session(req)
+      if (!sameOrigin(req, hosts) || !s || !same(s.csrf, String(req.headers['x-wizard-csrf'] || ''))) { send(res, 403, { error: 'owner_session_required' }); return true }
+      const key = String(req.headers['idempotency-key'] || '')
+      if (!IDEMPOTENCY.test(key)) { send(res, 400, { error: 'idempotency_key_required' }); return true }
+      let payload
+      try { payload = JSON.parse((await readBody(req, 65536)).toString('utf8') || '{}') } catch { send(res, 400, { error: 'invalid_request' }); return true }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { send(res, 400, { error: 'invalid_request' }); return true }
+      init.headers = { 'Content-Type': 'application/json', 'Idempotency-Key': key }
+      init.body = JSON.stringify(payload)
+    } else if (!['GET', 'HEAD'].includes(req.method)) { send(res, 405, { error: 'method_not_allowed' }); return true }
+    try {
+      if (read && path.endsWith('/image')) {
+        const r = await fetchImpl(managerUrl + path, { ...init, redirect: 'error', headers: { Authorization: `Bearer ${managerToken}` } })
+        const type = String(r.headers.get('content-type') || '').split(';')[0]
+        if (!r.ok || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type)) { send(res, 404, { error: 'image_unavailable' }); return true }
+        const bytes = Buffer.from(await r.arrayBuffer())
+        if (bytes.length > 4 * 1024 * 1024) throw new Error('too_large')
+        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=60', 'X-Content-Type-Options': 'nosniff' }); res.end(bytes)
+        return true
+      }
+      const { r, data } = await managerJson(path, init)
+      if (life) { views.delete(life[1]); await refreshSafely() }
+      if (!r.ok) {
+        const error = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(data.error) ? data.error : 'app_operation_failed'
+        send(res, r.status >= 400 && r.status < 500 ? r.status : 502, { success: false, error })
+      } else send(res, r.status, data)
+    } catch {
+      if (life) { views.delete(life[1]); await refreshSafely() }
+      // A lost bridge response after submission is uncertain, never a definitive failure: same key retries replay.
+      send(res, 502, { success: false, error: life ? 'operation_unconfirmed' : 'app_manager_unavailable' })
+    }
+    return true
+  }
+}

@@ -244,6 +244,8 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         hermes["volumes"].append("claude-login:/claude")   # the top-level key below, named after the real volume
         hermes["environment"]["CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR"] = "/claude"
         doc_volumes["claude-login"] = {"name": CLAUDE_LOGIN_VOLUME, "external": True}
+    if os.environ.get('WIZARD_MANAGED_RUNTIME_STATE'):
+        hermes['volumes'].append(os.environ['WIZARD_MANAGED_RUNTIME_STATE'] + ':/wizard-managed-state')
     if (agent.get("model") or {}).get("provider") == "tinfoil":
         hermes["depends_on"] = [proxy]
         services[proxy] = {
@@ -1076,7 +1078,7 @@ def driver_for(agent: dict, driver, restricted_driver):
     return driver
 
 
-def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None):
+def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None, maintenance=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
 
@@ -1103,7 +1105,8 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 self._json(401, {"error": "unauthorized"})
                 return
             m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census)", self.path)
-            if not m:
+            maintenance_action = self.path.removeprefix('/maintenance/') if self.path.startswith('/maintenance/') else None
+            if not m and maintenance_action not in ['acquire', 'release']:
                 self._json(404, {"error": "not_found"})
                 return
             try:
@@ -1111,7 +1114,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             except ValueError:
                 self._json(400, {"error": "invalid_length"})
                 return
-            limit = 4 * ((PLACE_LIMIT + 2) // 3) + 4096 if m.group(2) == "place" else 512 * 1024
+            limit = 4 * ((PLACE_LIMIT + 2) // 3) + 4096 if m and m.group(2) == "place" else 512 * 1024
             if length < 0 or length > limit:
                 self._json(413, {"error": "too_large"})
                 return
@@ -1120,8 +1123,20 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             except ValueError:
                 self._json(400, {"error": "invalid_json"})
                 return
+            if maintenance_action:
+                if maintenance is None:
+                    self._json(409, {'error': 'managed_maintenance_unconfigured'}); return
+                try:
+                    self._json(200, getattr(maintenance, maintenance_action)(payload.get('token')))
+                except Exception as error:
+                    from managed_maintenance import MaintenanceError
+                    self._json(409, {'error': str(error) if isinstance(error, MaintenanceError) else 'maintenance_runtime_unknown'})
+                return
             agent_id, action = m.groups()
+            reservation = None
             try:
+                if maintenance:
+                    reservation = maintenance.enter()
                 if agent_id == "hermes" and action == "deliver":
                     # The main agent is not an agent folder; it is delivered to only when the box names its container.
                     if not main_container:
@@ -1152,6 +1167,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             except Exception as error:  # noqa: BLE001
                 sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}\n")
                 self._json(502, {"error": "runtime_failed"})
+            finally:
+                if reservation:
+                    reservation.close()
 
     return Handler
 
@@ -1170,6 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
+    ap.add_argument("--managed-maintenance-dir", type=Path)
     args = ap.parse_args(argv)
     if not args.token_file:
         ap.error("--token-file is required for the HTTP helper")
@@ -1186,7 +1205,12 @@ def main(argv: list[str] | None = None) -> int:
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
+    maintenance = None
+    if args.managed_maintenance_dir:
+        os.environ['WIZARD_MANAGED_RUNTIME_STATE'] = str(args.managed_maintenance_dir)
+        from managed_maintenance import ManagedMaintenance
+        maintenance = ManagedMaintenance(args.managed_maintenance_dir)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver, maintenance))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()
     return 0

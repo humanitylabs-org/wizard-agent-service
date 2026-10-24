@@ -1,9 +1,10 @@
 // Shares with an agents registry: per-agent routing and private-agent storage (AGENT_SERVICE_API.md "Shares").
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 
@@ -23,6 +24,7 @@ async function fakeHermes(name: string, sessions: string[] = []) {
     const json = (code: number, value: unknown) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)) }
     if (url.pathname === '/health') return json(200, { status: 'ok' })
     if (url.pathname === '/v1/capabilities') return json(200, { features: {} })
+    if (req.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(url.pathname)) return json(200, { messages: seen.filter(x => x.method === 'POST' && x.path === '/v1/runs').map((x, i) => ({ id: i + 1, role: 'user', content: x.body.input })) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
     if (req.method === 'GET' && sessionMatch) return known.has(sessionMatch[1]) ? json(200, { session: { id: sessionMatch[1] } }) : json(404, {})
     if (req.method === 'POST' && url.pathname === '/api/sessions') { if (known.has(body.id)) return json(409, {}); known.add(body.id); return json(201, { session: { id: body.id, title: body.title } }) }
@@ -40,7 +42,7 @@ async function start(extra: Record<string, any> = {}) {
   writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [] }))
   const main = await fakeHermes('main', ['main-thread'])
   const runtime = { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }), deliver: async () => ({ verified: true }) }
-  const svc = createWizardServer({
+  const options = {
     requireJoinedDelegationCapability: false,
     upstreamOrigin: main.origin, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false, followThrough: false,
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir,
@@ -49,11 +51,12 @@ async function start(extra: Record<string, any> = {}) {
     uploadStatePath: join(dir, 'state', 'uploads.sqlite3'), uploadReserveBytes: 0,
     runQueueStatePath: join(dir, 'state', 'queue.sqlite3'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     ...extra,
-  })
+  }
+  const svc = createWizardServer(options)
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
   const base = `http://127.0.0.1:${address.port}`
-  return { dir, main, base }
+  return { dir, main, base, svc, options }
 }
 
 const post = (base: string, path: string, value: unknown, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) })
@@ -89,6 +92,131 @@ const delivered = async (base: string, id: string) => {
   throw new Error(`not delivered: ${JSON.stringify(await (await fetch(`${base}/wizard/v1/shares/${id}`)).json())}`)
 }
 
+describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)', () => {
+  it('binds before bytes, survives Service restart, sends only to the selected private agent', async () => {
+    const { dir, main, base, svc, options } = await start()
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const data = Buffer.from('private ordinary paperclip fixture')
+    const body = { client_upload_id: 'paperclip-fixed-id', filename: 'private.txt', mime: 'text/plain', bytes: data.length, agent: agent.id }
+    const created = await post(base, '/wizard/v1/uploads', body)
+    expect(created.status).toBe(201)
+    const up = await created.json(), path = `/wizard/v1/uploads/${up.upload_id}`, q = `?agent=${agent.id}`
+    expect((await post(base, '/wizard/v1/uploads', { ...body, agent: 'hermes' })).status).toBe(409)
+    expect((await fetch(base + path, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data })).status).toBe(409)
+    expect((await fetch(base + path + q, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data.subarray(0, 8) })).status).toBe(204)
+    const stage = join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging', up.upload_id + '.part')
+    expect(readFileSync(stage).equals(data.subarray(0, 8))).toBe(true)
+    await new Promise<void>(resolve => svc.close(() => resolve()))
+    servers.splice(servers.indexOf(svc), 1)
+    const restarted = createWizardServer(options); servers.push(restarted)
+    const address = await listen(restarted) as import('node:net').AddressInfo
+    const next = `http://127.0.0.1:${address.port}`
+    expect((await (await fetch(next + path + q)).json()).offset).toBe(8)
+    expect((await fetch(next + path + q, { method: 'PATCH', headers: { 'Upload-Offset': '8', 'Content-Type': 'application/offset+octet-stream' }, body: data.subarray(8) })).status).toBe(204)
+    const complete = await post(next, path + '/complete' + q, {})
+    expect(complete.status).toBe(200)
+    const file = (await complete.json()).file
+    const download = await fetch(next + `/wizard/files/${file.id}/content` + q)
+    expect(download.status).toBe(200)
+    expect(Buffer.from(await download.arrayBuffer()).equals(data)).toBe(true)
+    expect((await fetch(next + `/wizard/files/${file.id}/content?agent=hermes`)).status).toBe(404)
+    const wrongMain = await post(next, '/wizard/hermes/v1/runs', { session_id: 'main-thread', input: 'wrong main target', wizard_file_ids: [file.id] }, { 'Idempotency-Key': 'must-not-leak' })
+    expect(wrongMain.status).toBeGreaterThanOrEqual(400)
+    const session = await post(next, '/wizard/hermes/api/sessions' + q, { id: 'private-paperclip-thread' })
+    expect(session.status).toBe(201)
+    const sent = await post(next, '/wizard/hermes/v1/runs' + q, { session_id: 'private-paperclip-thread', input: 'read this', wizard_file_ids: [file.id] })
+    expect(sent.status).toBe(202)
+    expect(agentHermes.runs()[0].body.input).toContain('/opt/data/inbox/')
+    expect(agentHermes.runs()[0].body.wizard_file_ids).toBeUndefined()
+    const history = await fetch(next + '/wizard/hermes/api/sessions/private-paperclip-thread/messages' + q + '&view=wizard')
+    expect(history.status).toBe(200)
+    const content = (await history.json()).messages[0].content
+    expect(content).toContain('WIZARD_FILE_CHIPS_V1')
+    expect(content).toContain(`"agent":"${agent.id}"`)
+    expect(content).not.toContain('/opt/data/')
+    expect((await post(next, '/wizard/hermes/v1/runs' + q, { session_id: 'private-paperclip-thread', input: 'wrong', wizard_file_ids: ['af_' + 'a'.repeat(32)] })).status).toBe(409)
+    expect(existsSync(join(dir, 'media', 'Inbox'))).toBe(false)
+    expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
+    expect(main.seen.filter(s => s.method === 'POST')).toEqual([])
+  })
+  it('one-shot outbox audio is stored only in selected agent home', async () => {
+    const { dir, main, base } = await start()
+    const { agent } = await addPrivate(dir, base)
+    const data = Buffer.from('private audio fixture')
+    const response = await fetch(`${base}/wizard/files/upload?agent=${agent.id}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Wizard-Filename': 'voice.webm', 'X-Wizard-Mime': 'audio/webm' }, body: data })
+    expect(response.status).toBe(201)
+    expect((await response.json()).file.id).toMatch(/^af_/)
+    expect(readFileSync(join(dir, 'agents', agent.id, 'home', 'inbox', new Date().toISOString().slice(0,10), 'voice.webm')).equals(data)).toBe(true)
+    expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
+    expect(main.seen.filter(s => s.method === 'POST')).toEqual([])
+  })
+})
+
+describe('global ordinary control request boundary', () => {
+  it('denies hostile authority/origin/fetch metadata on reads and writes before routing', async () => {
+    const { base, main } = await start()
+    const raw = (path: string, headers: Record<string,string>, method = 'GET') => new Promise<number>((resolve, reject) => {
+      const req = httpRequest(base + path, { method, headers: { 'Content-Type':'application/json', ...headers } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)) })
+      req.on('error', reject); req.end(method === 'POST' ? JSON.stringify({ id: 'must-not-create' }) : undefined)
+    })
+    for (const headers of [ { Host: 'attacker.test' }, { Origin: 'http://attacker.test' }, { Origin: 'null' }, { 'Sec-Fetch-Site': 'cross-site' }, { 'Sec-Fetch-Site': 'same-site' }, { Host: '127.0.0.1:1' } ]) {
+      for (const path of ['/wizard/files', '/wizard/v1/agents', '/wizard/bootstrap']) expect(await raw(path, headers as Record<string,string>), JSON.stringify(headers)).toBe(403)
+      expect(await raw('/wizard/hermes/api/sessions', headers as Record<string,string>, 'POST')).toBe(403)
+    }
+    expect((await post(base, '/wizard/hermes/api/sessions', { id: 'valid' }, { Origin: base, 'Sec-Fetch-Site': 'same-origin' })).status).toBe(201)
+    expect((await fetch(base + '/wizard/v1/agents')).status).toBe(200)
+    expect(main.seen.filter(s => s.method === 'POST')).toHaveLength(1)
+    // Token routes are not owner-authorized by the exception: forged token still fails.
+    expect((await post(base, '/wizard/v1/agents/hermes/deliveries', {}, { Host: 'machine.test', Authorization: 'Bearer forged' })).status).toBe(403)
+  })
+})
+
+describe('maintenance HTTP admission (runtime barrier fixture, real activity DBs)', () => {
+  it('does not let a loopback proxy bypass a configured access verifier', async () => {
+    let entered = false
+    const { base } = await start({ requireAccess: true, accessVerifier: async () => { throw new Error('denied') },
+      maintenanceBarrier: { acquire: async () => { entered = true }, release: async () => {} } })
+    const token = '11111111-1111-4111-8111-111111111111'
+    expect((await post(base, '/wizard/v1/maintenance', { token })).status).toBe(403)
+    expect((await fetch(base + '/wizard/v1/maintenance', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })).status).toBe(403)
+    expect(entered).toBe(false)
+  })
+  it('checks secondary activity and rejects a new run racing the acquisition', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'maintenance-http-'))
+    const mainPath = join(root, 'state.db')
+    const makeState = (path: string, busy = false) => {
+      const db = new DatabaseSync(path)
+      db.exec("CREATE TABLE session_turn_leases(conversation_id TEXT, expires_at REAL); CREATE TABLE sessions(last_activity_description TEXT, last_activity_at REAL)")
+      if (busy) db.prepare('INSERT INTO session_turn_leases VALUES (?,?)').run('hidden-worker', Date.now()/1000+300)
+      db.close()
+    }
+    makeState(mainPath)
+    let finish: () => void, entered: () => void
+    const ready = new Promise<void>(r => entered = r)
+    let waiting = true
+    const barrier = { acquire: async () => { if (waiting) { entered!(); await new Promise<void>(r => finish = r) } return async () => {} }, release: async () => {} }
+    const { dir, base } = await start({ hermesStatePath: mainPath, maintenanceBarrier: barrier })
+    const { agent, agentHermes } = await addPrivate(dir, base)
+    const privatePath = join(dir, 'agents', agent.id, 'home', 'state.db')
+    makeState(privatePath, true)
+    const token = '12345678-1234-1234-1234-123456789abc'
+    const acquiring = post(base, '/wizard/v1/maintenance', {token})
+    await ready
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'race',input:'must wait'})).status).toBe(409)
+    expect(agentHermes.runs()).toHaveLength(0)
+    finish!();expect((await acquiring).status).toBe(409)
+    waiting = false
+    const db = new DatabaseSync(privatePath);db.exec('DELETE FROM session_turn_leases');db.close()
+    const held = await post(base, '/wizard/v1/maintenance', {token})
+    expect(held.status).toBe(201);expect((await held.json()).agents).toEqual(['hermes',agent.id])
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'race',input:'must wait'})).status).toBe(409)
+    expect((await fetch(base+'/wizard/v1/maintenance', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:'wrong'})})).status).toBe(409)
+    expect((await fetch(base+'/wizard/v1/maintenance', {method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})})).status).toBe(200)
+    expect((await post(base, `/wizard/hermes/v1/runs?agent=${agent.id}`, {session_id:'after-release',input:'now allowed'})).status).toBe(202)
+    expect(agentHermes.runs()).toHaveLength(1)
+  })
+})
+
 describe('shares with an agents registry', () => {
   it('a share to the Private agent lands only in its home inbox and its own Hermes; main history and media/ untouched', async () => {
     const { dir, main, base } = await start()
@@ -120,7 +248,7 @@ describe('shares with an agents registry', () => {
     expect(pins.schema).toBe(2)
     expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id, provenance: 'service_admission' })
     // staging is outside the agent's home and empty
-    expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
+    expect(readdirSync(join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path
     const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
     expect(JSON.stringify(upload)).not.toContain(dir)
