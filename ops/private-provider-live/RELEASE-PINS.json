@@ -1,0 +1,29 @@
+{
+  "service": {
+    "repository": "https://github.com/humanitylabs-org/wizard-agent-service.git",
+    "sha": "888ecee067cde661f069875dc5915a7abe341103",
+    "runtime_from_same_tree": true
+  },
+  "ux": {
+    "repository": "https://github.com/humanitylabs-org/wizard-ux.git",
+    "sha": "f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6"
+  },
+  "client": {
+    "image": "ghcr.io/humanitylabs-org/wizard-private-client:0.1.0@sha256:c562bef2166e6e1054be8eed34229cf0ead4574002da28f8fe5d4f09ad0e6631",
+    "store_sha": "4a3c8ace0a865493ca98cf4486a6091918017635"
+  },
+  "provider": {
+    "repository": "https://github.com/defleur-agents/wizard-tinfoil.git",
+    "branch": "ops/relay-only-launch",
+    "sha": "07eca5e30ca7873ab8cfda503175768fc55f66d4",
+    "upstream_main": "cbfa896fdd1d484f9c96c44d8b5ad7c20dc3474e",
+    "relay_only": true,
+    "realtime_commit_excluded": "9a32d08",
+    "deployed_on_rig": false,
+    "unit_tests": {"run": 23, "skipped": 1, "failures": 0}
+  },
+  "observed_live_wam": {
+    "image": "ghcr.io/humanitylabs-org/wizard-app-manager@sha256:07df73e79ee3bea5465cd27d90f99191317075e7a669678a8d066c51473d4116",
+    "main_mjs_sha256": "6e2b3e410f1e54fce473452d79102edc3c11e36ae69237e4ab232e8f43ebef42"
+  }
+}

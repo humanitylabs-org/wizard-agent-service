@@ -1,0 +1,17 @@
+{
+  "service.tar": {
+    "sha256": "fe144c00defda65249a09249f5afcae3538e5aa429f67b3463322e38a58702d4",
+    "source_sha": "888ecee067cde661f069875dc5915a7abe341103"
+  },
+  "ux.tar": {
+    "sha256": "cc07f21e1cc3fe8c22d5e6903aa3f3d1d762b23a54915e25b6129b948ad7cdea",
+    "source_sha": "f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6"
+  },
+  "tinfoil-relay.tar": {
+    "sha256": "cce0418b2fe386a2e1ffaec0416d3f6682381869b042a121ab99558491d40027",
+    "source_sha": "07eca5e30ca7873ab8cfda503175768fc55f66d4"
+  },
+  "rig-recover.py": {
+    "sha256": "97ca8fc049348c22cb032712079c9983f1ab299259779deb5c974483558bd084"
+  }
+}
