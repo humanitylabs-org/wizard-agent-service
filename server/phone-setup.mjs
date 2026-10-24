@@ -251,8 +251,9 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       // readiness as the phone screen, without pretending we have actually seen a phone.
       let ready = false
       if (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url)) {
-        const { status, error, absent } = await statusOrNull()
-        const phone = view(status, error, absent)
+        // The summary must not wait for a possibly hung helper (the shell's launch budget is 2.5 s).
+        // A present socket is never host-managed, whether it is healthy or currently unreachable.
+        const phone = view(null, null, !existsSync(socketPath))
         // This flag is a checklist-copy hint for ready-but-not-yet-seen, not a general capability.
         // Once a phone was seen, preserve the existing "connected" checklist state/copy instead.
         ready = phone.managed === 'host' && phone.step === 'serving'

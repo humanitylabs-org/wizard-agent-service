@@ -133,9 +133,13 @@ describe('setup API (box-local listener)', () => {
 
   it('a helper outage never marks a stale host phone address ready', async () => {
     const dir = tempDir()
-    const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), hostShellUrl: () => `${ORIGIN}:8796/wizard-os-home/`,
-      call: async () => { throw Object.assign(new Error('offline'), { code: 'unavailable', absent: false }) } })
+    const socketPath = join(dir,'unresponsive.sock')
+    writeFileSync(socketPath,'')
+    let calls = 0
+    const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), socketPath, hostShellUrl: () => `${ORIGIN}:8796/wizard-os-home/`,
+      call: async () => { calls++; throw new Error('The summary must never call or wait for the helper') } })
     expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'todo' })
+    expect(calls).toBe(0)
   })
 
   it('an unlinked helper socket never reclassifies a prior enrollment as host-managed', async () => {
