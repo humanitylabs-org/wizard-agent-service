@@ -804,6 +804,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-echo",
+      "description": "Reopen a thread whose outbox still holds a message the transcript shows",
+      "layer": "ux",
+      "how_to_test": "Seed a sent and a receipt-lost outbox copy of the last user message, reopen the thread on each agent kind; verify no Sending duplicate paints in any frame and the message shows once; seed an unsent copy with the same words and verify it still shows.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-pending-echo.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "memory-compaction",
       "description": "Compact an isolated long fixture thread",
       "layer": "runtime",
