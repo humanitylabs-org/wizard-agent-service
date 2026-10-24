@@ -247,6 +247,7 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     status: status.status,
     status_detail: status.status_detail ?? '',
     is_default: agent.id === defaultAgentId,
+    ...(agent.hidden === true ? { hidden: true } : {}),
     ...(agent.role === 'recovery' ? { role: 'recovery' } : {}),
     // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
     created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
@@ -275,6 +276,7 @@ export function threadAgent(agent) {
 /** Validate a stored agent.json. Returns null for anything that is not a schema-1 agent (e.g. other experiments). */
 export function parseAgentFile(value, id) {
   if (!value || typeof value !== 'object' || value.schema !== AGENT_SCHEMA || value.id !== id || !ID_RE.test(id) || id === MAIN_AGENT_ID) return null
+  if (value.hidden !== undefined && typeof value.hidden !== 'boolean') return null
   if (value.harness !== 'hermes' || !['private', 'standard'].includes(value.privacy)) return null
   if (value.role !== undefined && value.role !== 'standard') return null
   const model = value.model
@@ -477,7 +479,7 @@ export function createAgentRegistry(options = {}) {
     return structuredClone(mainMemo.value)
   }
   const buildMainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
@@ -1000,12 +1002,13 @@ export function createAgentRegistry(options = {}) {
       // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
       const keys = Object.keys(body)
       const permKeys = Object.keys(body.permissions ?? {})
-      if (keys.some((key) => key !== 'permissions') || !permKeys.length || permKeys.some((key) => !['wizard_apps', 'agent_apps'].includes(key))) {
+      if (keys.some((key) => !['permissions', 'hidden'].includes(key)) || (!permKeys.length && !Object.hasOwn(body, 'hidden')) || permKeys.some((key) => !['wizard_apps', 'agent_apps'].includes(key))) {
         fail(409, 'main_agent_read_only', 'agent.main', 'the main agent is configured in Hermes itself; only its apps are set here')
       }
+      if (Object.hasOwn(body, 'hidden') && typeof body.hidden !== 'boolean') fail(400, 'invalid_hidden', 'agent.hidden')
       const apps = normalizePermissions(agent.permissions, body.permissions)
       mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
+      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, ...(Object.hasOwn(body, 'hidden') ? { hidden: body.hidden } : {}), wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
       appsChanged()
       return read(id)
     }
@@ -1019,6 +1022,10 @@ export function createAgentRegistry(options = {}) {
       if (body.confirm_downgrade === true) sealed('a private agent cannot move to a public model')
     } else if (body.privacy !== undefined && body.privacy !== agent.privacy) fail(409, 'privacy_fixed', 'agent.privacy')
     const next = structuredClone(agent)
+    if (body.hidden !== undefined) {
+      if (typeof body.hidden !== 'boolean') fail(400, 'invalid_hidden', 'agent.hidden')
+      next.hidden = body.hidden
+    }
     if (body.label !== undefined) {
       next.label = cleanLabel(body.label)
       if (!next.label) fail(400, 'label_required', 'agent.label')

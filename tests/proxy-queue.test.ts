@@ -139,6 +139,7 @@ describe('Wizard proxy capacity queue', () => {
       hermesKey: 'fixture-key',
       requireAccess: false,
       hermesStatePath: statePath,
+      wizardOsHome: directory,
       canonicalSessionReader: () => sessions,
       runQueueStatePath: join(directory, 'queue.sqlite3'),
       runQueueMaxActive: 2,
