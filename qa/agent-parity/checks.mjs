@@ -127,7 +127,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind)
+  const s = await scene(kind, ['session-slim-index','session-body-search'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)

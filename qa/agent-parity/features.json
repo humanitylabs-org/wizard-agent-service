@@ -37,11 +37,11 @@
   "features": [
     {
       "id": "chats-spaces",
-      "description": "Owner-created thread collections persist independently of agent runtime kind",
+      "description": "Agent-owned thread collections persist independently of agent runtime kind",
       "layer": "server",
       "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.",
       "source_refs": ["server/ui-preferences.mjs"],
-      "reference_tests": ["tests/ui-preferences.test.ts"],
+      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts"],
       "fixture": "chats-spaces",
       "policy_exemptions": []
     },
@@ -471,6 +471,26 @@
         "tests/thread-unread.test.ts"
       ],
       "fixture": "read-receipts",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-slim-index",
+      "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
+      "layer": "server",
+      "how_to_test": "Request fields=slim on archive-50, page the pinned cursor, verify bounded wire fields/build and complete archive membership, and prove routed/private rows never enter the main index on all four kinds.",
+      "source_refs": ["server/session-list-window.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/session-list-http.node.mjs"],
+      "fixture": "session-slim-index",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-body-search",
+      "description": "Body-only indexed search returns bounded visible snippets and explicit titles-only availability",
+      "layer": "server",
+      "how_to_test": "Request mode=body per kind with a local trigram store; verify id/agent/snippet wire shape, visibility, recall/private exclusion, short-query zero work, timings and titles-only behavior when the local index is unavailable.",
+      "source_refs": ["server/session-truth.mjs", "server/session-text-search-worker.mjs"],
+      "reference_tests": ["tests/session-text-search-worker.node.mjs"],
+      "fixture": "session-body-search",
       "policy_exemptions": []
     },
     {

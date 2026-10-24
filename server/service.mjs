@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
@@ -34,6 +34,7 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { createSpaceFiling } from './thread-spaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -147,7 +148,7 @@ ${STATUS_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor', 'fields', 'mode']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
@@ -173,8 +174,10 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
     if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
     if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
     if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
-    if (['window','q','overrides','cursor'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if (['window','q','overrides','cursor','fields','mode'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
     if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
+    if (searchParams.has('fields') && (searchParams.get('fields') !== 'slim' || searchParams.get('window') !== 'archive-50')) return false
+    if (searchParams.has('mode') && (searchParams.get('mode') !== 'body' || !searchParams.has('q'))) return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
@@ -357,6 +360,9 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
            session_turn_leases.conversation_id IS NOT NULL
            OR (
              COALESCE(sessions.last_activity_description, '') <> ''
+             -- A background helper heartbeats its parent's activity while the parent's own
+             -- turn is over. That parent is waiting, not working: it must not hold a slot.
+             AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
              AND COALESCE(sessions.last_activity_at, 0) >= ?
            )
          )
@@ -1457,18 +1463,36 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   // both, and the merged copy lands after the owner's newest question, reading as extra replies
   // to it. Drop that copy when it is the earlier message plus only text other rows on this page
   // already paint; anything else stays, so no text can disappear.
+  // Hermes stores one message either as a string (its text-only projection turns each image part
+  // into "[screenshot]") or as the original multipart list; a compaction replay can use the other
+  // form. Compare their text, whitespace-insensitive, so both forms count as the same message.
+  // Recalled <memory-context> blocks are hidden from the owner and may be present in only one form.
+  const replayText = (content) => {
+    if (typeof content === 'string') return visibleMemoryText(content)
+    if (!Array.isArray(content)) return null
+    const parts = content.slice(0, 64).map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      if (['image', 'image_url', 'input_image'].includes(part.type)) return '[screenshot]'
+      return typeof part.text === 'string' ? part.text : ''
+    })
+    return visibleMemoryText(parts.join('\n'))
+  }
+  const squash = (text) => String(text ?? '').replace(/\s+/g, '')
   const replayKey = (item) => {
     const role = item?.role ?? item?.author
     const at = item?.timestamp
-    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
-      ? `${role}\u0000${at}` : ''
+    return (role === 'user' || role === 'assistant') && typeof replayText(item?.content) === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${String(item?.session_id ?? '')}\u0000${role}\u0000${at}` : ''
   }
-  const mergedReplay = (earlier, later, pageTexts) => {
+  const mergedReplay = (earlierText, laterText, pageTexts) => {
+    const earlier = squash(earlierText)
+    const later = squash(laterText)
     if (later === earlier) return true
     if (!earlier || !later.startsWith(earlier)) return false
     let rest = later.slice(earlier.length)
-    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
-    return !rest.trim()
+    for (const text of pageTexts.map(squash)) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest
   }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
@@ -1484,14 +1508,15 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
         return key && firstByKey.get(key) !== index ? [index] : []
       }))
       const pageTexts = repeated.size
-        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [replayText(sourceOf(item, index).content)]))]
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
-          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+          const earlierText = replayText(earlier.content)
+          if (mergedReplay(earlierText, replayText(sourceItem.content), pageTexts.filter((text) => text !== earlierText))) return []
         }
         const role = sourceItem?.role ?? sourceItem?.author
         const content = historyContentStrings(sourceItem?.content ?? sourceItem?.text ?? sourceItem?.output).join('\n')
@@ -2600,9 +2625,11 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
+  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
+    agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
@@ -3383,7 +3410,7 @@ function buildWizardServer(options, lifetime) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
-      if (payload.status === 'completed') chatPhotos?.kick('completed_assistant')
+      if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)) }
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -3531,6 +3558,19 @@ function buildWizardServer(options, lifetime) {
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
       if (!access) throw Object.assign(new Error('access required'), {status:403})
       const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      if (searchParams.get('mode') === 'body') {
+        const start=performance.now(), q=searchParams.get('q') || ''
+        // Short queries never open SQLite, even on a cold list.
+        if (!indexedSearchWords(q).length) return {object:'list',window_projected:true,data:[],search_total:0,mode:'titles',partial:false,timings:{list_ms:0,fts_ms:0,read_ms:0,candidates:0,sessions:0}}
+        let cached
+        try { cached=await listCache.searchSnapshot() } catch {
+          const all=(await loadCanonicalSessions()).filter(s=>isHumanSession(s,operator)); cached=[]
+          for(let i=0;i<all.length;i+=100) cached.push(...JSON.parse((await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)).toString('utf8')).data)
+        }
+        const list_ms=performance.now()-start
+        const hits=await searchHermesSessionTextAsync(hermesStatePath,cached.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || scope)
+        return {object:'list',window_projected:true,data:[...hits].map(([id,snippet])=>({id,agent:'hermes',snippet})),search_total:hits.size,mode:hits.mode,partial:hits.partial,timings:{list_ms,...hits.timings}}
+      }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
           try { return await listCache.served() }
@@ -3541,13 +3581,13 @@ function buildWizardServer(options, lifetime) {
           // Search reuses the shared list snapshot; only the message-text lookup is per query.
           // Rows are shared with other clients, so matches get a copy, never a mutation.
           let cached
-          try { cached = await listCache.served() }
+          try { cached = await listCache.searchSnapshot() }
           catch (error) { listCache.fellBack(error) }
           if (cached) {
             // Search failures are not cache failures: never retry a timed-out scan
             // as a full projection plus one new search for every batch.
             const hits = await searchHermesSessionTextAsync(hermesStatePath, cached.map(s => s.id), q)
-            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
+            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id), wizard_search_match:true } : row)
           }
         }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
@@ -3556,11 +3596,11 @@ function buildWizardServer(options, lifetime) {
         for (let i=0; i<all.length; i+=100) {
           const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
           const batch = JSON.parse(result.toString('utf8')).data
-          if (searchParams.get('q')) {
-            const hits = await searchHermesSessionTextAsync(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
-            for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
-          }
           rows.push(...batch)
+        }
+        if(searchParams.get('q')) {
+          const hits=await searchHermesSessionTextAsync(hermesStatePath,rows.map(s=>s.id),searchParams.get('q'))
+          for(const row of rows) if(hits.has(row.id)) { row.wizard_search_text=hits.get(row.id); row.wizard_search_match=true }
         }
         return rows
       } })
@@ -3646,7 +3686,7 @@ function buildWizardServer(options, lifetime) {
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
-    const appNote = appProvenanceRunNote(appCatalog())
+    const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
   }
@@ -3691,6 +3731,7 @@ function buildWizardServer(options, lifetime) {
         if (!session || typeof session.id !== 'string') return session
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+        spaceFiling.apply('hermes', session.id, session.wizard_attention)
         const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
         if (attention?.subject) {
           servedSubjects.delete(session.id)
@@ -3932,6 +3973,14 @@ function buildWizardServer(options, lifetime) {
       touch: () => { localRevision++ },
       stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
       check,
+      searchSnapshot: async () => {
+        const cached = snapshot.peek()
+        if (cached) {
+          if(snapshot.age()>20000) setImmediate(()=>{ void listCache.served().catch(()=>undefined) })
+          return cached
+        }
+        return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+      },
       served: async () => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
         return rows.map((row) => ({ ...row }))
@@ -3957,7 +4006,11 @@ function buildWizardServer(options, lifetime) {
     return JSON.parse(result.toString('utf8'))
   }
 
-  const safeQueuedRunPayload = (record, raw = false) => safeQueueValue(runQueue.publicPayload(record), record, raw)
+  const safeQueuedRunPayload = (record, raw = false) => {
+    const value = runQueue.publicPayload(record)
+    if (value.status === 'completed' && record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output))
+    return safeQueueValue(value, record, raw)
+  }
   const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
   // The scheduler's own read of a `deliver: notification` run: its answer ends in [SILENT] (quiet thread), so the
   // display scrub would erase the notification text. Internal token only; owners always get the scrubbed view.
@@ -5651,7 +5704,7 @@ function buildWizardServer(options, lifetime) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
-        for (const key of ['window','q','overrides','cursor']) upstreamQuery.delete(key)
+        for (const key of ['window','q','overrides','cursor','fields','mode']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
           ? await canonicalSessionPage(operator, url.searchParams, request)
@@ -5725,7 +5778,9 @@ function buildWizardServer(options, lifetime) {
           try {
             const runId = upstreamPath.split('/').at(-1)
             const tracked = directRuns.get(runId)
-            const status = JSON.parse(result.toString('utf8')).status
+            const completedRun = JSON.parse(result.toString('utf8'))
+            const status = completedRun.status
+            if (!ACTIVE_RUN_STATUSES.has(status)) spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output))
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
             else if (tracked) directRuns.delete(runId)
           } catch { /* status projection is best effort */ }

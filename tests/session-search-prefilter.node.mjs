@@ -1,4 +1,6 @@
-// Chats search: the SQL prefilter (instr(lower())) must never hide a hit the JS check would find.
+// Chats search reads message text only through Hermes' trigram index. Without a ready index (old store,
+// mid-way rebuild) or for words under 3 letters it answers from titles only: the old instr() content scan read
+// the whole store and took >30 s (James, 25 Oct 2026).
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -7,7 +9,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { searchHermesSessionText } from '../server/session-truth.mjs'
 
-test('message search: same hits with the SQL prefilter, including case and non-ASCII words', () => {
+test('message search: a store without the trigram index never runs the full content scan', () => {
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'search-'))
   try {
     const path = join(dir, 'state.db')
@@ -22,15 +24,11 @@ test('message search: same hits with the SQL prefilter, including case and non-A
     db.close()
     const ids = ['a', 'b', 'c', 'd', 'e']
     const hits = (q) => [...searchHermesSessionText(path, ids, q).keys()].sort()
-    assert.deepEqual(hits('restart keeper'), ['a'])
-    assert.deepEqual(hits('Restart'), ['a', 'b', 'e'])
-    assert.deepEqual(hits('café restart'), ['b'])
-    assert.deepEqual(hits('école'), ['e'])  // non-ASCII words skip the prefilter; JS folds them
-    assert.deepEqual(hits('zzz'), [])
+    for (const q of ['restart keeper', 'Restart', 'café restart', 'école', 'zzz']) assert.deepEqual(hits(q), [], q)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('message search: trigram index path matches substrings, skips tool rows, honours a mid-way rebuild', () => {
+test('message search: trigram index path matches substrings, skips tool rows, goes titles-only mid-rebuild', () => {
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'search-'))
   try {
     const path = join(dir, 'state.db')
@@ -54,9 +52,9 @@ test('message search: trigram index path matches substrings, skips tool rows, ho
     assert.deepEqual(hits('philosoph'), ['a', 'b'])
     assert.deepEqual(hits('PHILOSOPHER filter'), ['a'])
     assert.deepEqual(hits('pills'), ['a'])
-    assert.deepEqual(hits('ok'), [])  // short words use the content scan
+    assert.deepEqual(hits('ok'), [])  // short words: titles only
     assert.deepEqual(hits('zzzz'), [])
     const w = new DatabaseSync(path); w.prepare("INSERT INTO state_meta VALUES ('fts_rebuild_progress','1')").run(); w.close()
-    assert.deepEqual(hits('philosopher'), ['a', 'b', 'd'])
+    assert.deepEqual(hits('philosopher'), [])  // a half-built index could miss rows; never fall back to the scan
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

@@ -6,8 +6,13 @@ import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 const instructions = `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}`
 
 const servers: Server[] = []
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+const homes: string[] = []
 
 afterEach(async () => {
+  homes.splice(0).forEach(p => rmSync(p, { recursive: true, force: true }))
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
 })
 
@@ -46,7 +51,8 @@ async function startUpstream(joinSupported: boolean) {
 }
 
 async function startWizard(upstreamOrigin: string) {
-  const wizard = createWizardServer({ upstreamOrigin, hermesKey: 'fixture-key', requireAccess: false })
+  const home = mkdtempSync(join(tmpdir(), 'join-capability-')); homes.push(home)
+  const wizard = createWizardServer({ upstreamOrigin, hermesKey: 'fixture-key', requireAccess: false, wizardOsHome: home, agentBridge: false })
   servers.push(wizard)
   const address = await listen(wizard)
   return `http://127.0.0.1:${(address as import('node:net').AddressInfo).port}`

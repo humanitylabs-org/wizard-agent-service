@@ -117,6 +117,24 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('owner can hide/unhide agents without stopping them; hidden must be boolean and survives readback', async () => {
+    const dir = box(), main = await fakeHermes('main'), { base, calls } = await start(dir, main)
+    const { agent } = await withPrivate(dir, base)
+    const route = base + '/wizard/v1/agents/' + agent.id
+    const patch = (hidden: unknown) => fetch(route, { ...json({ hidden }), method: 'PATCH' })
+    expect((await patch('true')).status).toBe(400)
+    const before = calls.slice()
+    expect((await patch(true)).status).toBe(200)
+    expect((await (await fetch(route)).json()).agent.hidden).toBe(true)
+    expect((await (await fetch(base + '/wizard/v1/agents')).json()).agents.find((a:any)=>a.id===agent.id).hidden).toBe(true)
+    expect(calls).toEqual(before)
+    expect(JSON.parse(readFileSync(join(dir, 'agents', agent.id, 'agent.json'), 'utf8')).hidden).toBe(true)
+    expect((await patch(false)).status).toBe(200)
+    expect((await (await fetch(route)).json()).agent.hidden === true).toBe(false)
+    expect((await fetch(base + '/wizard/v1/agents/hermes', { ...json({hidden:true}), method:'PATCH' })).status).toBe(200)
+    expect((await (await fetch(base + '/wizard/v1/agents/hermes')).json()).agent.hidden).toBe(true)
+  })
+
   it('prepares only the reserved import socket through an owner-only API, without runtime calls', async () => {
     const dir = box(), main = await fakeHermes('main')
     const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), isolation: 'restricted',
