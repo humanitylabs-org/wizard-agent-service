@@ -219,14 +219,17 @@
     },
     {
       "id": "session-archive",
-      "description": "Archive and restore the disposable thread, reading back both changes",
+      "description": "Archive and restore a disposable thread while ensuring archived stale-running threads stay out of Working",
       "layer": "server",
-      "how_to_test": "Archive and restore the disposable thread, reading back both changes.",
+      "how_to_test": "Archive and restore the disposable thread, reading back both changes for every runtime kind. In Wizard UX, also verify archived stale-running rows appear in Archive, never Working, for both the main list and a routed agent list.",
       "source_refs": [
-        "server/agents-http.mjs"
+        "server/agents-http.mjs",
+        "wizard-ux/web/live.js"
       ],
       "reference_tests": [
-        "tests/agents.test.ts"
+        "tests/agents.test.ts",
+        "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-unified-chats.cjs"
       ],
       "fixture": "session-archive",
       "policy_exemptions": []
