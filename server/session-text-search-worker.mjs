@@ -43,7 +43,7 @@ function start(pool) {
     const worker=pool.worker; pool.worker=null; pool.active=null
     task.reject(unavailable('session search deadline exceeded'))
     void worker.terminate().then(()=>start(pool))
-  },3000)
+  },10000) // a cold 30 GB store needs more than 3 s once; killing the worker would throw the warm handle away
   pool.worker.postMessage({ids:task.ids,query:task.query})
 }
 export function searchHermesSessionTextAsync(path, sessionIds, query, scope='default') {
