@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -44,6 +45,17 @@ def validate(root):
     return live, manifest, parity
 
 
+def redact_diagnostic(data):
+    """Retain exception/assertion names without environment or bearer values."""
+    text = data.decode(errors='replace') if isinstance(data, bytes) else str(data)
+    text = re.sub(r'(?i)(bearer\s+)[^\s\"\'<>]+', r'\1[MASKED]', text)
+    text = re.sub(r'(?im)([\"\']?[\w.-]*(?:key|token|password|secret|proof|authorization)[\w.-]*[\"\']?\s*[:=]\s*)[^\r\n,}]+', r'\1[MASKED]', text)
+    text = re.sub(r'\b[A-Za-z0-9_+/=-]{32,}\b', '[MASKED]', text)
+    # Traceback source lines can contain literals: expose only frames and final exception.
+    lines = [line for line in text.splitlines() if line.startswith(('Traceback', '  File ', 'PHASE_FAILED', 'FAILED')) or re.match(r'^[A-Za-z_][\w.]*(?:Error|Exception)(?::|$)', line)]
+    return '\n'.join(lines)[-5000:] or 'nonzero exit (no safe exception diagnostic)'
+
+
 class Rig:
     def __init__(self, root):
         self.env = dict(os.environ, LIMA_HOME=str(root/'rig/lima'))
@@ -51,8 +63,7 @@ class Rig:
         argv = ['/opt/homebrew/bin/limactl','shell','--workdir','/home/rig','pp-rig','--',*args]
         p = subprocess.run(argv, input=payload, capture_output=True, env=self.env, timeout=timeout)
         if p.returncode:
-            # Docker/Compose diagnostics can include environment; don't echo them.
-            raise RuntimeError('guest command failed: '+args[0]+'; output withheld')
+            raise RuntimeError('guest command failed: '+args[0]+'; redacted diagnostic:\n'+redact_diagnostic(p.stdout+p.stderr))
         return p.stdout.decode()
     def python(self, script, root=False, payload=None, timeout=1800):
         return self.run((['sudo'] if root else [])+['python3','-c',script],payload,timeout)
