@@ -847,6 +847,20 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "window-refresh",
+      "description": "Refresh a desktop Chats window in place (↻ / ⌥R): refetch its own thread and list without closing it",
+      "layer": "ux",
+      "how_to_test": "Open a synthetic thread in a main Chats window and in routed windows for host-profile, container and restricted agents; press ⌥R on each and verify only that window's thread reloads (forced) and its own agent list repaints, while a New chat draft is never reloaded.",
+      "source_refs": [
+        "wizard-ux/web/desktop/desktop.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/desktop-window-refresh.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }
