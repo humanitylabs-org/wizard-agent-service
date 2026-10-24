@@ -839,12 +839,19 @@ function durableScreenshotCandidate(record) {
 // its "Sent" outbox item; every other internal notification keeps its kind.
 export function restoreOwnerTurns(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes('internal_notification')) return result
-  let admitted
-  try {
-    admitted = new Set(runQueue.admittedForSession('direct', sessionId)
-      .map((record) => record?.payload?.admission_id).filter((id) => typeof id === 'string' && id))
-  } catch { return result }
-  if (!admitted.size) return result
+  let records
+  try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
+  // Hermes' session history omits platform_message_id, so an admitted run is matched by its exact visible
+  // input and its admission time (Hermes stamps the user row moments after admitting the run).
+  const pending = []
+  for (const record of Array.isArray(records) ? records : []) {
+    let input = ''
+    try { input = visibleInputText(JSON.parse(String(record?.body ?? '{}'))?.input).trim() } catch { /* unreadable body */ }
+    const at = Number(record?.payload?.created_at ?? record?.createdAt)
+    const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
+    if ((input || id) && Number.isFinite(at)) pending.push({ input, at, id, used: false })
+  }
+  if (!pending.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   let changed = false
@@ -852,8 +859,13 @@ export function restoreOwnerTurns(result, runQueue, sessionId) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row
     if ((row.role ?? row.author) !== 'user' || row.display_kind !== 'internal_notification') return row
     if (row.session_id && row.session_id !== sessionId) return row
-    const id = row.platform_message_id ?? row.message_id
-    if (typeof id !== 'string' || !admitted.has(id)) return row
+    const rowId = row.platform_message_id ?? row.message_id
+    const text = visibleInputText(row.content).trim()
+    const at = Number(row.timestamp ?? row.created_at)
+    const match = pending.find((p) => !p.used && ((p.id && rowId === p.id)
+      || (p.input && text === p.input && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)))
+    if (!match) return row
+    match.used = true
     changed = true
     const { display_kind: _kind, ...rest } = row
     return rest
@@ -861,6 +873,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId) {
   for (const key of ['data', 'messages', 'items']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].map(fix)
   return changed ? Buffer.from(JSON.stringify(payload)) : result
 }
+const OWNER_TURN_WINDOW_SECONDS = 120
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
