@@ -359,6 +359,9 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
            session_turn_leases.conversation_id IS NOT NULL
            OR (
              COALESCE(sessions.last_activity_description, '') <> ''
+             -- A background helper heartbeats its parent's activity while the parent's own
+             -- turn is over. That parent is waiting, not working: it must not hold a slot.
+             AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
              AND COALESCE(sessions.last_activity_at, 0) >= ?
            )
          )
