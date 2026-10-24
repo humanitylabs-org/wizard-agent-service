@@ -92,6 +92,16 @@ function lockedRoute(modelConfig) {
   } catch { return null }
 }
 
+// The trigram index is complete only when it exists and no FTS rebuild is mid-way
+// (Hermes records rebuild progress in state_meta while backfilling).
+function trigramIndexReady(db) {
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
+    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+  } catch { return false }
+}
+
 // Search only caller-approved session IDs in this runtime, with the same visibility rules
 // as the list truth reader. Never discover agents or open their stores here.
 export function searchHermesSessionText(path, sessionIds, query) {
@@ -102,17 +112,31 @@ export function searchHermesSessionText(path, sessionIds, query) {
   try {
     const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x=>x.name));
     const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
+    const accept = row => {
+      if (hits.has(row.session_id)) return;
+      const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
+      if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
+    };
+    // Fast path: Hermes keeps a trigram FTS index over every non-tool message. Scanning
+    // content with instr() reads the whole (multi-GB) store and blew the search deadline,
+    // so Chats search spun forever. The index narrows to candidate rows; each session then
+    // reads only its newest candidates. The JS check above stays the authority.
+    const indexed = trigramIndexReady(db) ? words.filter(w => w.length >= 3 && /^[\x00-\x7f]+$/.test(w)) : [];
+    if (indexed.length) try {
+      db.exec('CREATE TEMP TABLE IF NOT EXISTS wizard_search_hits (id INTEGER PRIMARY KEY); DELETE FROM temp.wizard_search_hits');
+      db.prepare('INSERT INTO temp.wizard_search_hits SELECT rowid FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ?')
+        .run(indexed.map(w => `"${w.replace(/"/g, '""')}"`).join(' AND '));
+      const perSession = db.prepare(`SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id = ? AND id IN (SELECT id FROM temp.wizard_search_hits) AND role IN ('user','assistant') AND content IS NOT NULL ORDER BY timestamp DESC`);
+      for (const id of ids) for (const row of perSession.iterate(id)) { accept(row); if (hits.has(id)) break; }
+      return hits;
+    } catch { hits.clear() /* fall back to the content scan below */ }
     // Let SQLite drop non-matching messages before they become JS strings (the costly part):
     // instr(lower()) folds ASCII only, so it prefilters only ASCII words; the JS check below
     // stays the authority.
     const ascii = words.filter(w => /^[\x00-\x7f]+$/.test(w));
     const prefilter = ascii.map(() => ' AND instr(lower(content), ?) > 0').join('');
     const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL${prefilter} ORDER BY timestamp DESC`;
-    for (const row of db.prepare(sql).iterate(...ids, ...ascii)) {
-      if (hits.has(row.session_id)) continue;
-      const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
-      if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
-    }
+    for (const row of db.prepare(sql).iterate(...ids, ...ascii)) accept(row);
   } catch { /* old stores retain title/request search */ } finally { db.close(); }
   return hits;
 }
