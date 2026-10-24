@@ -107,24 +107,32 @@ export const checks = {
     assert.equal(visible.status, 200)
     const seeded = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic watcher seed' }))
     assert.equal(seeded.status, 202)
-    const call = (action, body = {}) => {
-      const init = post({ session_id: 'wizard_parity', ...body })
-      init.headers.Authorization = `Bearer ${s.followUpToken}`
-      return s.raw(`/wizard/internal/follow-ups/${action}`, init)
+    // The runtime's own gateway credential on its own transport (restricted: its socket). No owner proof.
+    let id = 0
+    const call = async (args) => {
+      const r = await s.gatewayRpc({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name: 'wizard_follow_up', arguments: { session_id: 'wizard_parity', ...args } } })
+      assert.equal(r.status, 200)
+      const result = (await r.json()).result
+      return { error: result.isError === true, value: result.isError ? result.content[0].text : JSON.parse(result.content[0].text) }
     }
-    const created = await call('create', { name: 'Parity dependency', instructions: 'Check the synthetic dependency.', every_minutes: 7 })
-    assert.equal(created.status, 201)
-    const watcher = await created.json(); assert.equal(watcher.kind, 'watch'); assert.equal(watcher.thread, 'wizard_parity')
-    const listed = await call('list'); assert.equal(listed.status, 200)
-    assert.deepEqual((await listed.json()).follow_ups.map(item => item.id), [watcher.id])
+    const created = await call({ action: 'create', name: 'Parity dependency', instructions: 'Check the synthetic dependency.', every_minutes: 7 })
+    assert.equal(created.error, false, String(created.value))
+    const watcher = created.value; assert.equal(watcher.kind, 'watch'); assert.equal(watcher.thread, 'wizard_parity')
+    assert.equal(watcher.agent, s.kind === 'main' ? 'main' : s.id)
+    if (s.kind !== 'main') {
+      const foreign = await call({ action: 'create', session_id: 'wizard_not_this_agents', name: 'Foreign', instructions: 'x' })
+      assert.equal(foreign.error, true, 'a routed agent may watch only a thread it owns')
+    }
+    const listed = await call({ action: 'list' }); assert.equal(listed.error, false)
+    assert.deepEqual(listed.value.follow_ups.map(item => item.id), [watcher.id])
     const sessions = await (await s.request('/api/sessions')).json()
     const row = (sessions.data || sessions.sessions).find(item => item.id === 'wizard_parity')
     assert.deepEqual({ active: row.wizard_follow_up.active, count: row.wizard_follow_up.count, names: row.wizard_follow_up.names },
       { active: true, count: 1, names: ['Parity dependency'] })
     assert.equal(typeof row.wizard_follow_up.nextRun, 'string')
-    const stopped = await call('stop', { watcher_id: watcher.id }); assert.equal(stopped.status, 200)
-    assert.deepEqual(await stopped.json(), { stopped: 1 })
-    assert.deepEqual((await (await call('list')).json()).follow_ups, [])
+    const stopped = await call({ action: 'stop', watcher_id: watcher.id }); assert.equal(stopped.error, false)
+    assert.deepEqual(stopped.value, { stopped: 1 })
+    assert.deepEqual((await call({ action: 'list' })).value.follow_ups, [])
   },
   'session-rename': async s => {
     const r = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Synthetic renamed thread' }), method: 'PATCH' }); assert.equal(r.status, 200)

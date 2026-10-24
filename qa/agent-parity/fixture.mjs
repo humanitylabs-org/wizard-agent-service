@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../../server/service.mjs'
+import { agentSocketPath } from '../../server/agent-sockets.mjs'
 import { PRESETS } from '../../server/agents.mjs'
 
 export const kinds = ['main', 'host-profile', 'container', 'restricted']
@@ -16,6 +17,8 @@ export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Typ
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
 export async function scene(kind, serverOptions = {}) {
   const followUpParity = serverOptions.followUpParity === true
+  // Generated per scene: the main agent's gateway credential when the follow-up gateway is under test.
+  const mainMcpToken = `parity-main-mcp-${crypto.randomUUID()}`
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
   const root = mkdtempSync(join(tmpdir(), 'parity-'))
@@ -139,7 +142,7 @@ export async function scene(kind, serverOptions = {}) {
   const options = { appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
-    ...(followUpParity ? { mcpToken: 'parity-main-mcp-secret', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
+    ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
   let wizard, base
   const start = async () => {
@@ -152,7 +155,21 @@ export async function scene(kind, serverOptions = {}) {
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
   const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
   return { kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
-    followUpToken: kind === 'main' ? 'parity-main-mcp-secret' : 'parity-gateway-secret',
+    // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
+    // a restricted agent only through its own per-agent socket.
+    gatewayRpc: async (rpc) => {
+      const token = kind === 'main' ? mainMcpToken : readFileSync(join(folder, 'gateway.key'), 'utf8')
+      const headers = { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json', Accept: 'application/json' }
+      if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body: JSON.stringify(rpc) })
+      await wizard.agentSocketsReady
+      const { request: unixRequest } = await import('node:http')
+      return new Promise((resolve, reject) => {
+        const req = unixRequest({ socketPath: agentSocketPath(join(osHome, 'agents'), id), path: '/wizard/mcp', method: 'POST', headers }, res => {
+          let data = ''; res.on('data', c => { data += c }); res.on('end', () => resolve({ status: res.statusCode, json: async () => JSON.parse(data) }))
+        })
+        req.on('error', reject); req.end(JSON.stringify(rpc))
+      })
+    },
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },

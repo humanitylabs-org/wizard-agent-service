@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Scheduler, importHermesSchedules, isSilentResult, isScheduleInput, projectFollowUps, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createWizardServer, listen, latestVisibleSessionMessages, projectWizardMessageHistory } from '../server/service.mjs'
+import { followUpTool } from '../server/follow-ups.mjs'
 import { projectStatusMarkers } from '../server/thread-status.mjs'
 import { readHermesSessionTruth, visibleAssistantReply, visibleUserRequest } from '../server/session-truth.mjs'
 
@@ -734,30 +736,105 @@ describe('windows, reminders and trickled agent work', () => {
     expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(0)
   })
 
-  it('creates, lists and stops a current-thread watcher over the MCP token only', async () => {
+  it('creates, lists and stops a current-thread watcher over the agent gateway only', async () => {
     vi.stubEnv('WIZARD_SCHEDULER', '1')
-    const token = 'fixture-mcp-token-with-more-than-32-chars'
+    const token = `fixture-gateway-${randomUUID()}`
+    const appsJsonPath = join(root, 'apps.json'); writeFileSync(appsJsonPath, JSON.stringify({ apps: [] }))
     const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
-      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, mcpToken: token,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, appsJsonPath, mcpToken: token,
       schedulerEnabled: true, schedulerIntervalMs: 3_600_000, schedulerStatePath: join(root, 'follow-up-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
     servers.push(server)
     const origin = `http://127.0.0.1:${(await listen(server)).port}`
-    const call = (action: string, body: any, auth = token) => fetch(`${origin}/wizard/internal/follow-ups/${action}`, { method: 'POST',
-      headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    expect((await call('create', { session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.' }, 'wrong-token-with-more-than-32-characters')).status).toBe(403)
-    const made = await (await call('create', { session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.', every_minutes: 7 })).json()
-    expect(made).toMatchObject({ kind: 'watch', thread: 'wizard_origin', name: 'Composer dependency', enabled: true, nextRun: '2026-10-21T00:07:00.000Z' })
-    expect((await (await call('list', { session_id: 'wizard_origin' })).json()).follow_ups.map((j: any) => j.id)).toEqual([made.id])
-    expect((await call('stop', { session_id: 'wizard_other', watcher_id: made.id })).status).toBe(404)
-    expect(await (await call('stop', { session_id: 'wizard_origin', watcher_id: made.id })).json()).toMatchObject({ stopped: 1 })
-    expect((await (await call('list', { session_id: 'wizard_origin' })).json()).follow_ups).toEqual([])
-    const second = await (await call('create', { session_id: 'wizard_origin', name: 'Second dependency', instructions: 'Wait again.' })).json()
+    let rpcId = 0
+    const call = async (args: any, auth = token) => {
+      const response = await fetch(`${origin}/wizard/mcp`, { method: 'POST', headers: { Authorization: ['Bearer', auth].join(' '), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name: 'wizard_follow_up', arguments: args } }) })
+      if (!response.ok) return { status: response.status }
+      const result = (await response.json()).result
+      return { status: response.status, error: result.isError === true, value: result.isError ? result.content[0].text : JSON.parse(result.content[0].text) }
+    }
+    expect((await call({ action: 'create', session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.' }, `wrong-${randomUUID()}`)).status).toBe(401)
+    const made = (await call({ action: 'create', session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.', every_minutes: 7 })).value
+    expect(made).toMatchObject({ kind: 'watch', thread: 'wizard_origin', agent: 'main', name: 'Composer dependency', enabled: true, nextRun: '2026-10-21T00:07:00.000Z' })
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups.map((j: any) => j.id)).toEqual([made.id])
+    expect(await call({ action: 'stop', session_id: 'wizard_other', watcher_id: made.id })).toMatchObject({ error: true, value: 'follow-up not found' })
+    expect((await call({ action: 'stop', session_id: 'wizard_origin', watcher_id: made.id })).value).toEqual({ stopped: 1 })
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups).toEqual([])
+    expect((await call({ action: 'create', session_id: '../wrong', name: 'x', instructions: 'x' })).error).toBe(true)
+    // The main agent reaches it through its plugin, which supplies the session id: it is not a listed gateway tool.
+    const listed = await (await fetch(`${origin}/wizard/mcp`, { method: 'POST', headers: { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list' }) })).json()
+    expect(listed.result.tools.map((t: any) => t.name)).not.toContain('wizard_follow_up')
+    const second = (await call({ action: 'create', session_id: 'wizard_origin', name: 'Second dependency', instructions: 'Wait again.' })).value
     const stopBody = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_origin' }) }
     expect((await fetch(`${origin}/wizard/follow-ups/stop`, stopBody)).status).toBe(403)
     const stopped = await fetch(`${origin}/wizard/follow-ups/stop`, { ...stopBody,
       headers: { ...stopBody.headers, 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters' } })
     expect(await stopped.json()).toMatchObject({ ok: true, stopped: 1 })
     expect(server.scheduler.get(second.id).enabled).toBe(false)
+  })
+
+  it('stopping drops a reserved check that has not launched, so it never runs after delivery recovers', async () => {
+    let failing = true
+    const calls: any[] = []
+    const s = scheduler(async (o: any) => { if (failing) throw Error('delivery outage'); calls.push(o); return { run_id: 'late' } })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait for the export.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(1)
+    expect(s.stopFollowUps('wizard_origin')).toEqual({ stopped: 1 })
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(0)
+    failing = false
+    clock += 60 * 60_000; await s.tick(); await s.tick(false)
+    expect(calls).toHaveLength(0)
+    expect(() => s.runNow(watch.id)).toThrow(/not active/)
+  })
+
+  it('never launches a pending watcher row whose watcher was stopped meanwhile', async () => {
+    const calls: any[] = []
+    const s = scheduler(async (o: any) => { calls.push(o); return { run_id: 'x' } })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait.' }))
+    // A row reserved before the stop, as a crash between reserve and disable would leave it.
+    s.transaction(() => s.reserve(s.get(watch.id), clock, true))
+    s.save({ ...s.get(watch.id), enabled: false })
+    await s.tick(false)
+    expect(calls).toHaveLength(0)
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(0)
+  })
+
+  it('Run now never adds a second watcher check while one is running or waiting to launch', async () => {
+    const calls: any[] = []
+    let run: any = { status: 'running' }
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const s = scheduler(async (o: any) => { calls.push(o); if (calls.length === 1) await gate; return { run_id: `watch-${calls.length}` } }, { lookup: async () => run })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait for the export.' }))
+    const first = s.runNow(watch.id)
+    // Still reserved, not admitted: the same pending check is returned rather than a second one.
+    clock += 1000
+    expect(s.runNow(watch.id).key).toBe(first.key)
+    release(); await s.tick(false)
+    expect(calls).toHaveLength(1)
+    expect(() => s.runNow(watch.id)).toThrow(/already running/)
+    clock += 1000; await s.tick(false)
+    expect(calls).toHaveLength(1)
+    run = { status: 'completed', output: '[SILENT]' }
+    await s.refreshRuns()
+    clock += 1000; s.runNow(watch.id); await s.tick(false)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('a routed agent reaches the watcher tool only on its own gateway key and only for a thread it owns', async () => {
+    const t = followUpTool({ scheduler: scheduler(), running: () => true, mainAgent: 'hermes',
+      ownsThread: (agentId: string, sessionId: string) => agentId === 'hermes' || (agentId === 'helper' && sessionId === 'wizard_helper') })
+    expect(t.list('hermes')).toEqual([])
+    expect(t.list('helper').map((tool: any) => tool.name)).toEqual(['wizard_follow_up'])
+    const made = JSON.parse((await t.call('wizard_follow_up', { action: 'create', session_id: 'wizard_helper', name: 'Helper result', instructions: 'Check.' }, 'helper'))!.content[0].text)
+    expect(made).toMatchObject({ agent: 'helper', thread: 'wizard_helper', kind: 'watch' })
+    expect((await t.call('wizard_follow_up', { action: 'create', session_id: 'wizard_main', name: 'x', instructions: 'x', agent: 'hermes' }, 'helper'))!.isError).toBe(true)
+    expect(JSON.parse((await t.call('wizard_follow_up', { action: 'list', session_id: 'wizard_helper' }, 'hermes'))!.content[0].text).follow_ups).toEqual([])
+    expect(JSON.parse((await t.call('wizard_follow_up', { action: 'stop', session_id: 'wizard_helper' }, 'helper'))!.content[0].text)).toEqual({ stopped: 1 })
+    const off = followUpTool({ scheduler: scheduler(), running: () => false, mainAgent: 'hermes', ownsThread: () => true })
+    expect((await off.call('wizard_follow_up', { action: 'create', session_id: 'wizard_x', name: 'x', instructions: 'x' }, 'hermes'))!.content[0].text).toContain('switched off')
   })
 })
 

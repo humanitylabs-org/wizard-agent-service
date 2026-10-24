@@ -59,6 +59,7 @@ import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, cre
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
+import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
@@ -2456,9 +2457,11 @@ function buildWizardServer(options, lifetime) {
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
+  // wizard_follow_up (server/follow-ups.mjs): unlisted, called by the wizard-os plugin over this same gateway.
+  let followUps = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
-      builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
+      builtins: { list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || [])], call: async (name, args, agentId) => (await followUps?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId) },
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -2583,6 +2586,7 @@ function buildWizardServer(options, lifetime) {
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
+    followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -4296,6 +4300,9 @@ function buildWizardServer(options, lifetime) {
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
+  followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
+    // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
+    ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
@@ -4831,40 +4838,6 @@ function buildWizardServer(options, lifetime) {
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
-        return
-      }
-      if (url.pathname.startsWith('/wizard/internal/follow-ups/')) {
-        // The first-party wizard-os plugin injects the current Hermes session id. It authenticates with the
-        // box-local Wizard MCP token; browsers and proxied requests never reach this scheduler write path.
-        if (!scheduler || request.method !== 'POST') { sendJson(response, 404, { error: 'not_found' }); return }
-        if (request.headers.origin || request.headers['sec-fetch-site'] || request.headers['x-forwarded-for'] || request.headers.forwarded
-          || request.headers['cf-connecting-ip'] || request.headers['tailscale-user-login']) { sendJson(response, 403, { error: 'box_only' }); return }
-        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const mainToken = String(options.mcpToken || '')
-        const directMain = mainToken && supplied.length === mainToken.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(mainToken))
-        const callingAgent = bridge?.agentFor(request) || (directMain ? MAIN_AGENT_ID : '')
-        if (!callingAgent) { sendJson(response, 403, { error: 'follow-up access denied' }); return }
-        let value
-        try { value = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid body' }); return }
-        const sessionId = typeof value?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value.session_id) ? value.session_id : ''
-        if (!sessionId) { sendJson(response, 400, { error: 'session required' }); return }
-        const action = url.pathname.slice('/wizard/internal/follow-ups/'.length)
-        const agent = callingAgent === MAIN_AGENT_ID ? 'main' : callingAgent
-        try {
-          if (action === 'create') {
-            if (!scheduler.running()) { sendJson(response, 503, { error: 'follow-up scheduler is not running' }); return }
-            const every = value.every_minutes === undefined ? 10 : Number(value.every_minutes)
-            if (!Number.isInteger(every) || every < 1 || every > 1440) { sendJson(response, 400, { error: 'every_minutes must be 1 to 1440' }); return }
-            const job = scheduler.create({ name: value.name, kind: 'watch', when: { every }, prompt: value.instructions,
-              thread: sessionId, agent, ...(value.model ? { model: value.model } : {}) })
-            sendJson(response, 201, scheduler.project(job))
-          } else if (action === 'list') {
-            await scheduler.refreshRuns()
-            sendJson(response, 200, { follow_ups: scheduler.followUps(sessionId, { agent }).map(job => scheduler.project(job)) })
-          } else if (action === 'stop') {
-            sendJson(response, 200, scheduler.stopFollowUps(sessionId, { watcherId: String(value.watcher_id || ''), agent }))
-          } else sendJson(response, 404, { error: 'not_found' })
-        } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'follow-up request failed' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {

@@ -25,12 +25,33 @@ except ImportError:  # loaded as a plain module (tests)
 logger = logging.getLogger(__name__)
 SECTION_ID = "wizard-os.kernel"
 _SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, D401
         return None
+
+
+try:  # Hermes resolves credentials per profile scope; os.environ is process-global under multiplexing.
+    from agent.secret_scope import get_secret as _get_secret
+except ImportError:  # outside Hermes (tests)
+    def _get_secret(name: str, default=None):  # type: ignore[no-redef]
+        return os.environ.get(name, default)
+
+
+_DEFAULT_GATEWAY = "http://127.0.0.1:8796/wizard/mcp"
+
+
+def _gateway_url() -> str:
+    """This profile's own `wizard` MCP server URL: the transport Hermes already gives its gateway key to."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        server = ((load_config_readonly() or {}).get("mcp_servers") or {}).get("wizard") or {}
+        url = server.get("url") if isinstance(server, dict) else None
+        return url if isinstance(url, str) and url else _DEFAULT_GATEWAY
+    except Exception:  # noqa: BLE001 - outside Hermes, or no config yet
+        return _DEFAULT_GATEWAY
 
 
 _FOLLOW_UP_SCHEMA = {
@@ -56,13 +77,13 @@ _FOLLOW_UP_SCHEMA = {
 
 
 def _follow_up_request(args: dict, *, session_id: str = "", **_kwargs):
-    """Call the box-local Agent Service. The session id comes from Hermes, never model arguments."""
+    """Call this agent's own Wizard gateway. The session id comes from Hermes, never model arguments."""
     action = str(args.get("action") or "")
     if action not in {"create", "list", "stop"}:
         return {"success": False, "error": "action must be create, list, or stop"}
     if not _SESSION_ID.fullmatch(str(session_id or "")):
         return {"success": False, "error": "This run has no Wizard thread to attach the follow-up to."}
-    payload: dict = {"session_id": session_id}
+    arguments: dict = {"action": action, "session_id": session_id}
     if action == "create":
         name = " ".join(str(args.get("name") or "").split())
         instructions = str(args.get("instructions") or "").strip()
@@ -71,39 +92,46 @@ def _follow_up_request(args: dict, *, session_id: str = "", **_kwargs):
             return {"success": False, "error": "create requires a name (1–160) and instructions (1–8000)"}
         if isinstance(every, bool) or not isinstance(every, int) or not 1 <= every <= 1440:
             return {"success": False, "error": "every_minutes must be 1 to 1440"}
-        payload.update({"name": name, "instructions": instructions, "every_minutes": every})
+        arguments.update({"name": name, "instructions": instructions, "every_minutes": every})
     elif action == "stop" and args.get("watcher_id"):
-        payload["watcher_id"] = str(args["watcher_id"])
+        arguments["watcher_id"] = str(args["watcher_id"])
 
-    token = os.environ.get("WIZARD_MCP_TOKEN", "")
-    if not token:
-        return {"success": False, "error": "Wizard follow-ups are not configured on this box."}
-    base = os.environ.get("WIZARD_AGENT_SERVICE_URL", "http://127.0.0.1:8796").rstrip("/")
     try:
-        parsed = urlparse(base)
-        if (parsed.scheme != "http" or parsed.hostname not in _LOOPBACK_HOSTS or parsed.username or parsed.password
-                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
-            return {"success": False, "error": "Wizard follow-up endpoint must be box-local."}
+        token = _get_secret("WIZARD_MCP_TOKEN") or ""
+    except Exception:  # noqa: BLE001 - an unscoped read under multiplexing fails closed
+        token = ""
+    if not token:
+        return {"success": False, "error": "Wizard follow-ups are not configured for this agent."}
+    url = _gateway_url()
+    try:
+        parsed = urlparse(url)
+        # Only the gateway endpoint itself, never a URL with credentials, query or another path.
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path.rstrip("/") != "/wizard/mcp" or parsed.query or parsed.fragment):
+            return {"success": False, "error": "Wizard follow-up gateway is not configured for this agent."}
         parsed.port  # validate a malformed explicit port before building an authenticated request
     except ValueError:
-        return {"success": False, "error": "Wizard follow-up endpoint must be box-local."}
+        return {"success": False, "error": "Wizard follow-up gateway is not configured for this agent."}
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "wizard_follow_up", "arguments": arguments}}
     request = Request(
-        f"{base}/wizard/internal/follow-ups/{action}",
-        data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        url, data=json.dumps(rpc).encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
     )
     try:
-        # Never inherit HTTP_PROXY/HTTPS_PROXY for an authenticated box-local call. A proxy can see both the
-        # bearer credential and the complete request even when the configured destination itself is loopback.
+        # Never inherit HTTP_PROXY/HTTPS_PROXY or follow a redirect with the gateway credential.
         with build_opener(ProxyHandler({}), _NoRedirect).open(request, timeout=15) as response:
-            result = json.loads(response.read(128 * 1024).decode("utf-8"))
-        return {"success": True, **result}
+            reply = json.loads(response.read(128 * 1024).decode("utf-8"))
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if not isinstance(result, dict):
+            return {"success": False, "error": "Wizard follow-up request failed."}
+        content = result.get("content") or []
+        text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
+        if result.get("isError"):
+            return {"success": False, "error": text or "Wizard follow-up request failed."}
+        value = json.loads(text) if text else {}
+        return {"success": True, **(value if isinstance(value, dict) else {})}
     except HTTPError as error:
-        try:
-            detail = json.loads(error.read(4096).decode("utf-8")).get("error")
-        except (ValueError, OSError):
-            detail = None
-        return {"success": False, "error": detail or f"Wizard follow-up request failed ({error.code})"}
+        return {"success": False, "error": f"Wizard follow-up request failed ({error.code})"}
     except (URLError, TimeoutError, OSError, ValueError):
         return {"success": False, "error": "Wizard follow-up service is unavailable."}
 

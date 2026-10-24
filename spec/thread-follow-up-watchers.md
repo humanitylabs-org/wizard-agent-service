@@ -17,7 +17,11 @@ A follow-up watcher is a durable scheduled check owned by one existing Wizard ch
 
 ## Agent tool
 
-`wizard_follow_up` is a native Wizard OS plugin tool. The handler injects the current Hermes session ID and calls the box-local Agent Service with the Wizard MCP token. The model cannot select another thread.
+`wizard_follow_up` is a tool on the agent's own `wizard` MCP gateway (`server/follow-ups.mjs`). Every runtime kind already reaches that gateway with its own gateway key: the main agent and host profiles over loopback, containers through the configured gateway URL, and restricted agents through their edge and per-agent socket. No other route or credential is added.
+
+- The agent is always the agent the key belongs to, never an argument.
+- A routed agent may attach a watcher only to a thread it owns (its accepted pin). Its run instructions name the current thread id when the scheduler is running.
+- The main agent calls it through the `wizard-os` Hermes plugin, which injects the session id Hermes gives the tool call, so the model cannot pick another thread. The plugin reads `WIZARD_MCP_TOKEN` through Hermes' profile secret scope and posts only to that profile's configured `wizard` gateway URL, with no proxy and no redirects. The tool is not listed for the main agent on the gateway.
 
 Actions:
 
@@ -26,6 +30,11 @@ Actions:
 - `stop`: stop one watcher by ID or every active watcher on this thread.
 
 The tool refuses to promise delivery if the scheduler is not running.
+
+## Stop and Run now
+
+- Stop disables the watcher and deletes every reserved check that has not launched yet, in one transaction. A pending row whose watcher is off is dropped at launch time as well, so a stopped watcher never runs after a delivery outage recovers. A check that already launched is left to finish.
+- Run now on a watcher never adds a second check: it is refused while a check is running or after the watcher stopped, and it returns the check already waiting to launch if there is one.
 
 ## Chats presentation
 

@@ -374,8 +374,19 @@ export class Scheduler {
     const active = this.followUps(thread, { agent })
     const targets = watcherId ? active.filter(job => job.id === watcherId) : active
     if (watcherId && !targets.length) throw fail('follow-up not found', 404)
-    for (const job of targets) this.update(job.id, { enabled: false })
+    // Disable and drop every reserved-but-unadmitted check in one step: a stopped watcher must never launch later
+    // from a pending row (for example after a delivery outage recovers). An admitted check is left to finish.
+    for (const job of targets) this.transaction(() => {
+      this.save(this.normalize({ enabled: false }, this.get(job.id)))
+      this.db.prepare('DELETE FROM schedule_occurrences WHERE job_id=? AND admitted=0').run(job.id)
+    })
     return { stopped: targets.length }
+  }
+  // A watcher check may launch only while its watcher is on and no other check of it is admitted and unfinished.
+  watchLaunchable(jobId) {
+    const row = this.db.prepare('SELECT data FROM schedules WHERE id=?').get(jobId)
+    if (!row || !JSON.parse(row.data).enabled) return false
+    return !this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=1 AND finished_at IS NULL LIMIT 1').get(jobId)
   }
   reserve(job, instant, manual = false) {
     // This identity is persisted before any external session/run call. A crashed create
@@ -391,7 +402,18 @@ export class Scheduler {
     return occurrence
   }
   runNow(jobId) {
-    const occurrence = this.transaction(() => this.reserve(this.get(jobId), this.now(), true))
+    const occurrence = this.transaction(() => {
+      const job = this.get(jobId)
+      if (job.kind === 'watch') {
+        // Run now never adds a second dependency check: a stopped or finished watcher stays off, a running check
+        // is not doubled, and a check already waiting to launch is the one this request gets.
+        if (!job.enabled) throw fail('follow-up is not active', 409)
+        if (!this.watchLaunchable(job.id)) throw fail('follow-up check already running', 409)
+        const pending = this.db.prepare('SELECT data FROM schedule_occurrences WHERE job_id=? AND admitted=0 ORDER BY instant LIMIT 1').get(job.id)
+        if (pending) return JSON.parse(pending.data)
+      }
+      return this.reserve(job, this.now(), true)
+    })
     // The durable receipt is returned immediately; admission retries on the loop or the
     // next explicit run request. A paused job stays paused, but its manual outbox drains.
     void this.tick(false).catch(() => { console.error('[scheduler] manual admission failed') })
@@ -434,6 +456,13 @@ export class Scheduler {
     for (const row of this.db.prepare('SELECT key,data FROM schedule_occurrences WHERE admitted=0 ORDER BY instant').all()) {
       if (this.stopped) break
       const occurrence = JSON.parse(row.data)
+      // Re-checked per row: the owner may stop a watcher while an earlier row is awaiting delivery.
+      if (occurrence.kind === 'watch' && !this.watchLaunchable(occurrence.jobId)) {
+        if (!this.db.prepare('SELECT data FROM schedules WHERE id=?').get(occurrence.jobId) || !this.get(occurrence.jobId).enabled) {
+          this.db.prepare('DELETE FROM schedule_occurrences WHERE key=? AND admitted=0').run(row.key)
+        }
+        continue
+      }
       // Reminders, Boomerang returns and the owner's explicit Run now skip the trickle.
       const trickled = !['remind', 'return'].includes(occurrence.kind) && !occurrence.manual
       // A held row stays pending and is retried on the next tick, in due order.

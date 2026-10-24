@@ -611,7 +611,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     claim(sessionId)
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
-    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
+    const followUp = ctx.followUpNote?.(sessionId) || ''
+    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }

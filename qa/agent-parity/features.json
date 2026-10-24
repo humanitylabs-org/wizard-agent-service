@@ -261,13 +261,15 @@
     },
     {
       "id": "thread-follow-up-watchers",
-      "description": "Create, project, list and explicitly stop a same-thread one-shot watcher without crossing agent boundaries",
+      "description": "Create, project, list and explicitly stop a same-thread one-shot watcher over the runtime's own gateway without crossing agent boundaries",
       "layer": "server",
-      "how_to_test": "For every runtime kind, authenticate as that runtime, create a watcher for its current thread, read back only that watcher in the owning thread list, explicitly stop it, and verify the list is empty.",
+      "how_to_test": "For every runtime kind, call wizard_follow_up on /wizard/mcp with that runtime's own gateway key and transport (restricted: its per-agent socket; never owner proof), create a watcher for its current thread, refuse a thread a routed agent does not own, read back only that watcher in the owning thread list, explicitly stop it, and verify the list is empty.",
       "source_refs": [
+        "server/follow-ups.mjs",
         "server/scheduler.mjs",
         "server/service.mjs",
-        "server/agents-http.mjs"
+        "server/agents-http.mjs",
+        "hermes-plugin/wizard-os/__init__.py"
       ],
       "reference_tests": [
         "tests/scheduler.test.ts",
