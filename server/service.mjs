@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
@@ -147,7 +147,7 @@ ${STATUS_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor', 'fields', 'mode']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
@@ -173,8 +173,10 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
     if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
     if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
     if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
-    if (['window','q','overrides','cursor'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if (['window','q','overrides','cursor','fields','mode'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
     if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
+    if (searchParams.has('fields') && (searchParams.get('fields') !== 'slim' || searchParams.get('window') !== 'archive-50')) return false
+    if (searchParams.has('mode') && (searchParams.get('mode') !== 'body' || !searchParams.has('q'))) return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
@@ -2575,6 +2577,7 @@ function buildWizardServer(options, lifetime) {
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
   const agentCtx = agents ? {
+    agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
@@ -3522,6 +3525,19 @@ function buildWizardServer(options, lifetime) {
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
       if (!access) throw Object.assign(new Error('access required'), {status:403})
       const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      if (searchParams.get('mode') === 'body') {
+        const start=performance.now(), q=searchParams.get('q') || ''
+        // Short queries never open SQLite, even on a cold list.
+        if (!indexedSearchWords(q).length) return {object:'list',window_projected:true,data:[],search_total:0,mode:'titles',partial:false,timings:{list_ms:0,fts_ms:0,read_ms:0,candidates:0,sessions:0}}
+        let cached
+        try { cached=await listCache.searchSnapshot() } catch {
+          const all=(await loadCanonicalSessions()).filter(s=>isHumanSession(s,operator)); cached=[]
+          for(let i=0;i<all.length;i+=100) cached.push(...JSON.parse((await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)).toString('utf8')).data)
+        }
+        const list_ms=performance.now()-start
+        const hits=await searchHermesSessionTextAsync(hermesStatePath,cached.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || scope)
+        return {object:'list',window_projected:true,data:[...hits].map(([id,snippet])=>({id,agent:'hermes',snippet})),search_total:hits.size,mode:hits.mode,partial:hits.partial,timings:{list_ms,...hits.timings}}
+      }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
           try { return await listCache.served() }
@@ -3532,13 +3548,13 @@ function buildWizardServer(options, lifetime) {
           // Search reuses the shared list snapshot; only the message-text lookup is per query.
           // Rows are shared with other clients, so matches get a copy, never a mutation.
           let cached
-          try { cached = await listCache.served() }
+          try { cached = await listCache.searchSnapshot() }
           catch (error) { listCache.fellBack(error) }
           if (cached) {
             // Search failures are not cache failures: never retry a timed-out scan
             // as a full projection plus one new search for every batch.
             const hits = await searchHermesSessionTextAsync(hermesStatePath, cached.map(s => s.id), q)
-            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
+            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id), wizard_search_match:true } : row)
           }
         }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
@@ -3547,11 +3563,11 @@ function buildWizardServer(options, lifetime) {
         for (let i=0; i<all.length; i+=100) {
           const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
           const batch = JSON.parse(result.toString('utf8')).data
-          if (searchParams.get('q')) {
-            const hits = await searchHermesSessionTextAsync(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
-            for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
-          }
           rows.push(...batch)
+        }
+        if(searchParams.get('q')) {
+          const hits=await searchHermesSessionTextAsync(hermesStatePath,rows.map(s=>s.id),searchParams.get('q'))
+          for(const row of rows) if(hits.has(row.id)) { row.wizard_search_text=hits.get(row.id); row.wizard_search_match=true }
         }
         return rows
       } })
@@ -3924,6 +3940,14 @@ function buildWizardServer(options, lifetime) {
       touch: () => { localRevision++ },
       stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
       check,
+      searchSnapshot: async () => {
+        const cached = snapshot.peek()
+        if (cached) {
+          if(snapshot.age()>20000) setImmediate(()=>{ void listCache.served().catch(()=>undefined) })
+          return cached
+        }
+        return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+      },
       served: async () => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
         return rows.map((row) => ({ ...row }))
@@ -5645,7 +5669,7 @@ function buildWizardServer(options, lifetime) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
-        for (const key of ['window','q','overrides','cursor']) upstreamQuery.delete(key)
+        for (const key of ['window','q','overrides','cursor','fields','mode']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
           ? await canonicalSessionPage(operator, url.searchParams, request)

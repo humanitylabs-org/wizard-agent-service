@@ -119,6 +119,7 @@ export function listRow(item, q = '') {
 
 }
 export function listPayload(payload, q = '') {
+  if (payload.mode === 'body' || payload.mode === 'titles' || payload.fields === 'slim') { const {window_projected,...visible}=payload; return { ...visible, view:'list', list_version:1 }; }
   for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q)).filter(Boolean);
   const { window_projected, ...visible } = payload;
   return { ...visible, view: 'list', list_version: 1 };

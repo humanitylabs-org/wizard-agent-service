@@ -1,6 +1,6 @@
 // Opt-in list windows. Membership is pinned after effective lifecycle projection,
 // never guessed from raw SQLite archived flags. No auth or agent discovery here.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { normalizeFull, clean } from './session-list-view.mjs';
 const WEEK = 7 * 864e5;
 const priority = new Set(['submitting','queued','running','stopping','waiting_for_approval','unknown','failed','interrupted']);
@@ -59,11 +59,16 @@ export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(
   return {rows:entries.filter(x=>!archiveCandidate(x.s,now)||keep.has(x.s.id)).map(x=>x.raw), archiveRows:archived.map(x=>x.raw), archive_total:archived.length,
     archive_returned:Math.min(50,archived.length), archive_cursor:archived.length>50 ? {after:archived[49].s.id, remaining:archived.length-50} : null};
 }
+export function slimRow(raw) {
+  const s=normalizeFull(raw);
+  return {id:s.id,agent:s.agent_id || 'hermes',title:s.title,preview:s.preview.slice(0,160),status:s.status,cardTime:cardTime(s),archived:s.archived};
+}
 export function createListWindows({ now=Date.now, ttl=30000 }={}) {
   const snapshots=new Map();
   return async function page({params, scope, load, dispositions={}}) {
-    const offset=Number(params.get('offset')||0), limit=Math.min(100,Math.max(1,Number(params.get('limit')||100)));
-    const signature=JSON.stringify([scope,params.get('window')||'',params.get('q')||'',params.get('overrides')||'']);
+    const slim=params.get('fields')==='slim';
+    const offset=Number(params.get('offset')||0), limit=Math.min(slim?500:100,Math.max(1,Number(params.get('limit')||100)));
+    const signature=JSON.stringify([scope,params.get('window')||'',params.get('q')||'',params.get('overrides')||'',params.get('fields')||'']);
     const cursor=params.get('cursor'), cursorParts=cursor?.split(':'), archiveOffset=cursor ? Number(cursorParts?.[1]) : 0;
     if(cursor && (cursorParts.length!==2 || params.has('q') || params.get('window')!=='archive-50' || !Number.isInteger(archiveOffset) || archiveOffset<50)) throw Object.assign(new Error('invalid cursor'),{status:400});
     const id=cursor ? cursorParts[0] : params.get('snapshot'), at=now();
@@ -71,14 +76,16 @@ export function createListWindows({ now=Date.now, ttl=30000 }={}) {
     if((offset>0 || cursor) && (!snap || snap.expiresAt<at || snap.signature!==signature)) throw Object.assign(new Error('session listing snapshot expired'),{status:409});
     if(!snap) {
       const selected=selectWindow(await load(),{dispositions,overrides:clientOverrides(params.get('overrides')),now:at,q:params.get('q')||''});
-      snap={...selected,id:randomUUID(),signature,expiresAt:now()+ttl};
+      const build=createHash('sha256').update(JSON.stringify(selected)).digest('hex').slice(0,24);
+      if(slim) { selected.rows=selected.rows.map(slimRow); selected.archiveRows=selected.archiveRows?.map(slimRow) }
+      snap={...selected,build,id:randomUUID(),signature,expiresAt:now()+ttl};
       snapshots.set(snap.id,snap);
       for(const [key,v] of snapshots) if(v.expiresAt<at || snapshots.size>32) snapshots.delete(key);
     }
     const {rows,archiveRows,...meta}=snap;
-    const data=cursor ? archiveRows.slice(archiveOffset,archiveOffset+50) : rows.slice(offset,offset+limit);
+    const data=cursor ? archiveRows.slice(archiveOffset,archiveOffset+(slim?500:50)) : rows.slice(offset,offset+limit);
     const nextArchive=cursor ? archiveOffset+data.length : 50;
-    return {object:'list',data,limit,offset,has_more:cursor ? false : offset+data.length<rows.length,snapshot:snap.id,
+    return {object:'list',data,limit,offset,build:snap.build,...(slim?{fields:'slim',account_scope:scope}:{}),has_more:cursor ? false : offset+data.length<rows.length,snapshot:snap.id,
       window:'archive-50',window_projected:true,archive_total:meta.archive_total,archive_returned:meta.archive_returned,
       archive_cursor:!params.get('q') && nextArchive<meta.archive_total ? `${snap.id}:${nextArchive}` : null,search_total:meta.search_total};
   };

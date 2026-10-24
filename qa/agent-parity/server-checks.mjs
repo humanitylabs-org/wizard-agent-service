@@ -80,6 +80,29 @@ export const serverChecks = {
     assert.equal(records.length, 1)
     assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now); assert.equal(records[0].unreadAt, unreadAt)
   },
+  'session-slim-index': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<165;i++) s.sessions.set(`wizard_slim_${i}`,{id:`wizard_slim_${i}`,source:'wizard-mobile',title:`Slim archive ${i}`,created_at:now-20*86400-i,archived:true,hidden:false,messages:[{role:'user',content:'Slim visible preview',timestamp:now-20*86400-i}]});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',title:'Private title sentinel',hidden:true,created_at:now,messages:[{role:'user',content:'Private hidden preview',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500'); assert.equal(r.status,200);
+    const page=await r.json(); assert.equal(page.fields,'slim'); assert(page.build); assert.equal(page.archive_total,165); assert.equal(page.data.length,50);
+    assert(!JSON.stringify(page).includes('Private title sentinel')); assert(page.data.every(row=>row.agent===s.id&&row.preview.length<=160&&!('latest_message'in row)&&!('request'in row)));
+    const tail=await (await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500&cursor='+page.archive_cursor)).json();
+    assert.equal(tail.data.length,115); assert.equal(tail.archive_cursor,null); assert.equal(tail.build,page.build);
+    if(s.kind!=='main') { const main=await (await s.raw('/wizard/hermes/api/sessions?view=list&window=archive-50&fields=slim')).json(); assert(!main.data.some(row=>row.id.startsWith('wizard_slim_')),'main index never unions a routed runtime'); }
+  },
+  'session-body-search': async s => {
+    const row=s.sessions.get('wizard_parity'),now=Date.now()/1000; row.hidden=false;
+    row.messages.push({role:'user',timestamp:now,content:'Visible paritybodytoken\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data]\nprivaterecalltoken\n</memory-context>'});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',hidden:true,created_at:now,messages:[{role:'user',content:'privatescopetoken',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body'); assert.equal(r.status,200);
+    const body=await r.json(); assert.equal(body.mode,'body'); assert.equal(body.search_total,1); assert.deepEqual(Object.keys(body.data[0]).sort(),['agent','id','snippet']); assert.equal(body.data[0].agent,s.id); assert(!body.data[0].snippet.includes('privaterecalltoken')); assert(body.timings.fts_ms>=0);
+    for(const token of ['privatescopetoken','privaterecalltoken']) { const privateResult=await (await s.request('/api/sessions?view=list&q='+token+'&mode=body')).json(); assert.equal(privateResult.search_total,0); }
+    const short=await (await s.request('/api/sessions?view=list&q=no&mode=body')).json(); assert.equal(short.mode,'titles'); assert.equal(short.timings.fts_ms,0);
+    s.dropSearchIndex(); const unavailable=await (await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body')).json(); assert.equal(unavailable.mode,'titles'); assert.equal(unavailable.search_total,0);
+  },
   'session-search': async s => {
     s.sessions.get('wizard_parity').messages.push({ role: 'user', timestamp: Date.now() / 1000, content: 'parityuniquetoken' })
     // List-visible synthetic rows are fixture-only; no human inbox is involved.

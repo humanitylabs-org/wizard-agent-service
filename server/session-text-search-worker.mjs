@@ -1,66 +1,65 @@
-// Message-body search can scan a runtime's entire historical text. Never run it
-// on the shared HTTP event loop: aborting a browser fetch cannot interrupt SQLite.
+// One isolated, warm read handle per runtime. No read transaction survives a query.
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
-import { searchHermesSessionText } from './session-truth.mjs'
+import { createHermesTextSearcher, indexedSearchWords } from './session-truth.mjs'
 
 if (!isMainThread && workerData?.kind === 'wizard-session-text-search') {
-  const { path, ids, query } = workerData
-  const hits = new Map()
-  for (let i = 0; i < ids.length; i += 200) {
-    for (const [id, text] of searchHermesSessionText(path, ids.slice(i, i + 200), query)) hits.set(id, text)
-  }
-  parentPort.postMessage([...hits])
-}
-
-// Share identical in-flight searches and bound CPU/memory across clients. The
-// deadline covers queue time as well as SQLite execution, terminating late work.
-const pending = new Map(), queue = []
-let active = 0
-const MAX_ACTIVE = 2, MAX_PENDING = 16, DEADLINE_MS = 30_000
-const unavailable = message => Object.assign(new Error(message), { status: 503 })
-function pump() {
-  while (active < MAX_ACTIVE && queue.length) queue.shift()()
-}
-export function searchHermesSessionTextAsync(path, sessionIds, query) {
-  const ids = [...new Set(sessionIds.filter(id => typeof id === 'string' && id.length <= 256))]
-  if (!ids.length || !String(query || '').trim()) return Promise.resolve(new Map())
-  const key = JSON.stringify([path, ids, query])
-  if (pending.has(key)) return pending.get(key)
-  if (pending.size >= MAX_PENDING) return Promise.reject(unavailable('session search busy'))
-  const promise = new Promise((resolve, reject) => {
-    let worker, done = false, started = false
-    const finish = (error, result) => {
-      if (done) return
-      done = true
-      clearTimeout(timer)
-      const index = queue.indexOf(start)
-      if (index >= 0) queue.splice(index, 1)
-      const release = () => { if (started) active--; pump() }
-      // Do not admit replacement work until the old SQLite worker really stopped.
-      if (worker) void worker.terminate().then(release, release)
-      else release()
-      if (error) reject(error); else resolve(new Map(result))
-    }
-    const start = () => {
-      if (done) return
-      started = true; active++
-      try {
-        worker = new Worker(new URL(import.meta.url), {
-          workerData: { kind: 'wizard-session-text-search', path, ids, query },
-          resourceLimits: { maxOldGenerationSizeMb: 256 },
-        })
-        worker.once('message', rows => finish(null, rows))
-        worker.once('error', error => finish(error))
-        worker.once('exit', code => { if (!done) finish(unavailable(`session search exited (${code})`)) })
-      } catch (error) { finish(error) }
-    }
-    const timer = setTimeout(() => finish(unavailable('session search deadline exceeded')), DEADLINE_MS)
-    timer.unref?.()
-    queue.push(start)
-    pump()
+  const searcher = createHermesTextSearcher(workerData.path)
+  parentPort.on('message', ({ids, query}) => {
+    try {
+      const hits = searcher.search(ids, query)
+      parentPort.postMessage({rows:[...hits], mode:hits.mode, partial:hits.partial, timings:hits.timings})
+    } catch (error) { parentPort.postMessage({error:error.message}) }
   })
-  pending.set(key, promise)
-  const clear = () => { if (pending.get(key) === promise) pending.delete(key) }
-  promise.then(clear, clear)
+}
+const pools = new Map()
+const unavailable = message => Object.assign(new Error(message), {status:503})
+const empty = () => Object.assign(new Map(), {mode:'titles',partial:false,timings:{fts_ms:0,read_ms:0,candidates:0,sessions:0}})
+function start(pool) {
+  if(pool.active || !pool.queue.length) return
+  const task = pool.active = pool.queue.shift()
+  if(!pool.worker) {
+    const worker = pool.worker = new Worker(new URL(import.meta.url), {
+      workerData:{kind:'wizard-session-text-search',path:pool.path}, resourceLimits:{maxOldGenerationSizeMb:256},
+    })
+    worker.on('message', result => {
+      const task=pool.active; if(!task) return
+      clearTimeout(task.timer); pool.active=null; worker.unref()
+      if(result.error) task.reject(unavailable(result.error))
+      else task.resolve(Object.assign(new Map(result.rows), {mode:result.mode,partial:result.partial,timings:result.timings}))
+      start(pool)
+    })
+    const fail = () => {
+      if(pool.worker!==worker) return
+      pool.worker=null
+      const task=pool.active; pool.active=null
+      if(task) { clearTimeout(task.timer); task.reject(unavailable('session search worker stopped')) }
+      void worker.terminate().then(()=>start(pool))
+    }
+    worker.on('error',fail); worker.on('exit',fail)
+    worker.unref()
+  }
+  pool.worker.ref()
+  task.timer=setTimeout(()=>{
+    const worker=pool.worker; pool.worker=null; pool.active=null
+    task.reject(unavailable('session search deadline exceeded'))
+    void worker.terminate().then(()=>start(pool))
+  },10000) // a cold 30 GB store needs more than 3 s once; killing the worker would throw the warm handle away
+  pool.worker.postMessage({ids:task.ids,query:task.query})
+}
+export function searchHermesSessionTextAsync(path, sessionIds, query, scope='default') {
+  const ids=[...new Set(sessionIds.filter(id=>typeof id==='string' && id.length<=256))]
+  // Crucially no worker or SQLite work at all for short/non-ASCII queries.
+  if(!ids.length || !indexedSearchWords(query).length) return Promise.resolve(empty())
+  let pool=pools.get(path)
+  if(!pool) { pool={path,queue:[],active:null,worker:null}; pools.set(path,pool) }
+  const key=JSON.stringify([ids,query])
+  if(pool.active?.key===key) return pool.active.promise
+  const same=pool.queue.find(t=>t.key===key); if(same) return same.promise
+  for(const task of pool.queue.filter(t=>t.scope===scope)) { pool.queue.splice(pool.queue.indexOf(task),1); task.reject(unavailable('session search superseded')) }
+  if(pool.queue.length>=16) return Promise.reject(unavailable('session search busy'))
+  let resolve,reject
+  const promise=new Promise((a,b)=>{resolve=a;reject=b})
+  pool.queue.push({ids,query,scope,key,promise,resolve,reject})
+  start(pool)
   return promise
 }

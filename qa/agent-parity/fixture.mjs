@@ -36,12 +36,25 @@ export async function scene(kind, serverOptions = {}) {
   const stt = { text: 'Synthetic voice words.' }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
   titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL);
-    CREATE TABLE messages (session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
     CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);`)
+  const searchDb = serverOptions.fixtureSearchIndex && kind!=='main' ? new DatabaseSync(join(agentHome,'state.db')) : null
+  if(searchDb) searchDb.exec('CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,finish_reason TEXT,content TEXT,display_kind TEXT,timestamp REAL); CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT,model TEXT,title TEXT,started_at REAL,ended_at REAL,end_reason TEXT,message_count INTEGER,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER,archived INTEGER,hidden INTEGER)')
+  const searchStore=searchDb||titleDb
+  if(serverOptions.fixtureSearchIndex) searchStore.exec("CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content,content='messages',content_rowid='id',tokenize='trigram')")
+  let hasSearchIndex=!!serverOptions.fixtureSearchIndex
   const syncMessages = () => {
     titleDb.exec('DELETE FROM messages')
     const insert = titleDb.prepare('INSERT INTO messages(session_id,role,finish_reason,content,display_kind,timestamp) VALUES(?,?,?,?,?,?)')
     for (const row of sessions.values()) for (const m of row.messages) insert.run(row.id,m.role,m.finish_reason || (m.role === 'assistant' ? 'stop' : null), typeof m.content === 'string' ? m.content : JSON.stringify(m.content),m.display_kind || (m.role === 'assistant' ? 'final' : null),m.timestamp)
+    if(searchDb) {
+      searchDb.exec('DELETE FROM messages; DELETE FROM sessions')
+      const putSession=searchDb.prepare('INSERT INTO sessions(id,source,title,started_at,message_count,parent_session_id,last_activity_at,pinned,archived,hidden) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      for(const row of sessions.values()) putSession.run(row.id,row.source||'wizard-mobile',row.title||'',row.created_at,row.messages.length,null,row.messages.at(-1)?.timestamp||row.created_at,0,row.archived?1:0,row.hidden?1:0)
+      const put=searchDb.prepare('INSERT INTO messages(session_id,role,finish_reason,content,display_kind,timestamp) VALUES(?,?,?,?,?,?)')
+      for(const row of titleDb.prepare('SELECT * FROM messages').all()) put.run(row.session_id,row.role,row.finish_reason,row.content,row.display_kind,row.timestamp)
+    }
+    if(hasSearchIndex) searchStore.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
   }
   writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA'] }))
   writeFileSync(join(root, 'apps.json'), JSON.stringify({ apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }] }))
@@ -83,7 +96,7 @@ export async function scene(kind, serverOptions = {}) {
     }
     if (path === '/api/sessions') {
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100)
-      const rows = [...sessions.values()].map(row => ({ ...row, message_count: row.messages.length, latest_message: row.messages.at(-1), last_active: row.messages.at(-1)?.timestamp || row.created_at }))
+      const rows = [...sessions.values()].filter(row => !(searchDb && row.archived)).map(row => ({ ...row, message_count: row.messages.length, latest_message: row.messages.at(-1), last_active: row.messages.at(-1)?.timestamp || row.created_at }))
       return json(200, { data: rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
     }
     const sm = path.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|model))?$/)
@@ -154,7 +167,7 @@ export async function scene(kind, serverOptions = {}) {
   await start()
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
   const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
-  return { kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
+  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     gatewayRpc: async (rpc) => {
@@ -173,5 +186,5 @@ export async function scene(kind, serverOptions = {}) {
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },
-    close: async () => { await closeServer(wizard); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
+    close: async () => { await closeServer(wizard); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); searchDb?.close(); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
 }
