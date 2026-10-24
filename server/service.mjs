@@ -2034,20 +2034,22 @@ function setupWriteRefusal(request, tailnetIngress) {
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 // The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
 // (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+// Availability and send use the same authority: the job's own agent and only the apps that agent may use, so a
+// provider that agent cannot reach (a private agent, an unbound app) means a thread fallback, never a hidden loss.
 export function scheduleNotifier({ bridge, appsJsonPath }) {
-  const pick = () => {
-    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+  const pick = (agent) => {
+    const providers = bridge.apps(agent).filter(app => app.jobs.includes('notifications'))
     let chosen = ''
     try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
     const running = providers.filter(app => app.status === 'running')
     return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
   }
   return {
-    available: () => pick()?.status === 'running',
-    send: async ({ title, message }) => {
-      const app = pick()
+    available: (agent = GATEWAY_MAIN_AGENT) => pick(agent)?.status === 'running',
+    send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
+      const app = pick(agent)
       if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
-      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, agent)
       if (!result || result.isError) throw new Error('notify failed')
       return { app: app.id }
     },
@@ -4242,6 +4244,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
