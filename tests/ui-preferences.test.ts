@@ -40,7 +40,7 @@ describe('box-wide UI preferences HTTP contract', () => {
     const invalid = [null, {}, 'x', Array(51).fill(space), [space, space],
       ...[{ id: 'Bad ID' }, { id: 'a'.repeat(49) }, { name: '' }, { name: ' ' }, { name: 'x'.repeat(61) }, { name: 'bad\nname' },
         { threads: ['a', 'a'] }, { threads: ['<x>'] }, { threads: Array.from({length:501}, (_,i)=>'id'+i) },
-        { createdAt: 'yesterday' }, { createdAt: '2026-10-24' }, { extra: true }, { id: undefined }].map(p => [{ ...space, ...p }])]
+        { createdAt: 'yesterday' }, { createdAt: '2026-10-24' }, { createdAt: '2026-02-31T00:00:00Z' }, { createdAt: '2026-10-24T25:00:00Z' }, { extra: true }, { id: undefined }].map(p => [{ ...space, ...p }])]
     for (const spaces of invalid) expect((await put(u, { spaces })).status).toBe(400)
     expect((await (await fetch(u)).json()).spaces).toEqual([space])
     // Accepted maximum shape exceeds the former 32 KB file/body ceiling; it must survive a GET.
