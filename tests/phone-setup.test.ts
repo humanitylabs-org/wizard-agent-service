@@ -122,6 +122,48 @@ describe('Wizard OS settings for phone setup', () => {
 })
 
 describe('setup API (box-local listener)', () => {
+  it('advertises quiet launch only for explicitly configured alongside installs', async () => {
+    const dir = tempDir()
+    for (const launchMode of ['alongside', 'vm', '', 'unknown']) {
+      const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), launchMode })
+      expect((await setup.overview()).launch_mode).toBe(launchMode === 'alongside' ? 'alongside' : undefined)
+      expect(existsSync(join(dir, 'settings.json'))).toBe(false)
+    }
+  })
+
+  it('a prior helper enrollment whose socket is gone is not host-managed ready', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    updateSettings(settingsPath, (raw: any) => { raw.network = { base_url: ORIGIN }; raw.access = { tailscale: { origin: ORIGIN, owner_logins: ['owner@example.com'] } } })
+    const setup = createPhoneSetup({ settingsPath, call: async () => { throw Object.assign(new Error('gone'), { code: 'unavailable', absent: true }) } })
+    const item = (await setup.overview()).items[0]
+    expect(item.state).toBe('in_progress')
+    expect(item.phone_ready).toBeUndefined()
+  })
+
+  it('environment-pinned access records the first verified phone visit', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const shell = `${ORIGIN}:8796/wizard-os-home/`
+    const absent = async () => { throw Object.assign(new Error('none'), { code: 'unavailable', absent: true }) }
+    const setup = createPhoneSetup({ settingsPath, accessPinned: true, hostShellUrl: () => shell, call: absent })
+    expect((await setup.overview()).items[0]).toMatchObject({ state: 'done', phone_ready: true })
+    setup.noteOwnerRequest({ headers: { 'user-agent': IPHONE_UA } } as any)
+    await expect.poll(() => readSettings(settingsPath).settings.setup.phone_seen_at).toMatch(/Z$/)
+    expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
+    const unpinned = createPhoneSetup({ settingsPath: join(dir, 'other.json'), hostShellUrl: () => shell, call: absent })
+    unpinned.noteOwnerRequest({ headers: { 'user-agent': IPHONE_UA } } as any)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(readSettings(join(dir, 'other.json')).settings.setup.phone_seen_at).toBe('')
+  })
+
+  it('a helper outage never marks a stale host phone address ready', async () => {
+    const dir = tempDir()
+    const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), hostShellUrl: () => `${ORIGIN}:8796/wizard-os-home/`,
+      call: async () => { throw Object.assign(new Error('offline'), { code: 'unavailable', absent: false }) } })
+    expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'todo' })
+  })
+
   it('is unavailable without the helper socket, never crashes, and tracks first run', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
@@ -368,6 +410,13 @@ describe('setup API (box-local listener)', () => {
     expect(phone.body.wizard_url).toBe(shell)
     expect(phone.body.device_name).toBe(DNS)
     expect(phone.body.managed).toBe('host')
+    const overview = (await call(port, '/wizard/v1/setup')).body
+    expect(overview.items[0]).toMatchObject({ state: 'done', phone_ready: true })
+    expect(readSettings(join(dir, 'settings.json')).settings.setup.phone_seen_at).toBe('')
+    updateSettings(join(dir, 'settings.json'), (raw: any) => { raw.setup = { phone_seen_at: new Date().toISOString() } })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+    // phone_ready is only a hint for ready-before-first-visit copy, not an availability capability.
+    expect((await call(port, '/wizard/v1/setup')).body.items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
   })
 
   it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {
@@ -377,6 +426,7 @@ describe('setup API (box-local listener)', () => {
       writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url } }] }))
       const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
       expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('unavailable')
+      expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('todo')
     }
   })
 

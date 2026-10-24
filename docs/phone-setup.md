@@ -26,6 +26,8 @@ own configured addresses (`network.base_url`, `network.aliases` — the only way
 `access.tailscale.origin`), so a DNS-rebound page cannot enroll the box into someone else's tailnet.
 
 - `GET /wizard/v1/setup` → `{ first_run, items: [{ id: "phone", title: "Use Wizard on your phone", state: todo|in_progress|done }] }`
+  - With `WIZARD_SETUP_MODE=alongside`, also returns `launch_mode: "alongside"`: no automatic Setup/tour on existing-Hermes installs. No setting or completion flag is written by this read. Other modes keep VM onboarding.
+  - An already configured host-managed private address, before the first recorded phone visit, makes the phone item `done` with `phone_ready: true`. This is a checklist-copy hint ("ready to open" instead of "connected"), not a general availability capability; after a recorded visit it is omitted and the existing connected copy applies. `phone_seen_at` stays untouched. A helper outage never trusts a stale host address.
 - `POST /wizard/v1/setup/seen` → `{ ok: true }`; records `setup.seen_at`.
 - `GET /wizard/v1/setup/phone` → `{ step, auth_url, https_enable_url, wizard_url, device_name, phones, install_url, error }`
   with `step` one of `unavailable` (no helper socket / Tailscale not installed), `off`, `signin`, `https`,
