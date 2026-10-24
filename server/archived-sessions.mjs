@@ -3,7 +3,8 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
-export function readArchivedSessions(sessionDbPath) {
+export function readArchivedSessions(sessionDbPath, { limit = 100 } = {}) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100000) throw new Error('invalid_archive_limit')
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
@@ -17,8 +18,8 @@ export function readArchivedSessions(sessionDbPath) {
          AND parent_session_id IS NULL
          AND message_count > 0
        ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
-    `).all().map((session) => ({
+       LIMIT ?
+    `).all(limit).map((session) => ({
       ...session,
       pinned: Boolean(session.pinned),
       archived: Boolean(session.archived),

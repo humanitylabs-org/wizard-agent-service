@@ -16,6 +16,31 @@ import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
 const profileRunCache = new WeakMap()
 
+// Shared metadata census for the list window and scoped Spaces tools. Never discovers other agents.
+export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets = [], signal, archiveLimit = 100, requireComplete = false } = {}) {
+  const all = []; let offset = 0
+  while (true) {
+    const q = new URLSearchParams({ limit: '100', offset: String(offset), include_children: 'false' })
+    const page = await ctx.registry.fetchAgent(agent, `/api/sessions?${q}`, { headers, redirect: 'manual', signal })
+    if (!page.ok) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    const raw = Buffer.from(await page.arrayBuffer())
+    if (secrets.some(secret => raw.includes(Buffer.from(secret)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
+    const value = JSON.parse(raw.toString('utf8')), rows = value.data || value.sessions || value.items || []
+    if (!Array.isArray(rows)) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    all.push(...rows.filter(row => !ctx.isThreadVisible || ctx.isThreadVisible(row)))
+    if (value.has_more === false || (value.has_more !== true && rows.length < 100)) break
+    if (!rows.length || offset >= 100000) throw new AgentError(502, 'incomplete_listing', 'agent.runtime')
+    offset += rows.length
+  }
+  const known = new Set(all.map(row => row?.id))
+  let archived = []
+  try { archived = readArchivedSessions(ctx.archivePath ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit }) }
+  catch (error) { if (requireComplete) throw error }
+  if (requireComplete && archived.length >= archiveLimit) throw new AgentError(502, 'incomplete_listing', 'agent.archive')
+  for (const row of archived) if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
+  return all
+}
+
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
 async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
@@ -701,28 +726,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
         const payload = await listWindows.get(ctx)({ params: searchParams, scope: agent.id, load: async () => {
-          const all=[]; let offset=0
-          // Read only this already-authorized agent runtime. Gateway controls never reach it.
-          while (true) {
-            const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
-            const page=await registry.fetchAgent(agent, `/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
-            if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            const raw=Buffer.from(await page.arrayBuffer())
-            if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
-            const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
-            if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
-            if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
-            if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
-            offset+=rows.length
-          }
-          // Stock Hermes never lists archived threads; add them from this agent's own state.db, exactly as the
-          // main list does, so an agent's Archive is not silently empty (James, 24 Oct 2026: one Philosopher thread).
-          try {
-            const known=new Set(all.map(row=>row?.id))
-            for (const row of readArchivedSessions(join(registry.agentsDir, agent.id, 'home', 'state.db')))
-              if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
-          } catch { /* an unreadable archive never hides the live threads */ }
+          const all = await loadAgentSessionRows(ctx, agent, { headers, secrets, signal: controller.signal })
           if (searchParams.get('q')) {
             const fts = privateChatMatches(registry.agentsDir,agent.id,searchParams.get('q'))
             if (fts) {
