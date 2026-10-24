@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { createWorkspaceStore, WORKSPACES_MAX_BYTES } from '../server/workspaces.mjs'
 const servers: any[] = [], dirs: string[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => { s.closeAllConnections?.(); return new Promise<void>(r => s.close(r)) })); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })) })
 function home() { const d = mkdtempSync(join(tmpdir(), 'workspaces-')); dirs.push(d); return d }
-async function start(d: string, auth = false) {
-  const s = createWizardServer({ wizardOsHome: d, hermesKey: 'test', agentBridge: false, followThrough: false, requireAccess: auth, ...(auth ? { accessVerifier: async () => null } : {}), runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0 })
+async function start(d: string, auth = false, extra: any = {}) {
+  const s = createWizardServer({ wizardOsHome: d, hermesKey: 'test', agentBridge: false, followThrough: false, requireAccess: auth, ...(auth ? { accessVerifier: async () => null } : {}), ...extra, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0 })
   servers.push(s); const a: any = await listen(s); return `http://127.0.0.1:${a.port}/wizard/v1/workspaces`
 }
 const put = (u: string, body: any, headers = {}) => fetch(u, { method: 'PUT', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })
@@ -71,5 +72,40 @@ describe('workspace sync HTTP contract', () => {
     expect(readFileSync(file, 'utf8')).toBe('{broken')
     expect((await put(u, { baseRev: 0, state: { desks: [{ id: 'a', wins: [chats] }] } })).status).toBe(200)
     expect(JSON.parse(readFileSync(file, 'utf8')).rev).toBe(1)
+  })
+  it('with an owner proof configured, only the owner reads or writes (auth-mode none)', async () => {
+    const proof = 'p'.repeat(40), u = await start(home(), false, { ownerProof: proof })
+    expect((await fetch(u)).status).toBe(403)
+    expect((await put(u, { baseRev: 0, state: { desks: [] } })).status).toBe(403)
+    expect((await fetch(u, { headers: { 'x-wizard-owner-proof': proof } })).status).toBe(200)
+  })
+})
+
+describe('workspace store durability', () => {
+  const big = (n: number, tag: string) => ({ desks: Array.from({ length: n }, (_, i) => ({ id: `${tag}${i}`, wins: Array.from({ length: 12 }, (_, k) => ({ id: `${tag}${i}w${k}`, app: 'frame', appId: 'files', url: '/' + 'x'.repeat(900) })) })) })
+  it('the stored file always fits the load limit and reloads, however many desks were closed', () => {
+    const d = home(), file = join(d, 'workspaces.json'), st = createWorkspaceStore(file)
+    let rev = 0
+    for (const tag of ['a', 'b', 'c']) { const r = st.put({ baseRev: rev, device: 'x', state: big(38, tag) }); expect(r.status).toBe(200); rev = r.body.rev }
+    expect(statSync(file).size).toBeLessThanOrEqual(WORKSPACES_MAX_BYTES)
+    const again = createWorkspaceStore(file).snapshot()
+    expect(again.rev).toBe(rev); expect(again.state.desks).toHaveLength(38)
+  })
+  it('a failed disk write publishes nothing: same rev, retry with the same baseRev still works', () => {
+    const d = home(), file = join(d, 'workspaces.json'), st = createWorkspaceStore(file)
+    st.put({ baseRev: 0, state: { desks: [{ id: 'a', wins: [chats] }] } })
+    chmodSync(d, 0o500)
+    try { expect(() => st.put({ baseRev: 1, state: { desks: [{ id: 'b', wins: [files] }] } })).toThrow() } finally { chmodSync(d, 0o700) }
+    expect(st.snapshot()).toMatchObject({ rev: 1, state: { desks: [{ id: 'a' }] } })
+    expect(st.put({ baseRev: 1, state: { desks: [{ id: 'b', wins: [files] }] } }).status).toBe(200)
+  })
+  it('two service processes sharing one home agree on rev (compare-and-swap through the file)', async () => {
+    const d = home(), file = join(d, 'workspaces.json'), one = createWorkspaceStore(file), two = createWorkspaceStore(file)
+    expect(one.put({ baseRev: 0, state: { desks: [{ id: 'a', wins: [chats] }] } }).status).toBe(200)
+    const lost = two.put({ baseRev: 0, state: { desks: [{ id: 'b', wins: [files] }] } })
+    expect(lost.status).toBe(409); expect(lost.body.state.desks[0].id).toBe('a')
+    const waiting = one.wait(1, 5)
+    expect(two.put({ baseRev: 1, state: { desks: [{ id: 'b', wins: [files] }] } }).status).toBe(200)
+    expect((await waiting).rev).toBe(2)
   })
 })

@@ -7,11 +7,11 @@
 //
 // Desks that disappear together with their windows are kept (newest first, at most 12) as `closed`, so any device can
 // reopen them; a window moved to another desk is not a close.
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, rmdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-export const WORKSPACES_MAX_BYTES = 512 * 1024
+export const WORKSPACES_MAX_BYTES = 1024 * 1024 // stored file (state + Recently closed); a single PUT body is capped at 512 KiB
 const MAX_DESKS = 40, MAX_WINS = 12, MAX_CLOSED = 12
 const APPS = new Set(['chats', 'frame', 'review', 'maps', 'feature'])
 const ID = /^[A-Za-z0-9_~-]{1,40}$/
@@ -55,56 +55,95 @@ function closedDesks(old, next, device) {
   return out
 }
 
+const empty = () => ({ rev: 0, state: { desks: [] }, closed: [], device: '', at: '' })
+function parseDb(text) {
+  const j = JSON.parse(text)
+  if (!isObj(j) || !Number.isInteger(j.rev)) return null
+  return { ...empty(), rev: j.rev, state: cleanWorkspaces(j.state) || { desks: [] },
+    closed: Array.isArray(j.closed) ? j.closed.filter(c => isObj(c) && cleanWorkspaces({ desks: [c.desk] })?.desks.length).slice(0, MAX_CLOSED) : [],
+    device: typeof j.device === 'string' ? j.device : '', at: typeof j.at === 'string' ? j.at : '' }
+}
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+
+// The file on disk is the single authority, so two service processes sharing one Wizard OS home agree on `rev`:
+// every mutation takes a short exclusive lock, re-reads the file, compares, writes, then publishes. Nothing is
+// visible to readers until the write has succeeded.
 export function createWorkspaceStore(path) {
-  const empty = () => ({ rev: 0, state: { desks: [] }, closed: [], device: '', at: '' })
-  let db = empty()
-  try {
-    if (existsSync(path) && statSync(path).size <= WORKSPACES_MAX_BYTES) {
-      const j = JSON.parse(readFileSync(path, 'utf8'))
-      if (isObj(j) && Number.isInteger(j.rev)) db = { ...empty(), rev: j.rev, state: cleanWorkspaces(j.state) || { desks: [] },
-        closed: Array.isArray(j.closed) ? j.closed.filter(c => isObj(c) && cleanWorkspaces({ desks: [c.desk] })?.desks.length).slice(0, MAX_CLOSED) : [],
-        device: typeof j.device === 'string' ? j.device : '', at: typeof j.at === 'string' ? j.at : '' }
-    }
-  } catch { /* unreadable: start empty, leave the file until the next save replaces it */ }
-  const waiters = new Set()
-  const snapshot = () => ({ rev: db.rev, state: db.state, closed: db.closed, device: db.device, at: db.at })
-  function save() {
-    mkdirSync(dirname(path), { recursive: true })
-    const temp = `${path}.${randomUUID()}.tmp`
-    try { writeFileSync(temp, JSON.stringify(db) + '\n', { mode: 0o600, flag: 'wx' }); renameSync(temp, path) }
-    finally { if (existsSync(temp)) unlinkSync(temp) }
+  const lockPath = `${path}.lock`
+  let db = empty(), seen = ''
+  function refresh() {
+    try {
+      if (!existsSync(path)) return
+      const st = statSync(path), mark = `${st.mtimeMs}:${st.size}`
+      if (mark === seen) return
+      seen = mark
+      if (st.size > WORKSPACES_MAX_BYTES) return
+      const next = parseDb(readFileSync(path, 'utf8'))
+      if (next && next.rev >= db.rev) { const changed = next.rev !== db.rev; db = next; if (changed) wake() }
+    } catch { /* unreadable: keep serving what we have; the next good save replaces the file */ }
   }
-  function bump() { db.rev += 1; save(); for (const w of [...waiters]) w() }
+  function withLock(fn) {
+    mkdirSync(dirname(path), { recursive: true })
+    for (let i = 0; ; i++) {
+      try { mkdirSync(lockPath); break } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+        try { if (Date.now() - statSync(lockPath).mtimeMs > 10000) { rmdirSync(lockPath); continue } } catch {}
+        if (i > 200) throw Object.assign(new Error('workspaces_busy'), { status: 503 })
+        sleepSync(10)
+      }
+    }
+    try { refresh(); return fn() } finally { try { rmdirSync(lockPath) } catch {} }
+  }
+  function write(next) {
+    const text = JSON.stringify(next) + '\n'
+    if (Buffer.byteLength(text) > WORKSPACES_MAX_BYTES) throw Object.assign(new Error('too_large'), { status: 413 })
+    const temp = `${path}.${randomUUID()}.tmp`
+    try { writeFileSync(temp, text, { mode: 0o600, flag: 'wx' }); renameSync(temp, path) }
+    finally { if (existsSync(temp)) unlinkSync(temp) }
+    db = next
+    try { const st = statSync(path); seen = `${st.mtimeMs}:${st.size}` } catch {}
+    wake()
+  }
+  const waiters = new Set()
+  function wake() { for (const w of [...waiters]) w() }
+  const snapshot = () => ({ rev: db.rev, state: db.state, closed: db.closed, device: db.device, at: db.at })
+  refresh()
   return {
-    snapshot,
-    // Resolves with the snapshot as soon as rev > since, or after `wait` seconds.
+    snapshot: () => { refresh(); return snapshot() },
+    // Resolves as soon as rev > since (this process or another one sharing the file), or after `wait` seconds.
     wait(since, wait, signal) {
+      refresh()
       if (db.rev > since || wait <= 0) return Promise.resolve(snapshot())
       return new Promise(resolve => {
-        const done = () => { clearTimeout(t); waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(snapshot()) }
+        const done = () => { clearTimeout(t); clearInterval(poll); waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(snapshot()) }
         const t = setTimeout(done, Math.min(25, wait) * 1000)
+        const poll = setInterval(() => { refresh(); if (db.rev > since) done() }, 1000)
         waiters.add(done); signal?.addEventListener?.('abort', done)
       })
     },
     put({ baseRev, device, state }) {
-      const next = cleanWorkspaces(state)
-      if (!next || !Number.isInteger(baseRev)) throw Object.assign(new Error('invalid_workspaces'), { status: 400 })
-      if (baseRev !== db.rev) return { status: 409, body: snapshot() }
-      if (JSON.stringify(next) !== JSON.stringify(db.state)) {
-        const who = typeof device === 'string' ? device.replace(CTRL, '').slice(0, 60) : ''
-        const back = new Set([...next.desks.map(d => d.id), ...next.desks.flatMap(d => d.wins.map(w => w.id))])
+      const clean = cleanWorkspaces(state)
+      if (!clean || !Number.isInteger(baseRev)) throw Object.assign(new Error('invalid_workspaces'), { status: 400 })
+      return withLock(() => {
+        if (baseRev !== db.rev) return { status: 409, body: snapshot() }
+        if (JSON.stringify(clean) === JSON.stringify(db.state)) return { status: 200, body: snapshot() }
+        const who = typeof device === 'string' ? device.replace(new RegExp(CTRL, 'gu'), '').slice(0, 60) : ''
+        const back = new Set([...clean.desks.map(d => d.id), ...clean.desks.flatMap(d => d.wins.map(w => w.id))])
         const kept = db.closed.filter(c => !back.has(c.desk.id) && !c.desk.wins.some(w => back.has(w.id)))
-        db.closed = [...closedDesks(db.state, next, who).reverse(), ...kept].slice(0, MAX_CLOSED)
-        db.state = next; db.device = who; db.at = now()
-        bump()
-      }
-      return { status: 200, body: snapshot() }
+        let closed = [...closedDesks(db.state, clean, who).reverse(), ...kept].slice(0, MAX_CLOSED)
+        const next = { rev: db.rev + 1, state: clean, closed, device: who, at: now() }
+        // Recently closed is a convenience: drop the oldest entries before ever refusing the owner's live desks.
+        while (closed.length && Buffer.byteLength(JSON.stringify(next) + '\n') > WORKSPACES_MAX_BYTES) { closed = closed.slice(0, -1); next.closed = closed }
+        write(next)
+        return { status: 200, body: snapshot() }
+      })
     },
     forget(desk) {
-      const before = db.closed.length
-      db.closed = db.closed.filter(c => c.desk.id !== desk)
-      if (db.closed.length !== before) bump()
-      return snapshot()
+      return withLock(() => {
+        const closed = db.closed.filter(c => c.desk.id !== desk)
+        if (closed.length !== db.closed.length) write({ ...db, rev: db.rev + 1, closed })
+        return snapshot()
+      })
     },
   }
 }

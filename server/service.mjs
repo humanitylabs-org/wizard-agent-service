@@ -4626,6 +4626,8 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname === '/wizard/v1/workspaces' || url.pathname === '/wizard/v1/workspaces/closed/forget') {
         // Workspace sync (server/workspaces.mjs, docs/workspaces.md): the same desks on every device of the owner.
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        // Owner-only like My skin: agent credentials and, with an owner proof configured, anonymous local callers are refused.
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         const forget = url.pathname.endsWith('/forget'), allowed = forget ? ['POST'] : ['GET', 'PUT']
         if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
         workspaceStore ||= createWorkspaceStore(resolve(bridgeOsHome || wizardOsHome(), 'workspaces.json'))
@@ -4644,7 +4646,7 @@ function buildWizardServer(options, lifetime) {
         try {
           if (forget) { sendJson(response, 200, workspaceStore.forget(body?.desk)); return }
           const r = workspaceStore.put(body || {}); sendJson(response, r.status, r.body)
-        } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_workspaces' : 'workspaces_unavailable' }) }
+        } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences') {
