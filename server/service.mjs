@@ -139,8 +139,7 @@ The originating Wizard run owns the requested outcome through verified completio
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
-${STATUS_INSTRUCTIONS}
-${APP_PROVENANCE_INSTRUCTIONS}`
+${STATUS_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
