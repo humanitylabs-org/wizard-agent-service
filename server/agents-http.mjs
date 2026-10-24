@@ -726,7 +726,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
               offset+=rows.length
             }
             const known=new Set(all.map(row=>row.id))
-            for(const row of readArchivedSessions(statePath))
+            for(const row of readArchivedSessions(statePath,{all:true}))
               if(!known.has(row.id) && (!ctx.isThreadVisible||ctx.isThreadVisible(row))) all.push(row)
             state.rows=await projectProfileSessions(ctx,agent,all,headers,secrets); state.at=Date.now()
             return state.rows
@@ -761,8 +761,12 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
           : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,wizard_search_text:hits.get(row.id),wizard_search_match:true}:row)})
         result=Buffer.from(JSON.stringify(payload))
       }
-      result = filterThreads(result, ctx.isThreadVisible)
-      result = decorateThreadAgent(result, info)
+      // Compact projections are already scope/visibility-filtered and carry explicit agent ids.
+      // Do not expand them back into full runtime identity envelopes.
+      if(searchParams.get('mode')!=='body' && searchParams.get('fields')!=='slim') {
+        result = filterThreads(result, ctx.isThreadVisible)
+        result = decorateThreadAgent(result, info)
+      }
       // One thread already claimed by another agent must not break this agent's whole list.
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
       if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
