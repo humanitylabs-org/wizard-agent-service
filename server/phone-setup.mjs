@@ -248,6 +248,8 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       if (hostShellLink(hostShellUrl) || validTailnetOrigin(saved.network?.base_url)) {
         const { status, error, absent } = await statusOrNull()
         const phone = view(status, error, absent)
+        // This flag is a checklist-copy hint for ready-but-not-yet-seen, not a general capability.
+        // Once a phone was seen, preserve the existing "connected" checklist state/copy instead.
         ready = phone.managed === 'host' && phone.step === 'serving'
       }
       const state = saved.setup.phone_seen_at || ready ? 'done'

@@ -387,6 +387,10 @@ describe('setup API (box-local listener)', () => {
     const overview = (await call(port, '/wizard/v1/setup')).body
     expect(overview.items[0]).toMatchObject({ state: 'done', phone_ready: true })
     expect(readSettings(join(dir, 'settings.json')).settings.setup.phone_seen_at).toBe('')
+    updateSettings(join(dir, 'settings.json'), (raw: any) => { raw.setup = { phone_seen_at: new Date().toISOString() } })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+    // phone_ready is only a hint for ready-before-first-visit copy, not an availability capability.
+    expect((await call(port, '/wizard/v1/setup')).body.items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
   })
 
   it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {

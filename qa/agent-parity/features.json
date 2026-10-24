@@ -693,12 +693,14 @@
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",
-      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries.",
+      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries. For each agent kind, render the real chat list: empty Yesterday/Past week sections are absent, populated historical sections remain available.",
       "source_refs": [
-        "server/session-list-window.mjs"
+        "server/session-list-window.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "tests/chats-views.test.ts"
+        "tests/chats-views.test.ts",
+        "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
       "policy_exemptions": []
