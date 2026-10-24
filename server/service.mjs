@@ -2651,7 +2651,7 @@ function buildWizardServer(options, lifetime) {
       const agent = agents.read(id)
       const key = id === MAIN_AGENT_ID ? hermesKey : agents.apiKey(id)
       const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
-      return loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+      return loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
         headers: key ? { Authorization: `Bearer ${key}` } : {}, secrets: [key].filter(Boolean),
         signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
       })
