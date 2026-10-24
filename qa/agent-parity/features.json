@@ -233,14 +233,16 @@
     },
     {
       "id": "archive-placement",
-      "description": "Keep archived stale-running threads in Archive rather than Working",
+      "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
       "layer": "ux",
-      "how_to_test": "Archive a synthetic thread while its stale status still says running; verify it appears in Archive and never Working through main, host-profile, container and restricted chat routes.",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
       "source_refs": [
-        "wizard-ux/web/live.js"
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
         "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-stopped-done.cjs",
         "wizard-ux/qa-unified-chats.cjs",
         "qa/agent-parity/browser.mjs"
       ],
