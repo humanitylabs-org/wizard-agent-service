@@ -699,6 +699,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
         if (!agentListSnapshots.has(ctx)) agentListSnapshots.set(ctx,new Map())
+        const statePath=ctx.agentStatePath?.(agent) ?? join(registry.agentsDir,agent.id,'home','state.db')
         const snapshots=agentListSnapshots.get(ctx)
         let state=snapshots.get(agent.id)
         if(!state) { state={rows:null,at:0,pending:null}; snapshots.set(agent.id,state) }
@@ -720,7 +721,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
               offset+=rows.length
             }
             const known=new Set(all.map(row=>row.id))
-            for(const row of readArchivedSessions(join(registry.agentsDir,agent.id,'home','state.db')))
+            for(const row of readArchivedSessions(statePath))
               if(!known.has(row.id) && (!ctx.isThreadVisible||ctx.isThreadVisible(row))) all.push(row)
             state.rows=await projectProfileSessions(ctx,agent,all,headers,secrets); state.at=Date.now()
             return state.rows
@@ -735,9 +736,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         const started=performance.now(), q=searchParams.get('q')||''
         const rows=await (searchParams.has('q') ? load() : refresh())
         const list_ms=performance.now()-started
-        const localPath=join(registry.agentsDir,agent.id,'home','state.db')
+        const localPath=statePath
         if(searchParams.get('mode')==='body' && !existsSync(localPath)) { sendJson(response,501,{error:'body_search_unavailable'}); return }
-        const hits=q ? await searchHermesSessionTextAsync(join(registry.agentsDir,agent.id,'home','state.db'),rows.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || agent.id) : null
+        const hits=q ? await searchHermesSessionTextAsync(statePath,rows.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || agent.id) : null
         if(q && !searchParams.has('mode') && !existsSync(localPath) && indexedSearchWords(q).length) {
           for(const row of rows) {
             const text=await searchMessageText(async offset=>{
