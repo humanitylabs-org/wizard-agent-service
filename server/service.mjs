@@ -18,7 +18,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
-import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
 import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -33,11 +33,11 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
@@ -69,6 +69,8 @@ import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isA
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
+import { readArchivedSessions } from './archived-sessions.mjs'
+export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 // Marks a request that arrived on the dedicated Tailscale Serve listener (createTailnetIngress). A symbol
@@ -139,8 +141,7 @@ The originating Wizard run owns the requested outcome through verified completio
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
-${STATUS_INSTRUCTIONS}
-${APP_PROVENANCE_INSTRUCTIONS}`
+${STATUS_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -406,31 +407,6 @@ export function readSessionArchived(sessionDbPath, sessionId) {
   }
 }
 
-export function readArchivedSessions(sessionDbPath) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    return database.prepare(`
-      SELECT id, source, model, title, started_at, ended_at, end_reason,
-             message_count, parent_session_id, last_activity_at AS last_active,
-             pinned, archived, hidden
-        FROM sessions
-       WHERE archived = 1
-         AND hidden = 0
-         AND parent_session_id IS NULL
-         AND message_count > 0
-       ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
-    `).all().map((session) => ({
-      ...session,
-      pinned: Boolean(session.pinned),
-      archived: Boolean(session.archived),
-      hidden: Boolean(session.hidden),
-    }))
-  } finally {
-    database.close()
-  }
-}
 
 export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return null
@@ -832,6 +808,49 @@ function durableScreenshotCandidate(record) {
   if (admittedAt === null) return null
   return { visibleText: visibleMemoryText(flattened), images, admittedAt }
 }
+
+// Hermes 0.22.5+ commits every API-server turn as a private-binding admission and stamps its user row
+// display_kind "internal_notification" (gateway/session_ingress.py sets event.internal for trust). For a Wizard
+// chat that row IS the owner's own message: its platform_message_id is the admission_id this queue recorded when
+// it admitted the run. Clear the kind on exactly those rows so the shell shows the owner's bubble and reconciles
+// its "Sent" outbox item; every other internal notification keeps its kind.
+export function restoreOwnerTurns(result, runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes('internal_notification')) return result
+  let records
+  try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
+  // Hermes' session history omits platform_message_id, so an admitted run is matched by its exact visible
+  // input and its admission time (Hermes stamps the user row moments after admitting the run).
+  const pending = []
+  for (const record of Array.isArray(records) ? records : []) {
+    let input = ''
+    try { input = visibleInputText(JSON.parse(String(record?.body ?? '{}'))?.input).trim() } catch { /* unreadable body */ }
+    const at = Number(record?.payload?.created_at ?? record?.createdAt)
+    const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
+    if ((input || id) && Number.isFinite(at)) pending.push({ input, at, id, used: false })
+  }
+  if (!pending.length) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  let changed = false
+  const fix = (row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if ((row.role ?? row.author) !== 'user' || row.display_kind !== 'internal_notification') return row
+    if (row.session_id && row.session_id !== sessionId) return row
+    const rowId = row.platform_message_id ?? row.message_id
+    const text = visibleInputText(row.content).trim()
+    const at = Number(row.timestamp ?? row.created_at)
+    const match = pending.find((p) => !p.used && ((p.id && rowId === p.id)
+      || (p.input && text === p.input && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)))
+    if (!match) return row
+    match.used = true
+    changed = true
+    const { display_kind: _kind, ...rest } = row
+    return rest
+  }
+  for (const key of ['data', 'messages', 'items']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].map(fix)
+  return changed ? Buffer.from(JSON.stringify(payload)) : result
+}
+const OWNER_TURN_WINDOW_SECONDS = 120
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
@@ -2039,6 +2058,22 @@ export function scheduleNotifier({ bridge, appsJsonPath }) {
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
 // Setup never opened. apps.json is written by the App Manager and mounted read-only; a page cannot change it.
+/** The first https view url of the app that provides `shell` in apps.json ('' when none). */
+export function shellUrlFromApps(appsJsonPath) {
+  if (!appsJsonPath) return ''
+  let doc = null
+  try {
+    if (statSync(appsJsonPath).size > 2 * 1024 * 1024) return ''
+    doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
+  } catch { return '' }
+  for (const app of Array.isArray(doc?.apps) ? doc.apps : []) {
+    if (!Array.isArray(app?.provides) || !app.provides.includes('shell')) continue
+    const url = typeof app.view === 'string' ? app.view : app.view?.url
+    if (typeof url === 'string' && url.startsWith('https://')) return url
+  }
+  return ''
+}
+
 export function shellHostsFromApps(appsJsonPath) {
   const hosts = new Set()
   if (!appsJsonPath) return hosts
@@ -2628,6 +2663,7 @@ function buildWizardServer(options, lifetime) {
   // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
   const phoneSetup = options.phoneSetup ?? (settingsPath ? createPhoneSetup({
     settingsPath, socketPath: options.privateAccessSocket || DEFAULT_PRIVATE_ACCESS_SOCKET, accessPinned: Boolean(options.tailnetAccessPinned),
+    hostShellUrl: () => shellUrlFromApps(appsJsonPath),
   }) : null)
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
@@ -3372,7 +3408,7 @@ function buildWizardServer(options, lifetime) {
       return held
     }
     const staleRunLogPath = resolve(dirname(runQueueStatePath), 'stale-run-guard.jsonl')
-    for (const path of [staleRunLogPath, resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl')]) {
+    for (const path of [staleRunLogPath, resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl')]) {
       try { migrateJsonLines(path) } catch { console.warn('[agent-pairs] diagnostic journal left unchanged: migration could not be validated') }
     }
     // Side-effect-free liveness probe: an empty steer is refused with 400 by a live agent, with
@@ -3408,6 +3444,14 @@ function buildWizardServer(options, lifetime) {
           upstream_run_id: record?.upstreamRunId, ...decision }
         console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
         try { const path = resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
+      },
+      steerDelivered: options.steerDeliveredReader
+        ?? ((record, text) => readSteerResentHttp((path) => hermesJson(path), record.sessionId, record.createdAt, text, queuedInputTextOf(record.body))),
+      onPendingSteerReplay: (record, decision) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, agent_id: record?.agent_id ?? MAIN_AGENT_ID, session_id: record?.sessionId,
+          upstream_run_id: record?.upstreamRunId, ...decision }
+        console.log(`[pending-steer] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.replayRunId ? ` -> ${decision.replayRunId}` : ''}`)
+        try { const path = resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
     })
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
@@ -4488,7 +4532,7 @@ function buildWizardServer(options, lifetime) {
           'POST /wizard/v1/setup/phone/start': () => phoneSetup.start(),
           'POST /wizard/v1/setup/phone/reset': () => phoneSetup.reset(),
         }
-        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, phoneSetup.overview()); return }
+        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, await phoneSetup.overview()); return }
         if (route === 'GET /wizard/v1/setup/phone') { sendJson(response, 200, await phoneSetup.phone()); return }
         if (!writes[route]) { sendJson(response, 404, { error: 'not_found' }); return }
         const refusal = setupWriteRefusal(request, tailnetIngress)
@@ -4663,7 +4707,7 @@ function buildWizardServer(options, lifetime) {
         let patch
         if (request.method === 'PUT') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
-          try { patch = JSON.parse((await readBoundedBody(request, 32768)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
+          try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
           sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
@@ -5757,6 +5801,7 @@ function buildWizardServer(options, lifetime) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
+            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original

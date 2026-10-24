@@ -36,6 +36,16 @@
   ],
   "features": [
     {
+      "id": "chats-spaces",
+      "description": "Owner-created thread collections persist independently of agent runtime kind",
+      "layer": "server",
+      "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.",
+      "source_refs": ["server/ui-preferences.mjs"],
+      "reference_tests": ["tests/ui-preferences.test.ts"],
+      "fixture": "chats-spaces",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-create",
       "description": "Create a hidden disposable thread",
       "layer": "server",
@@ -232,6 +242,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "archive-placement",
+      "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
+      "layer": "ux",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
+      "source_refs": [
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-stopped-done.cjs",
+        "wizard-ux/qa-unified-chats.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "session-rename",
       "description": "Rename a thread",
       "layer": "server",
@@ -316,6 +344,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-steer-replay",
+      "description": "Replay a steer the run accepted but never consumed",
+      "layer": "server",
+      "how_to_test": "Finish a run whose terminal status carries pending_steer; verify exactly one same-thread turn on the locked model under a wizard-pending-steer- key, answered, and no second replay after restart.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/pending-steer-replay.test.ts"
+      ],
+      "fixture": "pending-steer-replay",
+      "policy_exemptions": []
+    },
+    {
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
@@ -375,12 +418,14 @@
       "id": "heavy-relay",
       "description": "Submit disposable heavy work",
       "layer": "runtime",
-      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption.",
+      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption. For main, a running continuation may submit authorized follow-up behind a newer queued sibling, including after restart; unrelated newer requests/stop/steer still fence it. For restricted agents, guidance preserves original authorization and explicit owner gates. Nonrestricted container and host-profile heavy grants stay refused by the existing sandbox policy.",
       "source_refs": [
-        "server/heavy-integration.mjs"
+        "server/heavy-integration.mjs",
+        "server/agent-heavy-relay.mjs"
       ],
       "reference_tests": [
-        "tests/agent-heavy-relay.test.ts"
+        "tests/agent-heavy-relay.test.ts",
+        "tests/heavy-continuation-admission.test.ts"
       ],
       "fixture": null,
       "policy_exemptions": []
@@ -658,12 +703,14 @@
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",
-      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries.",
+      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries. For each agent kind, render the real chat list: empty Yesterday/Past week sections are absent, populated historical sections remain available.",
       "source_refs": [
-        "server/session-list-window.mjs"
+        "server/session-list-window.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "tests/chats-views.test.ts"
+        "tests/chats-views.test.ts",
+        "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
       "policy_exemptions": []
@@ -767,6 +814,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-echo",
+      "description": "Reopen a thread whose outbox still holds a message the transcript shows",
+      "layer": "ux",
+      "how_to_test": "Seed a sent and a receipt-lost outbox copy of the last user message, reopen the thread on each agent kind; verify no Sending duplicate paints in any frame and the message shows once; seed an unsent copy with the same words and verify it still shows.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-pending-echo.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "memory-compaction",
       "description": "Compact an isolated long fixture thread",
       "layer": "runtime",
@@ -792,6 +854,20 @@
       ],
       "reference_tests": [
         "tests/onboarding.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "window-refresh",
+      "description": "Refresh a desktop Chats window in place (↻ / ⌥R): refetch its own thread and list without closing it",
+      "layer": "ux",
+      "how_to_test": "Open a synthetic thread in a main Chats window and in routed windows for host-profile, container and restricted agents; press ⌥R on each and verify only that window's thread reloads (forced) and its own agent list repaints, while a New chat draft is never reloaded.",
+      "source_refs": [
+        "wizard-ux/web/desktop/desktop.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/desktop-window-refresh.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []
