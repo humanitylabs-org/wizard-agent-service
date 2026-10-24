@@ -2991,7 +2991,7 @@ export function createWizardServer(options = {}) {
         const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, agent_id: record?.agent_id ?? MAIN_AGENT_ID, session_id: record?.sessionId,
           upstream_run_id: record?.upstreamRunId, ...decision }
         console.log(`[pending-steer] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.replayRunId ? ` -> ${decision.replayRunId}` : ''}`)
-        try { const path = resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
+        try { appendFileSync(resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
       },
     })
   }
