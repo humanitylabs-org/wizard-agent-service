@@ -28,6 +28,9 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           // Never turn a pinned model into a provider switch, including recovered admissions.
           const { provider: _displayProvider, ...input } = JSON.parse(record.body)
           const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:JSON.stringify(input)})
+          if(record.continuation?.kind==='watch'&&record.continuation.preserve_archived===true) {
+            await call(`/api/sessions/${encodeURIComponent(record.sessionId)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:true})})
+          }
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
         lookup:async record=>({payload:await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)}),
@@ -58,9 +61,11 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           body.model = session?.model || agent.model?.model
         }
         const requestHash=init.wizardRequestHash||createHash('sha256').update(init.body).digest('hex')
+        const continuation=headers.get('X-Wizard-Schedule-Kind')==='watch'
+          ? {kind:'watch',preserve_archived:headers.get('X-Wizard-Watcher-Preserve')==='1',agent_id:agent.id} : null
         try {
           const replay = queue.replay('direct', body.session_id, key, requestHash)
-          const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id})
+          const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id,continuation})
           const response=json(202,queue.publicPayload(record)); if(replay)response.headers.set('Idempotency-Replayed','true');return response
         } catch(error) { if(Number.isInteger(error.status))return json(error.status,{error:error.code||'run_admission_failed'});throw error }
       }

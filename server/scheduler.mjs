@@ -224,8 +224,9 @@ export class Scheduler {
     if (this.refreshing) return this.refreshing
     this.refreshing = (async () => {
       // Only the last occurrence can be shown. Never use unrelated chat activity.
-      // Every unfinished admitted occurrence (bounded to 6 h) so the trickle's in-flight count is true.
-      const rows = this.db.prepare('SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND instant > ?').all(this.now() - 6 * 3600_000)
+      // Ordinary work keeps the six-hour safety bound. A watcher remains an overlap fence until its exact run is
+      // terminal or explicitly stopped: age alone can never admit a second dependency check.
+      const rows = this.db.prepare("SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND (instant > ? OR json_extract(data,'$.kind')='watch')").all(this.now() - 6 * 3600_000)
       await Promise.all(rows.map(async row => {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
@@ -419,10 +420,10 @@ export class Scheduler {
       for (const job of this.list()) {
         if (!job.enabled || job.nextAt === null || job.nextAt > now) continue
         const pending = this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=0 LIMIT 1').get(job.id)
-        // A slow check cannot overlap its next poll. The terminal lookup below releases it; a genuinely lost run
-        // ages out with the scheduler's ordinary six-hour in-flight safety bound.
-        if (job.kind === 'watch' && this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=1 AND finished_at IS NULL AND instant > ? LIMIT 1')
-          .get(job.id, now - 6 * 3600_000)) continue
+        // A slow check cannot overlap its next poll. Unlike ordinary scheduled work, a watcher never ages out into
+        // another admission: its exact run must become terminal, or the owner must explicitly stop the watcher.
+        if (job.kind === 'watch' && this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=1 AND finished_at IS NULL LIMIT 1')
+          .get(job.id)) continue
         if (!pending) this.reserve(job, latestInstant(job, now))
         // Skip every missed window, including when retrying a pending pre-downtime call.
         job.nextAt = nextInstant(job, now)

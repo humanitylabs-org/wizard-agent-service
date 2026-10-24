@@ -3247,9 +3247,9 @@ function buildWizardServer(options, lifetime) {
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
-    // Every admitted turn (typed or voice reply, share, follow-through) brings an archived
-    // thread back: it shows in Working and its result lands in Ready, never silently in Archive.
-    // Best effort: a failed un-archive must never fail the run itself.
+    // Every owner-authored turn (typed or voice reply, share, follow-through) brings an archived
+    // thread back: it shows in Working and its result lands in Ready. Quiet scheduler watchers are the exception;
+    // they retain archive state until a terminal visible outcome.
     const unarchiveForNewTurn = async (sessionId) => {
       try {
         if (!sessionId) return
@@ -3276,6 +3276,19 @@ function buildWizardServer(options, lifetime) {
           clearTimeout(timer)
         }
       } catch { /* the run proceeds; Restore stays available */ }
+    }
+    const preserveWatcherArchive = async (sessionId) => {
+      if (!sessionId) return
+      const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'PATCH',
+        headers: { Authorization: ['Bearer', hermesKey].join(' '), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: true }),
+        signal: AbortSignal.timeout(5_000),
+        redirect: 'manual',
+      })
+      await result.body?.cancel().catch(() => undefined)
+      if (!result.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: result.status })
+      canonicalSessionCache.expiresAt = 0
     }
     const queueHermesAdmission = async (record) => {
       if ((record.agent_id ?? MAIN_AGENT_ID) !== MAIN_AGENT_ID) throw Object.assign(new Error('Agent-qualified job belongs to a different executor'), { status: 410 })
@@ -3317,7 +3330,7 @@ function buildWizardServer(options, lifetime) {
         if (record.continuation?.kind === HEAVY_KIND) {
           if (!heavyWork) throw Object.assign(new Error('heavy continuation unavailable'), { status: 503 })
           await heavyWork.validate(record)
-        } else if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
+        } else if (!manualRecovery && record.continuation?.kind !== 'watch' && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
           await requireHelperContinuation(record.continuation)
         }
       }
@@ -3341,7 +3354,11 @@ function buildWizardServer(options, lifetime) {
         operatorWorkers.set(upstreamRunId, { ...pendingWorker, ackRunId: upstreamRunId })
         persistOperatorWorkers()
       }
-      await unarchiveForNewTurn(record.sessionId)
+      if (record.continuation?.kind === 'watch') {
+        // Hermes materializes a run by reopening its thread. A queued watcher may dispatch long after the scheduler
+        // first accepted it, so preserve Done at the durable launch boundary rather than only beside enqueue.
+        if (record.continuation.preserve_archived === true) await preserveWatcherArchive(record.sessionId)
+      } else await unarchiveForNewTurn(record.sessionId)
       chatPhotos?.kick('accepted_user') // accepted user message; never upload completion
       return {
         upstreamRunId,
@@ -4269,14 +4286,9 @@ function buildWizardServer(options, lifetime) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
       }
-      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, { 'X-Wizard-Schedule-Kind': occurrence.kind })
+      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, { 'X-Wizard-Schedule-Kind': occurrence.kind,
+        ...(occurrence.kind === 'watch' ? { 'X-Wizard-Watcher-Preserve': wasArchived ? '1' : '0' } : {}) })
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
-      // Hermes treats a run in an archived thread like an ordinary return. A pending watcher is not one:
-      // put Done back immediately, then only the terminal visible-result callback above restores it.
-      if (occurrence.kind === 'watch' && wasArchived) {
-        const kept = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, 'PATCH', { archived: true }, { 'X-Wizard-Watcher-Preserve': '1' })
-        if (!kept.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: kept.status })
-      }
       return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
     },
   }) : null
@@ -5593,7 +5605,8 @@ function buildWizardServer(options, lifetime) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
               return
             }
-            queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner' }
+            queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
+              ...(quietWatcherAdmission ? { continuation: { kind: 'watch', preserve_archived: request.headers['x-wizard-watcher-preserve'] === '1' } } : {}) }
           }
         }
         let pendingWorker = null

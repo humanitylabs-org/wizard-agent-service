@@ -339,6 +339,8 @@ describe('thread-bound one-shot follow-up watchers', () => {
     expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
     clock += 10 * 60_000; await s.tick()
     expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
+    clock += 7 * 60 * 60_000; await s.tick()
+    expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
     const other = s.create(job({ kind: 'watch', thread: 'wizard_other', prompt: 'Check another dependency.' }))
     expect(s.followUps('wizard_origin').map((j: any) => j.id)).toEqual([first.id])
     expect(s.stopFollowUps('wizard_origin')).toEqual({ stopped: 1 })
@@ -496,7 +498,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       schedulerStatePath: join(root, 'http-schedules.sqlite3'), schedulerNow: () => clock, schedulerHermesHome: process.env.HERMES_HOME, ...extra })
     servers.push(server)
     const address = await listen(server)
-    return { server, origin: `http://127.0.0.1:${address.port}`, bodies, keys, sessions }
+    return { server, origin: `http://127.0.0.1:${address.port}`, admitted, bodies, keys, sessions }
   }
 
   it('requires owner auth for CRUD/run/import and sends through the ordinary queue into one durable named thread', async () => {
@@ -571,6 +573,32 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     disposition = await (await fetch(`${f.origin}/wizard/thread-dispositions`, { headers })).json()
     expect(f.server.scheduler.get(watch.id).enabled).toBe(isSilentResult(fixtureOutput))
     expect(Boolean(disposition.state['direct:wizard_origin']?.deferred)).toBe(deferred)
+  })
+
+  it('keeps an archived watcher quiet when capacity delays its durable queue dispatch', async () => {
+    const f = await fixture({ fixtureStatus: 'running', runQueueMaxActive: 1 })
+    f.sessions.set('blocker', { id: 'blocker', title: 'Blocker', archived: false })
+    f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'Content-Type': 'application/json' }
+    const blocker = await fetch(`${f.origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': 'blocker-key' }, body: JSON.stringify({ session_id: 'blocker', input: 'Hold capacity.' }) })
+    expect(blocker.status).toBe(202)
+    const watch = await (await api(f.origin, '', 'POST', job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check it.' }))).json()
+    const receipt = await (await api(f.origin, `/${watch.id}/run`, 'POST')).json()
+    await f.server.scheduler.tick(false)
+    expect(f.bodies.map((body: any) => body.session_id)).toEqual(['blocker'])
+    expect(f.sessions.get('wizard_origin').archived).toBe(true)
+    const occurrence = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
+    const watcherRunId = JSON.parse(occurrence.receipt).run_id
+    const queueDb = new DatabaseSync(join(root, 'http-queue.sqlite3'))
+    expect(JSON.parse(queueDb.prepare('SELECT continuation_json FROM wizard_run_queue WHERE public_run_id=?').get(watcherRunId).continuation_json)).toMatchObject({ kind: 'watch', preserve_archived: true })
+    queueDb.close()
+    f.admitted.get('blocker-key').status = 'completed'
+    for (let i = 0; i < 20 && f.bodies.length < 2; i++) {
+      await fetch(`${f.origin}/wizard/hermes/v1/runs/${watcherRunId}`, { headers })
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(f.bodies.map((body: any) => body.session_id)).toEqual(['blocker', 'wizard_origin'])
+    expect(f.sessions.get('wizard_origin').archived).toBe(true)
   })
 
   it.each([

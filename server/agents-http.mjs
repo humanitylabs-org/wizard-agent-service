@@ -622,10 +622,14 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   }
   const key = registry.apiKey(agent.id)
   if (!key) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.key')
-  const headers = new Headers({ Authorization: `Bearer ${key}` })
+  const headers = new Headers({ Authorization: ['Bearer', key].join(' ') })
   if (hasBody) headers.set('Content-Type', 'application/json')
   if (typeof request.headers.accept === 'string') headers.set('Accept', request.headers.accept)
   if (typeof request.headers['idempotency-key'] === 'string') headers.set('Idempotency-Key', request.headers['idempotency-key'])
+  if (principalOf(request).kind === 'service' && request.headers['x-wizard-schedule-kind'] === 'watch') {
+    headers.set('X-Wizard-Schedule-Kind', 'watch')
+    headers.set('X-Wizard-Watcher-Preserve', request.headers['x-wizard-watcher-preserve'] === '1' ? '1' : '0')
+  }
   const query = new URLSearchParams(searchParams)
   for (const key of ['window','q','overrides','snapshot','cursor']) query.delete(key)
   query.delete('view')
