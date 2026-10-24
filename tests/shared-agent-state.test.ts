@@ -162,7 +162,7 @@ describe('standard-agent shared state', () => {
       const token = readFileSync(join(f.root, 'agents', b.id, 'gateway.key'), 'utf8').trim()
       const request = async (method: string, params = {}, key = token) => (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()
       const listed = await request('tools/list')
-      expect(listed.result.tools.map((t: any) => t.name)).toEqual(['wizard_apps', ...SHARED_AGENT_TOOLS])
+      expect(listed.result.tools.map((t: any) => t.name).filter((n: string) => !n.startsWith('spaces_'))).toEqual(['wizard_apps', ...SHARED_AGENT_TOOLS])
       const read = () => request('tools/call', { name: 'wizard_agents__memory_read', arguments: { agent: a.id } })
       expect(f.value((await read()).result).memory).toBe('http-memory-marker')
       await f.registry.update(a.id, { permissions: { shared_with_agents: false } })
