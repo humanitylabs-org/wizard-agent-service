@@ -474,6 +474,26 @@
       "policy_exemptions": []
     },
     {
+      "id": "session-slim-index",
+      "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
+      "layer": "server",
+      "how_to_test": "Request fields=slim on archive-50, page the pinned cursor, verify bounded wire fields/build and complete archive membership, and prove routed/private rows never enter the main index on all four kinds.",
+      "source_refs": ["server/session-list-window.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/session-list-http.node.mjs"],
+      "fixture": "session-slim-index",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-body-search",
+      "description": "Body-only indexed search returns bounded visible snippets and explicit titles-only availability",
+      "layer": "server",
+      "how_to_test": "Request mode=body per kind with a local trigram store; verify id/agent/snippet wire shape, visibility, recall/private exclusion, short-query zero work, timings and titles-only behavior when the local index is unavailable.",
+      "source_refs": ["server/session-truth.mjs", "server/session-text-search-worker.mjs"],
+      "reference_tests": ["tests/session-text-search-worker.node.mjs"],
+      "fixture": "session-body-search",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-search",
       "description": "Search for a unique synthetic turn, including outside the loaded list window",
       "layer": "server",
