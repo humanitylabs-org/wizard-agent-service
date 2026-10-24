@@ -329,6 +329,9 @@ describe('paused read-only Hermes import', () => {
     const results = importHermesSchedules(scheduler()).results
     expect(results[0].schedule.prompt).toContain(`cd '${workdir}' && '${join(root, 'venv', 'bin', 'python3')}'`)
     expect(results[0].schedule.prompt).toContain('3600 seconds')
+    expect(results[0].schedule.prompt).toContain('For the rest of this agent turn')
+    expect(results[0].schedule.prompt).toContain('resolve every relative path against it')
+    expect(results[0].schedule.prompt).toContain('AGENTS.md')
     expect(results[1]).toEqual({ id: 'system', name: 'Weekly', status: 'not imported: script-only system job (no agent turn) — move to a host timer or Supervisor health check', timezone: 'UTC', nextRun: null, thread: null, promptLength: null })
   })
 
@@ -342,6 +345,14 @@ describe('paused read-only Hermes import', () => {
     symlinkSync(root, join(scripts, 'outside'))
     source([weekly({ script: 'outside/missing.py' }), weekly({ id: 'bad-python', script: 'context.py', interpreter: '/bin/bash' })])
     expect(importHermesSchedules(scheduler()).results.map((r: any) => r.status)).toEqual(['not imported: unsupported or invalid job', 'not imported: unsupported or invalid job'])
+  })
+
+  it('validates the resolved target of an existing Python interpreter symlink', () => {
+    const venv = join(root, 'venv', 'bin'); mkdirSync(venv, { recursive: true })
+    const other = join(root, 'not-python'); writeFileSync(other, 'synthetic executable')
+    const interpreter = join(venv, 'python3'); symlinkSync(other, interpreter)
+    source([weekly({ script: 'context.py', interpreter })])
+    expect(importHermesSchedules(scheduler()).results[0].status).toBe('not imported: unsupported or invalid job')
   })
 
   it('includes nullable preview fields for invalid rows without turning empty jobs into delivery-note-only jobs', () => {
