@@ -13,7 +13,12 @@ def req(path,body=None):
   try:data=json.load(e)
   except:data={}
   return e.code,data
-codeword=(R/'codeword').read_text().strip();session='wizard_pp_'+agent.replace('-','_')+'_'+str(time.time_ns())
+codeword=(R/'codeword').read_text().strip()
+c,b=req('/wizard/hermes/api/sessions?agent='+agent,{'source':'wizard-mobile','title':'Synthetic privacy probe'})
+if c==503 and b.get('error')=='private_provider_unavailable':sys.exit(42)
+if c not in [200,201]:sys.exit(7)
+session=(b.get('session') or b).get('id') or b.get('session_id')
+if not session:sys.exit(8)
 c,b=req('/wizard/hermes/v1/runs?agent='+agent,{'session_id':session,'agent':agent,'input':'Reply with only PP_OK. Do not use tools. Unique test codeword to ignore: '+codeword})
 if c==503 and b.get('error')=='private_provider_unavailable':sys.exit(42)
 if c not in [200,202]:sys.exit(1)

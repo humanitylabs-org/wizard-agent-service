@@ -96,21 +96,20 @@ elif step=='baseline-prepare':
  save('baseline-prepared',{'status':'running'})
 elif step=='baseline':
  assert os.geteuid()==1000
- # An explicit synthetic legacy fixture, not the real owner's Private data.
- d=A/'pp-test-legacy';d.mkdir(exist_ok=False);(d/'home').mkdir()
- agent={'schema':1,'id':'pp-test-legacy','label':'Private (synthetic)','harness':'hermes','privacy':'private','model':{'provider':'tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False},'permissions':{'preset':'private','outside_tools':[],'files':'own','wizard_apps':[],'agent_apps':[],'other_agents':'none'},'runtime':{'kind':'container','app_id':'agent-pp-test-legacy','port':18680,'uid':1000,'gid':1000},'created_at':1}
- (d/'agent.json').write_text(json.dumps(agent))
- c,b=req('/wizard/v1/agents/pp-test-legacy',{},'PATCH');assert c==200,(c,b)
- save('baseline-start',{'status':c,'product_apply':True})
+ # Product creation, no installed provider, legacy TCP+sidecar path (not owner data).
+ assert not json.loads((O/'apps.json').read_text()).get('apps',[])
+ c,b=req('/wizard/v1/agents',{'label':'pp-test-legacy','harness':'hermes','permissions':{'preset':'private','read_standard_chats':False},'model':{'provider':'tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST');assert c==201,(c,b)
+ assert b['agent']['id']=='pp-test-legacy'
+ agent=json.loads((A/'pp-test-legacy/agent.json').read_text());assert agent['model']['provider']=='tinfoil' and not agent['runtime'].get('private_client') and not agent['runtime'].get('isolation')
+ save('baseline-start',{'status':c,'product_create':True,'legacy_route':True})
 elif step=='chat':
  aid=sys.argv[2];assert aid.startswith('pp-test-')
- import uuid
  pending=R/('run-'+aid+'.json')
  if pending.exists():
   accepted=json.loads(pending.read_text());session=accepted['session_id'];rid=accepted['run_id']
  else:
-  session='wizard_'+uuid.uuid4().hex
-  c,b=req('/wizard/hermes/api/sessions?agent='+aid,{'id':session,'source':'wizard-mobile','title':'Private provider synthetic rehearsal'},'POST');assert c in [200,201],(c,b)
+  c,b=req('/wizard/hermes/api/sessions?agent='+aid,{'source':'wizard-mobile','title':'Private provider synthetic rehearsal'},'POST');assert c in [200,201],(c,b)
+  session=(b.get('session') or b).get('id') or b.get('session_id');assert session,'canonical session response missing id'
   c,b=req('/wizard/hermes/v1/runs?agent='+aid,{'session_id':session,'input':'Reply with only PP_OK. Do not use tools.'},'POST');assert c==202,(c,b)
   rid=b['run_id'];pending.write_text(json.dumps({'session_id':session,'run_id':rid}));pending.chmod(0o600)
  for _ in range(180):

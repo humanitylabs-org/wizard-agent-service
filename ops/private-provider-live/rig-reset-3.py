@@ -49,6 +49,9 @@ for base in roots:
    else:target.unlink()
 for path in [r/'legacy-key.env',r/'key-sha256',h/'.wizard-os/agent-runtime/tinfoil.env']:
  path.unlink(missing_ok=True)
+# Packet captures contain relay bearer tokens; retain only sanitized checker logs.
+for path in (r/'privacy-evidence').glob('*.pcap'):
+ assert path.parent==r/'privacy-evidence';path.unlink()
 code="from wam import cli; c=cli.Config();cli.write_registry(c,c.runtipi())"
 subprocess.run(['sudo','-u','rig','env','HOME=/home/rig','PYTHONPATH=/opt/pp-rig/src/wam','python3','-c',code],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 key_paths=[r/'legacy-key.env',h/'.wizard-os/agent-runtime/tinfoil.env']
