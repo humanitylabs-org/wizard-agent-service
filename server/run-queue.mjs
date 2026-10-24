@@ -22,6 +22,12 @@ export const isBackgroundContinuation = record => Boolean(record.continuation)
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
 export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
 const RECOVERY_INPUT_CHARS = 4000
+// Pending steer replay: Hermes accepts a steer (POST /v1/runs/<id>/steer -> 200) and injects it at the
+// run's next tool result. A steer that arrives while the run is writing its final answer has no next
+// tool result, so Hermes ends the run with the text in `pending_steer` "for replay" (24 Oct 2026: a voice
+// note and a photo showed "Delivered · Wizard sees it next step" and were never read). The queue replays
+// that text once, as the owner's next ordinary turn in the same thread, under this stable key prefix.
+export const PENDING_STEER_REPLAY_PREFIX = 'wizard-pending-steer-'
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
@@ -86,6 +92,25 @@ const queuedInputText = (value) => {
   }).join('\n').trim()
 }
 
+// The undelivered steer Hermes returns on a terminal run, or '' when there is none.
+export const pendingSteerText = (payload) => (typeof payload?.pending_steer === 'string' ? payload.pending_steer.trim() : '')
+
+// Comparable form of a message: its words before any Wizard file block, whitespace collapsed.
+export const steerProbe = (text) => {
+  const words = String(text ?? '').split('[WIZARD_FILES_V1]')[0].replace(/\s+/g, ' ').trim()
+  return (words || String(text ?? '').replace(/\s+/g, ' ').trim()).slice(0, 200)
+}
+
+// Files the steer attached that are not the owner's visible files stay redacted in the replay's output.
+const hiddenFilePaths = (text) => {
+  const block = String(text).match(/\[WIZARD_FILES_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILES_V1\]/u)?.[1]
+  const files = block ? parseJson(block, []) : []
+  return Array.isArray(files) ? files.filter(file => file && !file.userVisible && typeof file.trusted_path === 'string').map(file => file.trusted_path) : []
+}
+
+/** The text of a saved /v1/runs request body (string or JSON). */
+export const queuedInputTextOf = (body) => queuedInputText(typeof body === 'string' ? parseJson(body, {}) : body)
+
 const requestError = (message, status) => Object.assign(new Error(message), { status })
 
 export function queueRequestHash(runtime, body) {
@@ -115,6 +140,10 @@ export class DurableRunQueue {
     interruptOutcome = null,
     onInterruptRecovery = () => {},
     interruptRecoveryMaxAgeSeconds = 6 * 3600,
+    // Pending steer replay: steerDelivered(record, text) -> true when the thread already holds a user
+    // turn with this text after the run started (resent by hand), false when not; a throw retries later.
+    steerDelivered = null,
+    onPendingSteerReplay = () => {},
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -136,6 +165,8 @@ export class DurableRunQueue {
     this.interruptOutcome = interruptOutcome
     this.onInterruptRecovery = onInterruptRecovery
     this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
+    this.steerDelivered = steerDelivered
+    this.onPendingSteerReplay = onPendingSteerReplay
     this.leaselessSince = new Map()
     this.timer = null
     this.tickPromise = null
@@ -177,6 +208,10 @@ export class DurableRunQueue {
       CREATE TABLE IF NOT EXISTS wizard_interrupt_recovery (
         public_run_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
         recovery_run_id TEXT NOT NULL DEFAULT '', at REAL NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS wizard_pending_steer_replay (
+        public_run_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+        replay_run_id TEXT NOT NULL DEFAULT '', at REAL NOT NULL
       );
     `)
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'continuation_json')) {
@@ -571,6 +606,58 @@ export class DurableRunQueue {
     }
   }
 
+  pendingSteerReplay(publicRunId) {
+    return this.database.prepare('SELECT * FROM wizard_pending_steer_replay WHERE public_run_id = ?').get(publicRunId) ?? null
+  }
+
+  _pendingSteerBody(record, text) {
+    // Same thread, same model lock and client view context as the run the owner steered; only the
+    // input changes. The text is the owner's message exactly as Hermes held it (files already resolved).
+    const value = { ...parseJson(record.body, {}) }
+    delete value._wizard_background_recovery
+    delete value.wizard_file_ids
+    value.input = text
+    return JSON.stringify(value)
+  }
+
+  async _replayPendingSteers() {
+    const pending = this.database.prepare("SELECT public_run_id FROM wizard_pending_steer_replay WHERE state = 'pending' ORDER BY at").all()
+    for (const { public_run_id: id } of pending) {
+      const record = this.get(id)
+      const finish = (state, reason, replayRunId = '') => {
+        this.database.prepare('UPDATE wizard_pending_steer_replay SET state = ?, reason = ?, replay_run_id = ?, at = ? WHERE public_run_id = ?')
+          .run(state, reason, replayRunId, nowSeconds(), id)
+        try { this.onPendingSteerReplay(record, { state, reason, replayRunId }) } catch { /* logging only */ }
+      }
+      const text = record ? pendingSteerText(record.payload) : ''
+      if (!record || !TERMINAL.has(record.status)) { finish('skipped', 'not_terminal'); continue }
+      if (!text) { finish('skipped', 'no_pending_steer'); continue }
+      if (record.runtime !== 'direct') { finish('skipped', 'not_direct'); continue }
+      if (this._ownerStopped(record)) { finish('skipped', 'owner_stopped'); continue }
+      if (nowSeconds() - (record.terminalAt ?? record.updatedAt) > this.interruptRecoveryMaxAgeSeconds) { finish('skipped', 'too_old'); continue }
+      const key = PENDING_STEER_REPLAY_PREFIX + record.publicRunId
+      // The owner (or his phone's outbox) already resent it as a normal message in this thread.
+      const probe = steerProbe(text)
+      const resent = this.database.prepare(`SELECT body FROM wizard_run_queue WHERE runtime = ? AND session_id = ?
+        AND created_at > ? AND idempotency_key <> ?`).all(record.runtime, record.sessionId, record.createdAt, key)
+        .some(row => steerProbe(queuedInputText(parseJson(row.body, {}))).includes(probe))
+      if (resent) { finish('skipped', 'already_resent'); continue }
+      if (this.steerDelivered) {
+        let delivered
+        try { delivered = await this.steerDelivered(record, text) } catch { continue } // history unreadable: retry next tick
+        if (delivered === true) { finish('skipped', 'already_in_thread'); continue }
+      }
+      try {
+        const body = this._pendingSteerBody(record, text)
+        const { record: admitted } = this._admitRow({ runtime: record.runtime, sessionId: record.sessionId, idempotencyKey: key,
+          requestHash: queueRequestHash(record.runtime, body), body, trustedPaths: [...new Set([...(record.trustedPaths ?? []), ...hiddenFilePaths(text)])] })
+        finish('admitted', '', admitted.publicRunId)
+      } catch (error) {
+        finish('failed', String(error?.message ?? error).slice(0, 200))
+      }
+    }
+  }
+
   async cancel(publicRunId) {
     const record = this.get(publicRunId)
     if (!record) throw requestError('queued run not found', 404)
@@ -658,6 +745,10 @@ export class DurableRunQueue {
         capacityStatus = 'interrupted'
         nextPayload = { ...(nextPayload ?? {}), status: 'interrupted', interrupted_reason: 'transport_lost', safe_error: INTERRUPTED_SAFE_ERROR }
         this.database.prepare("INSERT OR IGNORE INTO wizard_interrupt_recovery(public_run_id, state, at) VALUES(?, 'pending', ?)")
+          .run(record.publicRunId, nowSeconds())
+      }
+      if (TERMINAL.has(capacityStatus) && pendingSteerText(nextPayload)) {
+        this.database.prepare("INSERT OR IGNORE INTO wizard_pending_steer_replay(public_run_id, state, at) VALUES(?, 'pending', ?)")
           .run(record.publicRunId, nowSeconds())
       }
       return this._update(record.publicRunId, {
@@ -751,6 +842,7 @@ export class DurableRunQueue {
     }
     await this._reconcileStale()
     await this._recoverInterrupted()
+    await this._replayPendingSteers()
 
     let external
     try { external = await this.activeSessionIds() }

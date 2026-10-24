@@ -16,7 +16,7 @@ import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
-import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
 import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -31,7 +31,7 @@ import { bootstrapPayload, readApps, readSettings, validTimeZone, resolveFastRou
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
@@ -2984,6 +2984,14 @@ export function createWizardServer(options = {}) {
           upstream_run_id: record?.upstreamRunId, ...decision }
         console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
         try { appendFileSync(resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
+      },
+      steerDelivered: options.steerDeliveredReader
+        ?? ((record, text) => readSteerResentHttp((path) => hermesJson(path), record.sessionId, record.createdAt, text, queuedInputTextOf(record.body))),
+      onPendingSteerReplay: (record, decision) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, agent_id: record?.agent_id ?? MAIN_AGENT_ID, session_id: record?.sessionId,
+          upstream_run_id: record?.upstreamRunId, ...decision }
+        console.log(`[pending-steer] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.replayRunId ? ` -> ${decision.replayRunId}` : ''}`)
+        try { const path = resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
     })
   }
