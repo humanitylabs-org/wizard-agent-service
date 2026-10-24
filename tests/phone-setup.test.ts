@@ -138,6 +138,18 @@ describe('setup API (box-local listener)', () => {
     expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'todo' })
   })
 
+  it('an unlinked helper socket never reclassifies a prior enrollment as host-managed', async () => {
+    const dir = tempDir(), settingsPath = join(dir, 'settings.json')
+    updateSettings(settingsPath, (raw: any) => {
+      raw.network = {base_url: ORIGIN}
+      raw.access = {tailscale:{origin:ORIGIN,owner_logins:[OWNER]}}
+      raw.setup = {phone_started_at:new Date().toISOString()}
+    })
+    const setup = createPhoneSetup({settingsPath, socketPath:join(dir,'missing.sock'), hostShellUrl:()=>`${ORIGIN}:8796/wizard-os-home/`})
+    expect(await setup.phone()).toMatchObject({step:'unavailable'})
+    expect((await setup.overview()).items[0]).toEqual({id:'phone',title:'Use Wizard on your phone',state:'in_progress'})
+  })
+
   it('is unavailable without the helper socket, never crashes, and tracks first run', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
@@ -445,7 +457,7 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
       onVerified: (request: IncomingMessage) => (server as any)?.phoneSetup?.noteOwnerRequest(request),
     })
     server = createWizardServer({
-      requireAccess: false, ownerProof, tailnetVerifier, settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
+      requireAccess: false, ownerProof, tailnetVerifier, tailnetAccessPinned: Boolean(tailnetVerifier.pinned), settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
       mcpToken: 'fixture-mcp', wizardOsHome: dir, bridgeWriteSkills: false, bridgeWatchMs: 0,
       followThrough: false, archivedSessionReader: () => [], ...(shellOrigin ? { tailnetShellOrigin: shellOrigin } : {}),
     })
@@ -567,9 +579,9 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
     expect((await call(s.tailnet, '/wizard/v1/agents', { headers: owner })).status).toBe(200)
   })
 
-  it('records phone_seen when the owner arrives through Serve from a phone', async () => {
-    const s = await stack()
-    s.enroll()
+  it.each([false,true])('records phone_seen on verified settings or pinned access (pinned=%s)', async (pinned) => {
+    const s = await stack(pinned ? {env:{origin:ORIGIN,logins:OWNER}} : {})
+    if (!pinned) s.enroll()
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'user-agent': DESKTOP_UA } })
     await call(s.local, '/wizard/v1/apps', { headers: { 'user-agent': IPHONE_UA } })  // box-local phones do not count
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'tailscale-user-login': 'someone@example.com', 'user-agent': IPHONE_UA } })
@@ -577,6 +589,8 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
     expect(readSettings(s.settingsPath).settings.setup.phone_seen_at).toBe('')
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'user-agent': IPHONE_UA } })
     await expect.poll(() => readSettings(s.settingsPath).settings.setup.phone_seen_at).toMatch(/Z$/)
+    expect(readSettings(s.settingsPath).settings.access.tailscale.origin).toBe(pinned ? '' : ORIGIN)
+    expect((await call(s.tailnet, '/wizard/v1/setup', {headers:owner})).body.items[0]).toEqual({id:'phone',title:'Use Wizard on your phone',state:'done'})
   })
 
   it('serves the shell to a verified phone without forwarding identity or credentials', async () => {

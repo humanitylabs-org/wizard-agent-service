@@ -162,6 +162,11 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     const saved = settings()
     const base = { step: 'unavailable', auth_url: null, https_enable_url: null, wizard_url: null, device_name: null, phones: [], install_url: INSTALL_URL, error }
     if (!status) {
+      // A helper's clean stop can unlink its socket too. Saved enrollment is evidence
+      // this is NOT an unmanaged host, so never reclassify its stale address as ready.
+      if (absent && (saved.setup.phone_started_at || saved.access.tailscale.origin) && !accessPinned) {
+        return { ...base, error: error || 'helper_unreachable' }
+      }
       // No helper, but the host already serves this box privately on its tailnet (a hand-built box whose owner
       // runs Tailscale themselves) and network.base_url names that address: the phone can connect today, so
       // show the address and QR instead of "phone setup isn't available".
@@ -303,10 +308,10 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     noteOwnerRequest(request) {
       if (!mobileUserAgent(request)) return
       const saved = settings()
-      if (saved.setup.phone_seen_at || !saved.access.tailscale.origin) return
+      if (saved.setup.phone_seen_at || (!saved.access.tailscale.origin && !accessPinned)) return
       serial(async () => {
         const again = settings()
-        if (!again.setup.phone_seen_at && again.access.tailscale.origin) markSetup('phone_seen_at', nowIso(now))
+        if (!again.setup.phone_seen_at && (again.access.tailscale.origin || accessPinned)) markSetup('phone_seen_at', nowIso(now))
       }).catch(() => {})
     },
   }
