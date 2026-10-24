@@ -15,7 +15,7 @@ from provider_egress import ProviderEgress, declared_hosts
 
 RELAY_POOL = ipaddress.ip_network('10.252.0.0/16')
 NETWORK_LOCK = threading.Lock()
-CLIENT_IMAGE = 'ghcr.io/humanitylabs-org/wizard-private-client:0.1.0'
+CLIENT_IMAGE = 'ghcr.io/humanitylabs-org/wizard-private-client:0.1.0@sha256:c562bef2166e6e1054be8eed34229cf0ead4574002da28f8fe5d4f09ad0e6631'
 CLIENT_UID = 1000  # agreed image user; EVIDENCE-client.md
 
 
