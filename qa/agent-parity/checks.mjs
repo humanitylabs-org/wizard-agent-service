@@ -3,10 +3,14 @@ import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
+
+const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true) }
 
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'scheduler-notifications': checkBoundNotification,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')
@@ -201,7 +205,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : feature === 'app-job-routing' ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
+  const s = featureScenes[feature] ? await featureScenes[feature](kind) : await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : feature === 'app-job-routing' ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)
