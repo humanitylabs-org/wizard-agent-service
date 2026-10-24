@@ -3,7 +3,7 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
-export function readArchivedSessions(sessionDbPath) {
+export function readArchivedSessions(sessionDbPath, { all = false } = {}) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
@@ -17,7 +17,7 @@ export function readArchivedSessions(sessionDbPath) {
          AND parent_session_id IS NULL
          AND message_count > 0
        ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
+       ${all ? '' : 'LIMIT 100'}
     `).all().map((session) => ({
       ...session,
       pinned: Boolean(session.pinned),
