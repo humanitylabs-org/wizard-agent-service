@@ -1,62 +1,57 @@
 # Public container publication
 
-`Publish public image` runs on every canonical-branch push (including PR merges).
-Every commit gets a write-once `sha-<full 40-character commit>` tag. It does not
-move `latest` or any release tag. Re-running a SHA reuses its manifest and still
-requires the independent public-pull job to pass.
+`Publish public image` validates every event. Pull requests build the Dockerfile on
+standard `ubuntu-24.04` runners (native amd64 and QEMU arm64), but receive only
+`contents: read`: they never log in, push, attest, upload artifacts, or use a
+persistent Actions cache. GitHub documents this label as a standard hosted runner
+and says standard runners are free and unlimited for public repositories:
+<https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job>.
 
-## First publication and releases
+Canonical `main` pushes and explicitly confirmed dispatches publish on
+`ubuntu-24.04`. QEMU plus one buildx builder creates and pushes the amd64/arm64
+index atomically. A native publication matrix would add per-architecture registry
+writes and a manifest-assembly step without a useful payoff for these small
+Dockerfiles. PR builds exercise the same native amd64 and emulated arm64 paths.
 
-1. Merge through a reviewed PR with all required checks green. The repo-scoped
-   Actions token has `packages: write`; no personal package token is required.
-2. A new GHCR package is initially private. An administrator must set it to
-   **Public**, with the linked repository retaining Actions write access.
-3. Re-run the failed `anonymous-pull` job. A private package is a release failure,
-   never a warning or a skipped test.
-4. For a version alias, dispatch on the canonical branch with `release_tag` and
-   `confirm_release_tag` equal (for example `0.3.0-candidate.20261012`) and
-   `expected_sha` equal to the full selected branch commit. Existing release tags
-   fail rather than being reassigned. A dispatch whose build succeeded but public
-   check failed should rerun **failed jobs only**, not repeat the alias creation.
+Every action is pinned to an official release's full commit SHA. Every Docker job
+uses a job-local configuration below `RUNNER_TEMP`; the build and publication
+script explicitly receives the builder created by `setup-buildx-action`. Action
+cleanup and image cleanup target only that builder/config or the exact PR image.
+There are no shared locks, owner HOME, Homebrew plugin paths, remote Docker
+sockets, worker volumes, artifacts, or persistent caches.
 
-Anonymous verification runs in a fresh hosted Linux job, has no package
-permission, uses an empty isolated Docker configuration and no inherited auth
-variables, obtains only anonymous registry tokens, and actually pulls both
-`linux/amd64` and `linux/arm64` by the published index digest and every requested
-tag. It verifies child manifest digests and the pulled source commit revision. Registry
-propagation is retried for five minutes, then the job fails closed.
+## Immutable tags and serialization
 
-## Trusted worker contract
+Every canonical commit gets `sha-<full 40-character commit>`. An existing SHA tag
+is verified and reused rather than overwritten. Workflow concurrency is keyed by
+the SHA with cancellation disabled, so reruns of one commit serialize while
+independent immutable commits may build concurrently. The publish job additionally uses the
+requested version (or SHA when absent) as its concurrency key, closing the check/create race between
+two dispatches for that write-once alias.
 
-The build job uses a dedicated repo-scoped macOS ARM64 runner with the
-`wizard-ghcr-<repository-name>` label. Runner install, worktree, HOME, temporary
-Docker credentials, caches, diagnostic logs and launchd output must reside on the
-external worker SSD. Colima's existing containerd image store must advertise
-both platforms. Do not replace its VM, switch global contexts, install binfmt,
-prune other builders or touch live containers.
+A version dispatch must run on `main`, repeat `release_tag` exactly in
+`confirm_release_tag`, and set `expected_sha` to the full selected commit. The immutable SHA tag must already exist, so a release dispatch can never race its creation. Existing
+version tags fail before any alias write. The workflow and Python script both
+check the canonical repository, `main` ref, and permitted event; a fork, PR, or
+other branch cannot publish even if one layer is edited incorrectly.
 
-Host environment supplies `WIZARD_HEAVY_ROOT` (fallback `WIZARD_WORK_ROOT`) and
-`WIZARD_CI_ROOT` beneath that configured root,
-`WIZARD_CI_WORKER_LOCK` (the existing shared Android/VM worker lock), and
-`DOCKER_HOST` (the explicit existing Colima socket). Builds use `fcntl.flock`,
-wait up to one hour and release automatically on exit. The 100-minute job limit
-bounds lock plus build time. If another heavy task holds the lock longer, rerun
-the failed publication after that task ends; never remove or replace the lock.
+## Public verification and provenance
 
-Before registering the runner, require approval for **all external fork
-contributors**, protect the canonical branch with PR/check gates, and install a
-host-owned job-start guard matching repository, ref, event and workflow path.
-The workflow never runs PR code on the self-hosted worker; PR contract tests run
-on hosted Linux. Repository writers and people approving fork workflows are
-trusted: a job-start hook is defense in depth, **not a sandbox** against a
-malicious approved workflow using `always()` steps. Do not approve untrusted
-workflows that target this runner. Untrusted execution needs separate ephemeral
-VM isolation, not this persistent runner.
+After publication, a fresh hosted job with no package permission, credentials, or
+login obtains anonymous registry tokens and pulls both architectures by index
+digest, immutable SHA tag, and optional version tag. It checks manifest digests,
+architecture, and source-revision labels and fails closed if the package is not
+public. For newly built digests, a final job creates and verifies GitHub-signed
+build provenance; its repository/ref/event guards pin it to the canonical workflow
+on `main`. Reused digests must already have canonical signed provenance matching
+the exact source SHA/ref, verified before any version alias is written. Both
+config blobs are digest-checked and must carry the correct revision/source labels
+before an existing SHA is reused. A rerun that did not build never signs a fresh
+build claim. If the first build succeeded but attestation failed, rerun only the
+failed attestation job (not all jobs); a full rerun fails closed on missing provenance.
 
-Temporary publish credentials are written directly with mode 0600 and removed
-on normal exit. `docker login` is deliberately not used: it may auto-detect the
-macOS keychain and overwrite the owner's credentials. No global Docker config,
-keychain, GH CLI identity or personal token is used by the publisher.
+A new GHCR package starts private. An administrator must make it **Public** and
+retain repository Actions write access. No personal package token is needed.
 
 ## Checks
 
@@ -64,6 +59,7 @@ keychain, GH CLI identity or personal token is used by the publisher.
 python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
 ```
 
-Unit tests exercise guards, collision refusal and credential-free pull commands;
-only an actual protected-branch Actions run proves the build and public install
-contract. Existing recipe, quality and secret-scan workflows remain unchanged.
+The tests mock registry and Docker behavior, including exact buildx builder
+selection, no-push hosted PR builds, tag collision refusal, immutable rerun reuse,
+and anonymous digest/tag pulls. Only a reviewed canonical-branch run proves the
+live GHCR publication and attestation path.
