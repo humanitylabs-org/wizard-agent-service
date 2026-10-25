@@ -100,6 +100,7 @@ def main():
         owner.ready(aid)
         result['migration_readback']=runtime_rpc(p,aid,'private-migration-status')
         rb=result['migration_readback']
+        write(out/'migration-status.json',{k:rb.get(k) for k in ('sealed','retirement_status','retired_files','files_scanned','credential_matches')})
         if rb.get('retirement_status')!='completed' or rb.get('credential_matches')!=0 or rb.get('sealed') is not True:raise RuntimeError('post-migration credential retirement readback failed')
         if p.get('rig_target'):
             # No production Private request exists in this code path. Synthetic
