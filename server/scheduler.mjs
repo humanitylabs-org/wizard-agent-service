@@ -8,6 +8,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { CronExpressionParser } from 'cron-parser'
 import { parse as parseYaml } from 'yaml'
 import { lintReport, REPORTER_INSTRUCTIONS } from './reporter.mjs'
+import { parseStatus } from './thread-status.mjs'
 
 export const SCHEDULE_INPUT = '[Wizard schedule]'
 export const isSilentResult = value => {
@@ -336,8 +337,12 @@ export class Scheduler {
     if (result.ok) return { run, pending: false }
     let correction = row.report_correction ? JSON.parse(row.report_correction) : null
     if (!correction) {
+      // A rewrite fixes wording only. The owner's attention state, subject and title must survive it, or a
+      // "check"/"needs_you" ask silently drops off Ready (25 Oct 2026: a check became fyi and lost its title).
+      const prior = parseStatus(run.output || '')
+      const keep = prior ? `\nKeep the status line's state "${prior.state}"${prior.subject ? `, subject "${prior.subject}"` : ''}${prior.title ? ` and title "${prior.title}"` : ''} exactly; reword only the ask if it breaks the rules.` : ''
       correction = { ...occurrence, key: `${row.key}:reporter`, createThread: false,
-        body: { session_id: occurrence.thread, input: `[reporter] Your last report does not meet the report format: ${result.reasons.join('; ')}. Rewrite it now in the format, nothing else.\n\nreport=${kind}\n${REPORTER_INSTRUCTIONS}` } }
+        body: { session_id: occurrence.thread, input: `[reporter] Your last report does not meet the report format: ${result.reasons.join('; ')}. Rewrite it now in the format, nothing else.${keep}\n\nreport=${kind}\n${REPORTER_INSTRUCTIONS}` } }
       // Freeze before admission: an ambiguous response retries the identical durable request.
       this.db.prepare('UPDATE schedule_occurrences SET report_correction=? WHERE key=?').run(JSON.stringify(correction), row.key)
     }
