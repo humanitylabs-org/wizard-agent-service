@@ -62,8 +62,9 @@ it.each(['permission_denied','idempotency_key_conflict','admission_conflict'])(
     expect(calls).toEqual(['refused','human'])
   })
 
-it.each([7200,'7200',new Date(Date.now()+7200_000).toUTCString()])(
+it.each([7200,'7200','http-date'])(
   'Retry-After %s persists across restart and reserved manual input cannot bypass its scope', async retryAfter => {
+    if (retryAfter === 'http-date') retryAfter = new Date(Date.now()+7200_000).toUTCString()
     const calls:string[]=[]
     const s=setup({launch:async(r:any)=>{
       calls.push(r.idempotencyKey)
