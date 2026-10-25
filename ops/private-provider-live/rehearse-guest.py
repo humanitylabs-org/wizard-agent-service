@@ -161,7 +161,7 @@ elif step=='connect':
  # Model-list/attestation verification does not authenticate a key. Complete one
  # short app SDK request, then require the product's verified readback.
  cid=run(['docker','ps','-q','--filter','label=com.docker.compose.service=wizard-tinfoil']).decode().split();assert len(cid)==1,'provider container selection failed'
- token=json.loads(run(['docker','exec',cid[0],'python3','-c',"import json;from pathlib import Path;print((Path('/data')/'gateway-token.json').read_text())"]))['token']
+ token=json.loads(run(['docker','exec',cid[0],'python3','-c',"import json,os;from pathlib import Path;print((Path(os.environ.get('DATA_DIR','/data'))/'gateway-token.json').read_text())"]))['token']
  body={'model':'glm-5-3','messages':[{'role':'user','content':'Reply exactly PP_AUTH.'}],'max_tokens':64,'thinking':{'type':'disabled'},'stream':False}
  q=urllib.request.Request('http://127.0.0.1:18804/v1/chat/completions',json.dumps(body).encode(),{'Content-Type':'application/json','Authorization':'Bearer '+token},method='POST')
  with urllib.request.urlopen(q,timeout=180) as f:authenticated=json.load(f)
