@@ -3,9 +3,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadSeenStore } from '../server/thread-seen.mjs'
+import { scene } from '../qa/agent-parity/fixture.mjs'
 
 const roots = []
-const record = (seenAt, unreadAt, sessionId = 'ready-thread') => ({
+const record = (seenAt: number, unreadAt?: number, sessionId = 'ready-thread') => ({
   agent_id: 'hermes',
   session_id: sessionId,
   updatedAt: '2026-10-23T12:00:00.000Z',
@@ -18,6 +19,34 @@ const record = (seenAt, unreadAt, sessionId = 'ready-thread') => ({
 
 afterEach(() => {
   while (roots.length) rmSync(roots.pop(), { recursive: true, force: true })
+})
+
+describe('thread seen HTTP batch qualification', () => {
+  it('drops retired agents, merges valid marks, and treats an all-retired batch as a no-op', async () => {
+    const s = await scene('main')
+    const put = (body: unknown) => s.raw('/wizard/thread-seen', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    try {
+      const retired = { ...record(100, undefined, 'nonexistent-probe'), agent_id: 'quick' }
+      const result = await put({ initializedAt: 1, threads: {
+        'agent/quick/nonexistent-probe': retired,
+        'direct:ready-thread': record(200, 300),
+      } })
+      expect(result.status).toBe(200)
+      expect((await result.json()).state.threads).toEqual({ 'direct:ready-thread': record(200, 300) })
+      // Exact incident repro: the discarded mark need not carry valid mark fields or initializedAt.
+      const noop = await put({ threads: { 'agent/quick/nonexistent-probe': {
+        agent_id: 'quick', session_id: 'nonexistent-probe', seenAt: '2026-10-25T00:00:00Z',
+      } } })
+      expect(noop.status).toBe(200)
+      await s.restart()
+      const saved = (await (await s.raw('/wizard/thread-seen')).json()).state
+      expect(saved.threads).toEqual({ 'direct:ready-thread': record(200, 300) })
+      // Invalid visible records and pair mismatches still reject the batch, rather than being swallowed.
+      expect((await put({ initializedAt: 1, threads: { 'direct:ready-thread': record(1.5) } })).status).toBe(400)
+      expect((await put({ initializedAt: 1, threads: { 'agent/quick/nonexistent-probe': record(100) } })).status).toBe(400)
+      expect((await put({ threads: {} })).status).toBe(400)
+    } finally { await s.close() }
+  })
 })
 
 describe('thread seen manual unread state', () => {

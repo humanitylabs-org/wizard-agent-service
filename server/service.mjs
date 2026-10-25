@@ -5,6 +5,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
+import { guardOwnerThreadWrite, isTurnWritePath, OwnerThreadWriteError, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -1254,6 +1255,7 @@ function legacyInternalHistoryMessage(message) {
   if (role === 'assistant' && normalized === EMPTY_ASSISTANT_SENTINEL) return true
   if (role === 'user' && normalized === EMPTY_TOOL_RESPONSE_NUDGE) return true
   return [
+    '[Agent-to-agent',
     '[ASYNC DELEGATION BATCH COMPLETE',
     '[Wizard follow-through]',
     '[CONTEXT COMPACTION — REFERENCE ONLY]',
@@ -1334,7 +1336,8 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   if (operator) projected = projectOperatorMessages(projected, completions, records)
   let rows = []
   try { rows = sessionMessageRows(JSON.parse(projected.toString('utf8'))) } catch { return { latest: null, lastUser: null } }
-  const visible = rows.flatMap((message) => {
+  const safeRows = withoutAgentToAgentTurns(rows)
+  const visible = safeRows.flatMap((message) => {
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
@@ -1355,6 +1358,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   return {
     latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
+    ...(safeRows.length !== rows.length ? { suppressedAgentTurns: true } : {}),
     status,
     appId,
     latestAssistantAt: latestAssistant?.created_at ?? null,
@@ -3832,6 +3836,7 @@ function buildWizardServer(options, lifetime) {
           if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null))
           return {
             ...session,
+            ...(messages.suppressedAgentTurns ? { latest_message: null, last_user_message: null, preview: messages.latest?.content ?? '' } : {}),
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
             ...(messages.appId ? { wizard_app_id: messages.appId } : {}),
@@ -4613,11 +4618,19 @@ function buildWizardServer(options, lifetime) {
   }
   // Client-authored side stores are projections, never pair-ownership evidence.
   const qualifySeenInput = (request, state) => {
-    if (!state?.threads || typeof state.threads !== 'object') return state
-    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
+    if (!state?.threads || typeof state.threads !== 'object' || Array.isArray(state.threads)) return state
+    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).flatMap(([key, record]) => {
       const pair = sideReference(key, record)
-      const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
+      let agent
+      try { agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : '')) }
+      catch (error) {
+        // A stale device can retain retired agents or ambiguous legacy ids. One such mark must not
+        // block the whole batch; invisible private agents take the identical drop-only path.
+        if (error instanceof AgentError && ((error.status === 404 && error.check === 'agent.id')
+          || (error.status === 409 && error.check === 'agent.ambiguous_thread'))) return []
+        throw error
+      }
+      return [[sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]]
     })) }
   }
 
@@ -5589,6 +5602,13 @@ function buildWizardServer(options, lifetime) {
         // move the store's start time back, so it can neither push out nor reset the owner's private marks.
         const owner = ownerLike(principalOf(request))
         const qualified = qualifySeenInput(request, owner ? state : withoutHiddenSeen(request, state))
+        // An entirely discarded batch is a successful no-op, including old devices sending only a
+        // retired mark without the current state envelope. Never create/reset state from that batch.
+        if (state?.threads && !Array.isArray(state.threads) && Object.keys(state.threads).length > 0
+          && qualified?.threads && Object.keys(qualified.threads).length === 0) {
+          sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
+          return
+        }
         const merged = owner ? threadSeenStore.merge(scope, qualified)
           : threadSeenStore.merge(scope, qualified, { protect: (key) => hiddenSession(request, key), keepInitializedAt: true })
         sendJson(response, 200, { state: withoutHiddenSeen(request, merged) })
@@ -5703,6 +5723,16 @@ function buildWizardServer(options, lifetime) {
             return
           }
         }
+        // Embedders without the agent registry use the same admission rule.
+        let unscopedBody
+        if (!agentResolution && request.method === 'POST' && isTurnWritePath(upstreamPath)) {
+          unscopedBody = await readBoundedBody(request)
+          await guardOwnerThreadWrite({ method: request.method, upstreamPath, body: unscopedBody,
+            sessionExists: async id => {
+              try { await hermesJson(`/api/sessions/${encodeURIComponent(id)}`, {}, true); return true }
+              catch (error) { if (error?.status === 404) return false; throw error }
+            } })
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -5762,7 +5792,7 @@ function buildWizardServer(options, lifetime) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
           if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
           const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
@@ -6158,6 +6188,10 @@ function buildWizardServer(options, lifetime) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof OwnerThreadWriteError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if (error instanceof AgentError && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return

@@ -429,6 +429,39 @@ describe('review regressions', () => {
     await same((id) => fetch(`${s.base}/wizard/v1/apps/meditate/agents`, send('PUT', { agents: ['nobody', id] })))
   })
 
+  it('drops private and ambiguous seen records without blocking a visible mark or changing owner marks', async () => {
+    const s = await scene()
+    const record = (seenAt: number, agent_id?: string, session_id?: string) => ({ updatedAt: new Date(seenAt).toISOString(), previewFingerprint: 'abc', seenAt, ...(agent_id ? { agent_id, session_id } : {}) })
+    const privateKey = `agent/${s.privateId}/direct:${CANARY}`
+    expect((await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 1000, threads: {
+      [privateKey]: record(2000, s.privateId, CANARY),
+    } }, OWNER))).status).toBe(200)
+    // The same unqualified id is pinned to two visible agents by real list reads.
+    s.main.known.add('wizard_ambiguous_seen')
+    s.helper.known.add('wizard_ambiguous_seen')
+    for (const id of ['hermes', s.helperId]) expect((await fetch(`${s.base}/wizard/hermes/api/sessions?agent=${id}`, { headers: OWNER })).status).toBe(200)
+    const response = await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { initializedAt: 0, threads: {
+      [privateKey]: record(9000, s.privateId, CANARY),
+      'agent/no-such-agent/direct:retired': record(9000, 'no-such-agent', 'retired'),
+      'direct:wizard_ambiguous_seen': record(9000),
+      'direct:wizard_main_1': record(4000, 'hermes', 'wizard_main_1'),
+    } }))
+    expect(response.status).toBe(200)
+    const visible = (await response.json()).state
+    expect(Object.keys(visible.threads)).toEqual(['direct:wizard_main_1'])
+    const saved = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
+    expect(saved.initializedAt).toBe(1000)
+    expect(saved.threads[privateKey].seenAt).toBe(2000)
+    expect(Object.keys(saved.threads).sort()).toEqual([privateKey, 'direct:wizard_main_1'].sort())
+    // A non-owner cannot create a private mark either, including one not already pinned.
+    const hiddenOnly = await fetch(`${s.base}/wizard/thread-seen`, send('PUT', { threads: {
+      [`agent/${s.privateId}/direct:unlisted-private`]: record(9000, s.privateId, 'unlisted-private'),
+    } }))
+    expect(hiddenOnly.status).toBe(200)
+    const after = (await (await fetch(`${s.base}/wizard/thread-seen`, { headers: OWNER })).json()).state
+    expect(after).toEqual(saved)
+  })
+
   it('third review: the number of visible seen marks a caller can store does not depend on hidden ones', async () => {
     const s = await scene()
     const record = (seenAt: number) => ({ updatedAt: new Date(seenAt).toISOString(), previewFingerprint: 'abc', seenAt })

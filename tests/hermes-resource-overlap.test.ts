@@ -68,7 +68,7 @@ it.each([7200,'7200','http-date'])(
     const calls:string[]=[]
     const s=setup({launch:async(r:any)=>{
       calls.push(r.idempotencyKey)
-      if(JSON.parse(r.body).provider==='busy') throw upstreamError(429,'{}',retryAfter)
+      if(JSON.parse(r.body).provider==='busy') throw upstreamError(429,'{}',retryAfter === 'http-date' ? new Date(Date.now()+7200_000).toUTCString() : retryAfter)
       return {upstreamRunId:r.idempotencyKey,payload:{status:'completed'}}
     },lookup:async()=>({})})
     let q=s.open()

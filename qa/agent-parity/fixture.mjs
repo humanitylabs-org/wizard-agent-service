@@ -178,7 +178,9 @@ export async function scene(kind, serverOptions = {}) {
     finally { if (priorScheduler === undefined) delete process.env.WIZARD_SCHEDULER; else process.env.WIZARD_SCHEDULER = priorScheduler }
   }
   await start()
-  const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
+  // Synchronous fixture snapshots can outlive a previous socket's keep-alive
+  // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
+  const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
   return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
@@ -208,7 +210,7 @@ export async function scene(kind, serverOptions = {}) {
         req.on('error', reject); req.end(body)
       })
     },
-    raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),
+    raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },
     close: async () => { await closeServer(wizard); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); searchDb?.close(); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }

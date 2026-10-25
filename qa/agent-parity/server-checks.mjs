@@ -17,6 +17,21 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'owner-thread-agent-write-guard': async s => {
+    const before = s.seen.filter(r => r.method === 'POST').length
+    for (const input of ['  [Agent-to-agent test] ping', '[Agent-to-agent follow-up] ping', 'Clearance request, NOT a James message']) {
+      for (const path of ['/v1/runs', '/v1/runs/guard-test/steer', '/api/sessions/wizard_parity/chat', '/api/sessions/wizard_parity/chat/stream']) {
+        const response = await s.request(path, post({ session_id: 'wizard_parity', input, message: input }))
+        assert.equal(response.status, 409, path)
+        assert.equal((await response.json()).error.code, 'agent_to_agent_thread_write')
+      }
+    }
+    const noContentType = await s.request('/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_parity', input: '[Agent-to-agent test] ping' }) })
+    assert.equal(noContentType.status, 409, 'a non-JSON content-type cannot bypass admission')
+    assert.equal(s.seen.filter(r => r.method === 'POST').length, before, 'rejected writes never reach Hermes')
+    await admit(s, { input: 'Normal owner request remains accepted' })
+    assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
+  },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
     const space = { id: 'parity-space', name: 'Synthetic Space', ...(s.id === 'hermes' ? {} : { agent: s.id }), threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -104,8 +119,17 @@ export const serverChecks = {
   },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
-    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': record } }), method: 'PUT' })
+    const retiredKey = 'agent/retired/direct:retired-thread'
+    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: {
+      [retiredKey]: { ...record, agent_id: 'retired', session_id: 'retired-thread' },
+      'direct:wizard_parity': record,
+    } }), method: 'PUT' })
     assert.equal(r.status, 200)
+    assert.equal((await r.json()).state.threads[retiredKey], undefined)
+    const noop = await s.raw('/wizard/thread-seen', { ...post({ threads: { [retiredKey]: {
+      agent_id: 'retired', session_id: 'retired-thread', seenAt: '2026-10-25T00:00:00Z',
+    } } }), method: 'PUT' })
+    assert.equal(noop.status, 200)
     const unreadAt = now + 1
     const unread = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, unreadAt } } }), method: 'PUT' })
     assert.equal(unread.status, 200)
