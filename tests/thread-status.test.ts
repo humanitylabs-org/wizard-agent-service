@@ -45,6 +45,8 @@ describe('thread status tag', () => {
     // reported as done. The QA ones for me should be like, you need me to see if this is what I meant or if I like it."
     expect(STATUS_INSTRUCTIONS).toContain('done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check)')
     expect(STATUS_INSTRUCTIONS).toContain('check (only when the user\'s own judgment is the missing piece')
+    expect(STATUS_INSTRUCTIONS).toContain('confirmed installed on their device')
+    expect(STATUS_INSTRUCTIONS).toContain('send check only after it has landed')
     expect(STATUS_INSTRUCTIONS).toContain('whether they like it (look, feel, wording, taste)')
     expect(STATUS_INSTRUCTIONS).toContain('never "Test that X works"')
     expect(STATUS_INSTRUCTIONS).not.toMatch(/should try or QA/)
