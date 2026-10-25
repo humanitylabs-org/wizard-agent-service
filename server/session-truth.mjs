@@ -95,6 +95,13 @@ function lockedRoute(modelConfig) {
 
 // The trigram index is complete only when it exists and no FTS rebuild is mid-way
 // (Hermes records rebuild progress in state_meta while backfilling).
+function wordIndexReady(db) {
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts'").get()) return false
+    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+  } catch { return false }
+}
 function trigramIndexReady(db) {
   try {
     if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
@@ -111,8 +118,8 @@ export const indexedSearchWords = query => {
 }
 export function createHermesTextSearcher(path) {
   const db = openReadOnly(path)
-  let rootsKey = '', candidates, columns, insert
-  const reads = new Map(), bodies = new Map()
+  let rootsKey = '', candidates, wordCandidates, columns, insert
+  const reads = new Map(), heads = new Map(), bodies = new Map()
   let bodyBytes=0, dataVersion=-1
   const remember = row => {
     const bytes=typeof row.content==='string' ? row.content.length*2 : 0
@@ -130,7 +137,7 @@ export function createHermesTextSearcher(path) {
     search(sessionIds, query) {
       const hits = new Map(), words = indexedSearchWords(query)
       Object.assign(hits, {mode:'titles', partial:false, timings:{fts_ms:0,read_ms:0,candidates:0,sessions:0}})
-      if (!db || !words.length || !trigramIndexReady(db)) return hits
+      if (!db || !words.length || !(wordIndexReady(db) || trigramIndexReady(db))) return hits
       const ids = boundedIds(sessionIds, Infinity)
       if (!ids.length) return hits
       const key = JSON.stringify(ids)
@@ -142,16 +149,37 @@ export function createHermesTextSearcher(path) {
       const version=db.prepare('PRAGMA data_version').get().data_version
       if(version!==dataVersion) { bodies.clear(); bodyBytes=0; dataVersion=version }
       const start = performance.now()
-      // Newest 8,000 matching messages only: each is a random lookup in a 30 GB store, and a common 3-letter word
-      // ("nos": 30k rows) blew the deadline. Older matches still come from titles; the response says partial.
-      candidates ||= db.prepare(`WITH c AS MATERIALIZED (
-        SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 8000
-      ) SELECT m.session_id AS session_id, m.id AS id, (SELECT count(*) FROM c) AS candidate_count
-        FROM c JOIN messages m ON m.id=c.id JOIN temp.wizard_roots r ON r.session_id=m.session_id
-        WHERE m.role IN ('user','assistant')
-        UNION ALL SELECT NULL,NULL,count(*) FROM c ORDER BY session_id,id DESC`)
-      const result = candidates.all(words.filter(w=>w.length>=3).map(w=>`"${w.replace(/"/g,'""')}"`).join(' AND '))
-      const rows=result.filter(r=>r.session_id!==null), partial=result.some(r=>r.candidate_count>=8000)
+      let rows, partial
+      if (wordIndexReady(db)) {
+        // Hermes' word index first: one small posting list per word (20-80 ms cold) instead of three trigram lists,
+        // where common trigrams like "str" in "nostr" cost 1-3 s cold (James, 25 Oct 2026: still 5 s on the phone).
+        // Words match from their start ("nos" finds "nostr"); the JS check below stays the authority.
+        wordCandidates ||= db.prepare('SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rowid DESC LIMIT 8000')
+        const tokens=words.flatMap(w=>w.split(/[^a-z0-9]+/)).filter(t=>t.length>=3)
+        const ftsIds=tokens.length ? wordCandidates.all(`content : (${tokens.map(t=>`"${t}"*`).join(' AND ')})`).map(r=>r.id) : []
+        const roots=new Set(ids), sessions=new Set(); rows=[]; partial=ftsIds.length>=8000
+        // Newest first, 200 at a time, until 60 threads have a visible match: tool output dominates the word index
+        // and each row is a random read, so the old reads of all 8,000 rows cost seconds.
+        let at=0
+        for(; at<ftsIds.length && sessions.size<60; at+=200) {
+          const chunk=ftsIds.slice(at,at+200)
+          if(!heads.has(chunk.length)) heads.set(chunk.length,db.prepare(`SELECT id,session_id,role FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
+          for(const r of heads.get(chunk.length).all(...chunk)) if(roots.has(r.session_id) && (r.role==='user'||r.role==='assistant')) { rows.push(r); sessions.add(r.session_id) }
+        }
+        if(at<ftsIds.length) partial=true
+        rows.sort((a,b)=>a.session_id<b.session_id?-1:a.session_id>b.session_id?1:b.id-a.id)
+      } else {
+        // Newest 8,000 matching messages only: each is a random lookup in a 30 GB store, and a common 3-letter word
+        // ("nos": 30k rows) blew the deadline. Older matches still come from titles; the response says partial.
+        candidates ||= db.prepare(`WITH c AS MATERIALIZED (
+          SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 8000
+        ) SELECT m.session_id AS session_id, m.id AS id, (SELECT count(*) FROM c) AS candidate_count
+          FROM c JOIN messages m ON m.id=c.id JOIN temp.wizard_roots r ON r.session_id=m.session_id
+          WHERE m.role IN ('user','assistant')
+          UNION ALL SELECT NULL,NULL,count(*) FROM c ORDER BY session_id,id DESC`)
+        const result = candidates.all(words.filter(w=>w.length>=3).map(w=>`"${w.replace(/"/g,'""')}"`).join(' AND '))
+        rows=result.filter(r=>r.session_id!==null); partial=result.some(r=>r.candidate_count>=8000)
+      }
       const fts_ms = performance.now()-start, readStart=performance.now(), grouped=new Map()
       for (const row of rows) { if(!grouped.has(row.session_id)) grouped.set(row.session_id,[]); grouped.get(row.session_id).push(row.id) }
       // Snippets for the 60 threads with the newest matching message: reading text is the slow part (a common
