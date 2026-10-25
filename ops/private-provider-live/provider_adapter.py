@@ -128,11 +128,14 @@ class Provider:
         rows=[x for x in registry['apps'] if x.get('id')=='wizard-tinfoil']
         if len(rows)!=1 or rows[0].get('urn')!=URN or not rows[0].get('private_inference'):raise RuntimeError('canonical provider registry readback failed')
         return {'urn':URN,'override_api_readback':True,'status':status,'source_sha':SHA,'dependency_parity':True,'canonical_registry_unique':True}
-    def connect(self,runtime_source,legacy_source):
-        sys.path.insert(0,str(runtime_source))
-        from agent_runtime import Agents
-        failures=Agents(self.home/'.wizard-os/agents',apps_path=self.home/'.wizard-os/apps.json').providers.reconcile_installed()
-        if failures:raise RuntimeError('provider egress reconciliation failed')
+    def connect(self,legacy_source,runtime_origin,runtime_auth_file):
+        # The authenticated runtime owns metadata reconciliation. The installer
+        # never traverses a private agent's records or container data.
+        auth=Path(runtime_auth_file).read_text().strip()
+        q=urllib.request.Request(runtime_origin+'/providers/reconcile',b'{}',{'Content-Type':'application/json','Authorization':'Bearer '+auth},method='POST')
+        with urllib.request.urlopen(q,timeout=180) as f:reconciled=json.load(f)
+        del auth
+        if reconciled.get('ok') is not True or reconciled.get('failure_count')!=0:raise RuntimeError('provider egress reconciliation failed')
         origin='http://127.0.0.1:18804';deadline=time.monotonic()+90
         while time.monotonic()<deadline:
             try:

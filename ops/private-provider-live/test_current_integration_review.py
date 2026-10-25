@@ -17,7 +17,7 @@ class CurrentIntegrationReviewTests(unittest.TestCase):
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         self.assertEqual(self.data['provider_sha'], '5e445fca7c87da825e8d669fbf35e3e6eeeb5acb')
-        self.assertEqual(module.SERVICE, 'be076f491b8db8ac6963380266856f63447107f2')
+        self.assertEqual(module.SERVICE, '809513862d318e6e55dc4b0f4d3ef9d24da06982')
         source=(ROOT/'stage-candidate.py').read_text()
         self.assertIn("'git','apply','--3way'",source)
         self.assertNotIn("'merge','--no-ff'",source)

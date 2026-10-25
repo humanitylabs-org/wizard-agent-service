@@ -37,7 +37,7 @@ for forced in [False,True]:
   assert not run(['docker','ps','-aq','--filter','label=com.docker.compose.service=agent-pp-test-legacy-tinfoil']).strip()
   run(['docker','image','load','-i',p['provider_image_archive']],timeout=180)
   rt.install(URN,FORM);assert rt.wait_status(URN,{'running','stopped'},timeout=180)=='running';cli.write_registry(cli.Config(),rt)
-  Provider(H,wm,out,attempt).connect(H/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
+  Provider(H,wm,out,attempt).connect(p['legacy_source'],p['runtime_origin'],p['runtime_auth_file'])
   owner.require('/wizard/v1/agents/pp-test-legacy/start',{},'POST');owner.ready('pp-test-legacy');owner.prefix='pp-test-';assert owner.chat('pp-test-legacy').get('completed') is True
   removal={'provider_removed':True,'visible_unavailable_http':503,'sealed_record_retained':True,'legacy_sidecar_absent':True,'sealed_request_recovered_after_reinstall':True};(out/'provider-removal.json').write_text(json.dumps(removal,indent=2)+'\n');report['provider_removal']=removal;save()
   # Restore a clean semantic baseline using the SAME product + API + pointer

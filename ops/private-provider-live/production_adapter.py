@@ -78,7 +78,7 @@ def main():
         if actual['Id']!=ctx['live']['containers']['runtipi']['id'] or actual['State']['StartedAt']!=ctx['live']['containers']['runtipi']['started_at']:raise RuntimeError('Runtipi daemon changed')
         result['runtipi_unchanged']=True
     elif phase=='install':
-        result.update(provider.install(p['provider_archive'],p['provider_archive_sha256'],{'archive':p['provider_image_archive'],'sha256':p['provider_image_archive_sha256'],'id':p['provider_image_id']}));result['connection']=provider.connect(home/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
+        result.update(provider.install(p['provider_archive'],p['provider_archive_sha256'],{'archive':p['provider_image_archive'],'sha256':p['provider_image_archive_sha256'],'id':p['provider_image_id']}));result['connection']=provider.connect(p['legacy_source'],p['runtime_origin'],p['runtime_auth_file'])
     elif phase=='privacy':
         result.update(owner.privacy(p['check_file'],p['legacy_source']))
     elif phase=='regression':
