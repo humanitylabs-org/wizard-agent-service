@@ -1,9 +1,24 @@
 {
   "base_service_commit": "888ecee067cde661f069875dc5915a7abe341103",
-  "service_feature_commit": "5114d2d036afb655e86cd49c45fc7ea611559a2d",
+  "service_feature_commit": "e3b0dae",
   "archive": "service-engine-fix.tar",
-  "sha256": "30f8975d2fc029d88f402739e9b91b0441e69bf8b9c395b3840b8f66baba3e97",
-  "files": ["ops/agent-runtime/provider_container.py", "ops/agent-runtime/test_provider_container.py"],
+  "sha256": "dde0ec027391c3c89a45b97ed2a7aa9352cd9d9d1036854d4718a8e8db6a90cc",
+  "files": [
+    "ops/agent-runtime/provider_container.py",
+    "ops/agent-runtime/test_provider_container.py",
+    "ops/private-provider-rig/checks/check.py",
+    "ops/private-provider-rig/test_checks.py",
+    "ops/agent-runtime/agent_runtime.py",
+    "ops/agent-runtime/provider_key_scrub.py",
+    "ops/agent-runtime/test_provider_key_scrub.py",
+    "server/agents.mjs"
+  ],
   "reason": "No-key actual Engine response was HTTP 499: run(input=...) closes dial-stdio stdin before creation completes. Keep tunnel open until full response; bounded timer; no daemon body diagnostics.",
-  "unit_tests": {"passed": 40, "subtests_passed": 33, "baseline_regression_reproduced": true}
+  "unit_tests": {
+    "passed": 40,
+    "subtests_passed": 33,
+    "baseline_regression_reproduced": true
+  },
+  "reason_2": "key-location scan refused uv cache symlinks in real agent homes; now scans link file targets and skips dangling/dir links",
+  "reason_3": "Host-helper stopped-home credential retirement before registry seal publication, count/path-only restart fence, host-source rollback, and explicit unsealed fixture coexistence scope."
 }

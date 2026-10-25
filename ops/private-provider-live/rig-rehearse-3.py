@@ -30,13 +30,13 @@ for name,target in [('service.tar','service'),('tinfoil-relay.tar','tinfoil')]:
 ''')
  overlay=json.loads((L/'SERVICE-ENGINE-FIX.json').read_text());payload=(L/overlay['archive']).read_bytes()
  assert __import__('hashlib').sha256(payload).hexdigest()==overlay['sha256'],'service engine overlay digest mismatch'
- r.python("from pathlib import Path;import os,sys,tarfile,io,hashlib;assert os.geteuid()==1000;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';data=sys.stdin.buffer.read();assert hashlib.sha256(data).hexdigest()=="+repr(overlay['sha256'])+";tf=tarfile.open(fileobj=io.BytesIO(data));allowed="+repr(set(overlay['files']))+";assert all((m.name.rstrip('/') in {'ops','ops/agent-runtime'} and m.isdir()) or (m.name in allowed and m.isfile()) for m in tf);tf.extractall('/home/rig/pp-launch-3/service',filter='data');print('service_engine_feature_commit='+"+repr(overlay['service_feature_commit'])+")",payload=payload)
+ r.python("from pathlib import Path;import os,sys,tarfile,io,hashlib;assert os.geteuid()==1000;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';data=sys.stdin.buffer.read();assert hashlib.sha256(data).hexdigest()=="+repr(overlay['sha256'])+";tf=tarfile.open(fileobj=io.BytesIO(data));allowed="+repr(set(overlay['files']))+";assert all((m.name.rstrip('/') in {'ops','ops/agent-runtime','ops/private-provider-rig','ops/private-provider-rig/checks','server'} and m.isdir()) or (m.name in allowed and m.isfile()) for m in tf);tf.extractall('/home/rig/pp-launch-3/service',filter='data');print('service_engine_feature_commit='+"+repr(overlay['service_feature_commit'])+")",payload=payload)
  r.python("import subprocess;from pathlib import Path;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';subprocess.run(['systemctl','stop','pp-agent-runtime','pp-agent-service'],check=True)",root=True)
  try:print(r.run(['python3','/home/rig/pp-launch-3/guest.py','setup'],timeout=1800),flush=True)
  except Exception:
   print(r.python("from pathlib import Path; p=Path('/home/rig/pp-launch-3/last-command.log'); print(p.read_text()[-6000:] if p.exists() else 'No failed subprocess output')"),flush=True)
   raise
-elif phase=='privacy':
+elif phase in ['privacy','key-migrated']:
  r.python("from pathlib import Path;import sys,uuid;root=Path('/home/rig/pp-launch-3');(root/'probe-guest.py').write_bytes(sys.stdin.buffer.read());p=root/'codeword';p.write_text('PP-CODE-'+uuid.uuid4().hex) if not p.exists() else None;p=root/'trigger.sh';p.write_text('#!/bin/sh\\nexec sudo -u rig python3 /home/rig/pp-launch-3/probe-guest.py pp-test-probe\\n');p.chmod(0o755)",payload=(L/'probe-guest.py').read_bytes())
  print(r.python(r'''
 from pathlib import Path
@@ -54,12 +54,12 @@ vol=[x['Source'] for x in provider[0]['Mounts'] if x.get('Destination')=='/data'
 base=['python3',str(R/'service/ops/private-provider-rig/checks/check.py'),'--agent',aid,'--provider-app','wizard-tinfoil','--hermes-container',main[0]['Id'],'--client-container',client[0]['Id'],'--provider-container',provider[0]['Id'],'--provider-data',vol[0],'--os-home','/home/rig/.wizard-os','--runtipi-root','/home/rig/runtipi','--evidence-dir',str(R/'privacy-evidence'),'--trigger',str(R/'trigger.sh'),'--codeword',(R/'codeword').read_text().strip(),'--key-sha256',(R/'key-sha256').read_text().strip(),'--timeout','240']
 checks={}
 for name in ['relay','hermes','client','key-location','stop-provider','codeword']:
- p=subprocess.run([*base,name],capture_output=True,text=True,timeout=900)
+ p=subprocess.run([*base,*(['--legacy-agent','pp-test-legacy'] if name=='key-location' and aid=='pp-test-probe' else []),name],capture_output=True,text=True,timeout=900)
  log=R/('check-'+name+'.log');log.write_text(p.stdout+p.stderr);log.chmod(0o600)
  checks[name]='passed' if p.returncode==0 else 'failed';print('CHECK',name,checks[name],flush=True)
- if p.returncode:break
+ if p.returncode:print('FAILED_CHECK_TAIL',name,(p.stdout+p.stderr)[-1500:].replace(chr(10),' | '),flush=True);break
 out={'checks':checks,'privacy_checks_passed':sum(v=='passed' for v in checks.values()),'br_netfilter_absent':not Path('/sys/module/br_netfilter').exists(),'bridge_filter_sysctl_absent':not Path('/proc/sys/net/bridge/bridge-nf-call-iptables').exists()};(R/'privacy.json').write_text(json.dumps(out,indent=2)+'\n');assert len(checks)==6 and all(v=='passed' for v in checks.values()) and out['br_netfilter_absent'] and out['bridge_filter_sysctl_absent']
-''',root=True,timeout=1800),flush=True)
+'''.replace("aid='pp-test-probe'", "aid='pp-test-legacy'" if phase=='key-migrated' else "aid='pp-test-probe'").replace("['relay','hermes','client','key-location','stop-provider','codeword']", "['key-location']" if phase=='key-migrated' else "['relay','hermes','client','key-location','stop-provider','codeword']").replace("len(checks)==6", "len(checks)==1" if phase=='key-migrated' else "len(checks)==6").replace("R/'privacy.json'", "R/'key-migrated.json'" if phase=='key-migrated' else "R/'privacy.json'"),root=True,timeout=1800),flush=True)
 elif phase=='baseline-resume':
  r.python("from pathlib import Path;import sys;Path('/home/rig/pp-launch-3/guest.py').write_bytes(sys.stdin.buffer.read())",payload=(L/'rehearse-guest.py').read_bytes())
  for step in [['baseline-prepare'],['chat','pp-test-legacy']]:print(run_guest(step),flush=True)

@@ -20,7 +20,9 @@ def save(name,data):
 def running(aid):
  for _ in range(90):
   c,b=req('/wizard/v1/agents/'+aid)
-  if c==200 and b['agent']['status']=='running':return
+  if c==200 and b['agent']['status']=='running':
+   c,b=req('/wizard/hermes/api/sessions?agent='+aid)
+   if c==200:return
   time.sleep(2)
  raise RuntimeError('agent readiness failed: '+aid)
 def containers():
@@ -38,10 +40,12 @@ if phase=='verify-migrated':
  messages=b.get('messages',b.get('data'));assert isinstance(messages,list) and len(messages)==checkpoint['canonical_history']['message_count'],'legacy message count changed'
  assert hashlib.sha256(json.dumps(messages,sort_keys=True,separators=(',',':')).encode()).hexdigest()==checkpoint['canonical_history']['sha256'],'legacy canonical messages changed'
  main=hermes(aid);assert main['Config']['User']=='1000:1000';assert all(not e.startswith('TINFOIL_API_KEY=') for e in main['Config']['Env'])
+ scrub=json.loads((d/'runtime/key-scrub.json').read_text());assert scrub['status']=='completed' and scrub['count']>=3 and 'pp-key-copy.bin' in scrub['paths']
  networks=main['NetworkSettings']['Networks'];assert networks
  for n in networks:assert json.loads(run(['docker','network','inspect',n]))[0]['Internal'] is True
  clients=[x for x in containers() if (x['Config'].get('Labels') or {}).get('com.docker.compose.service')=='agent-'+aid+'-client' and x['State']['Running']];assert len(clients)==1
  for n in clients[0]['NetworkSettings']['Networks']:assert json.loads(run(['docker','network','inspect',n]))[0]['Internal'] is True
+ save('d-preflight',{'home_inode_retained':True,'uid':1000,'gid':1000,'history_readback':True,'internal_networks_only':True,'scrub':scrub})
  run(['python3',str(R/'probe-guest.py'),aid],timeout=420)
  # A completed EHBP inference requires the client attestation gate; retain route/topology evidence.
  assert not Path('/sys/module/br_netfilter').exists() and not Path('/proc/sys/net/bridge/bridge-nf-call-iptables').exists(),'bridge-filter absence lost during migration'

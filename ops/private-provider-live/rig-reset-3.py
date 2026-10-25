@@ -34,7 +34,10 @@ for pid in pids.values():
 time.sleep(2)
 ids=subprocess.check_output(['docker','ps','-aq'],text=True).split()
 docs=json.loads(subprocess.check_output(['docker','inspect',*ids])) if ids else []
-remove=[doc['Id'] for doc in docs if (doc['Config'].get('Labels') or {}).get('com.docker.compose.service','').startswith('agent-pp-test-') or (doc['Config'].get('Labels') or {}).get('com.docker.compose.service')=='wizard-tinfoil']
+def synthetic(doc):
+ labels=doc['Config'].get('Labels') or {}
+ return labels.get('com.docker.compose.project') in {p for aid in ['pp-test-legacy','pp-test-probe','pp-test-other'] for p in ['agent-'+aid,'agent-'+aid+'_wizardapps']} or labels.get('com.docker.compose.service','').startswith('agent-pp-test-') or any(m.get('Source','').startswith('/home/rig/.wizard-os/agents/pp-test-') for m in doc.get('Mounts',[]))
+remove=[doc['Id'] for doc in docs if synthetic(doc) or (doc['Config'].get('Labels') or {}).get('com.docker.compose.service')=='wizard-tinfoil']
 if remove:subprocess.run(['docker','rm','-f',*remove],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 volumes=[n for n in subprocess.check_output(['docker','volume','ls','--format','{{.Name}}'],text=True).splitlines() if 'tinfoil' in n]
 for volume in volumes:subprocess.run(['docker','volume','rm',volume],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -64,8 +67,8 @@ apps=json.loads((h/'.wizard-os/apps.json').read_text()).get('apps',[])
 ids=subprocess.check_output(['docker','ps','-aq'],text=True).split()
 docs=json.loads(subprocess.check_output(['docker','inspect',*ids])) if ids else []
 key_in_env=any(any(item.startswith('TINFOIL_API_KEY=') and item.split('=',1)[1] for item in doc['Config'].get('Env',[])) for doc in docs)
-result={'provider_key_present':any(p.exists() for p in key_paths) or key_in_env,'provider_volumes':remaining,'apps':len(apps),'remaining_synthetic_agent_dirs':[p.name for p in (h/'.wizard-os/agents').glob('pp-test-*')],'reset_scope':'pp-rig / pp-rehearsal-3'}
-assert result['provider_key_present'] is False and result['provider_volumes']==[] and result['apps']==0 and not result['remaining_synthetic_agent_dirs'],result
+result={'provider_key_present':any(p.exists() for p in key_paths) or key_in_env,'provider_volumes':remaining,'apps':len(apps),'remaining_synthetic_agent_dirs':[p.name for p in (h/'.wizard-os/agents').glob('pp-test-*')],'remaining_synthetic_containers':[d['Name'] for d in docs if synthetic(d)],'reset_scope':'pp-rig / pp-rehearsal-3'}
+assert result['provider_key_present'] is False and result['provider_volumes']==[] and result['apps']==0 and not result['remaining_synthetic_agent_dirs'] and not result['remaining_synthetic_containers'],result
 p=r/'reset.json';p.write_text(json.dumps(result,indent=2)+'\n');p.chmod(0o600)
 print(json.dumps(result))
 ''',root=True,timeout=600))

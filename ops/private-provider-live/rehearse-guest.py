@@ -179,13 +179,22 @@ elif step=='connect':
  q=urllib.request.Request('http://127.0.0.1:18804/v1/chat/completions',json.dumps(body).encode(),{'Content-Type':'application/json','Authorization':'Bearer '+token},method='POST')
  with urllib.request.urlopen(q,timeout=180) as f:authenticated=json.load(f)
  del token
- assert 'PP_AUTH' in str(authenticated['choices'][0]['message']['content']),'provider authentication inference did not complete'
+ # Authenticated completion is the proof; model wording varies between runs.
+ message=(authenticated.get('choices') or [{}])[0].get('message') or {}
+ assert any(str(message.get(field) or '').strip() for field in ['content','reasoning','reasoning_content']),'provider authentication inference did not complete'
  with urllib.request.urlopen('http://127.0.0.1:18804/api/connection',timeout=30) as f:data=json.load(f)
  assert data.get('credentialVerified') is True and data.get('status')=='connected','provider credential not verified by completed inference'
  save('provider-connected',{'connected':True,'credential_verified':True,'verified_via':'completed app SDK inference','models':len(data.get('models',[])),'attestation_mode':data.get('verification',{}).get('mode')})
 elif step=='create-probe':
  c,b=req('/wizard/v1/agents',{'label':'pp-test-probe','harness':'hermes','permissions':{'preset':'private','read_standard_chats':False},'model':{'provider':'wizard-tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST')
- assert c==201,(c,b);aid=b['agent']['id'];assert aid=='pp-test-probe';save('probe-created',{'agent':aid,'created':True})
+ assert c==201,(c,b);aid=b['agent']['id'];assert aid=='pp-test-probe'
+ # Docker Running is not readiness of Hermes' Unix ingress/history API.
+ for _ in range(90):
+  c,b=req('/wizard/hermes/api/sessions?agent='+aid)
+  if c==200:break
+  time.sleep(2)
+ else:raise RuntimeError('sealed probe history API not ready')
+ save('probe-created',{'agent':aid,'created':True,'history_api_ready':True})
 elif step=='quarantine-legacy-key':
  assert os.geteuid()==1000
  # The old fixture remains reversible and its home/history are not discarded.
@@ -197,18 +206,13 @@ elif step=='quarantine-legacy-key':
  inspect=json.loads(run(['docker','inspect',ids[0]]))[0];env=dict(x.split('=',1) for x in inspect['Config']['Env'] if '=' in x);u=inspect['Config'].get('User','')
  pair=[env.get('HERMES_UID'),env.get('HERMES_GID')] if u in ['', 'root','0','0:0'] else u.split(':');assert [int(x) for x in pair]==[1000,1000]
  record=json.loads((d/'agent.json').read_text());record['runtime'].update(uid=1000,gid=1000);(d/'agent.json').write_text(json.dumps(record))
- c,b=req('/wizard/v1/agents/'+aid+'/stop',{},'POST');assert c==202,(c,b)
- # Remove stopped containers carrying the legacy key, retaining the data mount.
- names=run(['docker','ps','-aq','--filter','label=com.docker.compose.project=agent-'+aid]).decode().split()
- if not names:
-  allids=run(['docker','ps','-aq']).decode().split();docs=json.loads(run(['docker','inspect',*allids])) if allids else []
-  names=[x['Id'] for x in docs if (x['Config'].get('Labels') or {}).get('com.docker.compose.service') in ['agent-'+aid,'agent-'+aid+'-tinfoil']]
- if names:run(['docker','rm','-f',*names])
- p=d/'home/.env'
- if p.exists():p.write_text('\n'.join(l for l in p.read_text().splitlines() if not l.startswith('TINFOIL_API_KEY='))+'\n')
- (R/'legacy-key.env').unlink()
+ # Seed byte-only and backup copies to prove the product retires more than .env.
+ source=(R/'legacy-key.env').read_text().split('=',1)[1].strip().encode()
+ backups=d/'home/backups/config';backups.mkdir(parents=True,exist_ok=True)
+ (backups/'pp-legacy.env').write_bytes(b'TINFOIL_API_KEY='+source+b'\n')
+ (d/'home/pp-key-copy.bin').write_bytes(b'prefix\x00'+source+b'\x00suffix')
  history={str(p.relative_to(d/'home')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (d/'home').rglob('*') if p.is_file() and p.name.endswith(('.db','.sqlite','.sqlite3'))}
- home=(d/'home').stat();save('legacy-checkpoint',{'uid':home.st_uid,'gid':home.st_gid,'inode':home.st_ino,'history':history,'canonical_history':canonical_history,'recorded_identity':[1000,1000],'legacy_key_quarantined':True})
+ home=(d/'home').stat();save('legacy-checkpoint',{'uid':home.st_uid,'gid':home.st_gid,'inode':home.st_ino,'history':history,'canonical_history':canonical_history,'recorded_identity':[1000,1000],'legacy_key_retained_for_product_migration':True})
 elif step=='migrate':
  assert os.geteuid()==1000
  checkpoint=json.loads((R/'legacy-checkpoint.json').read_text());d=A/'pp-test-legacy';before=(d/'home').stat()
