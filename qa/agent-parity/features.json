@@ -36,6 +36,16 @@
   ],
   "features": [
     {
+      "id": "android-shell-recording-custody",
+      "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/shell-recording-routes.test.mjs. The real parkReply function runs for main, host-profile, container and restricted routes with asynchronous shell and synchronous full-app recorders; it preserves session, agent, typed draft and audio, and acknowledges only after durable held custody. Meeting cancellation also awaits native bytes before acknowledgement. This is synthetic source-executed evidence, not live provider or physical-phone proof. Companion UX PR: humanitylabs-org/wizard-ux#504.",
+      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/core/device-recording.js"],
+      "reference_tests": ["wizard-ux/tests/shell-recording-routes.test.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-spaces",
       "description": "Agent-owned thread collections persist independently of agent runtime kind",
       "layer": "server",
@@ -834,6 +844,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-echo",
+      "description": "Reopen a thread whose outbox still holds a message the transcript shows",
+      "layer": "ux",
+      "how_to_test": "Seed a sent and a receipt-lost outbox copy of the last user message, reopen the thread on each agent kind; verify no Sending duplicate paints in any frame and the message shows once; seed an unsent copy with the same words and verify it still shows.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-pending-echo.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "memory-compaction",
       "description": "Compact an isolated long fixture thread",
       "layer": "runtime",
@@ -859,6 +884,20 @@
       ],
       "reference_tests": [
         "tests/onboarding.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "window-refresh",
+      "description": "Refresh a desktop Chats window in place (↻ / ⌥R): refetch its own thread and list without closing it",
+      "layer": "ux",
+      "how_to_test": "Open a synthetic thread in a main Chats window and in routed windows for host-profile, container and restricted agents; press ⌥R on each and verify only that window's thread reloads (forced) and its own agent list repaints, while a New chat draft is never reloaded.",
+      "source_refs": [
+        "wizard-ux/web/desktop/desktop.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/desktop-window-refresh.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []

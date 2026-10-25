@@ -41,7 +41,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
@@ -4999,6 +4999,24 @@ function buildWizardServer(options, lifetime) {
             scheduler.delete(job.id); sendJson(response, 200, { deleted: true, id: job.id, name: job.name })
           } else sendJson(response, 404, { error: 'not_found' })
         } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/agents/')) {
+        // The main agent's read-only cross-agent tools (Hermes plugin wizard-agents): the same six
+        // wizard_agents__* tools container agents get on /wizard/mcp, read as the main agent. Same loopback
+        // token and refusal rules as schedules; the registry's live seals decide every read.
+        if (!bridge || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'agent read denied' }); return }
+        const tool = `wizard_agents__${url.pathname.slice('/wizard/internal/agents/'.length)}`
+        if (!SHARED_AGENT_TOOLS.includes(tool)) { sendJson(response, 404, { error: 'not_found' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 8 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        const result = await bridge.callTool(tool, value && typeof value === 'object' && !Array.isArray(value) ? value : {}, GATEWAY_MAIN_AGENT)
+        sendJson(response, result?.isError ? 403 : 200, result)
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {

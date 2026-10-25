@@ -25,7 +25,7 @@ test('an agent list window includes the agent\'s archived threads from its own s
  const owner=createPrincipalResolver();
  const server=createServer(async(req,res)=>{const u=new URL(req.url,'http://fixture');try{await owner.attach(req);
   await proxyToAgent(ctx,{agent:{id:'philosopher'},method:'GET',upstreamPath:u.pathname,searchParams:u.searchParams,request:req,response:res});}
-  catch(e){res.writeHead(e.status||500);res.end(String(e.message))}});
+  catch(e){res.writeHead(e.status||500,{'Content-Type':'text/plain'});res.end(String(e.message))}});
  const address=await listen(server);t.after(()=>new Promise(r=>server.close(r)));
  const r=await fetch(`http://127.0.0.1:${address.port}/api/sessions?view=list&window=archive-50`);if(r.status!==200)console.log("BODY",await r.clone().text());assert.equal(r.status,200);
  const body=await r.json(), ids=body.data.map(s=>s.id);
