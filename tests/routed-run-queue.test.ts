@@ -48,6 +48,23 @@ test('a cached routed queue follows the current sealed runtime after migration',
   } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
 })
 
+test('removing an agent never dispatches an already cached legacy runtime', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'routed-removed-'))
+  const agent = { id: 'fixture-agent', model: { model: 'fixture-model' } }
+  let current: any = agent, calls = 0
+  const disposers: Array<() => Promise<void>> = []
+  const registry = { agentsDir: root, list: () => [], read: () => current, apiKey: () => 'fixture-auth', fetchAgent: async () => { calls++; return Response.json({ run_id: 'fixture-run', status: 'completed' }) } }
+  try {
+    const queues = createRoutedQueues({ registry, own: (f: any) => disposers.push(f), pollIntervalMs: 0 })
+    const post = (id: string) => queues.fetch(agent, '/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_' + id, input: 'synthetic', model: 'fixture-model' }) })
+    assert.equal((await (await post('before')).json()).status, 'completed')
+    const before = calls
+    current = null
+    assert.equal((await (await post('after')).json()).status, 'failed')
+    assert.equal(calls, before)
+  } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
 test('queue authority remains fixed across admission and restart', async () => {
   const root=mkdtempSync(join(tmpdir(),'routed-authority-'))
   const options={statePath:join(root,'queue.db'),agentId:'fixture-agent',pollIntervalMs:0,launch:async()=>({payload:{status:'running'},upstreamRunId:'fixture-run'}),lookup:async()=>({payload:{status:'running'}})}
