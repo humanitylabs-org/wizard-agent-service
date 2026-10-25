@@ -1,62 +1,71 @@
 # Public container publication
 
-`Publish public image` runs on every canonical-branch push (including PR merges).
-Every commit gets a write-once `sha-<full 40-character commit>` tag. It does not
-move `latest` or any release tag. Re-running a SHA reuses its manifest and still
-requires the independent public-pull job to pass.
+`Publish public image` validates every event. Pull requests build the Dockerfile on
+standard `ubuntu-24.04` runners (native amd64 and QEMU arm64), but receive only
+`contents: read`: they never log in, push, attest, upload artifacts, or use a
+persistent Actions cache. GitHub documents this label as a standard hosted runner
+and says standard runners are free and unlimited for public repositories:
+<https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job>.
 
-## First publication and releases
+Canonical `main` pushes and explicitly confirmed dispatches use a staged
+prepare/sign/finalize flow on `ubuntu-24.04`:
 
-1. Merge through a reviewed PR with all required checks green. The repo-scoped
-   Actions token has `packages: write`; no personal package token is required.
-2. A new GHCR package is initially private. An administrator must set it to
-   **Public**, with the linked repository retaining Actions write access.
-3. Re-run the failed `anonymous-pull` job. A private package is a release failure,
-   never a warning or a skipped test.
-4. For a version alias, dispatch on the canonical branch with `release_tag` and
-   `confirm_release_tag` equal (for example `0.3.0-candidate.20261012`) and
-   `expected_sha` equal to the full selected branch commit. Existing release tags
-   fail rather than being reassigned. A dispatch whose build succeeded but public
-   check failed should rerun **failed jobs only**, not repeat the alias creation.
+1. Prepare uses the action-created buildx builder to push an amd64/arm64 index by
+   digest only (`push-by-digest=true,name-canonical=true`). It publishes no tag.
+2. A fresh digest receives and immediately verifies canonical GitHub build
+   provenance for the exact workflow, main ref, and source commit.
+3. A separate hosted finalizer revalidates the digest, both config blobs and
+   labels, and canonical provenance before creating the write-once SHA and
+   optional version aliases with `imagetools`.
+4. A credential-free job anonymously pulls the finalized digest and every alias
+   for both architectures.
 
-Anonymous verification runs in a fresh hosted Linux job, has no package
-permission, uses an empty isolated Docker configuration and no inherited auth
-variables, obtains only anonymous registry tokens, and actually pulls both
-`linux/amd64` and `linux/arm64` by the published index digest and every requested
-tag. It verifies child manifest digests and the pulled source commit revision. Registry
-propagation is retried for five minutes, then the job fails closed.
+A crash after the digest upload leaves no immutable tag, so a full rerun safely
+rebuilds and signs. A crash after alias creation finds the original signed SHA
+artifact and takes the verified-reuse path. A reused artifact is never signed as
+a fresh build.
 
-## Trusted worker contract
+Every action is pinned to an official release's full commit SHA. Every Docker job
+uses a job-local configuration below `RUNNER_TEMP`; prepare and finalize each use
+their own login and action-created builder. There are no shared locks, owner HOME,
+Homebrew plugin paths, remote Docker sockets, worker volumes, artifacts, or
+persistent caches.
 
-The build job uses a dedicated repo-scoped macOS ARM64 runner with the
-`wizard-ghcr-<repository-name>` label. Runner install, worktree, HOME, temporary
-Docker credentials, caches, diagnostic logs and launchd output must reside on the
-external worker SSD. Colima's existing containerd image store must advertise
-both platforms. Do not replace its VM, switch global contexts, install binfmt,
-prune other builders or touch live containers.
+## Immutable tags and serialization
 
-Host environment supplies `WIZARD_HEAVY_ROOT` (fallback `WIZARD_WORK_ROOT`) and
-`WIZARD_CI_ROOT` beneath that configured root,
-`WIZARD_CI_WORKER_LOCK` (the existing shared Android/VM worker lock), and
-`DOCKER_HOST` (the explicit existing Colima socket). Builds use `fcntl.flock`,
-wait up to one hour and release automatically on exit. The 100-minute job limit
-bounds lock plus build time. If another heavy task holds the lock longer, rerun
-the failed publication after that task ends; never remove or replace the lock.
+Every canonical commit gets `sha-<full 40-character commit>`. An existing SHA tag
+is accepted only when its digest, platform config blobs, revision/source labels,
+and canonical signed provenance exactly match the selected source SHA and main
+ref. A mismatch fails before any write.
 
-Before registering the runner, require approval for **all external fork
-contributors**, protect the canonical branch with PR/check gates, and install a
-host-owned job-start guard matching repository, ref, event and workflow path.
-The workflow never runs PR code on the self-hosted worker; PR contract tests run
-on hosted Linux. Repository writers and people approving fork workflows are
-trusted: a job-start hook is defense in depth, **not a sandbox** against a
-malicious approved workflow using `always()` steps. Do not approve untrusted
-workflows that target this runner. Untrusted execution needs separate ephemeral
-VM isolation, not this persistent runner.
+Workflow concurrency is keyed by SHA with cancellation disabled and `queue: max`,
+so up to 100 same-SHA requests wait rather than GitHub cancelling an older pending
+request. The finalizer job separately applies the same queue policy to the requested
+version (or SHA), closing the check/create race while distinct commits remain
+independent. See the [official concurrency contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
-Temporary publish credentials are written directly with mode 0600 and removed
-on normal exit. `docker login` is deliberately not used: it may auto-detect the
-macOS keychain and overwrite the owner's credentials. No global Docker config,
-keychain, GH CLI identity or personal token is used by the publisher.
+A version dispatch must run on `main`, repeat `release_tag` exactly in
+`confirm_release_tag`, and set `expected_sha` to the full selected commit. The
+verified immutable SHA must already exist. SHA and version collisions are checked
+before finalization writes either alias; existing version tags always fail rather
+than being overwritten.
+
+## Public verification and provenance
+
+Prepare, finalization, and attestation independently enforce canonical repository,
+`main` ref, and push/dispatch event guards. Finalization runs only after successful
+fresh attestation, or after attestation was skipped specifically because prepare
+reported a verified existing SHA. Failed or cancelled attestation never permits
+aliases. The finalizer uses `gh attestation verify --bundle-from-oci` with the
+canonical workflow, source ref, and exact source digest before any write.
+
+After finalization, a fresh hosted job with no package permission, credentials, or
+login obtains anonymous registry tokens and pulls both architectures by index
+digest, immutable SHA tag, and optional version tag. It fails closed if the
+package is not public.
+
+A new GHCR package starts private. An administrator must make it **Public** and
+retain repository Actions write access. No personal package token is needed.
 
 ## Checks
 
@@ -64,6 +73,11 @@ keychain, GH CLI identity or personal token is used by the publisher.
 python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
 ```
 
-Unit tests exercise guards, collision refusal and credential-free pull commands;
-only an actual protected-branch Actions run proves the build and public install
-contract. Existing recipe, quality and secret-scan workflows remain unchanged.
+The installed actionlint 1.7.12 schema predates GitHub's `concurrency.queue` key and
+reports both required `queue: max` entries as unexpected. Keep those entries: do not add
+an actionlint ignore or remove the official queue contract merely to satisfy the old schema.
+
+The tests mock registry and Docker behavior, including exact builder selection,
+digest-only retry recovery, provenance refusal, SHA/version collisions, immutable
+reuse, queue retention, and anonymous digest/tag pulls. Only a reviewed canonical
+branch run proves the live GHCR publication and attestation path.

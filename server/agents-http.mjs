@@ -7,16 +7,46 @@
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
-import { privateChatMatches } from './private-chat-search.mjs'
+import { indexedSearchWords } from './session-truth.mjs'
+import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 const listWindows = new WeakMap()
+const agentListSnapshots = new WeakMap()
 const profileRunCache = new WeakMap()
+
+// Shared metadata census for the list window and scoped Spaces tools. Never discovers other agents.
+export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets = [], signal, archiveLimit = 100, requireComplete = false } = {}) {
+  const all = []; let offset = 0
+  while (true) {
+    const q = new URLSearchParams({ limit: '100', offset: String(offset), include_children: 'false' })
+    const page = await ctx.registry.fetchAgent(agent, `/api/sessions?${q}`, { headers, redirect: 'manual', signal })
+    if (!page.ok) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    const raw = Buffer.from(await page.arrayBuffer())
+    if (secrets.some(secret => raw.includes(Buffer.from(secret)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
+    const value = JSON.parse(raw.toString('utf8')), rows = value.data || value.sessions || value.items || []
+    if (!Array.isArray(rows)) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    all.push(...rows.filter(row => !ctx.isThreadVisible || ctx.isThreadVisible(row)))
+    if (value.has_more === false || (value.has_more !== true && rows.length < 100)) break
+    if (!rows.length || offset >= 100000) throw new AgentError(502, 'incomplete_listing', 'agent.runtime')
+    offset += rows.length
+  }
+  const known = new Set(all.map(row => row?.id))
+  let archived = []
+  try { archived = readArchivedSessions(ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit }) }
+  catch (error) { if (requireComplete) throw error }
+  if (requireComplete && archived.length >= archiveLimit) throw new AgentError(502, 'incomplete_listing', 'agent.archive')
+  for (const row of archived) if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
+  return all
+}
 
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
-async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
+export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
   let next = 0
@@ -267,6 +297,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
     if (method === 'PATCH') {
       const body = await readJson(ctx, request)
       assertPrivacyChange(request, body)
+      if (Object.hasOwn(body, 'hidden') && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'agent.hidden')
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
@@ -552,7 +583,7 @@ function modelAllowed(agent, value) {
  * state.db, the run queue or the main memory. ctx adds: { isAllowedProxyRequest, sendJson, secretGuard,
  * projectStatusMarkers, projectWizardMessageHistory, fetchImpl, mainSecrets }
  */
-export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead }) {
+export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead, rawRunRead = false }) {
   const { registry, sendJson } = ctx
   if (isPrivateAgent(registry,agent.id) && method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('q') && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   const deleting = method === 'DELETE' && /^\/api\/sessions\/[A-Za-z0-9._:-]{1,200}$/u.test(upstreamPath) && searchParams.size === 0
@@ -625,7 +656,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (typeof request.headers.accept === 'string') headers.set('Accept', request.headers.accept)
   if (typeof request.headers['idempotency-key'] === 'string') headers.set('Idempotency-Key', request.headers['idempotency-key'])
   const query = new URLSearchParams(searchParams)
-  for (const key of ['window','q','overrides','snapshot','cursor']) query.delete(key)
+  for (const key of ['window','q','overrides','snapshot','cursor','fields','mode']) query.delete(key)
   query.delete('view')
   query.delete('snapshot')
   const controller = new AbortController()
@@ -659,6 +690,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (secrets.some((secret) => result.includes(Buffer.from(secret)))) { sendJson(response, 502, { error: 'unsafe_upstream_response', check: 'agent.response' }); return }
   if (upstream.ok && contentType.includes('application/json')) {
     const info = registry.threadAgent(agent)
+    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) {
+      const run = JSON.parse(result.toString('utf8'))
+      if (!['queued', 'running', 'waiting', 'paused'].includes(run.status)) ctx.routedPresentation?.fileStatus(agent, run.session_id || registry.runThread?.(agent.id, runIdFromPath(upstreamPath))?.session_id, parseStatus(run.output))
+    }
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
         const admission = JSON.parse(result.toString('utf8'))
@@ -693,49 +728,54 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
-        const payload = await listWindows.get(ctx)({ params: searchParams, scope: agent.id, load: async () => {
-          const all=[]; let offset=0
-          // Read only this already-authorized agent runtime. Gateway controls never reach it.
-          while (true) {
-            const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
-            const page=await registry.fetchAgent(agent, `/api/sessions?${q}`,{headers,redirect:'manual',signal:controller.signal})
-            if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            const raw=Buffer.from(await page.arrayBuffer())
-            if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
-            const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
-            if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-            all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
-            if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
-            if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
-            offset+=rows.length
+        if (!agentListSnapshots.has(ctx)) agentListSnapshots.set(ctx,new Map())
+        const statePath=ctx.agentStatePath?.(agent) ?? join(registry.agentsDir,agent.id,'home','state.db')
+        const snapshots=agentListSnapshots.get(ctx)
+        let state=snapshots.get(agent.id)
+        if(!state) { state={rows:null,at:0,pending:null}; snapshots.set(agent.id,state) }
+        const secrets=[key,...ctx.mainSecrets].filter(Boolean)
+        const refresh=()=> {
+          if(!state.pending) state.pending=(async()=>{
+            const all = await loadAgentSessionRows(ctx, agent, { headers, secrets, signal: AbortSignal.timeout(10000), archiveLimit: 100000, requireComplete: true })
+            state.rows=await projectProfileSessions(ctx,agent,all,headers,secrets); state.at=Date.now()
+            return state.rows
+          })().finally(()=>{state.pending=null})
+          return state.pending
+        }
+        const load=async()=> {
+          if(!state.rows) return refresh()
+          if(Date.now()-state.at>20000) void refresh().catch(()=>undefined)
+          return state.rows
+        }
+        const started=performance.now(), q=searchParams.get('q')||''
+        const rows=await (searchParams.has('q') ? load() : refresh())
+        const list_ms=performance.now()-started
+        const localPath=statePath
+        if(searchParams.get('mode')==='body' && !existsSync(localPath)) { sendJson(response,501,{error:'body_search_unavailable'}); return }
+        const hits=q ? await searchHermesSessionTextAsync(statePath,rows.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || agent.id) : null
+        if(q && !searchParams.has('mode') && !existsSync(localPath) && indexedSearchWords(q).length) {
+          for(const row of rows) {
+            const text=await searchMessageText(async offset=>{
+              const hist=await registry.fetchAgent(agent,`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:AbortSignal.timeout(10000)})
+              if(!hist.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
+              const raw=Buffer.from(await hist.arrayBuffer())
+              if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
+              return JSON.parse(raw.toString('utf8'))
+            },q)
+            if(text) hits.set(row.id,text.slice(0,200))
           }
-          if (searchParams.get('q')) {
-            const fts = privateChatMatches(registry.agentsDir,agent.id,searchParams.get('q'))
-            if (fts) {
-              for (const row of all) if (fts.has(row.id)) { row.wizard_search_match = true; row.wizard_search_text = fts.get(row.id) }
-              return all
-            }
-            const q=searchParams.get('q'), pending=all.filter(row=>!selectWindow([row],{q}).search_total);
-            let index=0;
-            await Promise.all(Array.from({length:Math.min(4,pending.length)},async()=>{
-              while(index<pending.length) {
-                const row=pending[index++];
-                row.wizard_search_text=await searchMessageText(async offset=>{
-                  const page=await registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
-                  if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
-                  const raw=Buffer.from(await page.arrayBuffer());
-                  if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
-                  return JSON.parse(raw.toString('utf8'));
-                },q);
-              }
-            }));
-          }
-          return projectProfileSessions(ctx, agent, all, headers, secrets)
-        }})
+        }
+        const payload=searchParams.get('mode')==='body'
+          ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}
+          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
         result=Buffer.from(JSON.stringify(payload))
       }
-      result = filterThreads(result, ctx.isThreadVisible)
-      result = decorateThreadAgent(result, info)
+      // Compact projections are already scope/visibility-filtered and carry explicit agent ids.
+      // Do not expand them back into full runtime identity envelopes.
+      if(searchParams.get('mode')!=='body' && searchParams.get('fields')!=='slim') {
+        result = filterThreads(result, ctx.isThreadVisible)
+        result = decorateThreadAgent(result, info)
+      }
       // One thread already claimed by another agent must not break this agent's whole list.
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
       if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
@@ -754,7 +794,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
-    if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
+    // The scheduler's own internal read of a notification run keeps [SILENT]-ending output intact, as on main.
+    if (messageHistory || (!rawRunRead && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath))) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
     if (messageHistory && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
     // A finished run's output carries the same MEDIA lines the history will; project it identically.

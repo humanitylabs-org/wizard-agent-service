@@ -71,7 +71,8 @@ def status_json(state):
             pid = uid if peer.get("login", state["login"]) == state["login"] else 9000 + index
             users.setdefault(str(pid), {"ID": pid, "LoginName": peer.get("login", state["login"]), "DisplayName": "x"})
             peers[f"nodekey:peer{index}"] = {
-                "ID": f"nPEER{index}CNTRL", "PublicKey": f"nodekey:peer{index}", "HostName": peer["name"],
+                "ID": f"nPEER{index}CNTRL", "PublicKey": f"nodekey:peer{index}", # Real iPhones/iPads report "localhost" as their HostName; only the DNS name carries the device name.
+                "HostName": "localhost" if peer["os"] == "iOS" else peer["name"],
                 "DNSName": f"{peer['name']}.{state['dns_suffix']}.", "OS": peer["os"], "UserID": pid,
                 "Online": bool(peer["online"]),
                 "LastSeen": "0001-01-01T00:00:00Z" if peer["online"] else "2026-10-01T10:00:00Z",

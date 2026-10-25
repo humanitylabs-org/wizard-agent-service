@@ -36,6 +36,26 @@
   ],
   "features": [
     {
+      "id": "android-shell-recording-custody",
+      "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/shell-recording-routes.test.mjs. The real parkReply function runs for main, host-profile, container and restricted routes with asynchronous shell and synchronous full-app recorders; it preserves session, agent, typed draft and audio, and acknowledges only after durable held custody. Meeting cancellation also awaits native bytes before acknowledgement. This is synthetic source-executed evidence, not live provider or physical-phone proof. Companion UX PR: humanitylabs-org/wizard-ux#504.",
+      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/core/device-recording.js"],
+      "reference_tests": ["wizard-ux/tests/shell-recording-routes.test.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "chats-spaces",
+      "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
+      "layer": "server",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "source_refs": ["server/ui-preferences.mjs", "server/spaces-tools.mjs", "server/thread-spaces.mjs"],
+      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts", "tests/spaces-tools.test.ts", "tests/spaces-search-status.test.ts", "tests/managed-harness-upgrade.test.ts", "qa/agent-parity/server-checks.mjs", "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"],
+      "fixture": "chats-spaces",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-create",
       "description": "Create a hidden disposable thread",
       "layer": "server",
@@ -232,6 +252,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "archive-placement",
+      "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
+      "layer": "ux",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
+      "source_refs": [
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/qa-stopped-done.cjs",
+        "wizard-ux/qa-unified-chats.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "session-rename",
       "description": "Rename a thread",
       "layer": "server",
@@ -316,6 +354,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-steer-replay",
+      "description": "Replay a steer the run accepted but never consumed",
+      "layer": "server",
+      "how_to_test": "Finish a run whose terminal status carries pending_steer; verify exactly one same-thread turn on the locked model under a wizard-pending-steer- key, answered, and no second replay after restart.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/pending-steer-replay.test.ts"
+      ],
+      "fixture": "pending-steer-replay",
+      "policy_exemptions": []
+    },
+    {
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
@@ -375,12 +428,14 @@
       "id": "heavy-relay",
       "description": "Submit disposable heavy work",
       "layer": "runtime",
-      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption.",
+      "how_to_test": "Submit disposable heavy work; verify durable receipt, cancellation/terminal result and same agent/thread resumption. For main, a running continuation may submit authorized follow-up behind a newer queued sibling, including after restart; unrelated newer requests/stop/steer still fence it. For restricted agents, guidance preserves original authorization and explicit owner gates. Nonrestricted container and host-profile heavy grants stay refused by the existing sandbox policy.",
       "source_refs": [
-        "server/heavy-integration.mjs"
+        "server/heavy-integration.mjs",
+        "server/agent-heavy-relay.mjs"
       ],
       "reference_tests": [
-        "tests/agent-heavy-relay.test.ts"
+        "tests/agent-heavy-relay.test.ts",
+        "tests/heavy-continuation-admission.test.ts"
       ],
       "fixture": null,
       "policy_exemptions": []
@@ -426,6 +481,26 @@
         "tests/thread-unread.test.ts"
       ],
       "fixture": "read-receipts",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-slim-index",
+      "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
+      "layer": "server",
+      "how_to_test": "Request fields=slim on archive-50, page the pinned cursor, verify bounded wire fields/build and complete archive membership, and prove routed/private rows never enter the main index on all four kinds.",
+      "source_refs": ["server/session-list-window.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/session-list-http.node.mjs"],
+      "fixture": "session-slim-index",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-body-search",
+      "description": "Body-only indexed search returns bounded visible snippets and explicit titles-only availability",
+      "layer": "server",
+      "how_to_test": "Request mode=body per kind with a local trigram store; verify id/agent/snippet wire shape, visibility, recall/private exclusion, short-query zero work, timings and titles-only behavior when the local index is unavailable.",
+      "source_refs": ["server/session-truth.mjs", "server/session-text-search-worker.mjs"],
+      "reference_tests": ["tests/session-text-search-worker.node.mjs"],
+      "fixture": "session-body-search",
       "policy_exemptions": []
     },
     {
@@ -658,12 +733,14 @@
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",
-      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries.",
+      "how_to_test": "Load bounded newest/oldest history pages and search an older thread; assert no omissions or duplicate boundaries. For each agent kind, render the real chat list: empty Yesterday/Past week sections are absent, populated historical sections remain available.",
       "source_refs": [
-        "server/session-list-window.mjs"
+        "server/session-list-window.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "tests/chats-views.test.ts"
+        "tests/chats-views.test.ts",
+        "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
       "policy_exemptions": []
@@ -767,6 +844,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "pending-echo",
+      "description": "Reopen a thread whose outbox still holds a message the transcript shows",
+      "layer": "ux",
+      "how_to_test": "Seed a sent and a receipt-lost outbox copy of the last user message, reopen the thread on each agent kind; verify no Sending duplicate paints in any frame and the message shows once; seed an unsent copy with the same words and verify it still shows.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-pending-echo.cjs",
+        "qa/agent-parity/browser.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "memory-compaction",
       "description": "Compact an isolated long fixture thread",
       "layer": "runtime",
@@ -792,6 +884,20 @@
       ],
       "reference_tests": [
         "tests/onboarding.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "window-refresh",
+      "description": "Refresh a desktop Chats window in place (↻ / ⌥R): refetch its own thread and list without closing it",
+      "layer": "ux",
+      "how_to_test": "Open a synthetic thread in a main Chats window and in routed windows for host-profile, container and restricted agents; press ⌥R on each and verify only that window's thread reloads (forced) and its own agent list repaints, while a New chat draft is never reloaded.",
+      "source_refs": [
+        "wizard-ux/web/desktop/desktop.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/desktop-window-refresh.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []

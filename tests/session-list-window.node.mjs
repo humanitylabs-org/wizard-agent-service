@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {selectWindow,archiveCandidate,createListWindows} from '../server/session-list-window.mjs';
+import {selectWindow,archiveCandidate,createListWindows,slimRow} from '../server/session-list-window.mjs';
 import {normalizeFull} from '../server/session-list-view.mjs';
 const now=1800000000000, old=now/1000-20*86400;
 const rows=Array.from({length:130},(_,i)=>({id:`s${i}`,title:`Synthetic ${i}`,source:'wizard-mobile',last_active:old-i,archived:i%2===0,wizard_request_preview:'original '.repeat(50)+(i===129?'needle-beyond-window':''),latest_message:{role:'assistant',content:'reply '.repeat(50),timestamp:old-i}}));
@@ -50,4 +50,9 @@ test('archive and restore outside page 1 change the next complete membership wit
  assert(next.rows.some(s=>s.id==='s129'));
  assert.equal(next.archive_total,initial.archive_total);
  assert(!initial.rows.some(s=>s.id==='s129'));
+});
+
+test('slim rows keep the routed agent id instead of relabelling them as the main agent', () => {
+  assert.equal(slimRow({ id: 'p1', agent: 'philosopher', title: 'x', last_active: '2026-10-25T00:00:00Z' }).agent, 'philosopher');
+  assert.equal(slimRow({ id: 'm1', title: 'y', last_active: '2026-10-25T00:00:00Z' }).agent, 'hermes');
 });

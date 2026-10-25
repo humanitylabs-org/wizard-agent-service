@@ -90,13 +90,13 @@ export const PRESETS = [
     id: 'private', label: 'Private',
     summary: 'Confidential model only, no fallback, no outside tools, only its own files; only apps tagged private.',
     privacy: 'private',
-    permissions: { outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' },
+    permissions: { outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none', shared_with_agents: false },
   },
   {
     id: 'standard', label: 'Standard',
     summary: 'Hermes defaults: outside tools on, shared files, apps you pick.',
     privacy: 'standard',
-    permissions: { outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', wizard_apps: [], agent_apps: [], other_agents: 'none' },
+    permissions: { outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', wizard_apps: [], agent_apps: [], other_agents: 'read', shared_with_agents: true },
   },
 ]
 const PRESET = new Map(PRESETS.map((preset) => [preset.id, preset]))
@@ -179,6 +179,13 @@ function idList(value, check) {
   return [...new Set(value)]
 }
 
+/** Owner-visible notes only; never accept absolute, hidden or parent paths. */
+export function normalizeNotesDir(value) {
+  if (value === null || value === '') return ''
+  if (typeof value !== 'string' || value.length > 200 || !value.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/u.test(part) && !part.startsWith('.')) || value.includes('\\')) fail(400, 'invalid_notes_dir', 'agent.notes_dir')
+  return value
+}
+
 /** Merge a permissions patch onto a base, validating every field. */
 export function normalizePermissions(base, patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) fail(400, 'invalid_permissions', 'agent.permissions')
@@ -186,6 +193,10 @@ export function normalizePermissions(base, patch = {}) {
   if (patch.read_standard_chats !== undefined) {
     if (typeof patch.read_standard_chats !== 'boolean') fail(400, 'invalid_permissions', 'agent.permissions.read_standard_chats')
     out.read_standard_chats = patch.read_standard_chats
+  }
+  if (patch.shared_with_agents !== undefined) {
+    if (typeof patch.shared_with_agents !== 'boolean') fail(400, 'invalid_permissions', 'agent.permissions.shared_with_agents')
+    out.shared_with_agents = patch.shared_with_agents
   }
   const outside = idList(patch.outside_tools, 'agent.permissions.outside_tools')
   if (outside) {
@@ -214,6 +225,7 @@ function assertPrivateWalls(agent) {
     .some((id) => /^privacy(?:[.-]?com)?$/iu.test(id))) fail(409, 'import_sensitive_app_denied', 'agent.permissions')
   if (agent.permissions.read_standard_chats && agent.privacy !== 'private') fail(409, 'private_permission_required', 'agent.permissions.read_standard_chats')
   if (agent.privacy !== 'private') return
+  if (agent.permissions.shared_with_agents === true) sealed('a private agent is never a source')
   if (!isConfidentialProvider(agent.model.provider)) fail(409, 'confidential_provider_required', 'agent.confidential_provider')
   if (agent.model.fallback) fail(409, 'fallback_not_allowed', 'agent.fallback')
 }
@@ -243,10 +255,12 @@ export function publicAgent(agent, status = { status: 'stopped', status_detail: 
     privacy: agent.privacy,
     appearance: agent.appearance,
     model: { provider: agent.model.provider, model: agent.model.model, allowed_models: [...agent.model.allowed_models], fallback: agent.model.fallback },
+    ...(agent.notes_dir ? { notes_dir: agent.notes_dir } : {}),
     permissions: { ...agent.permissions, outside_tools: [...agent.permissions.outside_tools], wizard_apps: [...agent.permissions.wizard_apps], agent_apps: [...agent.permissions.agent_apps] },
     status: status.status,
     status_detail: status.status_detail ?? '',
     is_default: agent.id === defaultAgentId,
+    ...(agent.hidden === true ? { hidden: true } : {}),
     ...(agent.role === 'recovery' ? { role: 'recovery' } : {}),
     // Lets clients order several private agents the way the Agent Service routes a model to them (agentForModel).
     created_at: Number.isFinite(agent.created_at) ? agent.created_at : null,
@@ -275,6 +289,7 @@ export function threadAgent(agent) {
 /** Validate a stored agent.json. Returns null for anything that is not a schema-1 agent (e.g. other experiments). */
 export function parseAgentFile(value, id) {
   if (!value || typeof value !== 'object' || value.schema !== AGENT_SCHEMA || value.id !== id || !ID_RE.test(id) || id === MAIN_AGENT_ID) return null
+  if (value.hidden !== undefined && typeof value.hidden !== 'boolean') return null
   if (value.harness !== 'hermes' || !['private', 'standard'].includes(value.privacy)) return null
   if (value.role !== undefined && value.role !== 'standard') return null
   const model = value.model
@@ -289,12 +304,14 @@ export function parseAgentFile(value, id) {
     const { preset, ...fields } = permissions
     return {
       ...value,
+      ...(value.notes_dir === undefined ? {} : { notes_dir: normalizeNotesDir(value.notes_dir) }),
       label: cleanLabel(value.label, id),
       appearance: normalizeAppearance(value.appearance, value.privacy),
       model: { provider: model.provider, model: model.model, allowed_models: model.allowed_models.filter((m) => typeof m === 'string'), fallback: model.fallback === true },
       permissions: {
         preset: PRESET.has(preset) ? preset : 'standard',
-        ...normalizePermissions({ outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none' }, fields),
+        ...normalizePermissions({ outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none', shared_with_agents: value.privacy !== 'private' }, fields),
+        ...(value.privacy === 'private' ? { shared_with_agents: false } : {}),
       },
     }
   } catch { return null }
@@ -309,7 +326,7 @@ export function agentAppIds(agent) {
 
 /**
  * Whether the agent's harness gets the box's app gateway (/wizard/mcp). A standard agent always does (apps added
- * later appear without a restart); a private agent only once the owner ticks an app for it.
+ * later appear without a restart). Every private agent also gets its own scoped Spaces tools without ticking apps.
  */
 /** What a restricted agent's harness calls: its edge sidecar, forwarding only to its own Service socket. */
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
@@ -326,7 +343,7 @@ export function assertIsolationSupports(agent) {
 
 export function wantsGateway(agent, gatewayUrl) {
   if (!gatewayUrl) return false
-  return agent.privacy === 'standard' || agentAppIds(agent).size > 0 || agent.permissions.read_standard_chats === true
+  return true // Own Spaces are built-in, including private agents with no ticked apps.
 }
 
 const standardChatsEndpoint = (gatewayUrl, explicit = '') => {
@@ -388,7 +405,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   const standardUrl = standardChatsEndpoint(gatewayUrl,standardChatsUrl)
   if (wantsGateway(agent, gatewayUrl) || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
     lines.push('mcp_servers:')
-    if (gatewayUrl && (agent.privacy === 'standard' || agentAppIds(agent).size)) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
+    if (gatewayUrl) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     }
@@ -477,11 +494,11 @@ export function createAgentRegistry(options = {}) {
     return structuredClone(mainMemo.value)
   }
   const buildMainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
-    permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', ...mainApps(), other_agents: 'none' },
+    permissions: { preset: 'standard', outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', ...mainApps(), other_agents: readJson(mainPath)?.other_agents ?? 'read', shared_with_agents: readJson(mainPath)?.shared_with_agents !== false },
     runtime: { kind: 'external' },
   })
 
@@ -659,6 +676,7 @@ export function createAgentRegistry(options = {}) {
     if (!source) fail(404, 'agent_not_found', 'grant.source')
     if (reader.role === 'recovery' || source.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
     if (source.privacy === 'private') sealed(`${source.id} is private; nothing can read it`)
+    if (!source.permissions.shared_with_agents) fail(409, 'agent_not_shared', 'agent.not_shared')
     if (reader.id === source.id) fail(400, 'invalid_grant', 'grant.source')
     const scope = body.scope ?? 'titles'
     if (!GRANT_SCOPES.includes(scope)) fail(400, 'invalid_grant', 'grant.scope')
@@ -684,13 +702,13 @@ export function createAgentRegistry(options = {}) {
     const agents = list().filter(agent => agent.role !== 'recovery')
     const out = new Map()
     if (reader.permissions.other_agents !== 'none') {
-      for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard') out.set(agent.id, reader.permissions.other_agents)
+      for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard' && agent.permissions.shared_with_agents) out.set(agent.id, reader.permissions.other_agents)
     }
     for (const grant of grants()) {
       if (grant.reader !== reader.id) continue
       const source = agents.find((agent) => agent.id === grant.source)
-      if (!source || source.privacy !== 'standard' || source.id === reader.id) continue
-      out.set(source.id, grant.scope)
+      if (!source || source.privacy !== 'standard' || !source.permissions.shared_with_agents || source.id === reader.id) continue
+      if (GRANT_SCOPES.indexOf(grant.scope) > GRANT_SCOPES.indexOf(out.get(source.id))) out.set(source.id, grant.scope)
     }
     return [...out.entries()].map(([source, scope]) => ({ source, scope }))
   }
@@ -898,6 +916,43 @@ export function createAgentRegistry(options = {}) {
     writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
 
+  // Upgrade only Service-managed containers. Host profiles/imports own their harness;
+  // never traverse their home or rewrite user data. Keep a pending marker until apply
+  // succeeds, so a crash/failed runtime RPC cannot turn a rewritten stamp into success.
+  let harnessMigration
+  function migrateManagedHarnesses() {
+    if (harnessMigration) return harnessMigration
+    harnessMigration = (async () => {
+      if (!runtime?.apply) return
+      for (const id of folderIds()) {
+        const agent = readRaw(id)
+        if (!agent || agent.runtime.kind !== 'container' || agent.imported || agent.runtime.admission === 'importing') continue
+        const home = join(folder(id), restricted(agent) ? 'managed' : 'home')
+        const pending = join(folder(id), '.harness-apply-pending')
+        try {
+          let missingToken = false
+          if (wantsGateway(agent, gatewayUrlFor(agent))) {
+            const token = gatewayKey(id)
+            try { missingToken = !token || !readFileSync(join(home, '.env'), 'utf8').split(/\r?\n/u).includes(`WIZARD_MCP_TOKEN=${token}`) }
+            catch { missingToken = true }
+          }
+          if (!harnessStale(agent) && !missingToken && !existsSync(pending)) continue
+          writeTextAtomic(pending, 'managed harness upgrade\n')
+          writeHarnessFiles(agent) // same ownership/stamp rules as an owner update
+          if (serviceState(id).desired !== 'stopped') {
+            invalidateCatalog(id)
+            if (restricted(agent)) await options.beforeRestrictedStart?.(id)
+            const result = await runtime.apply(id)
+            if (result?.ok === false) throw new Error('runtime_failed')
+            writeServiceState(id, { started_at: now(), last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
+          }
+          rmSync(pending, { force: true })
+        } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      }
+    })().finally(() => { harnessMigration = null })
+    return harnessMigration
+  }
+
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
   async function create(body, { idempotencyKey = '', deferStart = false } = {}) {
@@ -940,6 +995,7 @@ export function createAgentRegistry(options = {}) {
       schema: AGENT_SCHEMA, id, label, harness: 'hermes', privacy: preset.privacy,
       appearance: normalizeAppearance(body.appearance, preset.privacy),
       model, permissions,
+      ...(body.notes_dir === undefined ? {} : { notes_dir: normalizeNotesDir(body.notes_dir) }),
       ...(normalizeMemory(body.memory) ? { memory: normalizeMemory(body.memory) } : {}),
       runtime: {
         kind: 'container', app_id: `agent-${id}`, api: `http://agent-${id}:8642`, port: nextPort(), image: options.image || '',
@@ -983,7 +1039,18 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
-    if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are provisioned from files and configured in Hermes')
+    if (agent.runtime.kind === 'profile') {
+      // Sharing metadata is Service-owned even for a file-provisioned host profile.
+      if (Object.keys(body).some(key => !['permissions', 'notes_dir'].includes(key))
+        || Object.keys(body.permissions ?? {}).some(key => !['other_agents', 'shared_with_agents'].includes(key))) {
+        fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are configured in Hermes; only sharing metadata is set here')
+      }
+      const next = { ...agent, permissions: normalizePermissions(agent.permissions, body.permissions) }
+      if (body.notes_dir !== undefined) next.notes_dir = normalizeNotesDir(body.notes_dir)
+      assertPrivateWalls(next)
+      writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+      return read(id)
+    }
     if (id === MAIN_AGENT_ID) {
       if (body.role !== undefined) {
         if (!['standard', 'recovery'].includes(body.role)) fail(400, 'invalid_agent_role', 'agent.role')
@@ -992,20 +1059,21 @@ export function createAgentRegistry(options = {}) {
         if (body.role === 'recovery' && options.isBindingTarget?.(MAIN_AGENT_ID)) fail(409, 'recovery_agent_bound', 'agent.recovery_sealed')
         if (body.role === 'recovery' && grants().some(grant => grant.reader === MAIN_AGENT_ID || grant.source === MAIN_AGENT_ID)) fail(409, 'recovery_agent_granted', 'agent.recovery_sealed')
         mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-        writeJsonAtomic(mainPath, { schema: 1, ...mainApps(), role: body.role })
+        writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, ...mainApps(), role: body.role })
         appsChanged()
         return read(id)
       }
       if (agent.role === 'recovery') fail(409, 'recovery_agent_sealed', 'agent.recovery_sealed')
-      // Only which apps the main agent can use is set here (#58); the rest is configured in Hermes itself.
+      // Apps and sharing are Service-owned; the other host settings stay in Hermes.
       const keys = Object.keys(body)
       const permKeys = Object.keys(body.permissions ?? {})
-      if (keys.some((key) => key !== 'permissions') || !permKeys.length || permKeys.some((key) => !['wizard_apps', 'agent_apps'].includes(key))) {
-        fail(409, 'main_agent_read_only', 'agent.main', 'the main agent is configured in Hermes itself; only its apps are set here')
+      if (keys.some((key) => !['permissions', 'hidden'].includes(key)) || (!permKeys.length && !Object.hasOwn(body, 'hidden')) || permKeys.some((key) => !['wizard_apps', 'agent_apps', 'other_agents', 'shared_with_agents'].includes(key))) {
+        fail(409, 'main_agent_read_only', 'agent.main', 'the main agent is configured in Hermes itself; only its apps and sharing permissions are set here')
       }
+      if (Object.hasOwn(body, 'hidden') && typeof body.hidden !== 'boolean') fail(400, 'invalid_hidden', 'agent.hidden')
       const apps = normalizePermissions(agent.permissions, body.permissions)
       mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
-      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps })
+      writeJsonAtomic(mainPath, { ...readJson(mainPath), schema: 1, ...(Object.hasOwn(body, 'hidden') ? { hidden: body.hidden } : {}), wizard_apps: apps.wizard_apps, agent_apps: apps.agent_apps, other_agents: apps.other_agents, shared_with_agents: apps.shared_with_agents })
       appsChanged()
       return read(id)
     }
@@ -1019,9 +1087,18 @@ export function createAgentRegistry(options = {}) {
       if (body.confirm_downgrade === true) sealed('a private agent cannot move to a public model')
     } else if (body.privacy !== undefined && body.privacy !== agent.privacy) fail(409, 'privacy_fixed', 'agent.privacy')
     const next = structuredClone(agent)
+    if (body.hidden !== undefined) {
+      if (typeof body.hidden !== 'boolean') fail(400, 'invalid_hidden', 'agent.hidden')
+      next.hidden = body.hidden
+    }
     if (body.label !== undefined) {
       next.label = cleanLabel(body.label)
       if (!next.label) fail(400, 'label_required', 'agent.label')
+    }
+    if (body.notes_dir !== undefined) {
+      const notes = normalizeNotesDir(body.notes_dir)
+      if (notes) next.notes_dir = notes
+      else delete next.notes_dir
     }
     if (body.appearance !== undefined) next.appearance = normalizeAppearance(body.appearance, next.privacy)
     if (body.memory !== undefined) {
@@ -1047,7 +1124,8 @@ export function createAgentRegistry(options = {}) {
     assertStandardTransport(next)
     assertIsolationSupports(next)
     // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
-    const harnessChanged = JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
+    const harnessPermissions = permissions => { const { other_agents, shared_with_agents, ...rest } = permissions; return rest }
+    const harnessChanged = JSON.stringify([agent.model, harnessPermissions(agent.permissions)]) !== JSON.stringify([next.model, harnessPermissions(next.permissions)]) || harnessStale(next)
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
     if (harnessChanged) writeHarnessFiles(next)
     writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
@@ -1304,12 +1382,19 @@ export function createAgentRegistry(options = {}) {
       }
       return current ?? null
     },
+    stateHome: id => {
+      const agent = read(id)
+      if (!agent) return ''
+      if (id === MAIN_AGENT_ID) return options.mainHome || ''
+      if (agent.runtime.kind === 'profile') return options.mainHome ? join(options.mainHome, 'profiles', agent.runtime.profile) : ''
+      return join(folder(id), 'home')
+    },
     agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
     credentialValues: () => folderIds().flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
+    syncApps, migrateManagedHarnesses, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
     grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {

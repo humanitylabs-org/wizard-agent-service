@@ -9,7 +9,7 @@ try {
     mainProviders: async () => [{ slug: p.provider, models: [p.model], authenticated: true }],
   })
   const { agent } = await registry.create({ label: p.id, model: { provider: p.provider, model: p.model, fallback: false },
-    permissions: { preset: 'standard', files: 'own', outside_tools: p.outside_tools, wizard_apps: [], agent_apps: [], other_agents: 'none' },
+    permissions: { preset: 'standard', files: 'own', outside_tools: p.outside_tools, wizard_apps: [], agent_apps: [], other_agents: 'read', shared_with_agents: true },
   }, { deferStart: true })
   if (agent.id !== p.id) throw new Error('import id collision')
   console.log(JSON.stringify({ id: agent.id }))

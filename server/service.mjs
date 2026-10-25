@@ -12,13 +12,13 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
-import { DurableRunQueue, queueRequestHash } from './run-queue.mjs'
+import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
 import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -33,22 +33,26 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { createSpacesTools } from './spaces-tools.mjs'
+import { createSpaceFiling } from './thread-spaces.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
+import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
+import { createSkins, SkinsError } from './skins.mjs'
 import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
@@ -62,7 +66,7 @@ import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
-import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
@@ -70,6 +74,8 @@ import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isA
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
+import { readArchivedSessions } from './archived-sessions.mjs'
+export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
 // Marks a request that arrived on the dedicated Tailscale Serve listener (createTailnetIngress). A symbol
@@ -140,13 +146,12 @@ The originating Wizard run owns the requested outcome through verified completio
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
-${STATUS_INSTRUCTIONS}
-${APP_PROVENANCE_INSTRUCTIONS}`
+${STATUS_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor', 'fields', 'mode']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
@@ -172,8 +177,10 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
     if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
     if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
     if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
-    if (['window','q','overrides','cursor'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if (['window','q','overrides','cursor','fields','mode'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
     if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
+    if (searchParams.has('fields') && (searchParams.get('fields') !== 'slim' || searchParams.get('window') !== 'archive-50')) return false
+    if (searchParams.has('mode') && (searchParams.get('mode') !== 'body' || !searchParams.has('q'))) return false
     if (searchParams.has('include_children') && searchParams.get('include_children') !== 'false') return false
     for (const key of ['limit', 'offset']) if (searchParams.has(key) && !/^\d{1,6}$/.test(searchParams.get(key) ?? '')) return false
   }
@@ -356,6 +363,9 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
            session_turn_leases.conversation_id IS NOT NULL
            OR (
              COALESCE(sessions.last_activity_description, '') <> ''
+             -- A background helper heartbeats its parent's activity while the parent's own
+             -- turn is over. That parent is waiting, not working: it must not hold a slot.
+             AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
              AND COALESCE(sessions.last_activity_at, 0) >= ?
            )
          )
@@ -407,31 +417,6 @@ export function readSessionArchived(sessionDbPath, sessionId) {
   }
 }
 
-export function readArchivedSessions(sessionDbPath) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    return database.prepare(`
-      SELECT id, source, model, title, started_at, ended_at, end_reason,
-             message_count, parent_session_id, last_activity_at AS last_active,
-             pinned, archived, hidden
-        FROM sessions
-       WHERE archived = 1
-         AND hidden = 0
-         AND parent_session_id IS NULL
-         AND message_count > 0
-       ORDER BY COALESCE(last_activity_at, started_at) DESC
-       LIMIT 100
-    `).all().map((session) => ({
-      ...session,
-      pinned: Boolean(session.pinned),
-      archived: Boolean(session.archived),
-      hidden: Boolean(session.hidden),
-    }))
-  } finally {
-    database.close()
-  }
-}
 
 export async function readCanonicalSessions(sessionDbPath, helmDbPath = '') {
   if (!sessionDbPath || !existsSync(sessionDbPath)) return null
@@ -633,7 +618,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -833,6 +818,49 @@ function durableScreenshotCandidate(record) {
   if (admittedAt === null) return null
   return { visibleText: visibleMemoryText(flattened), images, admittedAt }
 }
+
+// Hermes 0.22.5+ commits every API-server turn as a private-binding admission and stamps its user row
+// display_kind "internal_notification" (gateway/session_ingress.py sets event.internal for trust). For a Wizard
+// chat that row IS the owner's own message: its platform_message_id is the admission_id this queue recorded when
+// it admitted the run. Clear the kind on exactly those rows so the shell shows the owner's bubble and reconciles
+// its "Sent" outbox item; every other internal notification keeps its kind.
+export function restoreOwnerTurns(result, runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes('internal_notification')) return result
+  let records
+  try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
+  // Hermes' session history omits platform_message_id, so an admitted run is matched by its exact visible
+  // input and its admission time (Hermes stamps the user row moments after admitting the run).
+  const pending = []
+  for (const record of Array.isArray(records) ? records : []) {
+    let input = ''
+    try { input = visibleInputText(JSON.parse(String(record?.body ?? '{}'))?.input).trim() } catch { /* unreadable body */ }
+    const at = Number(record?.payload?.created_at ?? record?.createdAt)
+    const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
+    if ((input || id) && Number.isFinite(at)) pending.push({ input, at, id, used: false })
+  }
+  if (!pending.length) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  let changed = false
+  const fix = (row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if ((row.role ?? row.author) !== 'user' || row.display_kind !== 'internal_notification') return row
+    if (row.session_id && row.session_id !== sessionId) return row
+    const rowId = row.platform_message_id ?? row.message_id
+    const text = visibleInputText(row.content).trim()
+    const at = Number(row.timestamp ?? row.created_at)
+    const match = pending.find((p) => !p.used && ((p.id && rowId === p.id)
+      || (p.input && text === p.input && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)))
+    if (!match) return row
+    match.used = true
+    changed = true
+    const { display_kind: _kind, ...rest } = row
+    return rest
+  }
+  for (const key of ['data', 'messages', 'items']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].map(fix)
+  return changed ? Buffer.from(JSON.stringify(payload)) : result
+}
+const OWNER_TURN_WINDOW_SECONDS = 120
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
@@ -1438,18 +1466,36 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   // both, and the merged copy lands after the owner's newest question, reading as extra replies
   // to it. Drop that copy when it is the earlier message plus only text other rows on this page
   // already paint; anything else stays, so no text can disappear.
+  // Hermes stores one message either as a string (its text-only projection turns each image part
+  // into "[screenshot]") or as the original multipart list; a compaction replay can use the other
+  // form. Compare their text, whitespace-insensitive, so both forms count as the same message.
+  // Recalled <memory-context> blocks are hidden from the owner and may be present in only one form.
+  const replayText = (content) => {
+    if (typeof content === 'string') return visibleMemoryText(content)
+    if (!Array.isArray(content)) return null
+    const parts = content.slice(0, 64).map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      if (['image', 'image_url', 'input_image'].includes(part.type)) return '[screenshot]'
+      return typeof part.text === 'string' ? part.text : ''
+    })
+    return visibleMemoryText(parts.join('\n'))
+  }
+  const squash = (text) => String(text ?? '').replace(/\s+/g, '')
   const replayKey = (item) => {
     const role = item?.role ?? item?.author
     const at = item?.timestamp
-    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
-      ? `${role}\u0000${at}` : ''
+    return (role === 'user' || role === 'assistant') && typeof replayText(item?.content) === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${String(item?.session_id ?? '')}\u0000${role}\u0000${at}` : ''
   }
-  const mergedReplay = (earlier, later, pageTexts) => {
+  const mergedReplay = (earlierText, laterText, pageTexts) => {
+    const earlier = squash(earlierText)
+    const later = squash(laterText)
     if (later === earlier) return true
     if (!earlier || !later.startsWith(earlier)) return false
     let rest = later.slice(earlier.length)
-    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
-    return !rest.trim()
+    for (const text of pageTexts.map(squash)) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest
   }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
@@ -1465,14 +1511,15 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
         return key && firstByKey.get(key) !== index ? [index] : []
       }))
       const pageTexts = repeated.size
-        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [replayText(sourceOf(item, index).content)]))]
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
-          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+          const earlierText = replayText(earlier.content)
+          if (mergedReplay(earlierText, replayText(sourceItem.content), pageTexts.filter((text) => text !== earlierText))) return []
         }
         const role = sourceItem?.role ?? sourceItem?.author
         const content = historyContentStrings(sourceItem?.content ?? sourceItem?.text ?? sourceItem?.output).join('\n')
@@ -2000,6 +2047,12 @@ export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, lega
 // localhost app origins), and an Origin, when present, must be this host.
 // On the box-local listener a trusted local proxy may forward the browser-facing Host as X-Forwarded-Host (as
 // for /wizard/thread-dispositions); requests through Serve are judged on their own Host only.
+function skinOriginRefused(request) {
+  if (['cross-site', 'same-site'].includes(request.headers['sec-fetch-site'])) return true
+  if (!request.headers.origin) return false
+  try { return new URL(request.headers.origin).host !== (request.headers['x-forwarded-host'] || request.headers.host) } catch { return true }
+}
+
 function setupWriteRefusal(request, tailnetIngress) {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return 415
   const site = request.headers['sec-fetch-site']
@@ -2014,10 +2067,48 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+// The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
+// (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+export function scheduleNotifier({ bridge, appsJsonPath }) {
+  const pick = () => {
+    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+    let chosen = ''
+    try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
+    const running = providers.filter(app => app.status === 'running')
+    return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
+  }
+  return {
+    available: () => pick()?.status === 'running',
+    send: async ({ title, message }) => {
+      const app = pick()
+      if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      if (!result || result.isError) throw new Error('notify failed')
+      return { app: app.id }
+    },
+  }
+}
+
 // The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
 // Setup never opened. apps.json is written by the App Manager and mounted read-only; a page cannot change it.
+/** The first https view url of the app that provides `shell` in apps.json ('' when none). */
+export function shellUrlFromApps(appsJsonPath) {
+  if (!appsJsonPath) return ''
+  let doc = null
+  try {
+    if (statSync(appsJsonPath).size > 2 * 1024 * 1024) return ''
+    doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
+  } catch { return '' }
+  for (const app of Array.isArray(doc?.apps) ? doc.apps : []) {
+    if (!Array.isArray(app?.provides) || !app.provides.includes('shell')) continue
+    const url = typeof app.view === 'string' ? app.view : app.view?.url
+    if (typeof url === 'string' && url.startsWith('https://')) return url
+  }
+  return ''
+}
+
 export function shellHostsFromApps(appsJsonPath) {
   const hosts = new Set()
   if (!appsJsonPath) return hosts
@@ -2423,9 +2514,14 @@ function buildWizardServer(options, lifetime) {
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
+  let spacesTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
-      builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
+      builtins: {
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
+        call: async (name, args, agentId) => await spacesTools?.call(name, args, agentId) || onboarding?.call(name, args, agentId),
+      },
+      agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -2457,6 +2553,7 @@ function buildWizardServer(options, lifetime) {
     : null)
   let agentSockets
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
@@ -2536,9 +2633,11 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
+  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
+    agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
@@ -2603,11 +2702,32 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  spacesTools = createSpacesTools({
+    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
+    agentExists: id => Boolean(agents?.read(id)),
+    threadExists: (id, thread) => agentCtx.sessionExists(id, thread, { strict: true }),
+    loadThreads: async id => {
+      const agent = agents.read(id)
+      const key = id === MAIN_AGENT_ID ? hermesKey : agents.apiKey(id)
+      const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
+      const headers = key ? { Authorization: `Bearer ${key}` } : {}
+      const secrets = [key].filter(Boolean)
+      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+        headers, secrets,
+        signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
+      })
+      // Subjects come from status projection, not the raw upstream census. Use
+      // the session-list projection with the same scoped transport; omit title/
+      // filing hooks here so metadata search itself remains read-only.
+      return projectProfileSessions({ registry }, agent, rows, headers, secrets)
+    },
+  })
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
   const phoneSetup = options.phoneSetup ?? (settingsPath ? createPhoneSetup({
     settingsPath, socketPath: options.privateAccessSocket || DEFAULT_PRIVATE_ACCESS_SOCKET, accessPinned: Boolean(options.tailnetAccessPinned),
+    hostShellUrl: () => shellUrlFromApps(appsJsonPath),
   }) : null)
   const uxPrefix = `/${String(options.uxPrefix ?? 'wizard-os-home').replace(/^\/+|\/+$/gu, '')}/`
   // A headless Agent Service (the shell runs in its own container) still answers the shell's sidecar API paths
@@ -3209,6 +3329,13 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
+  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
+  let heavyRowsAt = 0, heavyRowsCache = []
+  const heavyJobRows = () => {
+    if (!heavyWork?.queue?.rows) return []
+    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
+    return heavyRowsCache
+  }
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -3318,7 +3445,7 @@ function buildWizardServer(options, lifetime) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
-      if (payload.status === 'completed') chatPhotos?.kick('completed_assistant')
+      if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)) }
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -3352,7 +3479,7 @@ function buildWizardServer(options, lifetime) {
       return held
     }
     const staleRunLogPath = resolve(dirname(runQueueStatePath), 'stale-run-guard.jsonl')
-    for (const path of [staleRunLogPath, resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl')]) {
+    for (const path of [staleRunLogPath, resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'), resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl')]) {
       try { migrateJsonLines(path) } catch { console.warn('[agent-pairs] diagnostic journal left unchanged: migration could not be validated') }
     }
     // Side-effect-free liveness probe: an empty steer is refused with 400 by a live agent, with
@@ -3388,6 +3515,14 @@ function buildWizardServer(options, lifetime) {
           upstream_run_id: record?.upstreamRunId, ...decision }
         console.log(`[interrupt-recovery] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.recoveryRunId ? ` -> ${decision.recoveryRunId}` : ''}`)
         try { const path = resolve(dirname(runQueueStatePath), 'interrupt-recovery.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
+      },
+      steerDelivered: options.steerDeliveredReader
+        ?? ((record, text) => readSteerResentHttp((path) => hermesJson(path), record.sessionId, record.createdAt, text, queuedInputTextOf(record.body))),
+      onPendingSteerReplay: (record, decision) => {
+        const entry = { at: new Date().toISOString(), public_run_id: record?.publicRunId, agent_id: record?.agent_id ?? MAIN_AGENT_ID, session_id: record?.sessionId,
+          upstream_run_id: record?.upstreamRunId, ...decision }
+        console.log(`[pending-steer] ${record?.sessionId} run ${record?.upstreamRunId}: ${decision.state}${decision.reason ? ` (${decision.reason})` : ''}${decision.replayRunId ? ` -> ${decision.replayRunId}` : ''}`)
+        try { const path = resolve(dirname(runQueueStatePath), 'pending-steer-replay.jsonl'); withStoreLock(path, () => appendFileSync(path, JSON.stringify(entry) + '\n', { mode: 0o600 })) } catch { /* log line above remains */ }
       },
     })
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
@@ -3458,6 +3593,19 @@ function buildWizardServer(options, lifetime) {
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
       if (!access) throw Object.assign(new Error('access required'), {status:403})
       const scope = baseRequireAccess && requireAccess ? wizardAccountScope(access.claims) : 'wizard-account-local'
+      if (searchParams.get('mode') === 'body') {
+        const start=performance.now(), q=searchParams.get('q') || ''
+        // Short queries never open SQLite, even on a cold list.
+        if (!indexedSearchWords(q).length) return {object:'list',window_projected:true,data:[],search_total:0,mode:'titles',partial:false,timings:{list_ms:0,fts_ms:0,read_ms:0,candidates:0,sessions:0}}
+        let cached
+        try { cached=await listCache.searchSnapshot() } catch {
+          const all=(await loadCanonicalSessions()).filter(s=>isHumanSession(s,operator)); cached=[]
+          for(let i=0;i<all.length;i+=100) cached.push(...JSON.parse((await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)).toString('utf8')).data)
+        }
+        const list_ms=performance.now()-start
+        const hits=await searchHermesSessionTextAsync(hermesStatePath,cached.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || scope)
+        return {object:'list',window_projected:true,data:[...hits].map(([id,snippet])=>({id,agent:'hermes',snippet})),search_total:hits.size,mode:hits.mode,partial:hits.partial,timings:{list_ms,...hits.timings}}
+      }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
           try { return await listCache.served() }
@@ -3468,13 +3616,13 @@ function buildWizardServer(options, lifetime) {
           // Search reuses the shared list snapshot; only the message-text lookup is per query.
           // Rows are shared with other clients, so matches get a copy, never a mutation.
           let cached
-          try { cached = await listCache.served() }
+          try { cached = await listCache.searchSnapshot() }
           catch (error) { listCache.fellBack(error) }
           if (cached) {
             // Search failures are not cache failures: never retry a timed-out scan
             // as a full projection plus one new search for every batch.
             const hits = await searchHermesSessionTextAsync(hermesStatePath, cached.map(s => s.id), q)
-            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id) } : row)
+            return cached.map(row => hits.has(row.id) ? { ...row, wizard_search_text: hits.get(row.id), wizard_search_match:true } : row)
           }
         }
         const all = (await loadCanonicalSessions()).filter(s => isHumanSession(s, operator))
@@ -3483,11 +3631,11 @@ function buildWizardServer(options, lifetime) {
         for (let i=0; i<all.length; i+=100) {
           const result = await projectSessionList(Buffer.from(JSON.stringify({data:all.slice(i,i+100)})),operator,true,i===0)
           const batch = JSON.parse(result.toString('utf8')).data
-          if (searchParams.get('q')) {
-            const hits = await searchHermesSessionTextAsync(hermesStatePath,batch.map(s=>s.id),searchParams.get('q'))
-            for (const row of batch) if (hits.has(row.id)) row.wizard_search_text = hits.get(row.id)
-          }
           rows.push(...batch)
+        }
+        if(searchParams.get('q')) {
+          const hits=await searchHermesSessionTextAsync(hermesStatePath,rows.map(s=>s.id),searchParams.get('q'))
+          for(const row of rows) if(hits.has(row.id)) { row.wizard_search_text=hits.get(row.id); row.wizard_search_match=true }
         }
         return rows
       } })
@@ -3573,7 +3721,7 @@ function buildWizardServer(options, lifetime) {
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
-    const appNote = appProvenanceRunNote(appCatalog())
+    const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
   }
@@ -3618,6 +3766,7 @@ function buildWizardServer(options, lifetime) {
         if (!session || typeof session.id !== 'string') return session
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+        spaceFiling.apply('hermes', session.id, session.wizard_attention)
         const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
         if (attention?.subject) {
           servedSubjects.delete(session.id)
@@ -3725,6 +3874,14 @@ function buildWizardServer(options, lifetime) {
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
+          if (!operator) {
+            // A thread whose own Thales job is still owed stays in Working, not Ready.
+            try {
+              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(heavyJobRows(), listedSessionIds))) {
+                const t = sessionTruth.get(id); if (t) t.heavyPending = true
+              }
+            } catch { /* heavy queue unreadable: no wait projection */ }
+          }
           result = filterSessionList(
             result,
             operator,
@@ -3809,6 +3966,7 @@ function buildWizardServer(options, lifetime) {
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
+      for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
       const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
@@ -3859,6 +4017,14 @@ function buildWizardServer(options, lifetime) {
       touch: () => { localRevision++ },
       stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
       check,
+      searchSnapshot: async () => {
+        const cached = snapshot.peek()
+        if (cached) {
+          if(snapshot.age()>20000) setImmediate(()=>{ void listCache.served().catch(()=>undefined) })
+          return cached
+        }
+        return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+      },
       served: async () => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
         return rows.map((row) => ({ ...row }))
@@ -3873,9 +4039,9 @@ function buildWizardServer(options, lifetime) {
     }
   })()
 
-  const safeQueueValue = (value, record) => {
+  const safeQueueValue = (value, record, raw = false) => {
     let result = Buffer.from(JSON.stringify(value))
-    result = projectStatusMarkers(result)
+    if (!raw) result = projectStatusMarkers(result)
     result = projectWizardFileMarkers(result)
     const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
     if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
@@ -3884,8 +4050,15 @@ function buildWizardServer(options, lifetime) {
     return JSON.parse(result.toString('utf8'))
   }
 
-  const safeQueuedRunPayload = (record) => safeQueueValue(runQueue.publicPayload(record), record)
-  const sendQueuedRun = (response, status, record, headers = {}) => sendJson(response, status, safeQueuedRunPayload(record), headers)
+  const safeQueuedRunPayload = (record, raw = false) => {
+    const value = runQueue.publicPayload(record)
+    if (value.status === 'completed' && record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output))
+    return safeQueueValue(value, record, raw)
+  }
+  const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
+  // The scheduler's own read of a `deliver: notification` run: its answer ends in [SILENT] (quiet thread), so the
+  // display scrub would erase the notification text. Internal token only; owners always get the scrubbed view.
+  const scheduleRawRead = (request) => request.headers['x-wizard-schedule-raw'] === '1' && internalCall(request)
 
   const streamQueuedRunEvents = async (initialRecord, operator, request, response) => {
     const queuedPayload = safeQueuedRunPayload(initialRecord)
@@ -4113,10 +4286,10 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '') => {
+  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
@@ -4174,12 +4347,14 @@ function buildWizardServer(options, lifetime) {
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
       if (!selfOrigin) return null
       const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
-        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
+        headers: { 'X-Wizard-Internal-Token': internalToken, ...(occurrence.deliver === 'notification' ? { 'X-Wizard-Schedule-Raw': '1' } : {}) }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
       })
       if (!result.ok) { await result.body?.cancel(); return null }
       return result.json()
@@ -4200,6 +4375,13 @@ function buildWizardServer(options, lifetime) {
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+      }
+      // A notification job's own thread is history, not a chat: hidden from Chats. If the slot was down and this
+      // occurrence falls back to the thread, the thread is shown again so the alert is still seen.
+      if ((occurrence.deliver === 'notification' || occurrence.fallback) && occurrence.thread.startsWith('wizard_schedule_')) {
+        const hidden = occurrence.deliver === 'notification'
+        const marked = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, { hidden }, '', 'PATCH')
+        if (!marked.ok) throw Object.assign(new Error('schedule thread visibility failed'), { status: marked.status })
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
@@ -4228,6 +4410,13 @@ function buildWizardServer(options, lifetime) {
   // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
   const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
   if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
+  const skins = options.mySkin === false ? null : createSkins({
+    root: options.userFilesRoot || options.mediaRoot || '',
+    stateDir: options.skinsStateDir || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'skins') : join(bridgeOsHome || wizardOsHome(), 'skins')),
+    ...(options.skins || {}),
+  })
+  // Lazy migration keeps unavailable/symlinked Files roots from preventing service startup.
+  try { skins?.migrate() } catch { /* API reads report unavailable; the shell still renders */ }
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -4456,7 +4645,7 @@ function buildWizardServer(options, lifetime) {
           'POST /wizard/v1/setup/phone/start': () => phoneSetup.start(),
           'POST /wizard/v1/setup/phone/reset': () => phoneSetup.reset(),
         }
-        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, phoneSetup.overview()); return }
+        if (route === 'GET /wizard/v1/setup') { sendJson(response, 200, await phoneSetup.overview()); return }
         if (route === 'GET /wizard/v1/setup/phone') { sendJson(response, 200, await phoneSetup.phone()); return }
         if (!writes[route]) { sendJson(response, 404, { error: 'not_found' }); return }
         const refusal = setupWriteRefusal(request, tailnetIngress)
@@ -4657,7 +4846,7 @@ function buildWizardServer(options, lifetime) {
         let patch
         if (request.method === 'PUT') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
-          try { patch = JSON.parse((await readBoundedBody(request, 32768)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
+          try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
           sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
@@ -4671,6 +4860,44 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
+      }
+      if (url.pathname === '/wizard/v1/skins' || url.pathname.startsWith('/wizard/v1/skins/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (!skins) { sendJson(response, 503, { error: 'skins_unavailable' }); return }
+        try {
+          const route = url.pathname.slice('/wizard/v1/skins'.length)
+          const action = /^\/([^/]+)\/(pack|publish)$/.exec(route)
+          const blob = /^\/store\/blob\/([a-f0-9]{64})$/.exec(route)
+          const allowed = route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || action ? ['POST'] : []
+          if (!allowed.length) { sendJson(response, 404, { error: 'not_found' }); return }
+          if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
+          let input = {}
+          if (request.method !== 'GET') {
+            if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+            try { input = JSON.parse((await readBoundedBody(request, 768 * 1024)).toString('utf8')) } catch (e) { throw new SkinsError(e?.status === 413 ? 413 : 400, e?.status === 413 ? 'body_too_large' : 'invalid_request') }
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SkinsError(400, 'invalid_request')
+          }
+          let output
+          if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css })
+          else if (route === '/active') output = skins.setActive(input.id)
+          else if (route === '/store') output = await skins.store({ refresh: url.searchParams.get('refresh') === '1', authors: url.searchParams.get('authors') || '' })
+          else if (blob) {
+            const value = await skins.blob(blob[1])
+            response.writeHead(200, { 'Content-Type': value.mime, 'Content-Length': String(value.body.length), 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" })
+            response.end(value.body); return
+          }
+          else if (route === '/store/add') output = await skins.add(input.a)
+          else if (route === '/store/report') output = await skins.report(input)
+          else if (action) {
+            let id
+            try { id = decodeURIComponent(action[1]) } catch { throw new SkinsError(400, 'invalid_skin_id') }
+            output = action[2] === 'pack' ? await skins.pack(id, input) : await skins.publish(id, input.event)
+          }
+          sendJson(response, 200, output, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, error instanceof SkinsError ? error.status : 503, { error: error instanceof SkinsError ? error.code : 'skins_unavailable' }) }
+        return
       }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -4702,12 +4929,7 @@ function buildWizardServer(options, lifetime) {
         // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
         // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        if (request.headers.origin) {
-          let host
-          try { host = new URL(request.headers.origin).host } catch { host = '' }
-          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
         try {
           if (request.method === 'DELETE') mySkin.reset()
@@ -4803,6 +5025,24 @@ function buildWizardServer(options, lifetime) {
             scheduler.delete(job.id); sendJson(response, 200, { deleted: true, id: job.id, name: job.name })
           } else sendJson(response, 404, { error: 'not_found' })
         } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/agents/')) {
+        // The main agent's read-only cross-agent tools (Hermes plugin wizard-agents): the same six
+        // wizard_agents__* tools container agents get on /wizard/mcp, read as the main agent. Same loopback
+        // token and refusal rules as schedules; the registry's live seals decide every read.
+        if (!bridge || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'agent read denied' }); return }
+        const tool = `wizard_agents__${url.pathname.slice('/wizard/internal/agents/'.length)}`
+        if (!SHARED_AGENT_TOOLS.includes(tool)) { sendJson(response, 404, { error: 'not_found' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 8 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        const result = await bridge.callTool(tool, value && typeof value === 'object' && !Array.isArray(value) ? value : {}, GATEWAY_MAIN_AGENT)
+        sendJson(response, result?.isError ? 403 : 200, result)
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {
@@ -5386,7 +5626,7 @@ function buildWizardServer(options, lifetime) {
             }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
-              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead, rawRunRead: scheduleRawRead(request),
             })
             return
           }
@@ -5410,7 +5650,7 @@ function buildWizardServer(options, lifetime) {
         }
         if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
           await runQueue.tick(true)
-          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId))
+          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId), {}, scheduleRawRead(request))
           return
         }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop' && !queuedProxyRecord.upstreamRunId) {
@@ -5552,7 +5792,7 @@ function buildWizardServer(options, lifetime) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
-        for (const key of ['window','q','overrides','cursor']) upstreamQuery.delete(key)
+        for (const key of ['window','q','overrides','cursor','fields','mode']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
           ? await canonicalSessionPage(operator, url.searchParams, request)
@@ -5626,7 +5866,9 @@ function buildWizardServer(options, lifetime) {
           try {
             const runId = upstreamPath.split('/').at(-1)
             const tracked = directRuns.get(runId)
-            const status = JSON.parse(result.toString('utf8')).status
+            const completedRun = JSON.parse(result.toString('utf8'))
+            const status = completedRun.status
+            if (!ACTIVE_RUN_STATUSES.has(status)) spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output))
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
             else if (tracked) directRuns.delete(runId)
           } catch { /* status projection is best effort */ }
@@ -5751,6 +5993,7 @@ function buildWizardServer(options, lifetime) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
+            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original
@@ -5758,7 +6001,8 @@ function buildWizardServer(options, lifetime) {
           // the existing marker/media/shareability projection order.
           const historySource = result
           result = projectWizardFileMarkers(result, messageHistory)
-          if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
+          const scheduleRaw = !messageHistory && scheduleRawRead(request)
+          if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
@@ -5907,6 +6151,12 @@ function buildWizardServer(options, lifetime) {
     // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
     server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
     void server.agentSocketsReady.catch(() => undefined)
+    // Wait until the gateway is accepting connections before reapplying old
+    // managed harnesses. No owner update or conversation is needed on upgrade.
+    server.once('listening', () => {
+      server.agentHarnessesReady = server.agentSocketsReady.then(() => agents.migrateManagedHarnesses())
+      void server.agentHarnessesReady.catch(() => undefined)
+    })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {

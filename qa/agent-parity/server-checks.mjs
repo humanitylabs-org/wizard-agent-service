@@ -17,6 +17,52 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'chats-spaces': async s => {
+    const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
+    const space = { id: 'parity-space', name: 'Synthetic Space', ...(s.id === 'hermes' ? {} : { agent: s.id }), threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
+    const put = spaces => s.raw('/wizard/v1/ui-preferences', { ...post({ spaces }), method: 'PUT' })
+    const tool = async (name, args = {}, error = '') => {
+      const r = await s.agentMcp('tools/call', { name, arguments: args })
+      assert.equal(r.status, 200, 'agent gateway authentication/transport')
+      const reply = (await r.json()).result
+      if (error) { assert.equal(reply.isError, true); assert.equal(reply.content[0].text, error); return }
+      assert.notEqual(reply.isError, true, JSON.stringify(reply))
+      return JSON.parse(reply.content[0].text)
+    }
+    assert.equal((await put([space, foreign])).status, 200)
+    const listed = await s.agentMcp('tools/list')
+    assert.equal(listed.status, 200)
+    const names = (await listed.json()).result.tools.map(t => t.name)
+    for (const name of ['list', 'search_threads', 'create', 'add', 'remove', 'delete']) assert.ok(names.includes(`spaces_${name}`))
+    assert.deepEqual((await tool('spaces_list')).spaces, [{ id: space.id, name: space.name, count: 1 }])
+    const row = s.sessions.get('wizard_parity'); row.hidden = false; row.title = 'Synthetic metadata title'
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000, content: 'CONTENT_CANARY\n[WIZARD_STATUS_V1]{"state":"done","ask":"Synthetic","subject":"ParitySubjectOnly"}[/WIZARD_STATUS_V1]' })
+    const found = await tool('spaces_search_threads', { query: 'ParitySubjectOnly' })
+    assert.deepEqual(found.threads.map(t => t.id), ['wizard_parity'])
+    assert.equal(found.threads[0].subject, 'ParitySubjectOnly')
+    assert.ok(!JSON.stringify(found).includes('CONTENT_CANARY'))
+    const created = (await tool('spaces_create', { name: 'Gateway Space' })).space
+    assert.equal((await tool('spaces_create', { name: 'Gateway Space' })).space.id, created.id)
+    for (const name of ['spaces_add', 'spaces_remove', 'spaces_delete']) {
+      const args = name === 'spaces_delete' ? {} : { thread_ids: ['wizard_parity'] }
+      await tool(name, { space_id: foreign.id, ...args }, 'not_found')
+      await tool(name, { space_id: 'missing-space', ...args }, 'not_found')
+    }
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
+    const run = await admit(s, { input: 'Synthetic Space fill' })
+    assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
+    assert.ok(!sent(s).instructions.includes('FOREIGN_SPACE_CANARY'))
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output: `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Filed', space: created.id })}[/WIZARD_STATUS_V1]` })
+    assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'status-line Space filing')
+    await s.restart()
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'durable agent-scoped membership')
+    await tool('spaces_delete', { space_id: created.id })
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [space, foreign])
+    assert.equal((await put([])).status, 200)
+    assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
+  },
   'nonimage-files': async s => {
     const bytes = Buffer.from('PARITY_DOCUMENT_UNDISCLOSED_TOKEN\n')
     const r = await s.upload(bytes, 'fixture.txt', 'text/plain'); assert.equal(r.status, 201)
@@ -68,6 +114,29 @@ export const serverChecks = {
     const records = Object.values(state.state.threads)
     assert.equal(records.length, 1)
     assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now); assert.equal(records[0].unreadAt, unreadAt)
+  },
+  'session-slim-index': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<165;i++) s.sessions.set(`wizard_slim_${i}`,{id:`wizard_slim_${i}`,source:'wizard-mobile',title:`Slim archive ${i}`,created_at:now-20*86400-i,archived:true,hidden:false,messages:[{role:'user',content:'Slim visible preview',timestamp:now-20*86400-i}]});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',title:'Private title sentinel',hidden:true,created_at:now,messages:[{role:'user',content:'Private hidden preview',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500'); assert.equal(r.status,200);
+    const page=await r.json(); assert.equal(page.fields,'slim'); assert(page.build); assert.equal(page.archive_total,165); assert.equal(page.data.length,50);
+    assert(!JSON.stringify(page).includes('Private title sentinel')); assert(page.data.every(row=>row.agent===s.id&&row.preview.length<=160&&!('latest_message'in row)&&!('request'in row)));
+    const tail=await (await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500&cursor='+page.archive_cursor)).json();
+    assert.equal(tail.data.length,115); assert.equal(tail.archive_cursor,null); assert.equal(tail.build,page.build);
+    if(s.kind!=='main') { const main=await (await s.raw('/wizard/hermes/api/sessions?view=list&window=archive-50&fields=slim')).json(); assert(!main.data.some(row=>row.id.startsWith('wizard_slim_')),'main index never unions a routed runtime'); }
+  },
+  'session-body-search': async s => {
+    const row=s.sessions.get('wizard_parity'),now=Date.now()/1000; row.hidden=false;
+    row.messages.push({role:'user',timestamp:now,content:'Visible paritybodytoken\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data]\nprivaterecalltoken\n</memory-context>'});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',hidden:true,created_at:now,messages:[{role:'user',content:'privatescopetoken',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body'); assert.equal(r.status,200);
+    const body=await r.json(); assert.equal(body.mode,'body'); assert.equal(body.search_total,1); assert.deepEqual(Object.keys(body.data[0]).sort(),['agent','id','snippet']); assert.equal(body.data[0].agent,s.id); assert(!body.data[0].snippet.includes('privaterecalltoken')); assert(body.timings.fts_ms>=0);
+    for(const token of ['privatescopetoken','privaterecalltoken']) { const privateResult=await (await s.request('/api/sessions?view=list&q='+token+'&mode=body')).json(); assert.equal(privateResult.search_total,0); }
+    const short=await (await s.request('/api/sessions?view=list&q=no&mode=body')).json(); assert.equal(short.mode,'titles'); assert.equal(short.timings.fts_ms,0);
+    s.dropSearchIndex(); const unavailable=await (await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body')).json(); assert.equal(unavailable.mode,'titles'); assert.equal(unavailable.search_total,0);
   },
   'session-search': async s => {
     s.sessions.get('wizard_parity').messages.push({ role: 'user', timestamp: Date.now() / 1000, content: 'parityuniquetoken' })
