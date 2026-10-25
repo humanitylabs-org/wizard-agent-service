@@ -53,6 +53,7 @@ def permitted(home, path):
     return name in {
         '.local/share/wizard-mobile-server/current',
         '.local/share/wizard-agent-runtime/current',
+        '.local/share/wam-python/current',
         '.local/bin/wam',
         '.config/systemd/user/wizard-app-manager-api.service.d/connection-fork-registry.conf',
         '.config/systemd/user/wizard-agent-runtime.service.d/99-pp-launch-wam.conf',

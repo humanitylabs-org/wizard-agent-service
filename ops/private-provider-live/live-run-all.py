@@ -52,6 +52,7 @@ class Commands:
   env=dict(os.environ,PP_LAUNCH_ATTEMPT=self.attempt,PP_LAUNCH_CONTEXT=str(context),PP_LAUNCH_RECEIPTS=str(self.output),PP_LAUNCH_NO_DRAIN='1')
   out=self.output/(operation+'.json')
   p=subprocess.run(self.plan['commands'][operation],env=env,capture_output=True,timeout=timeout)
+  log=self.output/(operation+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
   # Never echo subprocess stdout/stderr; operational logs could contain secrets.
   if p.returncode:raise LaunchError(operation+' failed (exit '+str(p.returncode)+'); output withheld')
   if not out.is_file():raise LaunchError(operation+' returned no exact-target readback receipt')
@@ -114,6 +115,12 @@ def main():
  import importlib.util
  spec=importlib.util.spec_from_file_location('preflight',Path(__file__).with_name('live-preflight.py'));assert spec and spec.loader;mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
  plan=json.loads(a.plan.read_text());rig=json.loads(a.rig_evidence.read_text());attempt=uuid.uuid4().hex;root=a.output.parent/attempt;root.mkdir(parents=True)
+ if not plan.get('rig_target'):
+  from production_readiness import check
+  before=mod.fingerprint(Path.home());blockers=check(plan,rig,before,Path(__file__).parent);after=mod.fingerprint(Path.home())
+  if before!=after:blockers.append('live drift during authenticated read-only admission')
+  if blockers:
+   report={'attempt':attempt,'status':'blocked','blockers':blockers,'before':before,'after':after,'live_fingerprint_unchanged':before==after,'mutated':False};atomic(a.output,report);print(json.dumps(report,indent=2));return 1
  with (a.output.parent/'launch.lock').open('a') as lock:
   fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   report=Orchestrator(Commands(plan,attempt,root),lambda:mod.fingerprint(Path.home()),root/'receipt.json').run(rig,plan,a.dry_run)

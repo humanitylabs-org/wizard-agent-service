@@ -15,7 +15,7 @@ import time
 
 URN = 'wizard-tinfoil_private:wizardapps'
 CONTAINERS = ['wizard-agent-service', 'runtipi']
-UNITS = ['wizard-mobile', 'wizard-api', 'hermes-gateway', 'wizard-agent-runtime']
+UNITS = ['wizard-mobile', 'wizard-api', 'hermes-gateway', 'wizard-agent-runtime', 'wizard-app-manager-api']
 
 
 def command(argv):
@@ -26,7 +26,15 @@ def command(argv):
 
 
 def inspect():
-    data = json.loads(command(['docker', 'inspect', *CONTAINERS]))
+    data = json.loads(command(['docker', 'inspect', 'runtipi']))
+    if Path('/etc/pp-rig').exists():
+        # The marked guest runs the real Service as an owner systemd process,
+        # not a daemon-container lookalike. Fingerprint that actual selection.
+        raw=command(['systemctl','--user','show','wizard-mobile','--property=MainPID,ExecMainStartTimestampMonotonic'])
+        result={x['Name'].lstrip('/'): {'id':x['Id'],'image':x['Config']['Image'],'image_id':x['Image'],'started_at':x['State']['StartedAt'],'running':x['State']['Running']} for x in data}
+        result['wizard-agent-service']={'execution':'host-systemd','unit_fingerprint':raw}
+        return result
+    data += json.loads(command(['docker', 'inspect', 'wizard-agent-service']))
     return {x['Name'].lstrip('/'): {
         'id': x['Id'], 'image': x['Config']['Image'], 'image_id': x['Image'],
         'started_at': x['State']['StartedAt'], 'running': x['State']['Running'],
@@ -37,7 +45,7 @@ def units():
     rows = {}
     for name in UNITS:
         raw = command(['systemctl', '--user', 'show', name,
-                       '--property=MainPID,ActiveState,ExecMainStartTimestampMonotonic'])
+                       '--property=MainPID,ActiveState,ExecMainStartTimestampMonotonic']) if not Path('/etc/pp-rig').exists() or name in ['wizard-mobile','wizard-agent-runtime','wizard-app-manager-api'] else 'ActiveState=absent'
         rows[name] = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
     return rows
 
@@ -75,8 +83,10 @@ def ui_fingerprint(home):
 
 def fingerprint(home):
     from live_sources import discover
+    from python_rollout import tree_hash
+    shell=home/'apps/wizard-os-home/web'
     return {'containers': inspect(), 'units': units(), 'releases': releases(home),
-            'ui': ui_fingerprint(home), 'wam_sources': discover(home)}
+            'ui': ui_fingerprint(home), 'shell':{'resolved':str(shell.resolve()),'sha256':tree_hash(shell.resolve())},'wam_sources': discover(home)}
 
 
 def main():

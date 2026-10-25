@@ -2,7 +2,7 @@
 """Build a fresh tested candidate from the actual live Service base on Thales."""
 import argparse,hashlib,json,os,shutil,subprocess,sys,tarfile,time
 from pathlib import Path
-SERVICE='5e445fca7c87da825e8d669fbf35e3e6eeeb5acb'
+SERVICE='be076f491b8db8ac6963380266856f63447107f2'
 UX='f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6'
 ROOT=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live/staging')
 
@@ -13,10 +13,10 @@ def remote(data):
  attempt_root=ROOT/attempt;root=attempt_root/str(time.time_ns());root.mkdir(parents=True,exist_ok=True);remaining=min(float(data.get('budget',570)),float(data.get('expires_at',time.time()+570))-time.time());deadline=time.monotonic()+remaining;logs=[]
  if remaining<=0:raise RuntimeError('staging admission budget expired while waiting for worker')
  env=dict(os.environ,PATH='/opt/homebrew/bin:'+os.environ['PATH'],TMPDIR=str(Path('/Volumes/ThalesMedia/.pp-tmp')/attempt[:8]));Path(env['TMPDIR']).mkdir(parents=True,exist_ok=True)
- def run(argv,cwd=None):
+ def run(argv,cwd=None,payload=None):
   left=deadline-time.monotonic()
   if left<=0:raise RuntimeError('staging budget exhausted')
-  p=subprocess.run(argv,cwd=cwd,env=env,capture_output=True,timeout=left)
+  p=subprocess.run(argv,cwd=cwd,env=env,capture_output=True,timeout=left,input=payload)
   log=root/('step-'+str(len(logs))+'.log');log.write_bytes(p.stdout+p.stderr);logs.append({'argv':argv,'returncode':p.returncode,'log':str(log)})
   if p.returncode:raise RuntimeError('staging step failed: '+str(len(logs)-1))
   return p.stdout.decode().strip()
@@ -25,23 +25,28 @@ def remote(data):
   if svc.exists():shutil.rmtree(svc)
   svc.mkdir();run(['git','init','-q'],svc);run(['git','remote','add','origin','https://github.com/humanitylabs-org/wizard-agent-service.git'],svc)
   run(['git','fetch','--no-tags','origin',base,SERVICE],svc);run(['git','checkout','--detach',base],svc)
+  # Replay the already reviewed integration as a delta, then the new product
+  # delta. No branch/public merge is performed. Unknown apply conflicts fail closed.
+  old_provider='5e445fca7c87da825e8d669fbf35e3e6eeeb5acb'
+  old_live='4be54416627ab3f578a951166a084e459e9edd9c'
+  integrated='8aa4372ff0c64ae2e053032da789395d03c70540'
+  prior=ROOT/'f442c36a5fe942e4b55c7ec944482043/1792894907109610000/service-4be54416627a'
+  run(['git','fetch','--no-tags',str(prior),integrated,old_provider],svc)
   resolutions=[]
-  try:run(['git','-c','user.name=defleur-agents','-c','user.email=263346993+defleur-agents@users.noreply.github.com','merge','--no-ff','--no-edit',SERVICE],svc)
-  except RuntimeError:
-   from merge_resolver import resolve
-   conflicts=run(['git','diff','--name-only','--diff-filter=U'],svc).splitlines()
-   if not conflicts or not (svc/'.git/MERGE_HEAD').exists():raise
-   resolutions=resolve(svc,conflicts)
-   run(['git','add','--',*conflicts],svc)
-   run(['git','-c','user.name=defleur-agents','-c','user.email=263346993+defleur-agents@users.noreply.github.com','commit','--no-edit'],svc)
+  if base!=old_provider:
+   delta=run(['git','diff','--binary',old_live,integrated],svc)+'\n'
+   run(['git','apply','--3way','--index','-'],svc,payload=delta.encode())
+  delta=run(['git','diff','--binary',old_provider,SERVICE],svc)+'\n'
+  run(['git','apply','--3way','--index','-'],svc,payload=delta.encode())
+  run(['git','-c','user.name=defleur-agents','-c','user.email=263346993+defleur-agents@users.noreply.github.com','commit','--allow-empty','-m','Stage reviewed private-provider deltas on exact live base'],svc)
   candidate=run(['git','rev-parse','HEAD'],svc)
-  run(['git','merge-base','--is-ancestor',base,'HEAD'],svc);run(['git','merge-base','--is-ancestor',SERVICE,'HEAD'],svc)
+  run(['git','merge-base','--is-ancestor',base,'HEAD'],svc)
   run(['npm','ci','--no-audit','--no-fund'],svc)
-  run(['npx','--no-install','vitest','run','tests/private-provider-launch.test.ts','tests/legacy-private-compat.test.ts','tests/private-providers.test.ts','tests/agents.test.ts','tests/ui-preferences.test.ts','tests/thread-spaces.test.ts','tests/thread-spaces-http.test.ts','tests/routed-run-queue.test.ts'],svc)
+  run(['npx','--no-install','vitest','run','tests/agents-legacy-migration.test.ts','tests/private-provider-launch.test.ts','tests/legacy-private-compat.test.ts','tests/private-providers.test.ts','tests/agents.test.ts','tests/ui-preferences.test.ts','tests/thread-spaces.test.ts','tests/thread-spaces-http.test.ts','tests/routed-run-queue.test.ts'],svc)
   venv=root/'test-venv';python=str(venv/'bin/python')
   run([sys.executable,'-m','venv',str(venv)],svc)
   run([python,'-m','pip','install','--disable-pip-version-check','pytest','pyyaml'],svc)
-  run([python,'-m','pytest','ops/agent-runtime/test_agent_runtime.py','ops/agent-runtime/test_private_providers.py','ops/agent-runtime/test_provider_launch_compat.py','ops/agent-runtime/test_provider_egress.py','-q'],svc)
+  run([python,'-m','pytest','ops/agent-runtime/test_agent_runtime.py','ops/agent-runtime/test_private_providers.py','ops/agent-runtime/test_provider_launch_compat.py','ops/agent-runtime/test_provider_egress.py','ops/agent-runtime/test_provider_key_scrub.py','ops/agent-runtime/test_private_restore.py','-q'],svc)
   if not ux.exists():
    ux.mkdir();run(['git','init','-q'],ux);run(['git','remote','add','origin','https://github.com/humanitylabs-org/wizard-ux.git'],ux);run(['git','fetch','--no-tags','origin',UX],ux);run(['git','checkout','--detach',UX],ux)
   assert run(['git','rev-parse','HEAD'],ux)==UX
@@ -57,6 +62,7 @@ def remote(data):
    for name in ['server','node_modules','package.json','package-lock.json']:tf.add(svc/name,arcname='service/'+name)
    tf.add(svc/'ops/agent-runtime',arcname='runtime',filter=lambda i:None if '__pycache__' in i.name or '.pytest_cache' in i.name else i)
    tf.add(ux/'web',arcname='ux')
+   tf.add(svc/'ops/private-provider-rig/checks',arcname='acceptance')
   result={'attempt':attempt,'operation':'stage','status':'passed','base_sha':base,'provider_sha':SERVICE,'candidate_sha':candidate,'ux_sha':UX,'focused_suites_passed':True,'reviewed_merge_resolutions':resolutions,'artifact':str(artifact),'artifact_sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),'steps':logs}
  except Exception as e:
   result={'attempt':attempt,'operation':'stage','status':'blocked','base_sha':base,'error':type(e).__name__+': '+str(e),'steps':logs}
