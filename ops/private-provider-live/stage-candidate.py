@@ -2,7 +2,7 @@
 """Build a fresh tested candidate from the actual live Service base on Thales."""
 import argparse,hashlib,json,os,shutil,subprocess,sys,tarfile,time
 from pathlib import Path
-SERVICE='809513862d318e6e55dc4b0f4d3ef9d24da06982'
+SERVICE='5f590792828fd455bd5b4f5b71c155d30e7573ca'
 UX='f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6'
 ROOT=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live/staging')
 
@@ -46,7 +46,7 @@ def remote(data):
   venv=root/'test-venv';python=str(venv/'bin/python')
   run([sys.executable,'-m','venv',str(venv)],svc)
   run([python,'-m','pip','install','--disable-pip-version-check','pytest','pyyaml'],svc)
-  run([python,'-m','pytest','ops/agent-runtime/test_agent_runtime.py','ops/agent-runtime/test_private_providers.py','ops/agent-runtime/test_provider_launch_compat.py','ops/agent-runtime/test_provider_egress.py','ops/agent-runtime/test_provider_key_scrub.py','ops/agent-runtime/test_private_restore.py','-q'],svc)
+  run([python,'-m','pytest','ops/agent-runtime/test_agent_runtime.py','ops/agent-runtime/test_private_providers.py','ops/agent-runtime/test_provider_launch_compat.py','ops/agent-runtime/test_provider_egress.py','ops/agent-runtime/test_provider_key_scrub.py','ops/agent-runtime/test_private_restore.py','ops/agent-runtime/test_local_readiness.py','-q'],svc)
   if not ux.exists():
    ux.mkdir();run(['git','init','-q'],ux);run(['git','remote','add','origin','https://github.com/humanitylabs-org/wizard-ux.git'],ux);run(['git','fetch','--no-tags','origin',UX],ux);run(['git','checkout','--detach',UX],ux)
   assert run(['git','rev-parse','HEAD'],ux)==UX
