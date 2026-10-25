@@ -70,6 +70,30 @@ class RestoreTests(unittest.TestCase):
             return SimpleNamespace(stdout=json.dumps({'files_scanned':9,'credential_matches':0}))
         with patch.object(ar,'container_for',return_value='synthetic-main'),patch.object(ar,'docker',side_effect=mocked):handler.do_POST()
         self.assertEqual(replies,[(200,{'sealed':True,'retirement_status':'completed','retired_files':3,'files_scanned':9,'credential_matches':0})])
+    def test_status_scan_ignores_identifier_mentions_but_detects_real_credentials(self):
+        from email.message import Message
+        import io, subprocess, sys
+        self.agent['schema']=1
+        (self.home.parent/'agent.json').write_text(json.dumps(self.agent))
+        (self.runtime/'key-scrub.json').write_text(json.dumps({'status':'completed','count':3}))
+        scan=self.root/'scan';scan.mkdir()
+        handler=object.__new__(ar.make_handler('fixture-auth',self.agents,self.legacy,restricted_driver=self.sealed))
+        handler.headers=Message();handler.headers['Authorization']='Bearer fixture-auth'
+        handler.path='/agents/probe/private-migration-status'
+        replies=[];handler._json=lambda c,b:replies.append((c,b))
+        def mocked(args,**kwargs):
+            code=args[-1].replace("'/opt/data'",repr(str(scan)))
+            return subprocess.run([sys.executable,'-c',code],input=kwargs['input_text'],capture_output=True,text=True,check=True)
+        (scan/'documentation').write_text('# Set TINFOIL_API_KEY through the trusted host source.\n')
+        with patch.object(ar,'container_for',return_value='synthetic-main'),patch.object(ar,'docker',side_effect=mocked):
+            handler.rfile=io.BytesIO();handler.do_POST()
+            self.assertEqual(replies[-1][1]['credential_matches'],0)
+            (scan/'assignment').write_text('export TINFOIL_API_KEY=synthetic-old-value\n')
+            (scan/'boundary').write_bytes(b'x'*(1048576-5)+b'synthetic-host-only-12345')
+            (scan/'multiple').write_text('synthetic-host-only-12345\n'*50000)
+            handler.rfile=io.BytesIO();handler.do_POST()
+            self.assertEqual(replies[-1][1]['credential_matches'],3)
+            self.assertEqual(replies[-1][1]['files_scanned'],4)
     def test_provider_reconcile_rpc_is_authenticated_count_only(self):
         from email.message import Message
         import io
