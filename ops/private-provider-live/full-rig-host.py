@@ -3,10 +3,10 @@
 import base64,hashlib,importlib.util,json,os,shutil,subprocess,sys,tarfile,time
 from pathlib import Path
 L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live');s=importlib.util.spec_from_file_location('prepare',L/'rig-prepare.py');assert s and s.loader;m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
-number=int(sys.argv[1]);assert number in {2,3,4,5}
-prior=sorted(L.glob('FULL-LIVE-RUN-[0-9].json'));assert len(prior)<4 and all(json.loads(x.read_text()).get('status')!='running' for x in prior),'four-job rig budget exhausted or another lane job is active'
+number=int(sys.argv[1]);assert number in {6,7,8,9,10}
+prior=[x for x in L.glob('FULL-LIVE-RUN-*.json') if x.stem.rsplit('-',1)[-1].isdigit() and json.loads(x.read_text()).get('lane')=='pp-live-adapters-3'];assert len(prior)<5 and all(json.loads(x.read_text()).get('status')!='running' for x in prior),'five-job rig budget exhausted or another lane job is active'
 key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
-receipt={'lane':'pp-live-adapters-2','rig_attempt':len(prior)+1,'job_label':number,'prior_job_labels':[x.name for x in prior],'status':'running','phases':[],'started_at':time.time()};path=L/('FULL-LIVE-RUN-'+str(number)+'.json');assert not path.exists()
+receipt={'lane':'pp-live-adapters-3','rig_attempt':len(prior)+1,'job_label':number,'prior_job_labels':[x.name for x in prior],'status':'running','phases':[],'started_at':time.time()};path=L/('FULL-LIVE-RUN-'+str(number)+'.json');assert not path.exists()
 def save():path.write_text(json.dumps(receipt,indent=2)+'\n')
 def phase(name,argv,payload=None,timeout=1800):
  p=subprocess.run(argv,input=payload,capture_output=True,timeout=timeout)

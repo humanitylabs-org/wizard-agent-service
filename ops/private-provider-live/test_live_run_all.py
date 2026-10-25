@@ -69,4 +69,15 @@ class Tests(unittest.TestCase):
   import copy
   rig=copy.deepcopy(RIG);rig['reset']['remaining_synthetic_containers']=['survivor']
   f,r=self.launch(rig=rig,dry=True);self.assertEqual(r['status'],'blocked');self.assertEqual(f.calls,[])
+ def test_failed_step_has_explicit_error_receipt(self):
+  f,r=self.launch(Fake('snapshot'))
+  self.assertEqual(r['steps'][-1]['operation'],'snapshot')
+  self.assertEqual(r['steps'][-1]['receipt']['status'],'failed')
+  self.assertIn('injected snapshot',r['steps'][-1]['receipt']['error'])
+ def test_untrusted_exception_text_is_redacted(self):
+  class Bad(Fake):
+   def call(self,*args,**kwargs):raise ValueError('sensitive-response-sentinel')
+  f,r=self.launch(Bad())
+  self.assertNotIn('sensitive-response-sentinel',json.dumps(r))
+  self.assertIn('ValueError',json.dumps(r))
 if __name__=='__main__':unittest.main()

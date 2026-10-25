@@ -28,6 +28,16 @@ def api(home,wam):
 
 def urns(rt):return {(r.get('info') or {}).get('urn'):r for r in rt.installed()}
 
+def user_config(rt):
+    # An unstaged local recipe has no catalogue entry yet. Only this exact API
+    # absence is a blank prior config; auth/transport/other errors fail closed.
+    try:return rt.req('GET','/user-config/'+URN)
+    except Exception as error:
+        text=str(error)
+        if type(error).__name__=='RuntipiError' and text.startswith('GET /user-config/'+URN+' -> 404:') and 'APP_ERROR_APP_NOT_FOUND' in text:
+            return {'dockerCompose':'','appEnv':''}
+        raise
+
 def blank_config(data):
     import yaml
     try:
@@ -43,7 +53,7 @@ class Provider:
     def snapshot(self,legacy_source):
         installed=urns(self.rt)
         if URN in installed:raise RuntimeError('private provider already installed by another attempt')
-        before=self.rt.req('GET','/user-config/'+URN)
+        before=user_config(self.rt)
         if not blank_config(before):raise RuntimeError('foreign private provider user-config')
         old=installed.get(OLD)
         data={'attempt':self.attempt,'old_present':bool(old),'old_status':(old or {}).get('app',{}).get('status'),'backup':None,'new_owned':False,'prior_user_config':before}

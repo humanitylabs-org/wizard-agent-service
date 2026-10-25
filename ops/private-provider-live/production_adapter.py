@@ -144,5 +144,10 @@ if __name__=='__main__':
     except Exception as e:
         # Exception messages from urllib/Runtipi may include private response data.
         # Keep only exception class and adapter phase in the visible CLI result.
-        print('ADAPTER_FAILED '+type(e).__name__,file=sys.stderr)
-        raise
+        import traceback
+        frames=[{'file':Path(f.filename).name,'function':f.name,'line':f.lineno} for f in traceback.extract_tb(e.__traceback__)]
+        error={'type':type(e).__name__,'frames':frames}
+        root=os.environ.get('PP_LAUNCH_RECEIPTS')
+        if root:write(Path(root)/'adapter-error.json',error)
+        print('ADAPTER_FAILED '+json.dumps(error),file=sys.stderr)
+        sys.exit(1)

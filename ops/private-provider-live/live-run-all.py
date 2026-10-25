@@ -54,7 +54,11 @@ class Commands:
   p=subprocess.run(self.plan['commands'][operation],env=env,capture_output=True,timeout=timeout)
   log=self.output/(operation+'.log');log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
   # Never echo subprocess stdout/stderr; operational logs could contain secrets.
-  if p.returncode:raise LaunchError(operation+' failed (exit '+str(p.returncode)+'); output withheld')
+  if p.returncode:
+   error_path=self.output/'adapter-error.json'
+   detail=json.loads(error_path.read_text()) if error_path.exists() else {'type':'SubprocessFailure','returncode':p.returncode}
+   atomic(out,{'attempt':self.attempt,'operation':operation,'status':'failed','error':detail})
+   raise LaunchError(operation+' failed (exit '+str(p.returncode)+'); redacted error in '+operation+'.json')
   if not out.is_file():raise LaunchError(operation+' returned no exact-target readback receipt')
   data=json.loads(out.read_text())
   if data.get('attempt')!=self.attempt or data.get('operation')!=operation or data.get('status')!='passed':raise LaunchError(operation+' receipt is not an attempt-scoped pass')
@@ -67,8 +71,9 @@ class Orchestrator:
  def mark(self,step,data):
   self.result['steps'].append({'operation':step,'receipt':data});atomic(self.receipt,self.result)
  def run(self,rig,plan,dry_run=False):
-  before=self.discover();self.result['before']=before;context=self.receipt.parent/'context.json'
+  context=self.receipt.parent/'context.json';active='discover'
   try:
+   before=self.discover();self.result['before']=before
    blockers=validate_rig(rig)
    try:validate_plan(plan)
    except LaunchError as e:blockers.append(str(e))
@@ -80,7 +85,7 @@ class Orchestrator:
     left=deadline-self.clock()
     if left<=0:raise LaunchError('600s staging-refresh budget exhausted')
     context=self.receipt.parent/'context.json';atomic(context,{'attempt':self.result['attempt'],'live':before,'plan':plan,'dry_run':dry_run})
-    staged=self.ops.call('stage',context,timeout=left);self.mark('stage',staged)
+    active='stage';staged=self.ops.call('stage',context,timeout=left);self.mark('stage',staged)
     if staged.get('base_sha')!=before['releases']['service']['sha'] or staged.get('focused_suites_passed') is not True:raise LaunchError('staging is not tested on exact current live Service')
     after=self.discover()
     if after==before:break
@@ -90,18 +95,21 @@ class Orchestrator:
     self.result['live_fingerprint_unchanged']=before==after
     if before!=after:raise LaunchError('live drift during final dry-run verification')
     self.result.update(status='passed',mode='read-only-dry-run');return self.result
-   self.mark('snapshot',self.ops.call('snapshot',context,timeout=120))
+   active='snapshot';self.mark('snapshot',self.ops.call('snapshot',context,timeout=120))
    # Last compare immediately before the first live write; never promote an older base.
    if self.discover()!=before:raise LaunchError('live drift after snapshot; rerun staging')
    self.result['mutated']=True;atomic(self.receipt,self.result)
    for step in ['deploy','install','privacy','regression']:
-    data=self.ops.call(step,context,timeout=600);self.mark(step,data)
+    active=step;data=self.ops.call(step,context,timeout=600);self.mark(step,data)
     if step=='privacy' and data.get('checks_passed')!=6:raise LaunchError('six live privacy checks did not pass')
    # The only product migration is last, after both safety and regression gates.
-   self.mark('migrate',self.ops.call('migrate',context,timeout=300))
-   self.mark('verify',self.ops.call('verify',context,timeout=300));self.result['status']='passed';return self.result
+   active='migrate';self.mark('migrate',self.ops.call('migrate',context,timeout=300))
+   active='verify';self.mark('verify',self.ops.call('verify',context,timeout=300));self.result['status']='passed';return self.result
   except Exception as e:
-   self.result['blockers'].append(type(e).__name__+': '+str(e))
+   safe=type(e).__name__+(': '+str(e) if isinstance(e,LaunchError) else ': details withheld')
+   failed=self.receipt.parent/(active+'.json')
+   detail=json.loads(failed.read_text()) if failed.exists() and json.loads(failed.read_text()).get('status')=='failed' else {'status':'failed','error':safe}
+   self.mark(active,detail);self.result['blockers'].append(safe)
    if self.result['mutated']:
     try:self.mark('rollback',self.ops.call('rollback',context,timeout=600));self.result['status']='rolled_back'
     except Exception as rollback:self.result['blockers'].append('rollback failed: '+type(rollback).__name__)

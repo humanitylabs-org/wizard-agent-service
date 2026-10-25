@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from owner_acceptance import Owner
-from provider_adapter import api,blank_config,urns,URN,OLD
+from provider_adapter import api,blank_config,urns,user_config,URN,OLD
 FILES=('live-run-all.py','live-preflight.py','live_sources.py','release_transaction.py','python_rollout.py','provider_adapter.py','owner_acceptance.py','production_adapter.py','stage-candidate.py','production_readiness.py')
 def code_hashes(root):return {n:hashlib.sha256((Path(root)/n).read_bytes()).hexdigest() for n in FILES}
 def check(plan,rig,live,tooling):
@@ -22,8 +22,7 @@ def check(plan,rig,live,tooling):
     if Path(plan['home'])!=Path.home():blockers.append('target is not current owner home')
     try:
         rt=api(plan['home'],live['wam_sources']['selected']['api']['resolved']);installed=urns(rt)
-        rt.req('GET','/user-config/'+URN)
-        if URN in installed or not blank_config(rt.req('GET','/user-config/'+URN)):blockers.append('private provider app or user-config already belongs to another attempt')
+        if URN in installed or not blank_config(user_config(rt)):blockers.append('private provider app or user-config already belongs to another attempt')
         if OLD in installed:rt.list_backups(OLD) # API capability and auth; no backup created
         owner=Owner(plan['home'],plan['service_origin'],plan['owner_proof_file'],Path(plan['home']), '0'*32)
         legacy=owner.require('/wizard/v1/agents/private')['agent']
