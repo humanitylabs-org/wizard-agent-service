@@ -1,9 +1,9 @@
 """Trusted Docker recreation, without putting inspected app credentials in argv/logs."""
 import copy
 import http.client
-import io
 import json
 import subprocess
+import threading
 from urllib.parse import quote
 
 
@@ -54,18 +54,44 @@ def engine_create(name, spec):
     raw = json.dumps(spec).encode()
     path = '/containers/create?name=' + quote(name, safe='')
     request = (f'POST {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n').encode() + raw
-    result = subprocess.run(['docker', 'system', 'dial-stdio'], input=request, capture_output=True, timeout=60)
-    if result.returncode:
-        raise ValueError('provider container creation failed')
-    class ResponseSocket:
-        def makefile(self, *args):
-            return io.BytesIO(result.stdout)
-    response = http.client.HTTPResponse(ResponseSocket())
-    response.begin()
-    if response.status != 201:
-        raise ValueError('provider container creation failed')
-    value = json.loads(response.read())
-    cid = value.get('Id')
-    if not isinstance(cid, str) or len(cid) != 64 or any(c not in '0123456789abcdef' for c in cid):
-        raise ValueError('invalid provider container identity')
-    return cid
+    # Keep the tunnel's write side open until Docker has finished the response.
+    # communicate()/run(input=...) closes stdin immediately; dial-stdio then
+    # cancels the in-flight create request, which dockerd answers with HTTP 499.
+    process = subprocess.Popen(['docker', 'system', 'dial-stdio'], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    timer = threading.Timer(60, process.kill)
+    timer.daemon = True
+    timer.start()
+    response = None
+    try:
+        process.stdin.write(request)
+        process.stdin.flush()
+        class ResponseSocket:
+            def makefile(self, *args):
+                return process.stdout
+        response = http.client.HTTPResponse(ResponseSocket())
+        response.begin()
+        if response.status != 201:
+            raise ValueError('provider container creation failed')
+        value = json.loads(response.read())
+        cid = value.get('Id')
+        if not isinstance(cid, str) or len(cid) != 64 or any(c not in '0123456789abcdef' for c in cid):
+            raise ValueError('provider container creation failed')
+        return cid
+    except (OSError, http.client.HTTPException, ValueError, TypeError, AttributeError):
+        # Neither a daemon body nor stderr may expose inspected credentials.
+        raise ValueError('provider container creation failed') from None
+    finally:
+        timer.cancel()
+        if response is not None:
+            response.close()
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        process.stdout.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
