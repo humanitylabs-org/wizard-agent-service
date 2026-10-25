@@ -28,7 +28,11 @@ while not stop.is_set():
  if len(b)<54 or b[12:14]!=b'\x08\x00':continue
  ip=b[14:];ihl=(ip[0]&15)*4
  if ip[9]!=6 or len(ip)<ihl+20:continue
- tcp=ip[ihl:];thl=(tcp[12]>>4)*4;payload=tcp[thl:]
+ tcp=ip[ihl:]
+ # The sandbox-facing OpenAI leg is intentionally plaintext inside the seal.
+ # Inspect ONLY the client-to-provider EHBP relay leg, never that local input.
+ if int.from_bytes(tcp[:2],'big')!=8090 and int.from_bytes(tcp[2:4],'big')!=8090:continue
+ thl=(tcp[12]>>4)*4;payload=tcp[thl:]
  if not payload:continue
  flow=(ip[12:16],ip[16:20],tcp[:4]);seq=int.from_bytes(tcp[4:8],'big');flows.setdefault(flow,{})[seq]=payload
 recv,drops=struct.unpack('II',s.getsockopt(263,6,8));s.close();header=False;streams=0
@@ -159,7 +163,10 @@ class Owner:
         finally:
             cap.stdin.close();cap.stdin=None
             out,err=cap.communicate(timeout=30)
-        if cap.returncode:raise RuntimeError('private relay capture did not verify')
+        if cap.returncode:
+            text=err.decode(errors='replace');reasons=[x for x in ['capture TCP gap','codeword escaped seal','incomplete or missing EHBP capture'] if x in text]
+            (self.root/'capture-error.json').write_text(json.dumps({'returncode':cap.returncode,'reasons':reasons or ['unclassified capture failure; output withheld']}))
+            raise RuntimeError('private relay capture did not verify')
         capture=json.loads(out)
         source=''
         for line in Path(source_file).read_text().splitlines():
