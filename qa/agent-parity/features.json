@@ -36,6 +36,16 @@
   ],
   "features": [
     {
+      "id": "owner-thread-agent-write-guard",
+      "description": "Reject self-identified agent-to-agent run/chat/steer writes into existing owner threads before runtime side effects; preserve ordinary sends.",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, POST agent-to-agent prefix and NOT-a-James-message inputs through run, steer, chat and chat/stream. Require HTTP 409 agent_to_agent_thread_write and no upstream writes, then accept a normal owner run and list sessions.",
+      "source_refs": ["server/owner-thread-write.mjs", "server/agents-http.mjs", "server/service.mjs"],
+      "reference_tests": ["tests/owner-thread-write.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "fixture": "owner-thread-agent-write-guard",
+      "policy_exemptions": []
+    },
+    {
       "id": "android-shell-recording-custody",
       "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
       "layer": "ux",
