@@ -36,6 +36,7 @@ import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZ
 import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
+import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -2505,6 +2506,7 @@ function buildWizardServer(options, lifetime) {
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  let workspaceStore = null
   // The agent registry (below) decides which apps each agent may use on the gateway (#58).
   let gatewayAgents = null
   // agentBridge 'gateway': serve /wizard/mcp and the agent kernel to container agents (their own gateway token)
@@ -4858,6 +4860,32 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const run = scheduler?.returnRun(decodeURIComponent(url.pathname.slice(`${PROXY_PREFIX}/v1/runs/`.length)))
         sendJson(response, run ? 200 : 404, run ?? { error: 'not_found' }, { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/workspaces' || url.pathname === '/wizard/v1/workspaces/closed/forget') {
+        // Workspace sync (server/workspaces.mjs, docs/workspaces.md): the same desks on every device of the owner.
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        // Owner-only like My skin: agent credentials and, with an owner proof configured, anonymous local callers are refused.
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const forget = url.pathname.endsWith('/forget'), allowed = forget ? ['POST'] : ['GET', 'PUT']
+        if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
+        workspaceStore ||= createWorkspaceStore(resolve(bridgeOsHome || wizardOsHome(), 'workspaces.json'))
+        if (request.method === 'GET') {
+          const since = Number(url.searchParams.get('since') ?? -1), wait = Number(url.searchParams.get('wait') ?? 0)
+          if (!Number.isFinite(since) || !Number.isFinite(wait)) { sendJson(response, 400, { error: 'invalid_query' }); return }
+          const gone = new AbortController(); response.on('close', () => gone.abort())
+          const snap = await workspaceStore.wait(since, Math.max(0, Math.min(25, wait)), gone.signal)
+          if (!response.writableEnded && !response.destroyed) sendJson(response, 200, snap)
+          return
+        }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+        let body
+        try { body = JSON.parse((await readBoundedBody(request, 512 * 1024)).toString('utf8')) } catch (error) { sendJson(response, error?.status === 413 ? 413 : 400, { error: error?.status === 413 ? 'too_large' : 'invalid_workspaces' }); return }
+        try {
+          if (forget) { sendJson(response, 200, workspaceStore.forget(body?.desk)); return }
+          const r = workspaceStore.put(body || {}); sendJson(response, r.status, r.body)
+        } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences') {
