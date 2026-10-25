@@ -39,6 +39,16 @@ def synthetic(doc):
  return labels.get('com.docker.compose.project') in {p for aid in ['pp-test-legacy','pp-test-probe','pp-test-other'] for p in ['agent-'+aid,'agent-'+aid+'_wizardapps']} or labels.get('com.docker.compose.service','').startswith(('agent-pp-test-','agent-pp-live-')) or any(m.get('Source','').startswith(('/home/rig/.wizard-os/agents/pp-test-','/home/rig/.wizard-os/agents/pp-live-')) for m in doc.get('Mounts',[]))
 remove=[doc['Id'] for doc in docs if synthetic(doc) or (doc['Config'].get('Labels') or {}).get('com.docker.compose.service')=='wizard-tinfoil']
 if remove:subprocess.run(['docker','rm','-f',*remove],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+# Container removal alone leaves subnet reservations that collide with a fresh
+# Service allocator. Remove only empty, labelled synthetic Compose networks.
+netids=subprocess.check_output(['docker','network','ls','-q'],text=True).split()
+netdocs=json.loads(subprocess.check_output(['docker','network','inspect',*netids])) if netids else []
+removed_networks=[]
+for net in netdocs:
+ project=(net.get('Labels') or {}).get('com.docker.compose.project','')
+ if project.startswith(('agent-pp-test-','agent-pp-live-')):
+  assert not net.get('Containers'),'refusing a populated synthetic network'
+  subprocess.run(['docker','network','rm',net['Id']],check=True,capture_output=True);removed_networks.append(net['Name'])
 volumes=[n for n in subprocess.check_output(['docker','volume','ls','--format','{{.Name}}'],text=True).splitlines() if 'tinfoil' in n]
 for volume in volumes:subprocess.run(['docker','volume','rm',volume],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 roots=[h/'.wizard-os/agents',h/'runtipi/apps',h/'runtipi/app-data',h/'runtipi/user-config',h/'runtipi/user-config/wizardapps',h/'runtipi/app-data/wizardapps',h/'runtipi/apps/wizardapps',h/'runtipi/repos/wizardapps/apps']
@@ -67,7 +77,11 @@ apps=json.loads((h/'.wizard-os/apps.json').read_text()).get('apps',[])
 ids=subprocess.check_output(['docker','ps','-aq'],text=True).split()
 docs=json.loads(subprocess.check_output(['docker','inspect',*ids])) if ids else []
 key_in_env=any(any(item.startswith('TINFOIL_API_KEY=') and item.split('=',1)[1] for item in doc['Config'].get('Env',[])) for doc in docs)
-result={'provider_key_present':any(p.exists() for p in key_paths) or key_in_env,'provider_volumes':remaining,'apps':len(apps),'remaining_synthetic_agent_dirs':[p.name for p in list((h/'.wizard-os/agents').glob('pp-test-*'))+list((h/'.wizard-os/agents').glob('pp-live-*'))],'remaining_synthetic_containers':[d['Name'] for d in docs if synthetic(d)],'reset_scope':'pp-rig / pp-rehearsal-3'}
+remaining_netids=subprocess.check_output(['docker','network','ls','-q'],text=True).split()
+remaining_nets=json.loads(subprocess.check_output(['docker','network','inspect',*remaining_netids])) if remaining_netids else []
+remaining_synthetic_networks=[n['Name'] for n in remaining_nets if (n.get('Labels') or {}).get('com.docker.compose.project','').startswith(('agent-pp-test-','agent-pp-live-'))]
+assert not remaining_synthetic_networks
+result={'removed_synthetic_networks':removed_networks,'remaining_synthetic_networks':remaining_synthetic_networks,'provider_key_present':any(p.exists() for p in key_paths) or key_in_env,'provider_volumes':remaining,'apps':len(apps),'remaining_synthetic_agent_dirs':[p.name for p in list((h/'.wizard-os/agents').glob('pp-test-*'))+list((h/'.wizard-os/agents').glob('pp-live-*'))],'remaining_synthetic_containers':[d['Name'] for d in docs if synthetic(d)],'reset_scope':'pp-rig / pp-rehearsal-3'}
 assert result['provider_key_present'] is False and result['provider_volumes']==[] and result['apps']==0 and not result['remaining_synthetic_agent_dirs'] and not result['remaining_synthetic_containers'],result
 p=r/'reset.json';p.write_text(json.dumps(result,indent=2)+'\n');p.chmod(0o600)
 print(json.dumps(result))
