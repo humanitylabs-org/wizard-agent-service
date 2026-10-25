@@ -22,6 +22,22 @@ for forced in [False,True]:
  print('FULL_RUN', 'forced' if forced else 'normal',result['status'],flush=True)
  if not forced:
   assert result['status']=='passed','normal full orchestration failed'
+  # Check e on the actual new product: removal keeps the migrated record sealed
+  # and yields a visible unavailable result; reinstallation recovers the seal.
+  from provider_adapter import Provider,api,URN,FORM
+  from owner_acceptance import run
+  wm=H/'.local/share/wam-python/current';rt=api(H,wm);owner=Owner(H,p['service_origin'],p['owner_proof_file'],out,attempt)
+  rt.uninstall(URN);assert rt.wait_status(URN,{'missing'},timeout=180)=='missing'
+  from wam import cli
+  cli.write_registry(cli.Config(),rt)
+  code,closed=owner.request('/wizard/hermes/api/sessions?agent=pp-test-legacy',{'source':'wizard-mobile'},'POST')
+  assert code==503 and closed.get('error')=='private_provider_unavailable'
+  sealed=owner.require('/wizard/v1/agents/pp-test-legacy')['agent'];assert sealed['model']['provider']=='wizard-tinfoil' and sealed['runtime']['isolation']=='restricted'
+  assert not run(['docker','ps','-aq','--filter','label=com.docker.compose.service=agent-pp-test-legacy-tinfoil']).strip()
+  rt.install(URN,FORM);assert rt.wait_status(URN,{'running','stopped'},timeout=180)=='running';cli.write_registry(cli.Config(),rt)
+  Provider(H,wm,out,attempt).connect(H/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
+  owner.require('/wizard/v1/agents/pp-test-legacy/start',{},'POST');owner.ready('pp-test-legacy');owner.prefix='pp-test-';assert owner.chat('pp-test-legacy').get('completed') is True
+  removal={'provider_removed':True,'visible_unavailable_http':503,'sealed_record_retained':True,'legacy_sidecar_absent':True,'sealed_request_recovered_after_reinstall':True};(out/'provider-removal.json').write_text(json.dumps(removal,indent=2)+'\n');report['provider_removal']=removal;save()
   # Restore a clean semantic baseline using the SAME product + API + pointer
   # rollback, even after successful promotion. Preserve the success receipt.
   cleanup=ops.call('rollback',out/'context.json',timeout=600);report['normal_explicit_rollback']=cleanup;save()

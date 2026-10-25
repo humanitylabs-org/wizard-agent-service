@@ -16,6 +16,7 @@ URN='wizard-tinfoil_private:wizardapps'
 OLD='wizard-tinfoil:wizardapps'
 ID='wizard-tinfoil_private'
 SHA='07eca5e30ca7873ab8cfda503175768fc55f66d4'
+FORM={'openPort':False,'exposed':False,'exposedLocal':False,'port':18804,'WIZARD_TRUSTED_HOSTS':'127.0.0.1:18804,localhost:18804','WIZARD_TRUSTED_ORIGINS':'http://127.0.0.1:18804','HERMES_DASHBOARD_BASIC_AUTH_PASSWORD':'relay-only-unused-local-value'}
 OVERRIDE='services:\n  wizard-tinfoil:\n    networks: !override\n      - provider-bootstrap\n    volumes:\n      - tinfoil-private-data:/data\nvolumes:\n  tinfoil-private-data:\n    name: wizard-tinfoil-private-data\n'
 
 def api(home,wam):
@@ -90,7 +91,7 @@ class Provider:
         self.rt.req('PUT','/user-config/'+URN,{'dockerCompose':OVERRIDE,'appEnv':env})
         after=self.rt.req('GET','/user-config/'+URN)
         if (after.get('dockerCompose') or '').rstrip('\n')!=OVERRIDE.rstrip('\n') or (after.get('appEnv') or '').rstrip('\n')!=env.rstrip('\n'):raise RuntimeError('provider API override readback failed')
-        self.rt.install(URN,{'openPort':False,'exposed':False,'exposedLocal':False,'port':18804,'WIZARD_TRUSTED_HOSTS':'127.0.0.1:18804,localhost:18804','WIZARD_TRUSTED_ORIGINS':'http://127.0.0.1:18804','HERMES_DASHBOARD_BASIC_AUTH_PASSWORD':'relay-only-unused-local-value'})
+        self.rt.install(URN,FORM)
         status=self.rt.wait_status(URN,{'running','stopped'},timeout=180)
         if status!='running':raise RuntimeError('provider did not start')
         cfg=cli.Config();registry=cli.write_registry(cfg,self.rt)

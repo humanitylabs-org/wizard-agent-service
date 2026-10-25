@@ -26,7 +26,7 @@ def runtime_argv():
     raw=subprocess.check_output(['systemctl','--user','show','wizard-agent-runtime','--property=ExecStart','--value'],text=True)
     if 'argv[]=' not in raw:raise RuntimeError('runtime argv discovery unavailable')
     return shlex.split(raw.split('argv[]=',1)[1].split(' ; ',1)[0])
-def restart(owner):
+def restart(owner,runtime_origin):
     # This function is built for the parent, never invoked by the adapter lane on
     # James's VPS. Runtipi is intentionally absent. No blanket restart helper.
     run(['systemctl','--user','daemon-reload'],timeout=30)
@@ -35,7 +35,10 @@ def restart(owner):
     while time.monotonic()<deadline:
         try:
             code,b=owner.request('/wizard/health')
-            if code==200:return
+            if code==200:
+                with urllib.request.urlopen('http://127.0.0.1:7790/healthz',timeout=3) as response:assert json.load(response).get('ok') is True
+                with urllib.request.urlopen(runtime_origin+'/healthz',timeout=3) as response:assert json.load(response).get('ok') is True
+                return
         except Exception:pass
         time.sleep(1)
     raise RuntimeError('Service readiness after single restart failed')
@@ -66,7 +69,7 @@ def main():
         if digest(stage['local_artifact'])!=stage['artifact_sha256']:raise RuntimeError('candidate archive drift')
         if digest(p['wam_archive'])!=p['wam_archive_sha256']:raise RuntimeError('WAM archive drift')
         rollout.prepare(stage['local_artifact'],p['wam_archive'],metadata)
-        result.update(rollout.promote(load(out/'runtime-argv.json')));restart(owner)
+        result.update(rollout.promote(load(out/'runtime-argv.json')));restart(owner,p['runtime_origin'])
         from live_sources import discover
         result['wam_sources']=discover(home)
         for route in result['wam_sources']['selected'].values():
@@ -78,7 +81,11 @@ def main():
         result.update(provider.install(p['provider_archive'],p['provider_archive_sha256']));result['connection']=provider.connect(home/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
     elif phase=='privacy':
         result.update(owner.privacy(p['check_file'],p['legacy_source']))
-    elif phase=='regression':result.update(owner.regression())
+    elif phase=='regression':
+        result.update(owner.regression())
+        if p.get('rig_target'):
+            saved=owner.prefix;owner.prefix='pp-test-';result['legacy_coexistence_chat_completed']=owner.chat(p['rig_legacy_agent']).get('completed');owner.prefix=saved
+            if not result['legacy_coexistence_chat_completed']:raise RuntimeError('legacy coexistence regression failed')
     elif phase=='migrate':
         aid=p.get('rig_legacy_agent') if p.get('rig_target') else 'private'
         before=load(out/'pre-migration-public.json');current=owner.require('/wizard/v1/agents/'+aid)['agent']
@@ -127,7 +134,7 @@ def main():
         result['provider']=provider.rollback()
         # Only now may old runtime/Service code be selected. Never point old code
         # at a sealed record. All target CAS checks happen before pointer writes.
-        result['filesystem']=rollout.rollback();restart(owner)
+        result['filesystem']=rollout.rollback();restart(owner,p['runtime_origin'])
         current=owner.require('/wizard/v1/agents/'+aid)['agent']
         result['legacy_route_after_code_rollback']=current['model']['provider']=='tinfoil'
     write(out/(phase+'.json'),result)

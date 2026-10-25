@@ -16,7 +16,6 @@ for pid in pids.values():
  p=Path('/proc')/str(pid)/'cmdline'
  if p.exists():assert str(R/'service') in p.read_text();os.kill(pid,signal.SIGTERM)
 time.sleep(2);(R/'pids.json').unlink()
-run(['systemctl','--user','stop','wizard-mobile','wizard-agent-runtime','wizard-app-manager-api'],check=False) if False else None
 base='4be54416627ab3f578a951166a084e459e9edd9c'
 store=H/'.local/share/wizard-mobile-server/releases';store.mkdir(parents=True,exist_ok=True)
 serial=str(time.time_ns());service=store/('baseline-'+serial);service.mkdir()
@@ -35,7 +34,7 @@ launcher=H/'.local/bin/wam';launcher.parent.mkdir(parents=True,exist_ok=True);la
 ux=H/'apps/wizard-os-home/web';ux.parent.mkdir(parents=True,exist_ok=True)
 if ux.is_symlink():ux.unlink()
 elif ux.exists():shutil.rmtree(ux)
-shutil.copytree(H/'pp-launch-2/ux/web',ux)
+shutil.copytree(B/'candidate/ux',ux)
 (H/'apps/wizard-mobile/.ui-live').mkdir(parents=True,exist_ok=True);(H/'apps/wizard-mobile/.ui-live/index.html').write_text('Legacy wrapper fixture, unchanged by UX source rollout\n')
 common='[Unit]\nDescription=Private-provider acceptance fixture\n[Service]\nType=simple\nRestart=no\nEnvironment=HOME=/home/rig\nEnvironment=RUNTIPI_ROOT=/home/rig/runtipi\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n'
 (U/'wizard-mobile.service').write_text(common+'WorkingDirectory='+str(R/'service')+'\nEnvironmentFile=/opt/pp-rig/service.env\nEnvironment=WIZARD_AGENT_RUNTIME_URL=http://127.0.0.1:7795\nEnvironment=WIZARD_UX_DIR='+str(ux)+'\nExecStart=/usr/local/bin/node '+str(H/'.local/share/wizard-mobile-server/current/server/index.mjs')+'\n')

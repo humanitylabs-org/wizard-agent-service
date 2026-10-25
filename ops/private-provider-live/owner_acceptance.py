@@ -147,6 +147,19 @@ class Owner:
         for line in Path(source_file).read_text().splitlines():
             if line.startswith('TINFOIL_API_KEY='):source=line.split('=',1)[1].strip().strip('\"\'')
         if not source:raise RuntimeError('host legacy source missing')
+        shared=[]
+        candidates=[self.home/'.hermes/config.yaml',self.home/'.hermes/.env',self.home/'.wizard-os/apps.json']
+        for folder in [self.home/'.wizard-os/agent-runtime',self.home/'.wizard-os/agent-clients']:
+            if folder.exists():candidates.extend(p for p in folder.rglob('*') if p.is_file() and not p.is_symlink())
+        for path in candidates:
+            if not path.is_file() or path.resolve()==Path(source_file).resolve():continue
+            shared.append(path)
+            overlap=b''
+            with path.open('rb') as f:
+                while chunk:=f.read(1048576):
+                    chunk=overlap+chunk
+                    if source.encode() in chunk:raise RuntimeError('credential bytes reached shared Hermes/client configuration')
+                    overlap=chunk[-max(64,len(source)):]
         # Read only THIS throwaway home and its client. No host agents/ scan.
         scan=json.loads(run(['docker','exec','-i',main,'/opt/hermes/.venv/bin/python','-c',SCAN,'/opt/data'],input=source.encode()))
         if scan['matches']:raise RuntimeError('credential bytes reached throwaway home')
@@ -177,7 +190,7 @@ class Owner:
             time.sleep(1)
         recovery=self.chat(self.probe)
         if not recovery.get('completed'):raise RuntimeError('provider restart did not recover probe')
-        return {'checks_passed':6,'checks':dict.fromkeys(['hermes','client','relay','key-location','codeword','stop-provider'],'passed'),'capture':capture,'completed_request':completed,'recovered_request':recovery,'private_home_read':False}
+        return {'checks_passed':6,'checks':dict.fromkeys(['hermes','client','relay','key-location','codeword','stop-provider'],'passed'),'capture':capture,'completed_request':completed,'recovered_request':recovery,'private_home_read':False,'shared_configuration_files_scanned':len(shared)}
     def regression(self):
         aid=self.create('other');chat=self.chat(aid)
         if not chat.get('completed'):raise RuntimeError('other synthetic agent chat failed')
