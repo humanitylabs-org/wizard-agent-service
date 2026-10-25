@@ -153,10 +153,10 @@ export async function scene(kind, serverOptions = {}) {
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
   let wizard, base
-  const start = async () => { wizard = createWizardServer({ ...options, ...serverOptions }); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
+  const start = async () => { wizard = createWizardServer({ ...options, ...serverOptions }); await wizard.agentSocketsReady; base = `http://127.0.0.1:${(await listen(wizard)).port}` }
   await start()
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
-  const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
+  const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
   return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     agentMcp: async (method, params = {}) => {
       syncMessages()
@@ -164,7 +164,7 @@ export async function scene(kind, serverOptions = {}) {
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
       if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body })
       return new Promise((resolve, reject) => {
-        const req = httpRequest({ socketPath: join(folder, 'gateway', 'gateway.sock'), path: '/wizard/mcp', method: 'POST', headers }, res => {
+        const req = httpRequest({ socketPath: join(folder, 'gateway', 'gateway.sock'), agent: false, path: '/wizard/mcp', method: 'POST', headers }, res => {
           let text = ''; res.setEncoding('utf8'); res.on('data', chunk => { text += chunk }); res.on('end', () => resolve(new Response(text, { status: res.statusCode, headers: res.headers })))
         })
         req.on('error', reject); req.end(body)
