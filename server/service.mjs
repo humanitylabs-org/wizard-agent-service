@@ -5598,7 +5598,7 @@ function buildWizardServer(options, lifetime) {
             }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
-              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead, rawRunRead: scheduleRawRead(request),
             })
             return
           }
