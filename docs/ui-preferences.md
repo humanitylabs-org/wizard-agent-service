@@ -7,7 +7,7 @@ bypass that check. The API serves no secrets and sends `Cache-Control: no-store`
 The response is a flat JSON object:
 
 ```json
-{"archiveAfterDays":7,"compact":false,"readyOrder":"newest","subjectOrder":[],"pinnedChats":[],"spaces":[]}
+{"archiveAfterDays":7,"compact":false,"chatLayout":"day","readyOrder":"newest","subjectOrder":[],"pinnedChats":[],"spaces":[]}
 ```
 
 PUT accepts a **partial** object and merges only the specified fields. Unknown fields,
@@ -16,6 +16,7 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 
 - `archiveAfterDays`: 0 (Never), 1, 3, 7, 14 or 30. Default: 7.
 - `compact`: boolean. Default: false.
+- `chatLayout`: `day` (Ready, Yesterday, Past week) or `status` (Working, Ready, Archive). Default: `day`.
 - `readyOrder`: `newest`, `oldest`, `priority` or `subject`. Default: `newest`.
 - `subjectOrder`: at most 60 unique strings, each at most 120 characters without control
   characters. Default: empty (natural order).

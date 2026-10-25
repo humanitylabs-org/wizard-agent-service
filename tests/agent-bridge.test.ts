@@ -184,7 +184,7 @@ describe('agent bridge: MCP gateway', () => {
     expect(init.json.result.instructions).toContain('wizard-job-<job>')
     const list = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, init.session)
     const names = list.json.result.tools.map((t) => t.name)
-    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
+    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
     expect(names).toContain('spaces_list')
     expect(list.json.result.tools.find(t => t.name === 'hello_wizard__wizard_time').description).toBe('[Hello Wizard · diagnostics] Current UTC time.')
     const call = await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_echo', arguments: { text: 'secret-arg' } } }, init.session)

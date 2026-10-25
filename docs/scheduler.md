@@ -61,6 +61,25 @@ was supplied). Subsequent runs use the same thread. An existing session ID is
 not re-created. Changing agents on a bound job requires an explicit thread
 choice. Model overrides travel in the ordinary run/session payload.
 
+### Delivery: thread or notification
+
+`deliver` is `thread` (default) or `notification`. A thread job posts its answer
+into its chat thread as today. A `notification` job is a one-way alert with no
+conversation to own it (watchers, health checks, "tell me when"): the run still
+happens in its thread so history is kept, but its input tells the agent to write
+only a short title line plus one or two sentences and to end with `[SILENT]`, so
+the thread stays quiet. On completion the service sends that text to the box's
+`notifications` slot (the `slots.notifications.default` app in `apps.json`, else
+the only running provider) through the agent bridge's `notify` tool. `lastRun.outcome`
+is `notified`. A failed send records `failed` with "Notification not delivered; will
+retry" and retries on the next refresh. Notification occurrences stay observed for 7 days (other runs: 6 h), so a long run or a slot
+outage still sends. The scheduler reads the run with `X-Wizard-Schedule-Raw: 1` plus its internal token, so it sees the
+text before the `[SILENT]` display scrub; owners always get the scrubbed view. Delivery is at-least-once: ntfy has no
+client idempotency key, so a send whose reply is lost is sent again (a duplicate bell row beats a lost alert). An empty or stopped slot is checked when the
+occurrence is claimed: that occurrence is delivered to the thread instead, so nothing
+is lost. `kind: return` (Boomerang) is always a thread. Reports the owner replies in
+stay `thread`.
+
 ## Idempotency, recovery and catch-up
 
 One SQLite transaction inserts the immutable occurrence outbox payload and
@@ -115,7 +134,8 @@ Every job in GET and the job returned by POST/PATCH includes:
 `lastRun` is null before any occurrence. Otherwise it is the latest durable
 occurrence by scheduled instant (including run-now), never the job's edit time or
 unrelated activity in its destination. `outcome` is `running` after admission or
-while queued/running, `posted` for completed nonempty visible output, `silent` for
+while queued/running, `posted` for completed nonempty visible output, `notified` when a `deliver: notification`
+answer reached the notifications slot, `silent` for
 completed empty/[SILENT] output, and `failed` for failed/cancelled/interrupted runs
 or an admission failure awaiting exact-key retry. Admission is not completion.
 `error` is null or short service-owned copy; raw upstream errors/output are never
@@ -148,6 +168,9 @@ agent on any box (container agents included, which never load the host-only `wiz
 - `wizard_tips` `start` / `stop` / `status`: the opt-in five-day drip. Five one-shot `remind` jobs share one
   service-chosen thread titled `Wizard · Tips` (`group: wizard-tips`): tip 1 a minute after opting in, tips 2–5
   at the next 08:30 owner-time mornings. Starting again while tips are pending is a no-op.
+- `wizard_follow_up` `create` / `list` / `stop` (`server/follow-ups.mjs`): a `watch` job bound to the calling
+  agent's current thread (spec/thread-follow-up-watchers.md). A routed agent may watch only a thread it owns; the
+  main agent reaches it through the `wizard-os` plugin, which injects its session id, so it is unlisted for main.
 
 The thread, title and group are set by the service (`Scheduler.create(input, placement)`); the HTTP body cannot
 supply them. When the timer is off (`WIZARD_SCHEDULER` is not `1`) both tools answer with an error instead of

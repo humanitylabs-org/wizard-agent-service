@@ -904,7 +904,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                   'privacy': 'standard', 'appearance': {'glyph': 'spark', 'hue': 265},
                   'model': {'provider': model.get('provider', 'openai-codex'), 'model': model.get('default', ''),
                             'allowed_models': [model.get('default', '')], 'fallback': False},
-                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'none'},
+                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'read', 'shared_with_agents': True},
                   'runtime': {'kind': 'container', 'app_id': 'agent-' + agent_id, 'api': 'http://agent-' + agent_id + ':8642', 'port': plan['port']},
                   'created_at': int(time.time())}
         journal['state'] = 'starting'

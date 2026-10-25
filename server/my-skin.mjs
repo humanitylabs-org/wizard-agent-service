@@ -25,6 +25,8 @@ export const MY_SKIN_LEGACY = 'Skins/My skin.css'
 export const MY_SKIN_SCRIPT = 'Skins/My skin/skin.js'
 export const MY_SKIN_MAX_BYTES = 64 * 1024
 
+export const validSkinId = id => typeof id === 'string' && [...id].length >= 1 && [...id].length <= 64 && !/^[.]|[/\\\\\u0000-\u001f\u007f-\u009f]/u.test(id)
+
 export const MY_SKIN_TEMPLATE = `/* My skin
  *
  * Your own look, on top of whichever skin you picked in Settings > Look.
@@ -131,12 +133,23 @@ export function createMySkin({ root = '', path = '' } = {}) {
   const scriptFile = base && !path ? join(base, ...MY_SKIN_SCRIPT.split('/')) : join(dirname(preferred), 'skin.js')
   const top = base || dirname(preferred)
   // Only absence selects the legacy file: a present but invalid folder file never reveals older CSS.
+  const active = () => {
+    if (!base || path) return undefined
+    try {
+      const pointer = join(base, 'Skins', 'active')
+      if (!confined(pointer) || !lstatSync(pointer).isFile() || lstatSync(pointer).size > 512) return null
+      const id = readFileSync(pointer, 'utf8').replace(/\r?\n$/, '')
+      return validSkinId(id) ? id : null
+    } catch (error) { return error.code === 'ENOENT' ? undefined : null }
+  }
   const selected = () => {
+    const id = active()
+    if (id !== undefined) return id ? join(base, 'Skins', id, 'skin.css') : ''
     try { lstatSync(preferred); return preferred } catch (e) { if (e.code !== 'ENOENT') return preferred }
     if (legacy) { try { lstatSync(legacy); return legacy } catch { /* a new box uses the folder form */ } }
     return preferred
   }
-  const relative = () => base && !path ? selected() === legacy ? MY_SKIN_LEGACY : MY_SKIN_RELATIVE : ''
+  const relative = () => base && !path ? !selected() ? '' : selected() === legacy ? MY_SKIN_LEGACY : `Skins/${active() || 'My skin'}/skin.css` : ''
 
   // Confined to the root after resolving symlinks; the file itself must be a regular file, never a link.
   function confined(file) {
@@ -155,6 +168,7 @@ export function createMySkin({ root = '', path = '' } = {}) {
   }
 
   function readRaw(file = selected()) {
+    if (!file) return { exists: false, text: '' }
     const where = confined(file); if (!where || where.dirMissing) return { exists: false, text: '' }
     let st
     try { st = lstatSync(file) } catch { return { exists: false, text: '' } }
@@ -169,6 +183,7 @@ export function createMySkin({ root = '', path = '' } = {}) {
 
   function write(text) {
     const file = selected()
+    if (!file) throw new MySkinError(409, 'no_active_skin')
     const body = String(text ?? '')
     if (Buffer.byteLength(body, 'utf8') > MY_SKIN_MAX_BYTES) throw new MySkinError(413, 'my_skin_too_large')
     if (/[\u0000]/u.test(body)) throw new MySkinError(400, 'my_skin_invalid')
@@ -194,7 +209,8 @@ export function createMySkin({ root = '', path = '' } = {}) {
   }
 
   function script() {
-    const raw = readRaw(scriptFile)
+    const id = active()
+    const raw = readRaw(id === undefined ? scriptFile : id ? join(base, 'Skins', id, 'skin.js') : '')
     return { exists: raw.exists, sha256: raw.body ? createHash('sha256').update(raw.body).digest('hex') : null,
       bytes: raw.bytes ?? 0, body: raw.body ?? null }
   }
@@ -213,6 +229,6 @@ export function createMySkin({ root = '', path = '' } = {}) {
     write,
     reset() { write(MY_SKIN_TEMPLATE) },
     /** Best effort at start: an owner opening Files finds the (empty, commented) file to edit. */
-    ensure() { try { if (!readRaw().exists) write(MY_SKIN_TEMPLATE); return true } catch { return false } },
+    ensure() { try { if (!selected()) return true; if (!readRaw().exists) write(MY_SKIN_TEMPLATE); return true } catch { return false } },
   }
 }
