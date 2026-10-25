@@ -26,7 +26,7 @@ async function box({ installed = true, healthy = true, identity = { uid: 1234, g
   const file = join(dir, 'agent.json'); writeFileSync(file, JSON.stringify(agent))
   writeFileSync(join(dir, 'home', 'history.db'), 'synthetic-history')
   const registry = createAgentRegistry({ agentsDir: join(root, 'agents'), appsJsonPath,
-    runtime: { identity: async () => { calls.push('identity'); return identity }, apply: async () => { calls.push('apply') }, start: async () => { calls.push('start') } },
+    runtime: { scrubPrivateMigration: async () => { calls.push('scrub') }, identity: async () => { calls.push('identity'); return identity }, apply: async () => { calls.push('apply') }, start: async () => { calls.push('start') } },
     fetchImpl: async (url: any, init: any) => String(url).includes('/api/connection') ? fetch(url, init) : new Response('{}'),
   })
   return { root, dir, file, apps, save, registry, calls, uninstall: () => { installed = false; save() } }
@@ -46,7 +46,7 @@ it('explicit healthy installed-provider migration preserves identity/history and
   const agent = f.registry.read('private')
   expect(agent.runtime).toMatchObject({ private_client: true, isolation: 'restricted', uid: 1234, gid: 1235 })
   expect(agent.model.provider).toBe('wizard-tinfoil')
-  expect(f.calls).toEqual(['identity', 'apply'])
+  expect(f.calls).toEqual(['identity', 'scrub', 'apply'])
   expect(readFileSync(join(f.dir, 'home/history.db'), 'utf8')).toBe('synthetic-history')
   const config = readFileSync(join(f.dir, 'managed/config.yaml'), 'utf8')
   expect(config).toContain('agent-private-client:3301/v1')

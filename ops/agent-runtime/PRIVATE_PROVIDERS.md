@@ -17,6 +17,14 @@ must be installed, running, declare a valid `private_inference` relay capability
 the selected model. The explicit migration preserves recorded non-root uid/gid (or asks the trusted runtime
 to resolve the existing numeric container identity and home mount); unknown/root identities fail closed.
 Managed files move to `managed/`; the existing home/history are retained, not recursively reassigned.
+Before the seal is published, the host helper stops legacy writers under the lifecycle/process lock,
+atomically rewrites every home file containing the exact host credential or a legacy `.env` assignment
+value (including `backups/**` and binary copies), and removes credential-bearing legacy containers.
+`runtime/key-scrub.json` records only status, count and relative paths. A pending/completed scrub fences
+legacy apply/start until publication; interrupted work is safe to retry. No plaintext undo backup is
+made. A failed registry publication restores legacy managed config and the active `.env` credential
+from the host-side `--tinfoil-key-file` source, never from retired home backups. File aliases exposing
+credentials are unlinked rather than rewriting external host sources. Unreadable entries fail closed.
 New agents selecting a canonical installed provider opt into the sealed route at creation.
 
 `runtime.private_client` is the per-agent seal marker. Once set, provider removal/health failure produces

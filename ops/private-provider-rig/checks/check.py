@@ -90,7 +90,7 @@ def data_roots(a, cs):
     return sorted(set(roots))
 
 
-def files(roots):
+def files(roots, excluded=()):
     seen = set()
     for root in roots:
         require(root.exists(), 'scan root missing: ' + str(root))
@@ -100,6 +100,7 @@ def files(roots):
         def failed(err):
             raise err
         for d, dirs, names in os.walk(root, followlinks=False, onerror=failed):
+            dirs[:] = [name for name in dirs if Path(d) / name not in excluded]
             for name in names:
                 p = Path(d) / name
                 # Real agent homes hold tool caches (uv, pip) whose links point
@@ -230,14 +231,27 @@ def key_location(a):
     allowed = data_roots(a, cs)
     base = Path(a.os_home)
     roots = [base, Path(a.runtipi_root) / 'apps', Path(a.runtipi_root) / 'user-config', *map(Path, a.scan_root)]
+    # Pre-migration coexistence proof: explicitly named legacy homes may still
+    # legitimately hold credentials. Never exempt a sealed record or shared scope.
+    excluded, legacy_services = set(), set()
+    for aid in getattr(a, 'legacy_agent', []):
+        require(re.fullmatch(r'[a-z][a-z0-9-]{0,30}', aid) and aid != a.agent, 'invalid legacy exemption')
+        record = json.loads((base / 'agents' / aid / 'agent.json').read_text())
+        require(record.get('id') == aid and record.get('model', {}).get('provider') == 'tinfoil'
+                and not record.get('runtime', {}).get('private_client')
+                and not (base / 'agents' / aid / 'runtime' / 'private-provider.json').exists(), 'cannot exempt a sealed agent')
+        excluded.add(base / 'agents' / aid / 'home')
+        legacy_services.update(['agent-' + aid, 'agent-' + aid + '-tinfoil'])
     forbidden = []
-    for p in files(roots):
+    for p in files(roots, excluded):
         if scan_key(p, a.key_sha256):
             forbidden.append(str(p))
     container(a.hermes_container or 'agent-' + a.agent)
     container(a.client_container or 'agent-' + a.agent + '-client')
     for cid in docker('ps', '-aq').stdout.decode().split():
         c = inspect('container', cid)
+        if (c.get('Config', {}).get('Labels') or {}).get('com.docker.compose.service') in legacy_services:
+            continue
         doc = json.dumps(c).encode()
         if fingerprint_match(doc, a.key_sha256):
             forbidden.append('docker-inspect:' + c['Name'])
@@ -297,6 +311,7 @@ def main():
     p.add_argument('--provider-app', required=True, choices=['wizard-tinfoil', 'wizard-local-model'])
     p.add_argument('--codeword')
     p.add_argument('--key-sha256')
+    p.add_argument('--legacy-agent', action='append', default=[], help='Pre-migration only: exempt this verified unsealed legacy home and exact old services')
     p.add_argument('--hermes-container')
     p.add_argument('--client-container', help='Exact client container name for Compose-generated names')
     p.add_argument('--provider-container', action='append', default=[])

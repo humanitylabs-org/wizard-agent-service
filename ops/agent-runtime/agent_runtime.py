@@ -45,6 +45,7 @@ from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from private_providers import CLIENT_IMAGE, PrivateProviders, client_service, migrate_provider
+from provider_key_scrub import scrub as scrub_provider_key
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
@@ -945,6 +946,8 @@ def offline_census(driver, agent: dict) -> dict:
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if action in {'start', 'apply'} and not driver.agents.providers.is_private(agent) and (driver.agents.root / agent['id'] / 'runtime' / 'key-scrub.json').exists():
+        raise RuntimeFailure('private_migration_pending', 409)
     if isinstance(driver, ImportDriver):
         # Imports have no compose generation. Absence in a compose label lookup
         # MUST NOT mint a false stopped seal for an actually running import.
@@ -1228,7 +1231,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|deliver|place|fetch|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1274,7 +1277,34 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     return
                 with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
                     agent = agents.read(agent_id)
-                    result = lifecycle_action(chosen, agent, action)
+                    if action in {'apply', 'start'} and agents.providers.is_private(agent) and chosen is not restricted_driver:
+                        raise RuntimeFailure('private_migration_generation_changed', 409)
+                    if action == 'rollback-private-migration':
+                        if agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_already_sealed', 409)
+                        # Restore only the active env from the host-side legacy source;
+                        # never restore retired backups or read a key from the home.
+                        agents.add_provider_keys(agent)
+                        (agents.root / agent_id / 'runtime' / 'key-scrub.json').unlink(missing_ok=True)
+                        result = {'ok': True}
+                    elif action == 'scrub-private-migration':
+                        if agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_already_sealed', 409)
+                        source_key = agents.tinfoil_key()
+                        if agent.get('model', {}).get('provider') == 'tinfoil' and (not source_key or agents.tinfoil_key_file is None or agents.tinfoil_key_file.resolve().is_relative_to(agents.home(agent_id).resolve())):
+                            raise RuntimeFailure('private_migration_host_source_unavailable', 503)
+                        # Stop every old writer before touching its retained home. No
+                        # plaintext rollback backup: legacy start reads the host source.
+                        chosen.stop(agent)
+                        result = scrub_provider_key(agents.home(agent_id),
+                            agents.root / agent_id / 'runtime' / 'key-scrub.json', source_key)
+                        # Stopped containers also retain legacy credentials in Config.Env.
+                        ids = docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=agent-' + agent_id], timeout=60).stdout.split()
+                        ids += docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=agent-' + agent_id + '-tinfoil'], timeout=60).stdout.split()
+                        if ids:
+                            docker(['rm', *ids], timeout=60)
+                    else:
+                        result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})

@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -65,6 +66,26 @@ class ProbeTests(unittest.TestCase):
         (self.root / 'cache' / 'wheel').symlink_to('/opt/data/absent/wheel')
         (self.root / 'dirlink').symlink_to('/etc')
         self.assertEqual([], list(check.files([self.root])))
+
+    def test_coexistence_exemption_prunes_only_named_legacy_home(self):
+        legacy = self.root / 'agents/legacy/home'; legacy.mkdir(parents=True)
+        sealed = self.root / 'agents/sealed/home'; sealed.mkdir(parents=True)
+        (legacy / '.env').write_bytes(self.fixture_bytes)
+        (sealed / '.env').write_bytes(self.fixture_bytes)
+        (legacy.parent / 'agent.json').write_text('{}')
+        paths = set(check.files([self.root], {legacy}))
+        self.assertNotIn(legacy / '.env', paths)
+        self.assertIn(sealed / '.env', paths)
+        self.assertIn(legacy.parent / 'agent.json', paths)
+
+    def test_coexistence_exemption_refuses_sealed_record(self):
+        d = self.root / 'agents/legacy'; d.mkdir(parents=True)
+        (d / 'agent.json').write_text(json.dumps({'id':'legacy','model':{'provider':'tinfoil'},'runtime':{'private_client':True}}))
+        a = SimpleNamespace(key_sha256=self.fp, provider_data=[str(self.root)], os_home=str(self.root),
+                            runtipi_root=str(self.root), scan_root=[], legacy_agent=['legacy'], agent='sealed')
+        with patch.object(check, 'provider_containers', return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, 'cannot exempt a sealed agent'):
+                check.key_location(a)
 
     def test_tls_http_reset_and_tool_failure_are_not_network_seal(self):
         for rc in [0, 22, 35, 52, 56, 90]:

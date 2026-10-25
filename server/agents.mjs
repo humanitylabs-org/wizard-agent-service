@@ -1142,9 +1142,26 @@ export function createAgentRegistry(options = {}) {
     assertIsolationSupports(next)
     // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
     const harnessChanged = migrated || JSON.stringify([agent.model, agent.permissions]) !== JSON.stringify([next.model, next.permissions]) || harnessStale(next)
+    // The host helper holds the lifecycle lock, stops the legacy writers, and
+    // retires every plaintext home copy BEFORE publishing the sealed record.
+    // A failure leaves the old metadata and host-side rollback source intact.
+    if (migrated) {
+      if (!runtime?.scrubPrivateMigration) fail(503, 'private_migration_scrub_unavailable', 'agent.runtime')
+      await runtime.scrubPrivateMigration(id)
+    }
     if (JSON.stringify([...agentAppIds(agent)]) !== JSON.stringify([...agentAppIds(next)])) queueMicrotask(appsChanged)
-    if (harnessChanged) writeHarnessFiles(next)
-    writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+    try {
+      if (harnessChanged) writeHarnessFiles(next)
+      writeJsonAtomic(join(folder(id), 'agent.json'), next, 0o600)
+    } catch (error) {
+      if (migrated) {
+        // Recreate legacy managed config, then restore the active credential from
+        // the host source. Failed rollback keeps the helper's restart fence.
+        writeHarnessFiles(agent)
+        await runtime.rollbackPrivateMigration?.(id)
+      }
+      throw error
+    }
     if (harnessChanged && runtime && serviceState(id).desired !== 'stopped') {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
@@ -1457,6 +1474,8 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
   }
   return {
     identity: (id) => call('POST', `/agents/${encodeURIComponent(id)}/identity`),
+    scrubPrivateMigration: (id) => call('POST', `/agents/${encodeURIComponent(id)}/scrub-private-migration`),
+    rollbackPrivateMigration: (id) => call('POST', `/agents/${encodeURIComponent(id)}/rollback-private-migration`),
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
