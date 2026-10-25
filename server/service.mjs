@@ -6117,6 +6117,12 @@ function buildWizardServer(options, lifetime) {
     // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
     server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
     void server.agentSocketsReady.catch(() => undefined)
+    // Wait until the gateway is accepting connections before reapplying old
+    // managed harnesses. No owner update or conversation is needed on upgrade.
+    server.once('listening', () => {
+      server.agentHarnessesReady = server.agentSocketsReady.then(() => agents.migrateManagedHarnesses())
+      void server.agentHarnessesReady.catch(() => undefined)
+    })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
