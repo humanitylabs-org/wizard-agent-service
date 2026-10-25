@@ -23,7 +23,7 @@ export { PRIVATE as SUPERVISOR_PRIVATE_REFUSAL }
 /** SQLite ledger + durable outbox. Transport always queues ordinary runs, never steers.
  * Identity is trusted service context, not report arguments. One service owns this DB. */
 export class Supervisor {
-  constructor({ statePath, deliver, lookup = async () => null, now = Date.now, intervalMs = 15_000 }) {
+  constructor({ statePath, deliver, lookup = async () => null, canReadSource = () => true, now = Date.now, intervalMs = 15_000 }) {
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath); chmodSync(statePath, 0o600)
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -33,7 +33,7 @@ export class Supervisor {
       CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY, review TEXT, thread TEXT UNIQUE, state TEXT, data TEXT);
       CREATE TABLE IF NOT EXISTS outcomes(review TEXT PRIMARY KEY, data TEXT);
       CREATE TABLE IF NOT EXISTS supervisor_outbox(key TEXT PRIMARY KEY, data TEXT, receipt TEXT);`)
-    Object.assign(this, { deliver, lookup, now, intervalMs, stopped: false })
+    Object.assign(this, { deliver, lookup, canReadSource, now, intervalMs, stopped: false })
   }
   transaction(fn) {
     this.db.exec('BEGIN IMMEDIATE')
@@ -155,15 +155,29 @@ export class Supervisor {
     return { build_id: b.id, thread: b.thread }
   }
   lessons(args, caller) {
-    this.context(caller)
+    // Reports are shared with the main review, not with every standard worker.
+    this.requireReview(caller)
     const query = text(args.query, 200, 'query', true).toLowerCase().trim().split(/\s+/).filter(Boolean)
     const matches = this.rows('reviews').flatMap(r => {
+      const report = this.reportBy(r.report)
+      // Consult current grants/seals, not the source's admission-time privacy.
+      if (!this.canReadSource(report.agent_id)) return []
       const outcome = this.db.prepare('SELECT data FROM outcomes WHERE review=?').get(r.id)
       if (!outcome) return []
-      const item = { review_id: r.id, thread: r.thread, report: this.reportBy(r.report), outcome: JSON.parse(outcome.data) }
+      const item = { review_id: r.id, thread: r.thread, report, outcome: JSON.parse(outcome.data) }
       return query.every(w => JSON.stringify(item).toLowerCase().includes(w)) ? [item] : []
     })
-    return { lessons: matches.slice(-50), total: matches.length }
+    const lessons = []
+    for (const item of matches.reverse()) {
+      // Search full evidence, but return an index, not megabytes of transcripts.
+      const r = item.report
+      const next = { ...item, report: { id: r.id, title: r.title, agent_id: r.agent_id, thread_id: r.thread_id,
+        what_happened: r.what_happened.slice(0, 800), feedback_verbatim: r.feedback_verbatim.slice(0, 400) } }
+      if (lessons.length >= 50 || Buffer.byteLength(JSON.stringify([...lessons, next]), 'utf8') > 64 * 1024) break
+      lessons.push(next)
+    }
+    return { lessons, total: matches.length, truncated: lessons.length < matches.length,
+      ...(lessons.length < matches.length ? { hint: 'Narrow the query to see remaining lessons.' } : {}) }
   }
   closeReview(args, caller) {
     const c = this.context(caller)

@@ -4451,6 +4451,7 @@ function buildWizardServer(options, lifetime) {
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
   const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
+    canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
     intervalMs: options.supervisorIntervalMs || 15_000 }) : null
   if (supervisor) lifetime.own(() => supervisor.close(), () => supervisor.quiesce())
   const callSupervisor = async (action, args, agentId, sessionId) => {

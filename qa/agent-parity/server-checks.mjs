@@ -41,6 +41,8 @@ export const serverChecks = {
     assert.equal((await again.json()).suppressed, true)
     const unrelated = await s.supervisor('report', {...args, session_id: 'not-an-active-thread'})
     assert.equal(unrelated.status, 409)
+    const workerLessons = await s.supervisor('lessons', {session_id: 'wizard_parity', query: ''})
+    assert.equal(workerLessons.status, 403) // sending feedback does not grant a cross-agent reader
     if (s.kind !== 'main') {
       for (const [privacy, shared] of [['private', false], ['standard', false]]) {
         s.setSupervisorSeal(privacy, shared)

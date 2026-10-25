@@ -21,6 +21,7 @@ export async function scene(kind, serverOptions = {}) {
   const followUpParity = serverOptions.followUpParity === true
   // Generated per scene: the main agent's gateway credential when the follow-up gateway is under test.
   const mainMcpToken = `parity-main-mcp-${crypto.randomUUID()}`
+  const heavyToken = crypto.randomUUID() + crypto.randomUUID() // generated synthetic loopback capability
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
   delete optionOverrides.supervisorParity
@@ -169,7 +170,7 @@ export async function scene(kind, serverOptions = {}) {
     }
   }
   if (supervisorParity) installSupervisorAssets(agentHome)
-  const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken: 'parity-heavy-token-long-enough-for-loopback' } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
+  const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
@@ -197,7 +198,7 @@ export async function scene(kind, serverOptions = {}) {
     },
     supervisor: async (action, args, extraHeaders = {}) => {
       const path = kind === 'main' ? `/wizard/internal/supervisor/${action}` : '/wizard/mcp'
-      const token = kind === 'main' ? 'parity-heavy-token-long-enough-for-loopback' : 'parity-gateway-secret'
+      const token = kind === 'main' ? heavyToken : 'parity-gateway-secret'
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...extraHeaders }
       const body = JSON.stringify(kind === 'main' ? args : {jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'supervisor_'+action,arguments:args}})
       const normalize = async response => {

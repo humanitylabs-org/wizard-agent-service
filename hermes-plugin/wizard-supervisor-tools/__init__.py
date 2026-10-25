@@ -49,7 +49,10 @@ def call(action, args, session_id=None, **kwargs):
         req = Request(origin if gateway else origin + action, data=json.dumps(value).encode(), method='POST',
                       headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
         with build_opener(ProxyHandler({}), NoRedirect()).open(req, timeout=15) as res:
-            raw = res.read(131072).decode()
+            data = res.read(131073)
+            if len(data) > 131072:
+                return json.dumps({'error': 'Supervisor response is too large; narrow the lessons query.'})
+            raw = data.decode()
             if not gateway:
                 return raw
             result = json.loads(raw).get('result', {})

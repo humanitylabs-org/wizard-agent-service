@@ -93,10 +93,37 @@ describe('Supervisor durable feedback workflow', () => {
     const closes = f.sent.filter(o => o.body.input.startsWith('[supervisor closed]'))
     expect(closes).toHaveLength(1); expect(closes[0].thread).toBe('origin'); expect(closes[0].createThread).toBe(false)
     expect(closes[0].body.input).toContain('exactly this one line, nothing else:\nReports now use plain words. Home: Reporter skill')
-    expect(f.s.call('lessons', { query: 'plain' }, worker()).lessons).toHaveLength(1)
     f.report('new'); const review = f.s.rows('reviews')[1]
-    expect(() => f.s.call('close', { ...args, outcome: 'covered', covered_by: 'missing' }, worker(review.thread))).toThrow('earlier closed')
-    expect(f.s.call('close', { ...args, outcome: 'covered', covered_by: f.review().id }, worker(review.thread)).closed).toBe(true)
+    expect(f.s.call('lessons', { query: 'plain' }, worker(String(review.thread))).lessons).toHaveLength(1)
+    expect(() => f.s.call('close', { ...args, outcome: 'covered', covered_by: 'missing' }, worker(String(review.thread)))).toThrow('earlier closed')
+    expect(f.s.call('close', { ...args, outcome: 'covered', covered_by: f.review().id }, worker(String(review.thread))).closed).toBe(true)
+  })
+  it('limits lessons to main reviews and rechecks source visibility after sealing', () => {
+    let visible = true
+    const f = fixture({ canReadSource: () => visible })
+    f.report('source', worker('source-thread', 'helper'))
+    f.s.call('close', { outcome: 'shipped', home: 'Reporter skill', summary: 'Use plain words.' }, f.reviewCaller())
+    f.report('review'); const c = worker(String(f.s.rows('reviews')[1].thread))
+    for (const caller of [worker(), worker('arbitrary', 'helper'), worker(c.thread_id, 'helper')]) {
+      expect(() => f.s.call('lessons', { query: '' }, caller)).toThrow('open Supervisor review')
+    }
+    expect(f.s.call('lessons', { query: '' }, c).total).toBe(1)
+    visible = false
+    expect(f.s.call('lessons', { query: '' }, c)).toMatchObject({ lessons: [], total: 0 })
+  })
+  it('bounds lesson indexes below the plugin response limit and marks omitted matches', () => {
+    const f = fixture()
+    for (let i = 0; i < 35; i++) {
+      const report = f.s.call('report', { ...feedback(`large-${i}`), feedback_verbatim: '界'.repeat(16000) }, worker())
+      const r = f.s.rows('reviews').find((r: any) => r.report === report.report.id)
+      f.s.call('close', { outcome: 'shipped', home: '界'.repeat(2000), summary: '界'.repeat(800) }, worker(String(r!.thread)))
+    }
+    f.report('search'); const r = f.s.rows('reviews').at(-1)
+    const result = f.s.call('lessons', { query: '' }, worker(String(r!.thread)))
+    expect(result.total).toBe(35); expect(result.truncated).toBe(true)
+    expect(result.lessons.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(66 * 1024)
+    expect(result.lessons[0].report.evidence).toBeUndefined()
   })
   it('refuses private or siloed callers before any ledger writes or reads', () => {
     const f = fixture()

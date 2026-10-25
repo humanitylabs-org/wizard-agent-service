@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DurableRunQueue, PENDING_STEER_REPLAY_PREFIX, queueRequestHash } from '../server/run-queue.mjs'
 import { readSteerResentHttp } from '../server/hermes-http-readers.mjs'
 
@@ -14,6 +14,7 @@ const directories: string[] = []
 const queues: DurableRunQueue[] = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const queue of queues.splice(0)) queue.close()
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
@@ -127,9 +128,12 @@ describe('a steer the run never consumed', () => {
     directories.push(directory)
     const upstream: Upstream = new Map()
     const launched: Array<{ key: string, body: string }> = []
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
     const queue = serviceProcess(join(directory, 'q.sqlite3'), upstream, launched, { delivered: () => false })
     await queue.initialize()
     const { record } = await queue.admit(send('wizard_thread', 'wos-1', 'first'))
+    now += 1 // Make "newer" deterministic even when both admissions take under one millisecond.
     await queue.admit(send('wizard_thread', 'wos-2', 'Please try to SSH via Tailscale.'))
     Object.assign(upstream.get('run_1')!, { status: 'completed', output: 'done', pending_steer: VOICE })
     await queue.tick(true)

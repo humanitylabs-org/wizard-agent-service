@@ -62,6 +62,17 @@ class TestSupervisorPlugin(unittest.TestCase):
         self.assertEqual(json.loads(opener.req.data)['session_id'],'actual')
         self.assertEqual(opener.req.full_url,'http://127.0.0.1:8787/wizard/internal/supervisor/report')
 
+    def test_oversized_response_is_explicit_not_truncated_json(self):
+        secrets.update(WIZARD_HEAVY_ORIGIN='http://127.0.0.1:8787', WIZARD_HEAVY_TOKEN='fixture')
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, size): return b'x' * size
+        opener = types.SimpleNamespace(open=lambda *a, **kw: Response())
+        with patch.object(plugin, 'build_opener', return_value=opener):
+            result = json.loads(plugin.call('lessons', {}, session_id='review'))
+        self.assertIn('too large', result['error'])
+
     def test_missing_session_and_private_profile_refuse_without_network(self):
         with patch.object(plugin,'build_opener') as opener:
             self.assertIn('required', plugin.call('report',{}))
