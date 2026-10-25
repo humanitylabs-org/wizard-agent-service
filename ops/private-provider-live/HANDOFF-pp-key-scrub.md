@@ -12,6 +12,9 @@
 - The SSH tool disconnected after 420s; reporting then hit BrokenPipe. Separate receipt/log collection completed. Reset removed directories but missed generic sealed `agent` services; follow-up readback proved survivors. Do not claim that reset fully clean.
 - Fixed reset to cover exact synthetic Compose projects and synthetic-home mounts and assert zero synthetic containers. This is staged and unit-tested, not yet whole-rig-proven.
 
+## Admission result
+The delegated submission returned HTTP **409 heavy admission refused**. There is no receipt and no running or queued attempt 14. The temporary host credential staging file was removed and absence separately verified. Genuine-parent admission is required; restage the source before submission.
+
 ## Exactly one attempt remains: 14
 Staged Thales cwd: `/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live`.
 The runner performs a corrected **initial reset** before setup, then a–f, unexempted post-migration key-location, and corrected final reset/readback. e/f and key-location still run independently if the migrated inference fails, without marking d passed.

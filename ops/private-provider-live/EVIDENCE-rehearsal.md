@@ -10,6 +10,8 @@
 - Final authorized attempt **14** is prepared for the durable shared worker: initial corrected reset, a–f, mandatory post-migration unexempted key scan, independent e/f even if d fails, and corrected unconditional final reset/readback. It is not acceptance evidence until its actual receipt is collected. No attempt beyond 14 is authorized in this lane.
 - Another worker owns the shared lock. The lane's own waiting reset was cancelled by exact PID/argv verification; no other job was stopped. Current fully clean reset remains **unverified** until the corrected queued work executes. No production mutation/restart, Private-directory read, or Private message occurred.
 
+- Durable submission `pp-key-scrub-final-14` returned **HTTP 409 heavy admission refused** from this delegated helper: no job receipt, no queued/running job, and attempt 14 has not started. The temporary 0600 Thales credential staging file was immediately deleted and its absence separately read back. A genuine-parent submission must restage from the existing host source first; do not bypass admission.
+
 ## pp-rehearsal-5 (historical checkpoint)
 - Full fifth attempt was executed and collected under the shared Thales worker lock: `REHEARSAL-LEGACY-FIX-5.json`. No sixth full run was launched; the explicitly authorized five-attempt cap is exhausted.
 - **a PASS**: product-created synthetic legacy agent completed its canonical `PP_OK` turn. **b FAILED**: physical private-local install and override API readback passed; connect failed with `http.client.RemoteDisconnected` on the first credential POST. **c/d/e/f NOT RUN**; six privacy checks and migration/removal/regression remain unproven.
