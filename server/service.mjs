@@ -65,7 +65,7 @@ import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
-import { loadAgentSessionRows, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
@@ -2708,10 +2708,16 @@ function buildWizardServer(options, lifetime) {
       const agent = agents.read(id)
       const key = id === MAIN_AGENT_ID ? hermesKey : agents.apiKey(id)
       const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
-      return loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
-        headers: key ? { Authorization: `Bearer ${key}` } : {}, secrets: [key].filter(Boolean),
+      const headers = key ? { Authorization: `Bearer ${key}` } : {}
+      const secrets = [key].filter(Boolean)
+      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+        headers, secrets,
         signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
       })
+      // Subjects come from status projection, not the raw upstream census. Use
+      // the session-list projection with the same scoped transport; omit title/
+      // filing hooks here so metadata search itself remains read-only.
+      return projectProfileSessions({ registry }, agent, rows, headers, secrets)
     },
   })
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
