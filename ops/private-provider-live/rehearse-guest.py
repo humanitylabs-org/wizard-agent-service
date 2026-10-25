@@ -34,6 +34,18 @@ def wait(path):
   time.sleep(2)
  raise RuntimeError('readiness timeout '+path)
 
+def wait_provider_ready(origin,timeout=60):
+ # Egress reconciliation returns after docker start, before the HTTP server is
+ # necessarily listening. Poll only a credential-free GET; never replay POSTs.
+ deadline=time.monotonic()+timeout
+ while True:
+  try:
+   with urllib.request.urlopen(origin+'/api/connection',timeout=min(5,max(0.1,deadline-time.monotonic()))) as f:data=json.load(f)
+   if data.get('contract')=='wizard.ai-connection/1' and data.get('provider')=='tinfoil':return
+  except (OSError,ValueError):pass
+  if time.monotonic()>=deadline:raise RuntimeError('provider management readiness timeout; no credential submitted')
+  time.sleep(min(0.25,max(0,deadline-time.monotonic())))
+
 if step=='setup':
  assert os.geteuid()==1000
  prior=R/'pids.json'
@@ -154,6 +166,7 @@ elif step=='connect':
  assert os.geteuid()==1000
  sys.path.insert(0,str(S/'ops/agent-runtime'));from agent_runtime import Agents
  failures=Agents(A,apps_path=O/'apps.json').providers.reconcile_installed();assert not failures,failures
+ wait_provider_ready('http://127.0.0.1:18804')
  key=(R/'legacy-key.env').read_text().split('=',1)[1].strip()
  q=urllib.request.Request('http://127.0.0.1:18804/api/connect',json.dumps({'apiKey':key}).encode(),{'Content-Type':'application/json','Origin':'http://127.0.0.1:18804','X-Wizard-Request':'1'},method='POST')
  with urllib.request.urlopen(q,timeout=180) as f:data=json.load(f)

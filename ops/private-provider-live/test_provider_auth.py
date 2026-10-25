@@ -16,14 +16,14 @@ class ProviderAuthenticationTests(unittest.TestCase):
   run=Mock(side_effect=[b'fixture\n',json.dumps({'token':'synthetic-control-token'}).encode()])
   with tempfile.TemporaryDirectory() as d:
    root=Path(d);(root/'legacy-key.env').write_text('TINFOIL_API_KEY=synthetic-fixture-credential\n')
-   env={'os':types.SimpleNamespace(geteuid=lambda:1000),'sys':sys,'S':root,'A':root/'agents','O':root,'R':root,'json':json,'urllib':__import__('urllib'),'run':run,'save':lambda n,v:saved.append((n,v))}
+   env={'wait_provider_ready':lambda origin:calls.append('ready'),'os':types.SimpleNamespace(geteuid=lambda:1000),'sys':sys,'S':root,'A':root/'agents','O':root,'R':root,'json':json,'urllib':__import__('urllib'),'run':run,'save':lambda n,v:saved.append((n,v))}
    with patch.dict(sys.modules,{'agent_runtime':types.SimpleNamespace(Agents=agents)}),patch.object(urllib.request,'urlopen',side_effect=urlopen),patch.object(sys,'path',sys.path.copy()):
     try:exec(code,env)
     finally:self.calls=calls;self.saved=saved
   return calls,saved
  def test_stored_but_unverified_key_requires_genuine_completed_request_and_readback(self):
   calls,saved=self.execute_connect()
-  self.assertEqual([c.rsplit('/',2)[-1] for c in calls],['connect','completions','connection'])
+  self.assertEqual([c.rsplit('/',2)[-1] for c in calls],['ready','connect','completions','connection'])
   self.assertTrue(saved[0][1]['credential_verified'])
   self.assertNotIn('synthetic-',json.dumps(saved))
  def test_unverified_readback_never_claims_connected(self):
@@ -34,6 +34,6 @@ class ProviderAuthenticationTests(unittest.TestCase):
   self.assertEqual(self.saved,[])
  def test_unstored_credential_never_attempts_inference(self):
   with self.assertRaisesRegex(AssertionError,'not stored'):self.execute_connect(stored=False)
-  self.assertEqual(len(self.calls),1);self.assertEqual(self.saved,[])
+  self.assertEqual(len(self.calls),2);self.assertEqual(self.saved,[])
 
 if __name__=='__main__':unittest.main()
