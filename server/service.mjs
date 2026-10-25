@@ -1,6 +1,7 @@
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
+import { servePhoneFeed } from './phone-feed.mjs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -4634,6 +4635,9 @@ function buildWizardServer(options, lifetime) {
     if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      // Release bytes are public on the tailnet origin: the Android updater has no session/auth headers.
+      // This exact allow-list is deliberately before both principal and Serve identity gates.
+      if (await servePhoneFeed(request, response, options.phoneFeedDir)) return
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
