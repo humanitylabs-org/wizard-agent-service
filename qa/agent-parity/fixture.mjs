@@ -22,6 +22,7 @@ export async function scene(kind, serverOptions = {}) {
   // Generated per scene: the main agent's gateway credential when the follow-up gateway is under test.
   const mainMcpToken = `parity-main-mcp-${crypto.randomUUID()}`
   const heavyToken = crypto.randomUUID() + crypto.randomUUID() // generated synthetic loopback capability
+  const agentGatewayToken = crypto.randomUUID() + crypto.randomUUID()
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
   delete optionOverrides.supervisorParity
@@ -162,7 +163,7 @@ export async function scene(kind, serverOptions = {}) {
     const preset = PRESETS.find(p => p.id === 'standard')
     writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: ['fixture-model', 'fixture-other'], fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
     writeFileSync(join(folder, 'runtime.key'), 'parity-runtime-secret', { mode: 0o600 })
-    writeFileSync(join(folder, 'gateway.key'), 'parity-gateway-secret', { mode: 0o600 })
+    writeFileSync(join(folder, 'gateway.key'), agentGatewayToken, { mode: 0o600 })
     if (kind === 'restricted') {
       const gateway = join(folder, 'gateway'); mkdirSync(gateway)
       const socketPath = join(gateway, 'ingress.sock')
@@ -198,7 +199,7 @@ export async function scene(kind, serverOptions = {}) {
     },
     supervisor: async (action, args, extraHeaders = {}) => {
       const path = kind === 'main' ? `/wizard/internal/supervisor/${action}` : '/wizard/mcp'
-      const token = kind === 'main' ? heavyToken : 'parity-gateway-secret'
+      const token = kind === 'main' ? heavyToken : agentGatewayToken
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...extraHeaders }
       const body = JSON.stringify(kind === 'main' ? args : {jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'supervisor_'+action,arguments:args}})
       const normalize = async response => {
@@ -230,7 +231,7 @@ export async function scene(kind, serverOptions = {}) {
     },
     agentMcp: async (method, params = {}) => {
       syncMessages()
-      const headers = { Authorization: `Bearer ${kind === 'main' ? 'parity-main-gateway' : 'parity-gateway-secret'}`, 'Content-Type': 'application/json' }
+      const headers = { Authorization: `Bearer ${kind === 'main' ? options.mcpToken : agentGatewayToken}`, 'Content-Type': 'application/json' }
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
       if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body })
       return new Promise((resolve, reject) => {
