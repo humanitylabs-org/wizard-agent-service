@@ -60,7 +60,7 @@ def main():
     result={'attempt':attempt,'operation':args.operation,'status':'passed'}
     phase=args.operation
     if phase=='snapshot':
-        result['filesystem']=rollout.snapshot();result['provider']=provider.snapshot()
+        result['filesystem']=rollout.snapshot();result['provider']=provider.snapshot(p['legacy_source'])
         result['private_agent']=owner.require('/wizard/v1/agents/private')['agent'] if not p.get('rig_target') else owner.require('/wizard/v1/agents/'+p['rig_legacy_agent'])['agent']
         # Public metadata only: never open an agent record/home or container data.
         write(out/'pre-migration-public.json',result['private_agent']);write(out/'runtime-argv.json',runtime_argv())
@@ -78,7 +78,7 @@ def main():
         if actual['Id']!=ctx['live']['containers']['runtipi']['id'] or actual['State']['StartedAt']!=ctx['live']['containers']['runtipi']['started_at']:raise RuntimeError('Runtipi daemon changed')
         result['runtipi_unchanged']=True
     elif phase=='install':
-        result.update(provider.install(p['provider_archive'],p['provider_archive_sha256']));result['connection']=provider.connect(home/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
+        result.update(provider.install(p['provider_archive'],p['provider_archive_sha256'],{'archive':p['provider_image_archive'],'sha256':p['provider_image_archive_sha256'],'id':p['provider_image_id']}));result['connection']=provider.connect(home/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
     elif phase=='privacy':
         result.update(owner.privacy(p['check_file'],p['legacy_source']))
     elif phase=='regression':

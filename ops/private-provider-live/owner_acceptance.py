@@ -70,6 +70,13 @@ def cid(project,service):
     if len(ids)!=1:raise RuntimeError('acceptance container identity ambiguous')
     return ids[0]
 
+def load_legacy_source(path):
+    for line in Path(path).read_text().splitlines():
+        if line.startswith('TINFOIL_API_KEY='):
+            value=line.split('=',1)[1].strip().strip('\"\'')
+            if value:return value
+    raise RuntimeError('host legacy source missing')
+
 class Owner:
     def __init__(self,home,origin,proof_file,root,attempt):
         self.home=Path(home);self.origin=origin.rstrip('/');self.proof=Path(proof_file).read_text().strip();self.root=Path(root);self.attempt=attempt

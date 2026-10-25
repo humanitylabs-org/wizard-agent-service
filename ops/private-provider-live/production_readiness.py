@@ -13,9 +13,9 @@ def check(plan,rig,live,tooling):
     full=rig.get('full_live_run_all',{})
     if full.get('normal_status')!='passed' or full.get('forced_failure_status')!='rolled_back' or full.get('completed_legacy_after_rollback') is not True:blockers.append('same-adapter full orchestration/forced post-seal rollback proof missing')
     if full.get('tooling_sha256')!=code_hashes(tooling):blockers.append('tooling changed since full rig proof')
-    for name in ['service_sha','ux_sha','wam_archive_sha256','provider_archive_sha256']:
+    for name in ['service_sha','ux_sha','wam_archive_sha256','provider_archive_sha256','provider_image_archive_sha256','provider_image_id']:
         if full.get(name)!=plan.get(name):blockers.append('exact rig/plan artifact mismatch: '+name)
-    for name in ['wam','provider']:
+    for name in ['wam','provider','provider_image']:
         file=Path(plan[name+'_archive'])
         if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest()!=plan[name+'_archive_sha256']:blockers.append('local artifact drift: '+name)
     if blockers:return blockers

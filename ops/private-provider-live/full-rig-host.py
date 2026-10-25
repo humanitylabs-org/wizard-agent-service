@@ -35,6 +35,7 @@ try:
  assets=L/'assets-2';shutil.copyfile(stage['artifact'],assets/'candidate.tar.gz');(assets/'stage.json').write_text(json.dumps(stage,indent=2)+'\n');assert hashlib.sha256((assets/'candidate.tar.gz').read_bytes()).hexdigest()==stage['artifact_sha256']
  phase('initial-reset',[sys.executable,str(L/'full-rig-reset.py')])
  host('setup','setup-resume')
+ phase('provider-interpreter-build',[sys.executable,str(L/'prepare-provider-image.py')],timeout=1300)
  r.python("from pathlib import Path; r=Path('/home/rig/pp-launch-3'); names=['minted-session','baseline-start','baseline-prepared','chat-pp-test-legacy','run-pp-test-legacy','trigger-pp-test-legacy','trigger-pp-test-probe','trigger-pp-test-other','legacy-checkpoint','migration','privacy'];[(r/(n+'.json')).unlink(missing_ok=True) for n in names]")
  host('key','key',payload=key);key=b''
  phase('legacy-diagnose',[sys.executable,str(L/'legacy-host.py'),'legacy-diagnose.py'])
@@ -63,7 +64,7 @@ finally:
   raw=r.python("from pathlib import Path;import json;h=Path('/home/rig');p=h/'pp-live-receipts/full-result.json';print(p.read_text() if p.exists() else '{}')")
   if raw.strip()!='{}':receipt['full_result']=json.loads(raw)
   # Binary collection stays inside this host process. Never print evidence data.
-  p=subprocess.run(['/opt/homebrew/bin/limactl','shell','--workdir','/home/rig','pp-rig','--','tar','-C','/home/rig','-czf','-','pp-live-receipts','pp-launch-3/real-owner-bootstrap.log','pp-launch-3/old-provider-baseline.log','pp-launch-3/full-live-run-all.log'],capture_output=True,env=r.env,timeout=90)
+  p=subprocess.run(['/opt/homebrew/bin/limactl','shell','--workdir','/home/rig','pp-rig','--','tar','--exclude=prior-provider-image.tar.gz','-C','/home/rig','-czf','-','pp-live-receipts','pp-launch-3/real-owner-bootstrap.log','pp-launch-3/old-provider-baseline.log','pp-launch-3/full-live-run-all.log'],capture_output=True,env=r.env,timeout=90)
   artifact=L/('FULL-LIVE-RUN-'+str(number)+'-guest-evidence.tar.gz');artifact.write_bytes(p.stdout);artifact.chmod(0o600);receipt['guest_evidence']={'path':str(artifact),'sha256':hashlib.sha256(p.stdout).hexdigest(),'returncode':p.returncode}
  except Exception as e:receipt['collection_error']=type(e).__name__
  try:

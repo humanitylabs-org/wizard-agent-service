@@ -11,7 +11,8 @@ from owner_acceptance import Owner
 from production_readiness import code_hashes
 assets=json.loads((B/'assets.json').read_text());seed=json.loads((B/'seed-rig-evidence.json').read_text())
 plan={'schema':1,'no_drain':True,'migration_agent':'private','rollback_scope':'attempt','python_only_wam':True,'runtipi_daemon_unchanged':True,'rig_target':True,'rig_legacy_agent':'pp-test-legacy','home':str(H),'service_origin':'http://127.0.0.1:8787','owner_proof_file':str(H/'.wizard-os/agent-runtime/owner-proof'),'legacy_source':str(H/'pp-launch-3/legacy-key.env'),'runtime_origin':'http://127.0.0.1:7795','runtime_auth_file':str(H/'.wizard-os/agent-runtime/token'),'check_file':str(B/'candidate/acceptance/check.py'),**assets}
-for name in ['wam','provider']:plan[name+'_archive']=str(B/(name+'.tar'))
+for name in ['wam','provider','provider_image']:plan[name+'_archive']=str(B/(name+'.tar'))
+plan['provider_image_archive']=str(B/'provider-runtime.tar.gz')
 plan['commands']={op:['/usr/bin/python3',str(T/('rig-stage.py' if op=='stage' else 'production_adapter.py'))]+([] if op=='stage' else [op]) for op in engine.REQUIRED}
 root=H/'pp-live-receipts';root.mkdir(exist_ok=True);report={'status':'running','runs':[],'started_at':time.time()};target=root/'full-result.json'
 def save():(target).write_text(json.dumps(report,indent=2)+'\n')
@@ -34,6 +35,7 @@ for forced in [False,True]:
   assert code==503 and closed.get('error')=='private_provider_unavailable'
   sealed=owner.require('/wizard/v1/agents/pp-test-legacy')['agent'];assert sealed['model']['provider']=='wizard-tinfoil' and sealed['runtime']['isolation']=='restricted'
   assert not run(['docker','ps','-aq','--filter','label=com.docker.compose.service=agent-pp-test-legacy-tinfoil']).strip()
+  run(['docker','image','load','-i',p['provider_image_archive']],timeout=180)
   rt.install(URN,FORM);assert rt.wait_status(URN,{'running','stopped'},timeout=180)=='running';cli.write_registry(cli.Config(),rt)
   Provider(H,wm,out,attempt).connect(H/'.local/share/wizard-agent-runtime/current',p['legacy_source'])
   owner.require('/wizard/v1/agents/pp-test-legacy/start',{},'POST');owner.ready('pp-test-legacy');owner.prefix='pp-test-';assert owner.chat('pp-test-legacy').get('completed') is True
@@ -52,4 +54,4 @@ checkpoint=json.loads((H/'pp-launch-3/legacy-checkpoint.json').read_text());sid=
 import hashlib
 assert hashlib.sha256(json.dumps(body.get('messages',body.get('data')),sort_keys=True,separators=(',',':')).encode()).hexdigest()==checkpoint['canonical_history']['sha256']
 after=preflight.fingerprint(H);assert before['containers']['runtipi']==after['containers']['runtipi'];assert before['releases']==after['releases'] and before['shell']==after['shell'] and before['wam_sources']==after['wam_sources']
-report.update(status='passed',canonical_history_preserved=True,runtipi_daemon_unchanged=True,selection_rollback_readback=True,finished_at=time.time(),full_live_run_all={'normal_status':report['runs'][0]['status'],'forced_failure_status':report['runs'][1]['status'],'completed_legacy_after_rollback':report['postseal_rollback']['completed_legacy_request_after_rollback'],'tooling_sha256':code_hashes(T),**{k:assets[k] for k in ['service_sha','ux_sha','wam_archive_sha256','provider_archive_sha256']}});save();print('FULL_ORCHESTRATION_AND_POSTSEAL_ROLLBACK_PASS',flush=True)
+report.update(status='passed',canonical_history_preserved=True,runtipi_daemon_unchanged=True,selection_rollback_readback=True,finished_at=time.time(),full_live_run_all={'normal_status':report['runs'][0]['status'],'forced_failure_status':report['runs'][1]['status'],'completed_legacy_after_rollback':report['postseal_rollback']['completed_legacy_request_after_rollback'],'tooling_sha256':code_hashes(T),**{k:assets[k] for k in ['service_sha','ux_sha','wam_archive_sha256','provider_archive_sha256','provider_image_archive_sha256','provider_image_id']}});save();print('FULL_ORCHESTRATION_AND_POSTSEAL_ROLLBACK_PASS',flush=True)

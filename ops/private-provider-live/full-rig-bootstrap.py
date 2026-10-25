@@ -20,7 +20,7 @@ base='4be54416627ab3f578a951166a084e459e9edd9c'
 store=H/'.local/share/wizard-mobile-server/releases';store.mkdir(parents=True,exist_ok=True)
 serial=str(time.time_ns());service=store/('baseline-'+serial);service.mkdir()
 with tarfile.open(B/'baseline-service.tar') as tf:tf.extractall(service,filter='data')
-shutil.copytree(R/'service/node_modules',service/'node_modules')
+run(['npm','ci','--omit=dev','--no-audit','--no-fund'],cwd=service)
 for store_name,src in [('wizard-mobile-server',service),('wizard-agent-runtime',service/'ops/agent-runtime')]:
  root=H/'.local/share'/store_name;root.mkdir(parents=True,exist_ok=True)
  if store_name=='wizard-agent-runtime':
@@ -36,7 +36,7 @@ if ux.is_symlink():ux.unlink()
 elif ux.exists():shutil.rmtree(ux)
 shutil.copytree(B/'candidate/ux',ux)
 (H/'apps/wizard-mobile/.ui-live').mkdir(parents=True,exist_ok=True);(H/'apps/wizard-mobile/.ui-live/index.html').write_text('Legacy wrapper fixture, unchanged by UX source rollout\n')
-common='[Unit]\nDescription=Private-provider acceptance fixture\n[Service]\nType=simple\nRestart=no\nEnvironment=HOME=/home/rig\nEnvironment=RUNTIPI_ROOT=/home/rig/runtipi\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n'
+common='[Unit]\nDescription=Private-provider acceptance fixture\n[Service]\nType=simple\nRestart=no\nEnvironment=HOME=/home/rig\nEnvironment=RUNTIPI_ROOT=/home/rig/runtipi\nEnvironment=WIZARD_OS_HOME=/home/rig/.wizard-os\nUnsetEnvironment=WIZARD_AGENT_ISOLATION WIZARD_AGENT_HOST WIZARD_AGENT_PORT\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n'
 (U/'wizard-mobile.service').write_text(common+'WorkingDirectory='+str(R/'service')+'\nEnvironmentFile=/opt/pp-rig/service.env\nEnvironment=WIZARD_AGENT_RUNTIME_URL=http://127.0.0.1:7795\nEnvironment=WIZARD_UX_DIR='+str(ux)+'\nExecStart=/usr/local/bin/node '+str(H/'.local/share/wizard-mobile-server/current/server/index.mjs')+'\n')
 (U/'wizard-agent-runtime.service').write_text(common+'WorkingDirectory='+str(R/'service')+'\nExecStart=/usr/bin/python3 '+str(H/'.local/share/wizard-agent-runtime/current/agent_runtime.py')+' --driver runtipi --wam '+str(wams/'runtime')+' --agents-dir '+str(H/'.wizard-os/agents')+' --token-file '+str(H/'.wizard-os/agent-runtime/token')+' --tinfoil-key-file '+str(R/'legacy-key.env')+' --port 7795 --home-mount alongside\n')
 (U/'wizard-app-manager-api.service').write_text(common+'WorkingDirectory='+str(wams/'api')+'\nExecStart=/usr/bin/python3 -m wam serve\n')
@@ -44,4 +44,15 @@ common='[Unit]\nDescription=Private-provider acceptance fixture\n[Service]\nType
 p=U/'wizard-agent-runtime.service.d/99-pp-launch-wam.conf';p.unlink(missing_ok=True)
 # This creates/stops only real owner services in pp-rig; none on the VPS.
 run(['systemctl','--user','daemon-reload']);run(['systemctl','--user','start','wizard-app-manager-api','wizard-agent-runtime','wizard-mobile'])
+import urllib.request
+for origin,path in [('http://127.0.0.1:8787','/wizard/health'),('http://127.0.0.1:7790','/healthz'),('http://127.0.0.1:7795','/healthz')]:
+ deadline=time.monotonic()+60
+ while True:
+  try:
+   q=urllib.request.Request(origin+path,headers={'x-wizard-owner-proof':(H/'.wizard-os/agent-runtime/owner-proof').read_text().strip()})
+   with urllib.request.urlopen(q,timeout=3) as response:assert response.status==200
+   break
+  except Exception:
+   if time.monotonic()>deadline:raise RuntimeError('real owner unit did not become ready: '+origin)
+   time.sleep(1)
 print('REAL_OWNER_SELECTIONS_STARTED')
