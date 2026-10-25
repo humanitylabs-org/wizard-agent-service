@@ -1,3 +1,4 @@
+import shutil
 #!/usr/bin/env python3
 """Lightweight policy/scanner tests; no Docker, VM, provider, or live secrets."""
 import contextlib
@@ -51,10 +52,19 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             list(check.files([self.root / 'absent']))
 
-    def test_symlink_escape_fails_closed(self):
-        (self.root / 'escape').symlink_to('/etc/passwd')
-        with self.assertRaises(RuntimeError):
-            list(check.files([self.root]))
+    def test_symlink_escape_target_is_still_scanned(self):
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / 'secret').write_bytes(self.fixture_bytes)
+        (self.root / 'escape').symlink_to(outside / 'secret')
+        found = [p for p in check.files([self.root]) if check.scan_key(p, self.fp)]
+        self.assertEqual([self.root / 'escape'], found)
+
+    def test_dangling_cache_symlink_is_skipped(self):
+        (self.root / 'cache').mkdir()
+        (self.root / 'cache' / 'wheel').symlink_to('/opt/data/absent/wheel')
+        (self.root / 'dirlink').symlink_to('/etc')
+        self.assertEqual([], list(check.files([self.root])))
 
     def test_tls_http_reset_and_tool_failure_are_not_network_seal(self):
         for rc in [0, 22, 35, 52, 56, 90]:

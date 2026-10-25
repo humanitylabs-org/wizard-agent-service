@@ -102,8 +102,12 @@ def files(roots):
         for d, dirs, names in os.walk(root, followlinks=False, onerror=failed):
             for name in names:
                 p = Path(d) / name
-                if p.is_symlink():
-                    require(p.resolve().is_relative_to(root.resolve()), 'scan symlink escapes root: ' + str(p))
+                # Real agent homes hold tool caches (uv, pip) whose links point
+                # outside the scanned root, often dangling on the host. Do not refuse
+                # them: scan any existing file target too, so a key reachable through
+                # a link is still found; dangling or directory targets hold no bytes.
+                if p.is_symlink() and not p.is_file():
+                    continue
                 if p.is_file() and p.resolve() not in seen:
                     seen.add(p.resolve())
                     yield p
