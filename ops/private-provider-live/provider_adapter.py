@@ -38,6 +38,9 @@ def user_config(rt):
             return {'dockerCompose':'','appEnv':''}
         raise
 
+def config_hash(data):
+    return hashlib.sha256(json.dumps({k:(data.get(k) or '').rstrip('\n') for k in ['dockerCompose','appEnv']},sort_keys=True).encode()).hexdigest()
+
 def blank_config(data):
     import yaml
     try:
@@ -50,7 +53,7 @@ class Provider:
     def __init__(self,home,wam,receipts,attempt):
         self.home=Path(home);self.wam=Path(wam);self.root=Path(receipts);self.attempt=attempt
         self.rt=api(home,wam);self.journal=self.root/'provider-transaction.json'
-    def snapshot(self,legacy_source):
+    def snapshot(self,legacy_source,auth_source=None):
         installed=urns(self.rt)
         if URN in installed:raise RuntimeError('private provider already installed by another attempt')
         before=user_config(self.rt)
@@ -59,6 +62,21 @@ class Provider:
         data={'attempt':self.attempt,'old_present':bool(old),'old_status':(old or {}).get('app',{}).get('status'),'backup':None,'new_owned':False,'prior_user_config':before}
         atomic(self.journal,json.dumps(data).encode())
         if old:
+            # The API restore handler requires an installed row. Preserve its
+            # exact form encrypted under the unchanged trusted runtime auth, not
+            # as credential-bearing JSON in the operation receipt.
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            import os
+            if not auth_source:raise RuntimeError('trusted restore sealing source absent')
+            form=(self.rt.app(OLD).get('app') or {}).get('config') or {}
+            plain=json.dumps(form,sort_keys=True).encode()
+            from owner_acceptance import load_legacy_source
+            if load_legacy_source(legacy_source).encode() in plain:raise RuntimeError('legacy credential in app form; encrypted snapshot refused')
+            seal=hashlib.sha256(b'pp-provider-form-v1\0'+Path(auth_source).read_bytes()).digest();nonce=os.urandom(12)
+            atomic(self.root/'prior-provider-form.sealed',nonce+AESGCM(seal).encrypt(nonce,plain,self.attempt.encode()))
+            old_config=self.rt.req('GET','/user-config/'+OLD)
+            data.update(form_auth_source=str(auth_source),old_form_sha256=hashlib.sha256(plain).hexdigest(),old_user_config_sha256=config_hash(old_config),old_retired=False,old_restored=False)
+            atomic(self.journal,json.dumps(data).encode())
             ids=subprocess.check_output(['docker','ps','-aq','--filter','label=com.docker.compose.project=wizard-tinfoil_wizardapps','--filter','label=com.docker.compose.service=wizard-tinfoil'],text=True).split()
             if len(ids)!=1:raise RuntimeError('prior provider image identity ambiguous')
             doc=json.loads(subprocess.check_output(['docker','inspect',ids[0]]))[0]
@@ -104,6 +122,7 @@ class Provider:
                 time.sleep(1)
             if len(fresh)!=1:raise RuntimeError('prior provider snapshot ambiguous')
             data['backup']=fresh[0]['id'];atomic(self.journal,json.dumps(data).encode())
+            data['old_retired']=True;atomic(self.journal,json.dumps(data).encode())
             self.rt.uninstall(OLD,remove_backups=False)
             deadline=time.monotonic()+180
             while OLD in urns(self.rt):
@@ -137,7 +156,7 @@ class Provider:
         cfg=cli.Config();registry=cli.write_registry(cfg,self.rt)
         rows=[x for x in registry['apps'] if x.get('id')=='wizard-tinfoil']
         if len(rows)!=1 or rows[0].get('urn')!=URN or not rows[0].get('private_inference'):raise RuntimeError('canonical provider registry readback failed')
-        return {'urn':URN,'override_api_readback':True,'status':status,'source_sha':SHA,'dependency_parity':True,'canonical_registry_unique':True}
+        return {'urn':URN,'override_api_readback':True,'app_status':status,'source_sha':SHA,'dependency_parity':True,'canonical_registry_unique':True}
     def connect(self,legacy_source,runtime_origin,runtime_auth_file):
         # The authenticated runtime owns metadata reconciliation. The installer
         # never traverses a private agent's records or container data.
@@ -191,7 +210,7 @@ class Provider:
             prior=data['prior_user_config'];self.rt.req('PUT','/user-config/'+URN,{'dockerCompose':prior.get('dockerCompose') or '', 'appEnv':prior.get('appEnv') or ''})
             after=self.rt.req('GET','/user-config/'+URN)
             if any((after.get(k) or '').rstrip('\n')!=(prior.get(k) or '').rstrip('\n') for k in ['dockerCompose','appEnv']):raise RuntimeError('provider rollback user-config differs')
-        if data['old_present'] and OLD not in urns(self.rt):
+        if data['old_present'] and data.get('old_retired') and not data.get('old_restored'):
             if not data['backup']:raise RuntimeError('prior provider snapshot absent')
             archive=Path(data['prior_image_archive'])
             if digest(archive)!=data['prior_image_sha256']:raise RuntimeError('prior provider interpreter snapshot drift')
@@ -200,9 +219,22 @@ class Provider:
             subprocess.run(['docker','image','load','-i',str(archive)],check=True,capture_output=True,timeout=180)
             actual=json.loads(subprocess.check_output(['docker','image','inspect',data['prior_image_ref']]))[0]['Id']
             if actual!=data['prior_image']:raise RuntimeError('prior provider interpreter restore differs')
-            self.rt.restore_backup(OLD,data['backup'])
-            status=self.rt.wait_status(OLD,{'running','stopped'},timeout=180)
-            if data['old_status']=='running' and status!='running':self.rt.start(OLD);self.rt.wait_status(OLD,{'running'},timeout=180)
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            raw=(self.root/'prior-provider-form.sealed').read_bytes();seal=hashlib.sha256(b'pp-provider-form-v1\0'+Path(data['form_auth_source']).read_bytes()).digest()
+            plain=AESGCM(seal).decrypt(raw[:12],raw[12:],self.attempt.encode())
+            if hashlib.sha256(plain).hexdigest()!=data['old_form_sha256']:raise RuntimeError('prior app form snapshot drift')
+            form=json.loads(plain);del plain,seal
+            # A backup does not recreate the DB row. Install through the API
+            # first, then stop and restore root-owned data/config via the API.
+            if OLD not in urns(self.rt):
+                self.rt.install(OLD,form);self.rt.wait_status(OLD,{'running','stopped'},timeout=180)
+            self.rt.stop(OLD);self.rt.wait_status(OLD,{'stopped'},timeout=180)
+            self.rt.restore_backup(OLD,data['backup']);self.rt.wait_status(OLD,{'stopped'},timeout=180)
+            if data['old_status']=='running':self.rt.start(OLD);self.rt.wait_status(OLD,{'running'},timeout=180)
+            if config_hash(self.rt.req('GET','/user-config/'+OLD))!=data['old_user_config_sha256']:raise RuntimeError('prior app user-config restore differs')
+            restored_form=(self.rt.app(OLD).get('app') or {}).get('config') or {}
+            if hashlib.sha256(json.dumps(restored_form,sort_keys=True).encode()).hexdigest()!=data['old_form_sha256']:raise RuntimeError('prior app form restore differs')
+            data['old_restored']=True;atomic(self.journal,json.dumps(data).encode())
         dst=self.home/'runtipi/repos/wizardapps/apps'/ID
         if data['new_owned'] and dst.exists():
             from python_rollout import tree_hash
@@ -210,4 +242,4 @@ class Provider:
             shutil.rmtree(dst)
         from wam import cli
         cli.write_registry(cli.Config(),self.rt)
-        return {'provider_restored':True,'old_present':OLD in urns(self.rt),'new_absent':URN not in urns(self.rt)}
+        return {'provider_restored':True,'old_present':OLD in urns(self.rt),'new_absent':URN not in urns(self.rt),'original_app_form_and_user_config_restored':data.get('old_restored') is True}

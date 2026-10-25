@@ -112,7 +112,10 @@ class Orchestrator:
    self.mark(active,detail);self.result['blockers'].append(safe)
    if self.result['mutated']:
     try:self.mark('rollback',self.ops.call('rollback',context,timeout=600));self.result['status']='rolled_back'
-    except Exception as rollback:self.result['blockers'].append('rollback failed: '+type(rollback).__name__)
+    except Exception as rollback:
+     failed=self.receipt.parent/'rollback.json'
+     detail=json.loads(failed.read_text()) if failed.exists() else {'status':'failed','error':type(rollback).__name__}
+     self.mark('rollback',detail);self.result['blockers'].append('rollback failed: '+type(rollback).__name__);self.result['status']='blocked'
    return self.result
   finally:
    self.result['finished_at']=time.time();atomic(self.receipt,self.result)

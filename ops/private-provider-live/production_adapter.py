@@ -60,7 +60,7 @@ def main():
     result={'attempt':attempt,'operation':args.operation,'status':'passed'}
     phase=args.operation
     if phase=='snapshot':
-        result['filesystem']=rollout.snapshot();result['provider']=provider.snapshot(p['legacy_source'])
+        result['filesystem']=rollout.snapshot();result['provider']=provider.snapshot(p['legacy_source'],p['runtime_auth_file'])
         result['private_agent']=owner.require('/wizard/v1/agents/private')['agent'] if not p.get('rig_target') else owner.require('/wizard/v1/agents/'+p['rig_legacy_agent'])['agent']
         # Public metadata only: never open an agent record/home or container data.
         write(out/'pre-migration-public.json',result['private_agent']);write(out/'runtime-argv.json',runtime_argv())
@@ -147,6 +147,11 @@ if __name__=='__main__':
         import traceback
         frames=[{'file':Path(f.filename).name,'function':f.name,'line':f.lineno} for f in traceback.extract_tb(e.__traceback__)]
         error={'type':type(e).__name__,'frames':frames}
+        import re
+        status=re.search(r' -> (\d{3}):',str(e))
+        if status:error['http_status']=int(status[1])
+        codes=re.findall(r'\b(?:APP_ERROR|SYSTEM_ERROR)_[A-Z_]+\b',str(e))
+        if codes:error['api_errors']=sorted(set(codes))
         root=os.environ.get('PP_LAUNCH_RECEIPTS')
         if root:write(Path(root)/'adapter-error.json',error)
         print('ADAPTER_FAILED '+json.dumps(error),file=sys.stderr)
