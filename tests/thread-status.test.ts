@@ -49,6 +49,17 @@ describe('thread status tag', () => {
     expect(STATUS_INSTRUCTIONS).not.toMatch(/should try or QA/)
   })
 
+  it('keeps Ready asks understandable cold, situation-first, and free of internal jargon', () => {
+    expect(STATUS_INSTRUCTIONS).toContain('140 characters')
+    expect(STATUS_INSTRUCTIONS).toContain('read cold')
+    expect(STATUS_INSTRUCTIONS).toContain('no PR')
+    expect(STATUS_INSTRUCTIONS).toContain('first say what is waiting in everyday words, then the exact thing to do')
+    expect(STATUS_INSTRUCTIONS).toContain('if the action is a reply word, the sentence says what that word does')
+    expect(STATUS_INSTRUCTIONS).toContain('For check, say what changed and what to judge')
+    expect(STATUS_INSTRUCTIONS).toContain('The reply itself ends with the same ask in plain words.')
+    expect(STATUS_INSTRUCTIONS).not.toContain('under 90 characters')
+  })
+
   it('is part of every Wizard run instruction set', () => {
     expect(WIZARD_RUN_INSTRUCTIONS).toContain(STATUS_INSTRUCTIONS)
     expect(runInstructions({ join: false })).toContain('[WIZARD_STATUS_V1]')
