@@ -11,7 +11,7 @@ test('a routed agent run read keeps [SILENT] notification output only for the sc
   const server = createServer(async (req, res) => {
     const u = new URL(req.url, 'http://fixture')
     try { await proxyToAgent(ctx, { agent: { id: 'philosopher' }, method: 'GET', upstreamPath: u.pathname, searchParams: u.searchParams, request: req, response: res, rawRunRead: req.headers['x-raw'] === '1' }) }
-    catch (error) { res.writeHead(500); res.end(String(error?.stack || error)) }
+    catch { res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end('fixture proxy failed') }
   })
   const address = await listen(server); t.after(() => new Promise(r => server.close(r)))
   const read = async raw => { const r = await fetch(`http://127.0.0.1:${address.port}/v1/runs/run_1`, { headers: raw ? { 'x-raw': '1' } : {} }); const text = await r.text(); try { return JSON.parse(text).output } catch { throw new Error(text.slice(0, 400)) } }
