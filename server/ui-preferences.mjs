@@ -1,4 +1,7 @@
 // Box-wide shell preferences, separate from operator-owned settings.json.
+// The calendar date must exist: Date.parse would quietly turn 2026-02-31 into 3 March.
+const realDate = v => { const [y, m, d] = v.slice(0, 10).split('-').map(Number), t = new Date(Date.UTC(y, m - 1, d));
+  return Number.isFinite(Date.parse(v)) && t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d && +v.slice(11, 13) < 24 && +v.slice(14, 16) < 60 && +v.slice(17, 19) < 60 }
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -13,7 +16,7 @@ const validSpace = s => !!s && typeof s === 'object' && !Array.isArray(s)
   && typeof s.id === 'string' && SPACE_ID.test(s.id)
   && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(s.name)
   && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length
-  && typeof s.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(s.createdAt) && Number.isFinite(Date.parse(s.createdAt))
+  && typeof s.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(s.createdAt) && realDate(s.createdAt)
 const validators = {
   spaces: v => Array.isArray(v) && v.length <= 50 && v.every(validSpace) && new Set(v.map(s => s.id)).size === v.length,
   archiveAfterDays: v => Number.isInteger(v) && [0, 1, 3, 7, 14, 30].includes(v),
