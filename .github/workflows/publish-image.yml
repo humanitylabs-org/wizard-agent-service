@@ -144,8 +144,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Create isolated Docker configuration
-        run: install -d -m 700 "$RUNNER_TEMP/docker-config" && printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      # actions/attest reads registry credentials only from ~/.docker/config.json and
+      # ignores a relocated config, so this job keeps the default (ephemeral hosted VM) one.
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io

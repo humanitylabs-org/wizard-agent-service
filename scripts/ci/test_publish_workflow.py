@@ -53,6 +53,13 @@ class HostedWorkflow(unittest.TestCase):
         self.assertIn('needs: [publish, finalize]', anonymous)
         self.assertIn("needs.finalize.result == 'success'", anonymous)
 
+    def test_attest_uses_default_docker_config(self):
+        # actions/attest ignores DOCKER_CONFIG; an isolated config makes login invisible
+        # to it ("No credentials found for registry ghcr.io") and blocks every release.
+        attest = self.job('attest', 'finalize')
+        self.assertIn('docker/login-action@', attest)
+        self.assertNotIn('DOCKER_CONFIG', attest)
+
     def test_every_action_is_pinned_and_no_worker_state(self):
         for action in re.findall(r'uses:\s*(\S+)', self.workflow):
             self.assertRegex(action, r'^[\w-]+/[\w-]+@[0-9a-f]{40}$')
