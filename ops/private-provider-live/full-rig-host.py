@@ -3,11 +3,18 @@
 import base64,hashlib,importlib.util,json,os,shutil,subprocess,sys,tarfile,time
 from pathlib import Path
 L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live');s=importlib.util.spec_from_file_location('prepare',L/'rig-prepare.py');assert s and s.loader;m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
-number=int(sys.argv[1]);assert number in {11,12,13,14,15,16}
+number=int(sys.argv[1]);assert number in {17,18,19,20};LANE='pp-admit'
+# Frozen artifact set: the job never rebuilds the interpreter; it proves the frozen bytes.
+F=L/'frozen-admit';frozen=json.loads((F/'FROZEN.json').read_text())
+def sha(path):
+ h=hashlib.sha256()
+ with open(path,'rb') as f:
+  while c:=f.read(1048576):h.update(c)
+ return h.hexdigest()
 all_prior=[x for x in L.glob('FULL-LIVE-RUN-*.json') if x.stem.rsplit('-',1)[-1].isdigit()]
-prior=[x for x in all_prior if json.loads(x.read_text()).get('lane')=='pp-live-adapters-4'];assert len(prior)<6 and all(json.loads(x.read_text()).get('status')!='running' for x in all_prior),'six-job rig budget exhausted or another lane job is active'
+prior=[x for x in all_prior if json.loads(x.read_text()).get('lane')==LANE];assert len(prior)<4 and all(json.loads(x.read_text()).get('status')!='running' for x in all_prior),'four-job rig budget exhausted or another lane job is active'
 key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
-receipt={'lane':'pp-live-adapters-4','rig_attempt':len(prior)+1,'job_label':number,'prior_job_labels':[x.name for x in prior],'status':'running','phases':[],'started_at':time.time()};path=L/('FULL-LIVE-RUN-'+str(number)+'.json');assert not path.exists()
+receipt={'lane':LANE,'frozen_manifest_sha256':sha(F/'FROZEN.json'),'rig_attempt':len(prior)+1,'job_label':number,'prior_job_labels':[x.name for x in prior],'status':'running','phases':[],'started_at':time.time()};path=L/('FULL-LIVE-RUN-'+str(number)+'.json');assert not path.exists()
 def save():path.write_text(json.dumps(receipt,indent=2)+'\n')
 def phase(name,argv,payload=None,timeout=1800):
  p=subprocess.run(argv,input=payload,capture_output=True,timeout=timeout)
@@ -37,7 +44,13 @@ try:
  assets=L/'assets-2';shutil.copyfile(stage['artifact'],assets/'candidate.tar.gz');(assets/'stage.json').write_text(json.dumps(stage,indent=2)+'\n');assert hashlib.sha256((assets/'candidate.tar.gz').read_bytes()).hexdigest()==stage['artifact_sha256']
  phase('initial-reset',[sys.executable,str(L/'full-rig-reset.py')])
  host('setup','setup-resume')
- phase('provider-interpreter-build',[sys.executable,str(L/'prepare-provider-image.py')],timeout=1300)
+ # Frozen interpreter: verify (and restore from the immutable copy) instead of rebuilding.
+ if sha(assets/'provider-runtime.tar.gz')!=frozen['provider_image_archive_sha256']:shutil.copyfile(F/frozen['provider_image_archive_name'],assets/'provider-runtime.tar.gz')
+ a=json.loads((assets/'assets.json').read_text())
+ for k in ['service_sha','ux_sha','wam_sha','provider_sha','wam_archive_sha256','provider_archive_sha256','provider_image_archive_sha256','provider_image_id']:assert a.get(k)==frozen[k],'assets drift from frozen set: '+k
+ for n,k in [('provider-runtime.tar.gz','provider_image_archive_sha256'),('wam.tar','wam_archive_sha256'),('provider.tar','provider_archive_sha256')]:assert sha(assets/n)==frozen[k],'artifact drift from frozen set: '+n
+ assert sha(L/'tooling-2.tar')==frozen['tooling_tar_sha256'],'tooling bundle drift from frozen set'
+ receipt['phases'].append({'name':'provider-interpreter-frozen','returncode':0,'provider_image_id':frozen['provider_image_id']});save();print('provider-interpreter-frozen passed',flush=True)
  r.python("from pathlib import Path; r=Path('/home/rig/pp-launch-3'); names=['minted-session','baseline-start','baseline-prepared','chat-pp-test-legacy','run-pp-test-legacy','trigger-pp-test-legacy','trigger-pp-test-probe','trigger-pp-test-other','legacy-checkpoint','migration','privacy'];[(r/(n+'.json')).unlink(missing_ok=True) for n in names]")
  host('key','key',payload=key);key=b''
  phase('legacy-diagnose',[sys.executable,str(L/'legacy-host.py'),'legacy-diagnose.py'])

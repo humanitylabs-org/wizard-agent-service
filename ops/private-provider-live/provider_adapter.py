@@ -28,6 +28,33 @@ def api(home,wam):
 
 def urns(rt):return {(r.get('info') or {}).get('urn'):r for r in rt.installed()}
 
+def app_status(rt,urn):
+    try:return ((rt.app(urn).get('app') or {}).get('status')) or 'missing'
+    except Exception as error:
+        if type(error).__name__=='RuntipiError':return 'missing'
+        raise
+
+def ensure_running(rt,urn,timeout=300,grace=15,max_starts=2,poll=2,clock=time.monotonic,sleep=time.sleep):
+    """Bounded readiness after install/reinstall through the lifecycle API only.
+
+    Runtipi can report a freshly installed app as ``stopped`` while its compose
+    start is still settling (or after a concurrent catalogue refresh). Wait a
+    short grace period, then request at most ``max_starts`` API starts; never
+    touch the daemon. Raises with the last observed status when not running.
+    """
+    deadline=clock()+timeout;stopped_since=None;starts=0;status='unknown'
+    while True:
+        status=app_status(rt,urn)
+        if status=='running':return {'status':'running','start_requests':starts}
+        now=clock()
+        if status=='stopped':
+            if stopped_since is None:stopped_since=now
+            if now-stopped_since>=grace and starts<max_starts:
+                rt.start(urn);starts+=1;stopped_since=None
+        else:stopped_since=None
+        if now>=deadline:raise RuntimeError('provider did not start (last status '+str(status)+', start requests '+str(starts)+')')
+        sleep(poll)
+
 def user_config(rt):
     # An unstaged local recipe has no catalogue entry yet. Only this exact API
     # absence is a blank prior config; auth/transport/other errors fail closed.
@@ -151,13 +178,28 @@ class Provider:
         after=self.rt.req('GET','/user-config/'+URN)
         if (after.get('dockerCompose') or '').rstrip('\n')!=selected_override.rstrip('\n') or (after.get('appEnv') or '').rstrip('\n')!=env.rstrip('\n'):raise RuntimeError('provider API override readback failed')
         self.rt.install(URN,FORM)
-        status=self.rt.wait_status(URN,{'running','stopped'},timeout=180)
-        if status!='running':raise RuntimeError('provider did not start')
+        try:status=ensure_running(self.rt,URN)['status']
+        except Exception:
+            self.start_diagnostic();raise
         cfg=cli.Config();registry=cli.write_registry(cfg,self.rt)
         rows=[x for x in registry['apps'] if x.get('id')=='wizard-tinfoil']
         if len(rows)!=1 or rows[0].get('urn')!=URN or not rows[0].get('private_inference'):raise RuntimeError('canonical provider registry readback failed')
         atomic(self.root/'provider-registry-projection.json',json.dumps({k:rows[0].get(k) for k in ['id','status','urn','private_inference']}).encode())
         return {'urn':URN,'override_api_readback':True,'app_status':status,'source_sha':SHA,'dependency_parity':True,'canonical_registry_unique':True}
+    def start_diagnostic(self):
+        # Container state only (no env/config); log tail filtered for secrets.
+        import re
+        rows=[]
+        try:
+            ids=subprocess.run(['docker','ps','-aq','--filter','label=com.docker.compose.project=wizard-tinfoil_private_wizardapps'],capture_output=True,text=True,timeout=30).stdout.split()
+            for cid in ids:
+                doc=json.loads(subprocess.run(['docker','inspect',cid],capture_output=True,text=True,timeout=30).stdout or '[{}]')[0]
+                st=doc.get('State') or {}
+                logs=subprocess.run(['docker','logs','--tail','40',cid],capture_output=True,text=True,timeout=30)
+                tail=[l[:300] for l in (logs.stdout+logs.stderr).splitlines() if not re.search('key|token|secret|password|bearer',l,re.I)]
+                rows.append({'name':doc.get('Name'),'status':st.get('Status'),'exit_code':st.get('ExitCode'),'error':st.get('Error'),'oom':st.get('OOMKilled'),'restarts':doc.get('RestartCount'),'networks':sorted((doc.get('NetworkSettings') or {}).get('Networks') or {}),'log_tail':tail[-40:]})
+        except Exception as error:rows.append({'diagnostic_error':type(error).__name__})
+        atomic(self.root/'provider-start-diagnostic.json',json.dumps({'attempt':self.attempt,'containers':rows},indent=2).encode())
     def connect(self,legacy_source,runtime_origin,runtime_auth_file):
         # The authenticated runtime owns metadata reconciliation. The installer
         # never traverses a private agent's records or container data.

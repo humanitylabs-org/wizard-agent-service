@@ -36,7 +36,8 @@ for forced in [False,True]:
   sealed=owner.require('/wizard/v1/agents/pp-test-legacy')['agent'];assert sealed['model']['provider']=='wizard-tinfoil' and sealed['runtime']['isolation']=='restricted'
   assert not run(['docker','ps','-aq','--filter','label=com.docker.compose.service=agent-pp-test-legacy-tinfoil']).strip()
   run(['docker','image','load','-i',p['provider_image_archive']],timeout=180)
-  rt.install(URN,FORM);assert rt.wait_status(URN,{'running','stopped'},timeout=180)=='running';cli.write_registry(cli.Config(),rt)
+  from provider_adapter import ensure_running
+  rt.install(URN,FORM);assert ensure_running(rt,URN)['status']=='running';cli.write_registry(cli.Config(),rt)
   Provider(H,wm,out,attempt).connect(p['legacy_source'],p['runtime_origin'],p['runtime_auth_file'])
   owner.require('/wizard/v1/agents/pp-test-legacy/start',{},'POST',allowed=(200,202));owner.ready('pp-test-legacy');owner.prefix='pp-test-';assert owner.chat('pp-test-legacy').get('completed') is True
   removal={'provider_removed':True,'visible_unavailable_http':503,'sealed_record_retained':True,'legacy_sidecar_absent':True,'sealed_request_recovered_after_reinstall':True};(out/'provider-removal.json').write_text(json.dumps(removal,indent=2)+'\n');report['provider_removal']=removal;save()
