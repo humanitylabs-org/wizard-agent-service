@@ -482,7 +482,7 @@
       "id": "read-receipts",
       "description": "Mark one thread seen or unread",
       "layer": "server",
-      "how_to_test": "Mark one thread seen, then unread; assert both markers stay scoped to its exact agent/session and survive restart.",
+      "how_to_test": "Mark one thread seen, then unread, alongside a retired-agent record; assert only the valid exact agent/session merges and both markers survive restart on every kind. An all-retired batch is a 200 no-op. HTTP regressions also cover private non-owner and ambiguous legacy records being dropped without blocking visible marks.",
       "source_refs": [
         "server/thread-seen.mjs"
       ],

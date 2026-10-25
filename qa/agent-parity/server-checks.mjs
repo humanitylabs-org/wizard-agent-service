@@ -119,8 +119,17 @@ export const serverChecks = {
   },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
-    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': record } }), method: 'PUT' })
+    const retiredKey = 'agent/retired/direct:retired-thread'
+    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: {
+      [retiredKey]: { ...record, agent_id: 'retired', session_id: 'retired-thread' },
+      'direct:wizard_parity': record,
+    } }), method: 'PUT' })
     assert.equal(r.status, 200)
+    assert.equal((await r.json()).state.threads[retiredKey], undefined)
+    const noop = await s.raw('/wizard/thread-seen', { ...post({ threads: { [retiredKey]: {
+      agent_id: 'retired', session_id: 'retired-thread', seenAt: '2026-10-25T00:00:00Z',
+    } } }), method: 'PUT' })
+    assert.equal(noop.status, 200)
     const unreadAt = now + 1
     const unread = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, unreadAt } } }), method: 'PUT' })
     assert.equal(unread.status, 200)
