@@ -19,9 +19,34 @@ const listWindows = new WeakMap()
 const agentListSnapshots = new WeakMap()
 const profileRunCache = new WeakMap()
 
+// Shared metadata census for the list window and scoped Spaces tools. Never discovers other agents.
+export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets = [], signal, archiveLimit = 100, requireComplete = false } = {}) {
+  const all = []; let offset = 0
+  while (true) {
+    const q = new URLSearchParams({ limit: '100', offset: String(offset), include_children: 'false' })
+    const page = await ctx.registry.fetchAgent(agent, `/api/sessions?${q}`, { headers, redirect: 'manual', signal })
+    if (!page.ok) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    const raw = Buffer.from(await page.arrayBuffer())
+    if (secrets.some(secret => raw.includes(Buffer.from(secret)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
+    const value = JSON.parse(raw.toString('utf8')), rows = value.data || value.sessions || value.items || []
+    if (!Array.isArray(rows)) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
+    all.push(...rows.filter(row => !ctx.isThreadVisible || ctx.isThreadVisible(row)))
+    if (value.has_more === false || (value.has_more !== true && rows.length < 100)) break
+    if (!rows.length || offset >= 100000) throw new AgentError(502, 'incomplete_listing', 'agent.runtime')
+    offset += rows.length
+  }
+  const known = new Set(all.map(row => row?.id))
+  let archived = []
+  try { archived = readArchivedSessions(ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit }) }
+  catch (error) { if (requireComplete) throw error }
+  if (requireComplete && archived.length >= archiveLimit) throw new AgentError(502, 'incomplete_listing', 'agent.archive')
+  for (const row of archived) if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
+  return all
+}
+
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
-async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
+export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
   let next = 0
@@ -272,6 +297,7 @@ export async function handleAgentsApi(ctx, url, request, response) {
     if (method === 'PATCH') {
       const body = await readJson(ctx, request)
       assertPrivacyChange(request, body)
+      if (Object.hasOwn(body, 'hidden') && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'agent.hidden')
       const agent = await registry.update(id, body)
       sendJson(response, 200, { agent: await publicAgent(agent) })
       return true
@@ -664,6 +690,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (secrets.some((secret) => result.includes(Buffer.from(secret)))) { sendJson(response, 502, { error: 'unsafe_upstream_response', check: 'agent.response' }); return }
   if (upstream.ok && contentType.includes('application/json')) {
     const info = registry.threadAgent(agent)
+    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) {
+      const run = JSON.parse(result.toString('utf8'))
+      if (!['queued', 'running', 'waiting', 'paused'].includes(run.status)) ctx.routedPresentation?.fileStatus(agent, run.session_id || registry.runThread?.(agent.id, runIdFromPath(upstreamPath))?.session_id, parseStatus(run.output))
+    }
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
         const admission = JSON.parse(result.toString('utf8'))
@@ -706,23 +736,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         const secrets=[key,...ctx.mainSecrets].filter(Boolean)
         const refresh=()=> {
           if(!state.pending) state.pending=(async()=>{
-            const all=[]; let offset=0
-            while(true) {
-              const q=new URLSearchParams({limit:'100',offset:String(offset),include_children:'false'})
-              const page=await registry.fetchAgent(agent,`/api/sessions?${q}`,{headers,redirect:'manual',signal:AbortSignal.timeout(10000)})
-              if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-              const raw=Buffer.from(await page.arrayBuffer())
-              if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response')
-              const value=JSON.parse(raw.toString('utf8')), rows=value.data||value.sessions||value.items||[]
-              if(!Array.isArray(rows)) throw new AgentError(502,'upstream_unavailable','agent.runtime')
-              all.push(...rows.filter(row=>!ctx.isThreadVisible||ctx.isThreadVisible(row)))
-              if(value.has_more===false || (value.has_more!==true && rows.length<100)) break
-              if(!rows.length || offset>=100000) throw new AgentError(502,'incomplete_listing','agent.runtime')
-              offset+=rows.length
-            }
-            const known=new Set(all.map(row=>row.id))
-            for(const row of readArchivedSessions(statePath,{all:true}))
-              if(!known.has(row.id) && (!ctx.isThreadVisible||ctx.isThreadVisible(row))) all.push(row)
+            const all = await loadAgentSessionRows(ctx, agent, { headers, secrets, signal: AbortSignal.timeout(10000), archiveLimit: 100000, requireComplete: true })
             state.rows=await projectProfileSessions(ctx,agent,all,headers,secrets); state.at=Date.now()
             return state.rows
           })().finally(()=>{state.pending=null})

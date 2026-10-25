@@ -34,6 +34,8 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { createSpacesTools } from './spaces-tools.mjs'
+import { createSpaceFiling } from './thread-spaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -61,7 +63,7 @@ import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
-import { decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
@@ -2458,9 +2460,13 @@ function buildWizardServer(options, lifetime) {
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
+  let spacesTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
-      builtins: { list: (agentId) => onboarding?.list(agentId) || [], call: async (name, args, agentId) => onboarding?.call(name, args, agentId) },
+      builtins: {
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
+        call: async (name, args, agentId) => await spacesTools?.call(name, args, agentId) || onboarding?.call(name, args, agentId),
+      },
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -2571,8 +2577,9 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || '') }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8) }) : null
+  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -2639,6 +2646,26 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  spacesTools = createSpacesTools({
+    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
+    agentExists: id => Boolean(agents?.read(id)),
+    threadExists: (id, thread) => agentCtx.sessionExists(id, thread, { strict: true }),
+    loadThreads: async id => {
+      const agent = agents.read(id)
+      const key = id === MAIN_AGENT_ID ? hermesKey : agents.apiKey(id)
+      const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
+      const headers = key ? { Authorization: `Bearer ${key}` } : {}
+      const secrets = [key].filter(Boolean)
+      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+        headers, secrets,
+        signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
+      })
+      // Subjects come from status projection, not the raw upstream census. Use
+      // the session-list projection with the same scoped transport; omit title/
+      // filing hooks here so metadata search itself remains read-only.
+      return projectProfileSessions({ registry }, agent, rows, headers, secrets)
+    },
+  })
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
@@ -3355,7 +3382,7 @@ function buildWizardServer(options, lifetime) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
-      if (payload.status === 'completed') chatPhotos?.kick('completed_assistant')
+      if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)) }
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -3631,7 +3658,7 @@ function buildWizardServer(options, lifetime) {
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
-    const appNote = appProvenanceRunNote(appCatalog())
+    const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
   }
@@ -3676,6 +3703,7 @@ function buildWizardServer(options, lifetime) {
         if (!session || typeof session.id !== 'string') return session
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+        spaceFiling.apply('hermes', session.id, session.wizard_attention)
         const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
         if (attention?.subject) {
           servedSubjects.delete(session.id)
@@ -3950,7 +3978,11 @@ function buildWizardServer(options, lifetime) {
     return JSON.parse(result.toString('utf8'))
   }
 
-  const safeQueuedRunPayload = (record) => safeQueueValue(runQueue.publicPayload(record), record)
+  const safeQueuedRunPayload = (record) => {
+    const value = runQueue.publicPayload(record)
+    if (value.status === 'completed' && record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output))
+    return safeQueueValue(value, record)
+  }
   const sendQueuedRun = (response, status, record, headers = {}) => sendJson(response, status, safeQueuedRunPayload(record), headers)
 
   const streamQueuedRunEvents = async (initialRecord, operator, request, response) => {
@@ -5666,7 +5698,9 @@ function buildWizardServer(options, lifetime) {
           try {
             const runId = upstreamPath.split('/').at(-1)
             const tracked = directRuns.get(runId)
-            const status = JSON.parse(result.toString('utf8')).status
+            const completedRun = JSON.parse(result.toString('utf8'))
+            const status = completedRun.status
+            if (!ACTIVE_RUN_STATUSES.has(status)) spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output))
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
             else if (tracked) directRuns.delete(runId)
           } catch { /* status projection is best effort */ }
@@ -5948,6 +5982,12 @@ function buildWizardServer(options, lifetime) {
     // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
     server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
     void server.agentSocketsReady.catch(() => undefined)
+    // Wait until the gateway is accepting connections before reapplying old
+    // managed harnesses. No owner update or conversation is needed on upgrade.
+    server.once('listening', () => {
+      server.agentHarnessesReady = server.agentSocketsReady.then(() => agents.migrateManagedHarnesses())
+      void server.agentHarnessesReady.catch(() => undefined)
+    })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {

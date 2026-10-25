@@ -47,11 +47,11 @@
     },
     {
       "id": "chats-spaces",
-      "description": "Owner-created thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
+      "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
-      "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
-      "source_refs": ["server/ui-preferences.mjs"],
-      "reference_tests": ["tests/ui-preferences.test.ts"],
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "source_refs": ["server/ui-preferences.mjs", "server/spaces-tools.mjs", "server/thread-spaces.mjs"],
+      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts", "tests/spaces-tools.test.ts", "tests/spaces-search-status.test.ts", "tests/managed-harness-upgrade.test.ts", "qa/agent-parity/server-checks.mjs", "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"],
       "fixture": "chats-spaces",
       "policy_exemptions": []
     },
