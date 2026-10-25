@@ -170,4 +170,25 @@ describe('standard-agent shared state', () => {
       expect((await request('tools/list', {}, 'wrong-token')).error).toBe('unauthorized')
     } finally { svc.closeAllConnections?.(); await new Promise(resolve => svc.close(resolve)) }
   })
+  it('lets the main agent read other agents over the loopback token only, under the same live seals', async () => {
+    const f = fixture(); const a = await f.create('Source')
+    f.write(a.id, 'memories/MEMORY.md', 'loopback-memory-marker')
+    const heavy = 'fixture-heavy-token-with-more-than-32-chars'
+    const svc = createWizardServer({ heavyToken: heavy, upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-hermes', requireAccess: false, appsJsonPath: join(f.root, 'apps.json'), wizardOsHome: f.root, hermesHome: f.registry.stateHome('hermes'), agentRuntime: f.runtime, mcpToken: 'fixture-main', bridgeWatchMs: 0, bridgeWriteSkills: false, followThrough: false, bridgeLog: (line: string) => f.logs.push(line) })
+    try {
+      const origin = `http://127.0.0.1:${((await listen(svc)) as any).port}`
+      const call = (tool: string, body: any, auth = heavy, extra: any = {}) => fetch(`${origin}/wizard/internal/agents/${tool}`, { method: 'POST', headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body) })
+      expect((await call('memory_read', { agent: a.id }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
+      expect((await call('memory_read', { agent: a.id }, heavy, { Origin: 'https://evil.example' })).status).toBe(403)
+      expect((await call('memory_write', { agent: a.id })).status).toBe(404)
+      expect((await (await call('list', {})).json()).content[0].text).toContain(a.id)
+      const ok = await call('memory_read', { agent: a.id })
+      expect(ok.status).toBe(200)
+      expect(JSON.parse((await ok.json()).content[0].text).memory).toBe('loopback-memory-marker')
+      await f.registry.update(a.id, { permissions: { shared_with_agents: false } })
+      const sealed = await call('memory_read', { agent: a.id })
+      expect(sealed.status).toBe(403)
+      expect((await sealed.json()).isError).toBe(true)
+    } finally { svc.closeAllConnections?.(); await new Promise(resolve => svc.close(resolve)) }
+  })
 })
