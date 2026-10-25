@@ -131,13 +131,7 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   agentHeavy: process.env.WIZARD_AGENT_HEAVY || 'off',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
-  heavyWorker: {
-    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
-    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
-    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
-    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
-    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
-  },
+
   requireAccess,
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),

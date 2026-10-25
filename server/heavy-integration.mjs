@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { DurableHeavyQueue, heavySshTransport, heavyRpcTransport } from './heavy-queue.mjs'
+import { heavyHostConfigs } from './heavy-hosts.mjs'
+import { DurableHeavyQueue, heavyRpcTransport, heavyHostTransport } from './heavy-queue.mjs'
 import { queueRequestHash } from './run-queue.mjs'
 import { createAgentHeavyRelay } from './agent-heavy-relay.mjs'
 import { isAgentIngress, principalOf } from './principals.mjs'
@@ -118,7 +119,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
   }
   heavy = new DurableHeavyQueue({ statePath: options.heavyStatePath,
     transport: options.heavyTransport ?? (options.heavyRpcOrigin
-      ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavySshTransport(options.heavyWorker)),
+      ? heavyRpcTransport({ origin: options.heavyRpcOrigin, token }) : heavyHostTransport({ ...heavyHostConfigs(), ...(options.heavyWorker ? { thales: { ...heavyHostConfigs().thales, ...options.heavyWorker } } : {}) })),
     intervalMs: options.heavyPollIntervalMs ?? 1500, current,
     observe: job => agentRelay.observeOrigin(job),
     canDispatch: job => (job.agent_id ?? 'hermes') === 'hermes' || agentRelay.allowed(job.agent_id),
@@ -158,7 +159,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
       return result.record
     },
   })
-  const view = job => ({ job_id: job.job_id, agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, state: job.state, reason: job.reason,
+  const view = job => ({ job_id: job.job_id, host: job.host ?? 'thales', agent_id: job.agent_id ?? 'hermes', session_id: job.sessionId, state: job.state, reason: job.reason,
     cancel_requested: job.cancel_requested, continuation: job.resume || 'pending',
     continuation_invalidated: Boolean(job.continuation_invalidated), receipt: job.receipt,
     instruction: terminal.has(job.state) ? HEAVY_FOLLOWUP_GUIDANCE :

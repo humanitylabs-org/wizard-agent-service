@@ -3,7 +3,7 @@
 // service/remote SQLite stores, so restarting this bridge cannot repeat a build.
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
-import { heavySshTransport } from './heavy-queue.mjs'
+import { heavyHostTransport } from './heavy-queue.mjs'
 
 export function createHeavyRpcServer({ token, transport }) {
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy RPC token required')
@@ -29,8 +29,6 @@ export function createHeavyRpcServer({ token, transport }) {
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const server = createHeavyRpcServer({ token: process.env.WIZARD_HEAVY_TOKEN,
-    transport: heavySshTransport({ host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
-      script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT, root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
-      lock: process.env.WIZARD_HEAVY_REMOTE_LOCK, python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3' }) })
+    transport: heavyHostTransport() })
   server.listen(Number(process.env.WIZARD_HEAVY_RPC_PORT || 18788), '127.0.0.1', () => console.log('Heavy SSH bridge listening on loopback'))
 }
