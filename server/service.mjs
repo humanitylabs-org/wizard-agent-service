@@ -4613,11 +4613,19 @@ function buildWizardServer(options, lifetime) {
   }
   // Client-authored side stores are projections, never pair-ownership evidence.
   const qualifySeenInput = (request, state) => {
-    if (!state?.threads || typeof state.threads !== 'object') return state
-    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
+    if (!state?.threads || typeof state.threads !== 'object' || Array.isArray(state.threads)) return state
+    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).flatMap(([key, record]) => {
       const pair = sideReference(key, record)
-      const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
+      let agent
+      try { agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : '')) }
+      catch (error) {
+        // A stale device can retain retired agents or ambiguous legacy ids. One such mark must not
+        // block the whole batch; invisible private agents take the identical drop-only path.
+        if (error instanceof AgentError && ((error.status === 404 && error.check === 'agent.id')
+          || (error.status === 409 && error.check === 'agent.ambiguous_thread'))) return []
+        throw error
+      }
+      return [[sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]]
     })) }
   }
 
@@ -5589,6 +5597,13 @@ function buildWizardServer(options, lifetime) {
         // move the store's start time back, so it can neither push out nor reset the owner's private marks.
         const owner = ownerLike(principalOf(request))
         const qualified = qualifySeenInput(request, owner ? state : withoutHiddenSeen(request, state))
+        // An entirely discarded batch is a successful no-op, including old devices sending only a
+        // retired mark without the current state envelope. Never create/reset state from that batch.
+        if (state?.threads && !Array.isArray(state.threads) && Object.keys(state.threads).length > 0
+          && qualified?.threads && Object.keys(qualified.threads).length === 0) {
+          sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
+          return
+        }
         const merged = owner ? threadSeenStore.merge(scope, qualified)
           : threadSeenStore.merge(scope, qualified, { protect: (key) => hiddenSession(request, key), keepInitializedAt: true })
         sendJson(response, 200, { state: withoutHiddenSeen(request, merged) })
