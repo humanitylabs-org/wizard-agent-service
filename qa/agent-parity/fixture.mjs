@@ -45,18 +45,29 @@ export async function scene(kind, serverOptions = {}) {
   const searchStore=searchDb||titleDb
   if(serverOptions.fixtureSearchIndex) searchStore.exec("CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content,content='messages',content_rowid='id',tokenize='trigram')")
   let hasSearchIndex=!!serverOptions.fixtureSearchIndex
+  // Seed each disposable database in one transaction. Per-row autocommits can
+  // block this shared client/server event loop past HTTP's idle keep-alive
+  // deadline, making the next pooled request race an expired socket (ECONNRESET).
+  const transaction = (db, write) => {
+    db.exec('BEGIN')
+    try { write(); db.exec('COMMIT') }
+    catch (error) { db.exec('ROLLBACK'); throw error }
+  }
   const syncMessages = () => {
-    titleDb.exec('DELETE FROM messages')
-    const insert = titleDb.prepare('INSERT INTO messages(session_id,role,finish_reason,content,display_kind,timestamp) VALUES(?,?,?,?,?,?)')
-    for (const row of sessions.values()) for (const m of row.messages) insert.run(row.id,m.role,m.finish_reason || (m.role === 'assistant' ? 'stop' : null), typeof m.content === 'string' ? m.content : JSON.stringify(m.content),m.display_kind || (m.role === 'assistant' ? 'final' : null),m.timestamp)
-    if(searchDb) {
+    transaction(titleDb, () => {
+      titleDb.exec('DELETE FROM messages')
+      const insert = titleDb.prepare('INSERT INTO messages(session_id,role,finish_reason,content,display_kind,timestamp) VALUES(?,?,?,?,?,?)')
+      for (const row of sessions.values()) for (const m of row.messages) insert.run(row.id,m.role,m.finish_reason || (m.role === 'assistant' ? 'stop' : null), typeof m.content === 'string' ? m.content : JSON.stringify(m.content),m.display_kind || (m.role === 'assistant' ? 'final' : null),m.timestamp)
+      if (hasSearchIndex && !searchDb) titleDb.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
+    })
+    if (searchDb) transaction(searchDb, () => {
       searchDb.exec('DELETE FROM messages; DELETE FROM sessions')
       const putSession=searchDb.prepare('INSERT INTO sessions(id,source,title,started_at,message_count,parent_session_id,last_activity_at,pinned,archived,hidden) VALUES(?,?,?,?,?,?,?,?,?,?)')
       for(const row of sessions.values()) putSession.run(row.id,row.source||'wizard-mobile',row.title||'',row.created_at,row.messages.length,null,row.messages.at(-1)?.timestamp||row.created_at,0,row.archived?1:0,row.hidden?1:0)
       const put=searchDb.prepare('INSERT INTO messages(session_id,role,finish_reason,content,display_kind,timestamp) VALUES(?,?,?,?,?,?)')
       for(const row of titleDb.prepare('SELECT * FROM messages').all()) put.run(row.session_id,row.role,row.finish_reason,row.content,row.display_kind,row.timestamp)
-    }
-    if(hasSearchIndex) searchStore.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
+      if (hasSearchIndex) searchDb.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
+    })
   }
   writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA'] }))
   writeFileSync(join(root, 'apps.json'), JSON.stringify({ apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }] }))
