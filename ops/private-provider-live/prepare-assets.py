@@ -16,7 +16,7 @@ def main():
  sources=discover(a.home);baseline=a.output/'wam-baseline.tar'
  with tarfile.open(baseline,'w') as tf:
   for route,row in sources['selected'].items():tf.add(Path(row['resolved'])/'wam',arcname=route+'/wam',filter=lambda m:None if '__pycache__' in m.name or m.name.endswith('.pyc') else m)
- result={'service_sha':'be076f491b8db8ac6963380266856f63447107f2','ux_sha':'f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6','wam_sha':'0a1e01920b4700da8b4017d2bca64987e1eaebc0','wam_files':files,'provider_sha':sha}
+ result={'service_sha':'b8eb2268d07fc4b29b081771bd9e05dcbf56d776','ux_sha':'f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6','wam_sha':'0a1e01920b4700da8b4017d2bca64987e1eaebc0','wam_files':files,'provider_sha':sha}
  for name,file in [('wam',wam),('provider',provider),('wam_baseline',baseline)]:result[name+'_archive']=str(file);result[name+'_archive_sha256']=hashlib.sha256(file.read_bytes()).hexdigest()
  atomic(a.output/'assets.json',(json.dumps(result,indent=2)+'\n').encode());print(json.dumps(result,indent=2))
 if __name__=='__main__':main()
