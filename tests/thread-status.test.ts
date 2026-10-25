@@ -2,8 +2,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
+import { FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, latestVisibleSessionMessages, runInstructions } from '../server/service.mjs'
+import { AGENT_RUN_INSTRUCTIONS } from '../server/agents-http.mjs'
 
 const tag = (o: object) => `[WIZARD_STATUS_V1]${JSON.stringify(o)}[/WIZARD_STATUS_V1]`
 const dirs: string[] = []
@@ -53,6 +54,25 @@ describe('thread status tag', () => {
     expect(WIZARD_RUN_INSTRUCTIONS).toContain(STATUS_INSTRUCTIONS)
     expect(runInstructions({ join: false })).toContain('[WIZARD_STATUS_V1]')
   })
+})
+
+describe('finish-report prompt', () => {
+  it('preserves the approved wording including short-reply and background exceptions', () => {
+    expect(FINISH_REPORT_INSTRUCTIONS).toBe('When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.')
+  })
+
+  for (const [kind, instructions] of [
+    ['main', WIZARD_RUN_INSTRUCTIONS],
+    ['host-profile', AGENT_RUN_INSTRUCTIONS],
+    ['container', AGENT_RUN_INSTRUCTIONS],
+    ['restricted', AGENT_RUN_INSTRUCTIONS],
+  ]) {
+    it(`puts the shared finish report immediately before the final status rule for ${kind}`, () => {
+      expect(instructions).toContain(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`)
+      expect(instructions.endsWith(STATUS_INSTRUCTIONS)).toBe(true)
+      expect(instructions.split(FINISH_REPORT_INSTRUCTIONS)).toHaveLength(2)
+    })
+  }
 })
 
 describe('session list status projection', () => {

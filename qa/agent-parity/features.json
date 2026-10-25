@@ -46,6 +46,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "finish-report-instructions",
+      "description": "All agent kinds receive the shared finish-report rule immediately before the final status instructions, preserving short-reply and conversational exceptions.",
+      "layer": "server",
+      "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
+      "source_refs": ["server/thread-status.mjs", "server/service.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/thread-status.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "fixture": "finish-report-instructions",
+      "policy_exemptions": []
+    },
+    {
       "id": "android-shell-recording-custody",
       "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
       "layer": "ux",
