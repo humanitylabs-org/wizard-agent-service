@@ -231,7 +231,7 @@ export async function scene(kind, serverOptions = {}) {
     },
     agentMcp: async (method, params = {}) => {
       syncMessages()
-      const headers = { Authorization: `Bearer ${kind === 'main' ? options.mcpToken : agentGatewayToken}`, 'Content-Type': 'application/json' }
+      const headers = { Authorization: `Bearer ${kind === 'main' ? (serverOptions.mcpToken ?? options.mcpToken) : agentGatewayToken}`, 'Content-Type': 'application/json' }
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
       if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body })
       return new Promise((resolve, reject) => {
