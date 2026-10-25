@@ -62,12 +62,12 @@ it.each(['permission_denied','idempotency_key_conflict','admission_conflict'])(
     expect(calls).toEqual(['refused','human'])
   })
 
-it.each([7200,'7200',new Date(Date.now()+7200_000).toUTCString()])(
+it.each([7200,'7200','http-date'])(
   'Retry-After %s persists across restart and reserved manual input cannot bypass its scope', async retryAfter => {
     const calls:string[]=[]
     const s=setup({launch:async(r:any)=>{
       calls.push(r.idempotencyKey)
-      if(JSON.parse(r.body).provider==='busy') throw upstreamError(429,'{}',retryAfter)
+      if(JSON.parse(r.body).provider==='busy') throw upstreamError(429,'{}',retryAfter === 'http-date' ? new Date(Date.now()+7200_000).toUTCString() : retryAfter)
       return {upstreamRunId:r.idempotencyKey,payload:{status:'completed'}}
     },lookup:async()=>({})})
     let q=s.open()
