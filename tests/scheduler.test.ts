@@ -274,6 +274,8 @@ describe('schedule last/next run projections', () => {
   })
 })
 
+const plainReport = (sentence: string) => `**${sentence}**\n[WIZARD_STATUS_V1]{"state":"done","ask":"The check finished"}[/WIZARD_STATUS_V1]`
+
 describe('thread-bound one-shot follow-up watchers', () => {
   it('stays quiet while pending, disables itself on the first visible result, and never runs again', async () => {
     const calls: any[] = []
@@ -285,7 +287,7 @@ describe('thread-bound one-shot follow-up watchers', () => {
     expect(calls[0].body.input).toContain('one-shot follow-up')
     expect(calls[0].body.input).toContain('respond exactly [SILENT]')
     expect(s.project(s.get(watch.id))).toMatchObject({ enabled: true, lastRun: { outcome: 'silent' } })
-    run = { status: 'completed', output: 'Export finished.' }
+    run = { status: 'completed', output: plainReport('Export finished.') }
     clock += 5 * 60_000; await s.tick()
     expect(calls).toHaveLength(2)
     expect(s.project(s.get(watch.id))).toMatchObject({ enabled: false, nextRun: null, lastRun: { outcome: 'posted' } })
@@ -311,7 +313,7 @@ describe('thread-bound one-shot follow-up watchers', () => {
     let restorationAvailable = false
     const deliver = async (occurrence: any) => { calls.push(occurrence); return { run_id: 'watch-visible' } }
     const options = {
-      lookup: async () => ({ status: 'completed', output: 'Dependency finished.' }),
+      lookup: async () => ({ status: 'completed', output: plainReport('Dependency finished.') }),
       onWatchResult: async () => {
         restoreAttempts++
         if (!restorationAvailable) throw new Error('temporary restoration outage')
@@ -594,7 +596,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       if (path === '/v1/runs' && req.method === 'POST') {
         const key = String(req.headers['idempotency-key'])
         const session = sessions.get(body.session_id); if (session) session.archived = false
-        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? 'fixture report', error: 'credential-fixture-do-not-expose' }) }
+        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? plainReport('The check finished.'), error: 'credential-fixture-do-not-expose' }) }
         send(202, admitted.get(key)); return
       }
       if (path.startsWith('/v1/runs/') && path.endsWith('/events')) {
@@ -675,7 +677,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(history.messages).toEqual([])
   })
 
-  it.each(['fixture report', 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
+  it.each([plainReport('The check finished.'), 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
     const f = await fixture({ fixtureOutput })
     const created = await (await api(f.origin, '', 'POST', job({ enabled: false }))).json()
     const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
@@ -690,8 +692,8 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       expect(events).not.toContain('[SILENT]')
       expect(events).not.toContain('message.delta')
     } else {
-      expect(history.messages.map((m: any) => m.content)).toEqual(['fixture report'])
-      expect(events).toContain('fixture report')
+      expect(history.messages.map((m: any) => m.content)).toEqual(['**The check finished.**'])
+      expect(events).toContain('The check finished.')
     }
     expect(events).toContain('run.completed')
     await f.server.scheduler.tick(false)
@@ -700,7 +702,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
 
   it.each([
     ['nothing changed [SILENT]', true, true],
-    ['Dependency finished.', false, false],
+    [plainReport('Dependency finished.'), false, false],
   ])('keeps Done and Defer quiet while pending, then resurfaces only a visible watcher result: %s', async (fixtureOutput, archived, deferred) => {
     const f = await fixture({ fixtureOutput })
     f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
@@ -833,7 +835,7 @@ describe('windows, reminders and trickled agent work', () => {
     const work = s.create({ name: 'Overnight merge', when: { at: 'overnight' }, prompt: 'Merge the PR', thread: 'wizard_t2' })
     const r = s.transaction(() => s.reserve(remind, clock)), w = s.transaction(() => s.reserve(work, clock))
     expect(r.body.input).toContain('reminded'); expect(r.body.input).not.toContain('[SILENT]')
-    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).not.toContain('[SILENT]')
+    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).toContain('Reporter format')
     expect(isScheduleInput(r.body.input) && isScheduleInput(w.body.input)).toBe(true)
     expect(r.body.session_id).toBe('wizard_t1')
     expect(() => s.create({ name: 'x', kind: 'remind', when: { at: 'morning' }, skill: 'k' })).toThrow(/reminder needs/)
@@ -844,7 +846,7 @@ describe('windows, reminders and trickled agent work', () => {
     const admitted: string[] = []
     const status: Record<string, string> = {}
     const s = scheduler(async (o: any) => { admitted.push(o.jobId); status[o.jobId] = 'running'; return { run_id: o.jobId } },
-      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId] }) })
+      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId], output: '[SILENT]' }) })
     const jobs = Array.from({ length: 6 }, (_, i) => s.create({ name: `Work ${i}`, when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: `wizard_w${i}` }))
     const reminders = Array.from({ length: 2 }, (_, i) => s.create({ name: `R ${i}`, kind: 'remind', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'note', thread: `wizard_r${i}` }))
     await s.tick()

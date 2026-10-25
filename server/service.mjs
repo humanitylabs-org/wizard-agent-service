@@ -2526,11 +2526,12 @@ function buildWizardServer(options, lifetime) {
   let onboarding = null
   let followUps = null
   let spacesTools = null
+  let supervisorTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
         list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        call: async (name, args, agentId) => (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -4452,6 +4453,27 @@ function buildWizardServer(options, lifetime) {
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
     intervalMs: options.supervisorIntervalMs || 15_000 }) : null
   if (supervisor) lifetime.own(() => supervisor.close(), () => supervisor.quiesce())
+  const callSupervisor = async (action, args, agentId, sessionId) => {
+    if (!supervisor) throw Object.assign(new Error('Supervisor unavailable on this box'), { status: 503 })
+    const agent = agents?.read(agentId)
+    const privacy = (!agents && agentId === MAIN_AGENT_ID) || (agent?.privacy === 'standard' && agent?.permissions?.shared_with_agents !== false) ? 'shareable' : 'private-agent'
+    if (privacy !== 'shareable') throw Object.assign(new Error('Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'), { status: 403 })
+    if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionId)) throw Object.assign(new Error('An injected Wizard session is required; use the supervisor Hermes plugin tools.'), { status: 400 })
+    const owner = agentId === MAIN_AGENT_ID ? runQueue?.mutationOwnerForSession(sessionId) : await routedQueues?.mutationOwner(agent, sessionId)
+    if (!owner) throw Object.assign(new Error('An authenticated active Wizard run is required'), { status: 409 })
+    const result = supervisor.call(action, args, { agent_id: agentId, thread_id: sessionId, run_id: owner.publicRunId, privacy })
+    void supervisor.tick().catch(() => console.error('[supervisor] delivery pending'))
+    return result
+  }
+  // Session-aware Hermes adapter rides the EXISTING gateway and socket boundary. Do not advertise
+  // a second set of model tools: only the plugin can inject the actual calling session into them.
+  supervisorTools = { list: () => [], call: async (name, args, agentId) => {
+    if (!/^supervisor_(report|ask|answer|build|lessons|close)$/.test(name)) return undefined
+    const { session_id, ...value } = args
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callSupervisor(name.slice('supervisor_'.length), value, agentId, session_id)) }] } }
+    catch (error) { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: error.status ? error.message : 'Supervisor request failed', status: error.status || 500 }) }] } }
+  } }
+
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
@@ -5069,37 +5091,18 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
         return
       }
-      if (url.pathname.startsWith('/wizard/internal/supervisor/') || url.pathname.startsWith('/wizard/v1/agent-supervisor/')) {
-        if (!supervisor) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
+      if (url.pathname.startsWith('/wizard/internal/supervisor/')) {
+        if (!supervisor || !options.heavyToken) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-        const internal = url.pathname.startsWith('/wizard/internal/')
-        let agentId
-        if (internal) {
-          const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-          const token = String(options.heavyToken || '')
-          if (!token || isAgentIngress(request) || principal.kind === 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']
-            || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
-          agentId = MAIN_AGENT_ID
-        } else {
-          // Uses the exact same per-agent gateway key and restricted socket admission as existing tools.
-          agentId = bridge?.agentFor(request) || ''
-          if (!agentId || agentId === MAIN_AGENT_ID || principal.kind !== 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
-        }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principal.kind === 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
         try {
-          // Privacy is checked BEFORE history, queue lookup, lessons search, or ledger writes.
-          const agent = agents?.read(agentId)
-          const privacy = (!agents && agentId === MAIN_AGENT_ID) || (agent?.privacy === 'standard' && agent?.permissions?.shared_with_agents !== false) ? 'shareable' : 'private-agent'
-          if (privacy !== 'shareable') throw Object.assign(new Error('Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'), { status: 403 })
           const value = JSON.parse((await readBoundedBody(request, 128 * 1024)).toString('utf8'))
           if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('invalid body'), { status: 400 })
-          const { session_id: sessionId, ...args } = value
-          if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionId)) throw Object.assign(new Error('session required'), { status: 400 })
-          const owner = agentId === MAIN_AGENT_ID ? runQueue?.mutationOwnerForSession(sessionId) : await routedQueues?.mutationOwner(agent, sessionId)
-          if (!owner) throw Object.assign(new Error('An authenticated active Wizard run is required'), { status: 409 })
-          const action = url.pathname.split('/').at(-1)
-          const result = supervisor.call(action, args, { agent_id: agentId, thread_id: sessionId, run_id: owner.publicRunId, privacy })
-          sendJson(response, 200, result)
-          void supervisor.tick().catch(() => console.error('[supervisor] delivery pending'))
+          const { session_id, ...args } = value
+          sendJson(response, 200, await callSupervisor(url.pathname.split('/').at(-1), args, MAIN_AGENT_ID, session_id))
         } catch (error) { sendJson(response, error instanceof SyntaxError ? 400 : error.status || 500, { error: error instanceof SyntaxError ? 'invalid body' : error.status ? error.message : 'Supervisor request failed' }) }
         return
       }

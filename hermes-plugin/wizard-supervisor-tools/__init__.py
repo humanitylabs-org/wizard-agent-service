@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from urllib.error import HTTPError
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from agent.secret_scope import get_secret
 
 
@@ -30,7 +30,7 @@ def endpoint():
         p = urlparse(url)
         if p.scheme in ('http', 'https') and p.hostname and not p.username and not p.password and p.path.rstrip('/') == '/wizard/mcp' and not p.query and not p.fragment:
             p.port  # Validate malformed explicit port before sending a credential.
-            return urlunparse(p._replace(path='/wizard/v1/agent-supervisor/', params='', query='', fragment='')), token
+            return url, token
     return None, None
 
 
@@ -43,10 +43,18 @@ def call(action, args, session_id=None, **kwargs):
             return json.dumps({'error': 'Supervisor is not configured, or this agent is privacy-sealed; nothing was shared.'})
         # Overwrite, never trust model-provided identity (not in any public schema).
         value = {**args, 'session_id': session_id}
-        req = Request(origin + action, data=json.dumps(value).encode(), method='POST',
+        gateway = urlparse(origin).path.rstrip('/') == '/wizard/mcp'
+        if gateway:
+            value = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'supervisor_' + action, 'arguments': value}}
+        req = Request(origin if gateway else origin + action, data=json.dumps(value).encode(), method='POST',
                       headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
         with build_opener(ProxyHandler({}), NoRedirect()).open(req, timeout=15) as res:
-            return res.read(131072).decode()
+            raw = res.read(131072).decode()
+            if not gateway:
+                return raw
+            result = json.loads(raw).get('result', {})
+            content = result.get('content') or []
+            return content[0].get('text', '{}') if content else json.dumps({'error': 'Supervisor request failed.'})
     except HTTPError as error:
         try:
             message = json.loads(error.read(4096).decode()).get('error', 'Supervisor refused the request.')

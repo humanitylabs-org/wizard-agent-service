@@ -99,11 +99,11 @@ export class Supervisor {
       privacy: 'shareable', client_report_id: client }
     // An answer without a question binding is not allowed to spawn a review.
     if (kind === 'answer') fail('Use supervisor_answer with the question_id', 409)
-    if (kind === 'completion' && context.role !== 'builder') fail('A completion must come from a Supervisor builder thread', 403)
+    if (kind === 'completion' && !context.review) fail('A completion must come from a Supervisor review or builder thread', 403)
     this.transaction(() => {
       this.db.prepare('INSERT INTO reports VALUES(?,?,?,?,?)').run(report.id, caller.agent_id, caller.thread_id, client, JSON.stringify(report))
       if (context.review) {
-        if (context.build) this.db.prepare("UPDATE builds SET state='reported' WHERE id=?").run(context.build.id)
+        if (context.build && kind === 'completion') this.db.prepare("UPDATE builds SET state='reported' WHERE id=?").run(context.build.id)
         this.wake(context.review, `supervisor-report:${report.id}`, { report })
       } else {
         const review = { id: uid('review'), report: report.id, thread: uid('wizard_supervisor'), state: 'queued' }
@@ -136,6 +136,10 @@ export class Supervisor {
     if (q.state !== 'waiting') return { answered: false, state: q.state }
     this.transaction(() => {
       this.db.prepare("UPDATE questions SET state='answered', data=? WHERE id=?").run(JSON.stringify({ ...saved, answer, run_id: caller.run_id }), q.id)
+      const report = { id: uid('report'), kind: 'answer', depth: 1, parent_id: q.review, agent_id: caller.agent_id,
+        thread_id: caller.thread_id, run_id: caller.run_id, created_at: new Date(this.now()).toISOString(), title: 'Answer to Supervisor',
+        what_happened: answer, feedback_verbatim: '', evidence: [{ type: 'question', ref: q.id }], proposed_home: '', privacy: 'shareable', client_report_id: `answer:${q.id}` }
+      this.db.prepare('INSERT INTO reports VALUES(?,?,?,?,?)').run(report.id, caller.agent_id, caller.thread_id, report.client_report_id, JSON.stringify(report))
       this.wake(this.reviewBy(q.review), `supervisor-answer:${q.id}`, { question_id: q.id, answer })
     })
     return { answered: true }
@@ -222,7 +226,7 @@ export class Supervisor {
   start() {
     if (this.timer || this.stopped) return
     this.timer = setInterval(() => { void this.tick().catch(() => console.error('[supervisor] tick failed')) }, this.intervalMs)
-    this.timer.unref?.(); void this.tick()
+    this.timer.unref?.(); void this.tick().catch(() => console.error('[supervisor] initial tick failed'))
   }
   async quiesce() { this.stopped = true; clearInterval(this.timer); await this.inflight }
   async close() { await this.quiesce(); this.db.close() }

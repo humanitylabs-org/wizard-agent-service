@@ -10,6 +10,8 @@ For report=digest, keep the content body (it is the product); still open with th
 const marker = /\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/g
 const jargon = /\b(?:lanes?|gates?|waiv(?:e|ed|er|ers)|receipts?|cutovers?|soaks?|parity|unblock(?:ed|ing)?|PR\s*#?\s*\d+|issue\s*#?\s*\d+)\b|\b(?:feat|feature|fix|release|integration|docs|spec)\/[^\s]+|\b[0-9a-f]{7,40}\b|\bv?\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/gi
 
+export const reportJargon = text => [...String(text).matchAll(jargon)].map(m => m[0])
+
 /** One deterministic checker for scheduled replies and (later) script alerts. */
 export function lintReport(text, { kind = 'status' } = {}) {
   const reasons = []
@@ -18,7 +20,7 @@ export function lintReport(text, { kind = 'status' } = {}) {
   if (text === '[SILENT]') return { ok: true, reasons: [] }
   if (!['status', 'digest'].includes(kind)) reasons.push('report kind must be status or digest')
   const lines = text.split(/\r?\n/)
-  if (!/^\*\*[^*\n]+[.!?]\*\*$/.test(lines[0] || '')) reasons.push('open with one bold sentence')
+  if (!/^\*\*[^*\n]+[.!?]\*\*$/.test(lines[0] || '') || /[.!?]\s+\S/.test((lines[0] || '').slice(2, -2))) reasons.push('open with one bold sentence')
   const last = lines.at(-1) || ''
   if (!/^\[WIZARD_STATUS_V1\].*\[\/WIZARD_STATUS_V1\]$/.test(last) || !parseStatus(last) || (text.match(marker) || []).length !== 1) reasons.push('end with one valid status line')
   const body = text.replace(marker, '').trim()
@@ -30,9 +32,9 @@ export function lintReport(text, { kind = 'status' } = {}) {
     const open = body.split('**Still open:**')[1]?.split(/\n\*\*(?:What happened|What you need to do):\*\*/)[0] || ''
     if ((open.match(/^\s*(?:[-*•]|\d+[.)])\s/gm) || []).length > 2) reasons.push('Still open has at most two bullets')
   }
-  const found = [...body.matchAll(jargon)].map(m => m[0])
+  const found = reportJargon(body)
   const status = parseStatus(last)
-  const askJargon = [...String(status?.ask || '').matchAll(jargon)].map(m => m[0])
+  const askJargon = reportJargon(status?.ask || '')
   if (found.length || askJargon.length) reasons.push(`replace internal words or identifiers: ${[...new Set([...found, ...askJargon])].join(', ')}`)
   return { ok: !reasons.length, reasons }
 }

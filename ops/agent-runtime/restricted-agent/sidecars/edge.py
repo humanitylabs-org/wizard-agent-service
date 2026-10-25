@@ -48,7 +48,6 @@ ALLOW = [
     ({"GET"}, re.compile(r"/wizard/v1/agent-context")),
     # Service still requires opt-in + the owner-set grant on every request.
     ({"POST"}, re.compile(r"/wizard/v1/agent-heavy/(submit|status|cancel|artifacts)")),
-    ({"POST"}, re.compile(r"/wizard/v1/agent-supervisor/(report|ask|answer|build|lessons|close)")),
 ]
 PASS_HEADERS = {"content-type", "content-length", "accept", "authorization", "mcp-session-id",
                 "mcp-protocol-version", "last-event-id", "user-agent", "idempotency-key"}

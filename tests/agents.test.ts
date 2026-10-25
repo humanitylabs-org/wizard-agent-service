@@ -683,7 +683,7 @@ describe('per-agent threads and runs', () => {
     }
     expect(server.scheduler.get(watch.id).enabled).toBe(false)
     expect(priv.rows.get('wizard_shared')!.archived).toBe(false)
-    expect(priv.seen.filter((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared').map(row => row.body.archived)).toEqual([true, false])
+    expect(priv.seen.filter((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared').map(row => row.body.archived)).toEqual([true, true, false]) // Original and one Reporter rewrite stay hidden; only the final result resurfaces.
     expect(main.seen.some((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared')).toBe(false)
   })
 

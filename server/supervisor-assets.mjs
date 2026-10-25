@@ -19,6 +19,12 @@ export function installSupervisorAssets(home) {
     const path = join(home, target)
     // Never traverse agent-planted symlinks in a managed home (restricted homes use managed/).
     for (const p of [home, dirname(path), path]) if (existsSync(p) && lstatSync(p).isSymbolicLink()) throw new Error('supervisor_asset_symlink')
+    const rejectLinks = p => {
+      const st = lstatSync(p)
+      if (st.isSymbolicLink()) throw new Error('supervisor_asset_symlink')
+      if (st.isDirectory()) for (const child of readdirSync(p)) rejectLinks(join(p, child))
+    }
+    if (existsSync(path)) rejectLinks(path)
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     cpSync(join(root, source), path, { recursive: true, force: true, filter: p => !p.includes('__pycache__') && !p.endsWith('.pyc') })
   }

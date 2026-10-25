@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../../server/service.mjs'
+import { installSupervisorAssets } from '../../server/supervisor-assets.mjs'
 import { agentSocketPath } from '../../server/agent-sockets.mjs'
 import { PRESETS } from '../../server/agents.mjs'
 
@@ -16,11 +17,13 @@ export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Typ
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
 export async function scene(kind, serverOptions = {}) {
+  const supervisorParity = serverOptions.supervisorParity === true
   const followUpParity = serverOptions.followUpParity === true
   // Generated per scene: the main agent's gateway credential when the follow-up gateway is under test.
   const mainMcpToken = `parity-main-mcp-${crypto.randomUUID()}`
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
+  delete optionOverrides.supervisorParity
   const root = mkdtempSync(join(tmpdir(), 'parity-'))
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
@@ -165,7 +168,8 @@ export async function scene(kind, serverOptions = {}) {
       await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(socketPath, resolve) }); chmodSync(socketPath, 0o600)
     }
   }
-  const options = { appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
+  if (supervisorParity) installSupervisorAssets(agentHome)
+  const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken: 'parity-heavy-token-long-enough-for-loopback' } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
@@ -185,6 +189,31 @@ export async function scene(kind, serverOptions = {}) {
   return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
+    setSupervisorSeal: (privacy, shared) => {
+      if (kind === 'main') throw Error('main privacy cannot be changed by this fixture')
+      const path = join(folder, 'agent.json'), agent = JSON.parse(readFileSync(path, 'utf8'))
+      agent.privacy = privacy; agent.permissions.shared_with_agents = shared
+      writeFileSync(path, JSON.stringify(agent))
+    },
+    supervisor: async (action, args, extraHeaders = {}) => {
+      const path = kind === 'main' ? `/wizard/internal/supervisor/${action}` : '/wizard/mcp'
+      const token = kind === 'main' ? 'parity-heavy-token-long-enough-for-loopback' : 'parity-gateway-secret'
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...extraHeaders }
+      const body = JSON.stringify(kind === 'main' ? args : {jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'supervisor_'+action,arguments:args}})
+      const normalize = async response => {
+        if (kind === 'main' || !response.ok) return response
+        const reply = await response.json(), content = reply.result?.content || []
+        const value = JSON.parse(content[0]?.text || '{}')
+        return new Response(JSON.stringify(value), {status:value.status || 200})
+      }
+      if (kind !== 'restricted') return normalize(await fetch(`${base}${path}`, { method: 'POST', headers, body }))
+      return normalize(await new Promise((resolve, reject) => {
+        const req = httpRequest({ socketPath: join(folder, 'gateway', 'gateway.sock'), agent: false, path, method: 'POST', headers }, res => {
+          let text = ''; res.setEncoding('utf8'); res.on('data', chunk => { text += chunk }); res.on('end', () => resolve(new Response(text, { status: res.statusCode, headers: res.headers })))
+        })
+        req.on('error', reject); req.end(body)
+      }))
+    },
     gatewayRpc: async (rpc) => {
       const token = kind === 'main' ? mainMcpToken : readFileSync(join(folder, 'gateway.key'), 'utf8')
       const headers = { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json', Accept: 'application/json' }

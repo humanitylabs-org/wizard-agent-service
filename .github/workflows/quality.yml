@@ -27,6 +27,10 @@ jobs:
           python3 -m venv .import-venv
           .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
           printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Supervisor Hermes adapter and restricted asset synchronization
+        run: |
+          "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
+          python3 ops/agent-runtime/test_agent_runtime.py
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
