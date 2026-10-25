@@ -640,7 +640,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     claim(sessionId)
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
-    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
+    const followUp = ctx.followUpNote?.(sessionId) || ''
+    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }
@@ -651,10 +652,14 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   }
   const key = registry.apiKey(agent.id)
   if (!key) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.key')
-  const headers = new Headers({ Authorization: `Bearer ${key}` })
+  const headers = new Headers({ Authorization: ['Bearer', key].join(' ') })
   if (hasBody) headers.set('Content-Type', 'application/json')
   if (typeof request.headers.accept === 'string') headers.set('Accept', request.headers.accept)
   if (typeof request.headers['idempotency-key'] === 'string') headers.set('Idempotency-Key', request.headers['idempotency-key'])
+  if (principalOf(request).kind === 'service' && request.headers['x-wizard-schedule-kind'] === 'watch') {
+    headers.set('X-Wizard-Schedule-Kind', 'watch')
+    headers.set('X-Wizard-Watcher-Preserve', request.headers['x-wizard-watcher-preserve'] === '1' ? '1' : '0')
+  }
   const query = new URLSearchParams(searchParams)
   for (const key of ['window','q','overrides','snapshot','cursor','fields','mode']) query.delete(key)
   query.delete('view')
@@ -770,6 +775,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
           : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
         result=Buffer.from(JSON.stringify(payload))
       }
+      if (ctx.projectFollowUps) result = ctx.projectFollowUps(result, agent.id)
       // Compact projections are already scope/visibility-filtered and carry explicit agent ids.
       // Do not expand them back into full runtime identity envelopes.
       if(searchParams.get('mode')!=='body' && searchParams.get('fields')!=='slim') {
