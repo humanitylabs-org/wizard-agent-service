@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
+import { STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 export const checks = {
   ...serverChecks,
@@ -143,6 +144,31 @@ export const checks = {
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('Background only:'))
     assert.ok(sent.instructions.includes('Visible on screen: synthetic label'))
+  },
+  'ready-ask-contract': async s => {
+    const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Two desk layouts are ready for the owner to choose.' }))
+    assert.equal(r.status, 202)
+    const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1)
+    assert.ok(sent.body.instructions.includes(STATUS_INSTRUCTIONS), 'the complete shared status contract reaches the runtime')
+    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR', 'The reply itself ends with the same ask in plain words.']) {
+      assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
+    }
+    assert.ok(!sent.body.instructions.includes('under 90 characters'))
+    assert.equal(sent.path, s.kind === 'host-profile' ? '/p/parity-profile/v1/runs' : '/v1/runs')
+
+    // Synthetic reply: verify projection, not a claim that a live model followed the prompt.
+    const ask = 'Two desk layouts to choose from. Pick A or B'
+    const run = [...s.runs.values()].at(-1)
+    Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: `${ask}\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'needs_you', ask })}[/WIZARD_STATUS_V1]` })
+    assert.equal((await s.request(`/v1/runs/${(await r.json()).run_id}`)).status, 200)
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000 + 1, content: `${ask}\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'needs_you', ask })}[/WIZARD_STATUS_V1]` })
+    const list = await s.request('/api/sessions?view=list'); assert.equal(list.status, 200)
+    const item = (await list.json()).data.find(x => x.id === row.id)
+    assert.equal(item.attention.state, 'needs_you'); assert.equal(item.attention.ask, ask)
+    const history = await s.request('/api/sessions/wizard_parity/messages?view=wizard'); assert.equal(history.status, 200)
+    const visible = JSON.stringify(await history.json())
+    assert.ok(visible.includes(ask)); assert.ok(!visible.includes('[WIZARD_STATUS_V1]'))
   },
   'media-contract': async s => {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic media request' })); assert.equal(r.status, 202)
