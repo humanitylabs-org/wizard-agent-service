@@ -563,8 +563,8 @@ export class DurableRunQueue {
     }
   }
 
-  // `continuation` is service authority (helper tokens; {kind:'background-recovery'} lets a manual Continue skip the
-  // automatic helper check). Never pass a caller-supplied value here.
+  // `continuation` is service authority (helper tokens; background recovery; quiet watcher launch semantics).
+  // Never pass a caller-supplied value here.
   async admit(request) {
     const result = this._admitRow(request)
     if (!result.replayed) await this.tick(true)

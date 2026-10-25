@@ -168,6 +168,9 @@ agent on any box (container agents included, which never load the host-only `wiz
 - `wizard_tips` `start` / `stop` / `status`: the opt-in five-day drip. Five one-shot `remind` jobs share one
   service-chosen thread titled `Wizard · Tips` (`group: wizard-tips`): tip 1 a minute after opting in, tips 2–5
   at the next 08:30 owner-time mornings. Starting again while tips are pending is a no-op.
+- `wizard_follow_up` `create` / `list` / `stop` (`server/follow-ups.mjs`): a `watch` job bound to the calling
+  agent's current thread (spec/thread-follow-up-watchers.md). A routed agent may watch only a thread it owns; the
+  main agent reaches it through the `wizard-os` plugin, which injects its session id, so it is unlisted for main.
 
 The thread, title and group are set by the service (`Scheduler.create(input, placement)`); the HTTP body cannot
 supply them. When the timer is off (`WIZARD_SCHEDULER` is not `1`) both tools answer with an error instead of

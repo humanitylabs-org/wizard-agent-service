@@ -47,7 +47,7 @@
     },
     {
       "id": "chats-spaces",
-      "description": "Agent-owned thread collections persist independently of agent runtime kind",
+      "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
       "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
       "source_refs": ["server/ui-preferences.mjs", "server/spaces-tools.mjs", "server/thread-spaces.mjs"],
@@ -267,6 +267,26 @@
         "qa/agent-parity/browser.mjs"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "thread-follow-up-watchers",
+      "description": "Create, project, list and explicitly stop a same-thread one-shot watcher over the runtime's own gateway without crossing agent boundaries",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, call wizard_follow_up on /wizard/mcp with that runtime's own gateway key and transport (restricted: its per-agent socket; never owner proof), create a watcher for its current thread, refuse a thread a routed agent does not own, read back only that watcher in the owning thread list, explicitly stop it, and verify the list is empty.",
+      "source_refs": [
+        "server/follow-ups.mjs",
+        "server/scheduler.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "hermes-plugin/wizard-os/__init__.py"
+      ],
+      "reference_tests": [
+        "tests/scheduler.test.ts",
+        "tests/agents.test.ts",
+        "tests/wizard-os-follow-up-plugin.node.mjs"
+      ],
+      "fixture": "thread-follow-up-watchers",
       "policy_exemptions": []
     },
     {
