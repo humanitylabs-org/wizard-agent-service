@@ -18,14 +18,49 @@ const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/h
 
 export const serverChecks = {
   'chats-spaces': async s => {
-    const space = { id: 'parity-space', name: 'Synthetic Space', threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
+    const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
+    const space = { id: 'parity-space', name: 'Synthetic Space', ...(s.id === 'hermes' ? {} : { agent: s.id }), threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
     const put = spaces => s.raw('/wizard/v1/ui-preferences', { ...post({ spaces }), method: 'PUT' })
-    assert.equal((await put([space])).status, 200)
+    const tool = async (name, args = {}, error = '') => {
+      const r = await s.agentMcp('tools/call', { name, arguments: args })
+      assert.equal(r.status, 200, 'agent gateway authentication/transport')
+      const reply = (await r.json()).result
+      if (error) { assert.equal(reply.isError, true); assert.equal(reply.content[0].text, error); return }
+      assert.notEqual(reply.isError, true, JSON.stringify(reply))
+      return JSON.parse(reply.content[0].text)
+    }
+    assert.equal((await put([space, foreign])).status, 200)
+    const listed = await s.agentMcp('tools/list')
+    assert.equal(listed.status, 200)
+    const names = (await listed.json()).result.tools.map(t => t.name)
+    for (const name of ['list', 'search_threads', 'create', 'add', 'remove', 'delete']) assert.ok(names.includes(`spaces_${name}`))
+    assert.deepEqual((await tool('spaces_list')).spaces, [{ id: space.id, name: space.name, count: 1 }])
+    const row = s.sessions.get('wizard_parity'); row.hidden = false; row.title = 'Synthetic metadata title'
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000, content: 'CONTENT_CANARY\n[WIZARD_STATUS_V1]{"state":"done","ask":"Synthetic","subject":"ParitySubjectOnly"}[/WIZARD_STATUS_V1]' })
+    const found = await tool('spaces_search_threads', { query: 'ParitySubjectOnly' })
+    assert.deepEqual(found.threads.map(t => t.id), ['wizard_parity'])
+    assert.equal(found.threads[0].subject, 'ParitySubjectOnly')
+    assert.ok(!JSON.stringify(found).includes('CONTENT_CANARY'))
+    const created = (await tool('spaces_create', { name: 'Gateway Space' })).space
+    assert.equal((await tool('spaces_create', { name: 'Gateway Space' })).space.id, created.id)
+    for (const name of ['spaces_add', 'spaces_remove', 'spaces_delete']) {
+      const args = name === 'spaces_delete' ? {} : { thread_ids: ['wizard_parity'] }
+      await tool(name, { space_id: foreign.id, ...args }, 'not_found')
+      await tool(name, { space_id: 'missing-space', ...args }, 'not_found')
+    }
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
+    const run = await admit(s, { input: 'Synthetic Space fill' })
+    assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
+    assert.ok(!sent(s).instructions.includes('FOREIGN_SPACE_CANARY'))
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output: `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Filed', space: created.id })}[/WIZARD_STATUS_V1]` })
+    assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'status-line Space filing')
     await s.restart()
-    const prefs = await (await s.raw('/wizard/v1/ui-preferences')).json()
-    assert.deepEqual(prefs.spaces, [space])
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'durable agent-scoped membership')
+    await tool('spaces_delete', { space_id: created.id })
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [space, foreign])
     assert.equal((await put([])).status, 200)
-    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [])
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
   'nonimage-files': async s => {
