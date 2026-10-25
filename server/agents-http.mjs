@@ -8,6 +8,7 @@
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
 import { indexedSearchWords } from './session-truth.mjs'
+import { guardOwnerThreadWrite, isTurnWritePath, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -85,7 +86,9 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
           const raw = Buffer.from(await response.arrayBuffer())
           if (response.ok && !secrets.some(secret => raw.includes(Buffer.from(secret)))) {
             const payload = JSON.parse(raw.toString('utf8')), messages = payload.data || payload.messages || []
-            const latest = [...messages].filter(m => ['user', 'assistant'].includes(m.role)).sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0]
+            const safeMessages = withoutAgentToAgentTurns(messages)
+            if (safeMessages.length !== messages.length) row = { ...row, latest_message: null, last_user_message: null, preview: '' }
+            const latest = safeMessages.filter(m => ['user', 'assistant'].includes(m.role)).sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0]
             if (latest?.role === 'assistant') { attention = parseStatus(latest.content); assistantAt = latest.timestamp }
           }
         }
@@ -159,7 +162,7 @@ function agentErrorBody(error) {
 }
 
 export function sessionIdFromPath(upstreamPath) {
-  const match = upstreamPath.match(/^\/api\/sessions\/([^/]+)(?:\/(?:messages|model))?$/u)
+  const match = upstreamPath.match(/^\/api\/sessions\/([^/]+)(?:\/(?:messages|model|chat(?:\/stream)?))?$/u)
   if (!match) return ''
   try { return decodeURIComponent(match[1]) } catch { return '' }
 }
@@ -466,7 +469,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   const hasBody = method === 'PATCH' || (method === 'POST' && !upstreamPath.endsWith('/stop'))
   let explicitBody = ''
   let bodyValue = null
-  if (hasBody && String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+  if (hasBody && (isTurnWritePath(upstreamPath) || String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json'))) {
     body = await ctx.readBoundedBody(request)
     try {
       bodyValue = JSON.parse(body.toString('utf8'))
@@ -566,6 +569,9 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   }
   // Even an owner must name recovery explicitly; background/default/model routing never activates it.
   if (registry.read(agentId)?.role === 'recovery' && (!explicit || principalOf(request).kind !== 'owner')) throw new AgentError(404, 'agent_not_found', 'agent.id')
+  // After scope/privacy resolution, before forwarding or superseding any active work.
+  await guardOwnerThreadWrite({ method, upstreamPath, body: bodyValue,
+    sessionExists: id => ctx.sessionExists ? ctx.sessionExists(agentId, id, { strict: true }) : ctx.mainHasSession(id) })
   return { agentId, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
 }
 

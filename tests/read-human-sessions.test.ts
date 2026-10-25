@@ -56,6 +56,7 @@ CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL,
 INSERT INTO messages VALUES ('s', 'user', 'Real request', 100, 1, '');
 INSERT INTO messages VALUES ('s', 'user', '[Owner requested recovery of this interrupted Helm card.] Continue.', 200, 1, '');
 INSERT INTO messages VALUES ('s', 'user', '[James requested recovery of this interrupted Helm card.] Continue.', 300, 1, '');
+INSERT INTO messages VALUES ('s', 'user', '  [Agent-to-agent owner clearance] Reply JSON', 400, 1, '');
 """)
 print(json.dumps(module.latest_visible_users(database, {"s": "thread-s"}), sort_keys=True))
 `

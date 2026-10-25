@@ -5,6 +5,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
+import { guardOwnerThreadWrite, isTurnWritePath, OwnerThreadWriteError, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -1256,6 +1257,7 @@ function legacyInternalHistoryMessage(message) {
   if (role === 'assistant' && normalized === EMPTY_ASSISTANT_SENTINEL) return true
   if (role === 'user' && normalized === EMPTY_TOOL_RESPONSE_NUDGE) return true
   return [
+    '[Agent-to-agent',
     '[ASYNC DELEGATION BATCH COMPLETE',
     '[Wizard follow-through]',
     '[CONTEXT COMPACTION — REFERENCE ONLY]',
@@ -1336,7 +1338,8 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   if (operator) projected = projectOperatorMessages(projected, completions, records)
   let rows = []
   try { rows = sessionMessageRows(JSON.parse(projected.toString('utf8'))) } catch { return { latest: null, lastUser: null } }
-  const visible = rows.flatMap((message) => {
+  const safeRows = withoutAgentToAgentTurns(rows)
+  const visible = safeRows.flatMap((message) => {
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
@@ -1357,6 +1360,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   return {
     latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
+    ...(safeRows.length !== rows.length ? { suppressedAgentTurns: true } : {}),
     status,
     appId,
     latestAssistantAt: latestAssistant?.created_at ?? null,
@@ -3834,6 +3838,7 @@ function buildWizardServer(options, lifetime) {
           if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null))
           return {
             ...session,
+            ...(messages.suppressedAgentTurns ? { latest_message: null, last_user_message: null, preview: messages.latest?.content ?? '' } : {}),
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
             ...(messages.appId ? { wizard_app_id: messages.appId } : {}),
@@ -5720,6 +5725,16 @@ function buildWizardServer(options, lifetime) {
             return
           }
         }
+        // Embedders without the agent registry use the same admission rule.
+        let unscopedBody
+        if (!agentResolution && request.method === 'POST' && isTurnWritePath(upstreamPath)) {
+          unscopedBody = await readBoundedBody(request)
+          await guardOwnerThreadWrite({ method: request.method, upstreamPath, body: unscopedBody,
+            sessionExists: async id => {
+              try { await hermesJson(`/api/sessions/${encodeURIComponent(id)}`, {}, true); return true }
+              catch (error) { if (error?.status === 404) return false; throw error }
+            } })
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -5779,7 +5794,7 @@ function buildWizardServer(options, lifetime) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
           if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
           const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
@@ -6175,6 +6190,10 @@ function buildWizardServer(options, lifetime) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof OwnerThreadWriteError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if (error instanceof AgentError && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return

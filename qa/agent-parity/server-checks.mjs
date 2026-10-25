@@ -18,6 +18,21 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'owner-thread-agent-write-guard': async s => {
+    const before = s.seen.filter(r => r.method === 'POST').length
+    for (const input of ['  [Agent-to-agent test] ping', '[Agent-to-agent follow-up] ping', 'Clearance request, NOT a James message']) {
+      for (const path of ['/v1/runs', '/v1/runs/guard-test/steer', '/api/sessions/wizard_parity/chat', '/api/sessions/wizard_parity/chat/stream']) {
+        const response = await s.request(path, post({ session_id: 'wizard_parity', input, message: input }))
+        assert.equal(response.status, 409, path)
+        assert.equal((await response.json()).error.code, 'agent_to_agent_thread_write')
+      }
+    }
+    const noContentType = await s.request('/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_parity', input: '[Agent-to-agent test] ping' }) })
+    assert.equal(noContentType.status, 409, 'a non-JSON content-type cannot bypass admission')
+    assert.equal(s.seen.filter(r => r.method === 'POST').length, before, 'rejected writes never reach Hermes')
+    await admit(s, { input: 'Normal owner request remains accepted' })
+    assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
+  },
   'finish-report-instructions': async s => {
     await admit(s, { input: 'Synthetic task-finish prompt delivery check' })
     const instructions = sent(s).instructions

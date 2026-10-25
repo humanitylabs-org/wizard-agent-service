@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const reportDir = mkdtempSync(join(tmpdir(), 'parity-gate-'))
-const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: 90000, env: process.env })
+// This is a serial whole-matrix process budget, not a per-contract latency assertion.
+const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: 180000, env: process.env })
 let report
 try {
   report = JSON.parse(readFileSync(join(reportDir, 'matrix.json'), 'utf8'))
