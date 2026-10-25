@@ -14,9 +14,11 @@ class HostedWorkflow(unittest.TestCase):
     def test_same_sha_and_same_release_have_separate_serialization(self):
         top = self.workflow.split('\njobs:', 1)[0]
         self.assertIn('group: public-image-${{ github.repository }}-${{ github.sha }}', top)
-        publish = self.job('publish', 'anonymous-pull')
+        self.assertIn('queue: max', top)
+        publish = self.job('finalize', 'anonymous-pull')
         self.assertIn('group: public-release-${{ github.repository }}-${{ inputs.release_tag || github.sha }}', publish)
         self.assertIn('cancel-in-progress: false', publish)
+        self.assertIn('queue: max', publish)
 
     def test_pr_build_exercises_publisher_emulation_without_credentials(self):
         build = self.job('pr-build', 'publish')
@@ -31,18 +33,33 @@ class HostedWorkflow(unittest.TestCase):
         self.assertIn('platform: arm64', build)
 
     def test_only_real_builds_create_provenance(self):
-        attest = self.workflow.split('\n  attest:', 1)[1]
+        attest = self.job('attest', 'finalize')
+        self.assertIn('needs: publish', attest)
         self.assertIn("needs.publish.outputs.built == 'true'", attest)
         self.assertIn('--bundle-from-oci', attest)
         self.assertIn('--source-digest "$GITHUB_SHA"', attest)
         self.assertIn('--source-ref refs/heads/main', attest)
+
+    def test_finalize_waits_for_attestation_or_verified_reuse(self):
+        finalize = self.job('finalize', 'anonymous-pull')
+        self.assertIn('needs: [publish, attest]', finalize)
+        self.assertIn('!cancelled()', finalize)
+        self.assertIn("needs.attest.result == 'success'", finalize)
+        self.assertIn("needs.publish.outputs.built == 'false'", finalize)
+        self.assertIn("needs.attest.result == 'skipped'", finalize)
+        self.assertIn('ghcr_image.py finalize', finalize)
+        self.assertIn('docker/setup-buildx-action@', finalize)
+        anonymous = self.workflow.split('\n  anonymous-pull:', 1)[1]
+        self.assertIn('needs: [publish, finalize]', anonymous)
+        self.assertIn("needs.finalize.result == 'success'", anonymous)
 
     def test_every_action_is_pinned_and_no_worker_state(self):
         for action in re.findall(r'uses:\s*(\S+)', self.workflow):
             self.assertRegex(action, r'^[\w-]+/[\w-]+@[0-9a-f]{40}$')
         for forbidden in ('self-hosted', 'WIZARD_CI_WORKER_LOCK', 'WIZARD_CI_ROOT'):
             self.assertNotIn(forbidden, self.workflow)
-        for name, following in [('publish', 'anonymous-pull'), ('anonymous-pull', 'attest')]:
+        for name, following in [('publish', 'attest'), ('attest', 'finalize'),
+                                ('finalize', 'anonymous-pull')]:
             job = self.job(name, following)
             for guard in ('github.repository ==', "github.ref == 'refs/heads/main'", "github.event_name == 'push'", "github.event_name == 'workflow_dispatch'"):
                 self.assertIn(guard, job)

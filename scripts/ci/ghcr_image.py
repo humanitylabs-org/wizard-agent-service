@@ -159,7 +159,7 @@ def verify_existing_provenance(args, digest, config):
     ], env=env, check=True)
 
 
-def publish(args):
+def validate_publication(args):
     canonical_guard(args, {"push", "workflow_dispatch"})
     if os.environ.get("GITHUB_REF") != "refs/heads/main" or args.branch != "main":
         raise RuntimeError("publication is only allowed on the canonical main branch")
@@ -169,6 +169,11 @@ def publish(args):
             raise RuntimeError("release dispatch must confirm tag and exact selected commit")
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-candidate\.[0-9]{8})?", args.release):
             raise ValueError("only semantic versions or dated candidate tags are accepted")
+
+
+def publish(args):
+    """Prepare a digest; a fresh build deliberately creates no immutable tag."""
+    validate_publication(args)
     config = hosted_config()
     env = clean_env(config)
     registry = Registry(args.image, authenticated=True)
@@ -188,22 +193,53 @@ def publish(args):
                 "--platform", "linux/amd64,linux/arm64", "--provenance=false",
                 "--label", "org.opencontainers.image.source=https://github.com/" + CANONICAL[args.image],
                 "--label", "org.opencontainers.image.revision=" + args.sha,
-                "--tag", args.image + ":" + args.tag,
-                "--metadata-file", str(metadata), "--push", "."], env)
+                "--metadata-file", str(metadata),
+                "--output", "type=image,name=" + args.image +
+                ",push-by-digest=true,name-canonical=true,push=true", "."], env)
         digest = json.loads(metadata.read_text())["containerimage.digest"]
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise RuntimeError("build metadata did not contain an exact image digest")
         registry = Registry(args.image, authenticated=True)
-        if registry.manifest(args.tag)[0] != digest:
-            raise RuntimeError("published SHA tag does not match build digest")
         platform_manifests(registry, digest, args.sha, args.image)
-    if args.release:
-        docker(["buildx", "--builder", args.builder, "imagetools", "create",
-                "--tag", args.image + ":" + args.release, args.image + "@" + digest], env)
-        if Registry(args.image, authenticated=True).manifest(args.release)[0] != digest:
-            raise RuntimeError("release alias changed image digest")
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"digest={digest}\nbuilt={str(not bool(existing)).lower()}\n")
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-        output.write(f"Published `{args.image}@{digest}` from `{args.sha}`.\n\nTags: `{args.tag}` `{args.release}`. Public pull verification is a separate required job.\n")
+        output.write(f"Prepared `{args.image}@{digest}` from `{args.sha}`. "
+                     "Immutable aliases are created only after provenance verification.\n")
+
+
+def finalize(args):
+    """Create write-once aliases only for an exactly validated, attested digest."""
+    validate_publication(args)
+    config = hosted_config()
+    env = clean_env(config)
+    registry = Registry(args.image, authenticated=True)
+    platform_manifests(registry, args.digest, args.sha, args.image)
+    verify_existing_provenance(args, args.digest, config)
+
+    sha_existing = registry.manifest(args.tag, missing_ok=True)
+    release_existing = registry.manifest(args.release, missing_ok=True) if args.release else None
+    if sha_existing and sha_existing[0] != args.digest:
+        raise RuntimeError("immutable SHA tag collision; refusing to overwrite")
+    if release_existing:
+        raise RuntimeError("release tag already exists; refusing to overwrite")
+
+    aliases = []
+    if not sha_existing:
+        aliases.append(args.tag)
+    if args.release:
+        aliases.append(args.release)
+    for tag in aliases:
+        docker(["buildx", "--builder", args.builder, "imagetools", "create",
+                "--tag", args.image + ":" + tag, args.image + "@" + args.digest], env)
+
+    checked = Registry(args.image, authenticated=True)
+    for tag in [args.tag, args.release]:
+        if tag and checked.manifest(tag)[0] != args.digest:
+            raise RuntimeError("finalized alias changed image digest: " + tag)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+        output.write(f"Finalized `{args.image}@{args.digest}`. "
+                     f"Tags: `{args.tag}` `{args.release}`.\n")
 
 
 def verify(args):
@@ -245,7 +281,7 @@ def verify(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["build", "publish", "verify"])
+    parser.add_argument("mode", choices=["build", "publish", "finalize", "verify"])
     parser.add_argument("--image", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--branch", default="")
@@ -259,12 +295,12 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         parser.error("a full commit SHA is required")
-    if args.mode in {"build", "publish"} and not re.fullmatch(r"[A-Za-z0-9_.-]+", args.builder):
+    if args.mode in {"build", "publish", "finalize"} and not re.fullmatch(r"[A-Za-z0-9_.-]+", args.builder):
         parser.error("an explicit setup-buildx-action builder is required")
-    if args.mode == "verify" and not re.fullmatch(r"sha256:[0-9a-f]{64}", args.digest):
+    if args.mode in {"finalize", "verify"} and not re.fullmatch(r"sha256:[0-9a-f]{64}", args.digest):
         parser.error("an exact image digest is required")
     args.tag = "sha-" + args.sha
-    {"build": build, "publish": publish, "verify": verify}[args.mode](args)
+    {"build": build, "publish": publish, "finalize": finalize, "verify": verify}[args.mode](args)
 
 
 if __name__ == "__main__":

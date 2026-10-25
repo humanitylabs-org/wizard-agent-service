@@ -106,7 +106,7 @@ class ImageContract(unittest.TestCase):
     @patch.object(ci, 'platform_manifests', return_value={})
     @patch.object(ci, 'docker')
     @patch.object(ci, 'Registry')
-    def test_publish_build_selects_setup_builder_pushes_sha_and_checks_digest(
+    def test_prepare_pushes_by_digest_without_creating_sha_tag(
             self, registry, docker, platforms):
         registry.return_value.manifest.side_effect = [None, (DIGEST, {})]
         def run(command, env, **kwargs):
@@ -120,10 +120,40 @@ class ImageContract(unittest.TestCase):
             ci.publish(self.args())
         command = docker.call_args.args[0]
         self.assertEqual(command[command.index('--builder') + 1], 'isolated-builder')
-        self.assertIn('--push', command)
-        self.assertIn(IMAGE + ':sha-' + SHA, command)
+        self.assertIn('--metadata-file', command)
+        self.assertIn('--platform', command)
+        self.assertIn('linux/amd64,linux/arm64', command)
+        self.assertIn('--output', command)
+        self.assertIn('type=image,name=' + IMAGE + ',push-by-digest=true,name-canonical=true,push=true', command)
+        self.assertNotIn('--tag', command)
+        self.assertNotIn(IMAGE + ':sha-' + SHA, command)
         platforms.assert_called_once()
 
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_post_digest_validation_failure_retries_without_immutable_tag(
+            self, registry_class, docker):
+        registry_class.return_value.manifest.return_value = None
+        attempts = 0
+        def build(command, env, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            Path(command[command.index('--metadata-file') + 1]).write_text(
+                json.dumps({'containerimage.digest': DIGEST}))
+            return subprocess.CompletedProcess(command, 0)
+        docker.side_effect = build
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.env(temp), clear=True), patch.object(
+                ci, 'platform_manifests',
+                side_effect=[RuntimeError('post-digest manifest failure'), {}]):
+            with self.assertRaisesRegex(RuntimeError, 'post-digest'):
+                ci.publish(self.args())
+            ci.publish(self.args())
+        self.assertEqual(attempts, 2)
+        for call in docker.call_args_list:
+            self.assertNotIn('--tag', call.args[0])
+            self.assertIn('push-by-digest=true', ' '.join(call.args[0]))
     @patch.object(ci, 'platform_manifests', return_value={})
     @patch.object(ci, 'docker')
     @patch.object(ci, 'Registry')

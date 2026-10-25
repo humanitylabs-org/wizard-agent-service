@@ -24,10 +24,11 @@ permissions:
   contents: read
 
 # Same-SHA pushes and dispatches serialize; distinct merge SHAs remain independent.
-# The publish job additionally serializes competing claims on the same release tag.
+# The finalizer serializes the complete check/write of competing release-tag claims.
 concurrency:
   group: public-image-${{ github.repository }}-${{ github.sha }}
   cancel-in-progress: false
+  queue: max
 
 env:
   IMAGE: ghcr.io/humanitylabs-org/wizard-agent-service
@@ -82,9 +83,6 @@ jobs:
 
   publish:
     needs: validate
-    concurrency:
-      group: public-release-${{ github.repository }}-${{ inputs.release_tag || github.sha }}
-      cancel-in-progress: false
     if: >-
       github.repository == 'humanitylabs-org/wizard-agent-service' &&
       github.ref == 'refs/heads/main' &&
@@ -118,7 +116,7 @@ jobs:
         with:
           cleanup: true
           cache-binary: false
-      - name: Build and publish immutable multi-platform image
+      - name: Prepare multi-platform image by digest only
         id: publish
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -131,30 +129,8 @@ jobs:
           --builder "${{ steps.buildx.outputs.name }}"
           --release "$RELEASE_TAG" --confirm "$CONFIRM_TAG" --expected-sha "$EXPECTED_SHA"
 
-  anonymous-pull:
-    needs: publish
-    if: >-
-      github.repository == 'humanitylabs-org/wizard-agent-service' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Pull digest and every tag for both architectures without credentials
-        env:
-          DIGEST: ${{ needs.publish.outputs.digest }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: >-
-          python3 scripts/ci/ghcr_image.py verify
-          --image "$IMAGE" --sha "$GITHUB_SHA" --digest "$DIGEST" --release "$RELEASE_TAG"
-
   attest:
-    needs: [publish, anonymous-pull]
+    needs: publish
     if: >-
       needs.publish.outputs.built == 'true' &&
       github.repository == 'humanitylabs-org/wizard-agent-service' &&
@@ -190,3 +166,76 @@ jobs:
           --repo "$GITHUB_REPOSITORY" --bundle-from-oci
           --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-image.yml"
           --source-ref refs/heads/main --source-digest "$GITHUB_SHA"
+
+  finalize:
+    needs: [publish, attest]
+    concurrency:
+      group: public-release-${{ github.repository }}-${{ inputs.release_tag || github.sha }}
+      cancel-in-progress: false
+      queue: max
+    if: >-
+      !cancelled() &&
+      needs.publish.result == 'success' &&
+      (needs.attest.result == 'success' ||
+       (needs.publish.outputs.built == 'false' && needs.attest.result == 'skipped')) &&
+      github.repository == 'humanitylabs-org/wizard-agent-service' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Create isolated Docker configuration
+        run: install -d -m 700 "$RUNNER_TEMP/docker-config" && printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: true
+          cache-binary: false
+      - name: Finalize write-once SHA and optional version aliases
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CONFIRM_TAG: ${{ inputs.confirm_release_tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: >-
+          python3 scripts/ci/ghcr_image.py finalize
+          --image "$IMAGE" --sha "$GITHUB_SHA" --digest "$DIGEST" --branch main
+          --builder "${{ steps.buildx.outputs.name }}"
+          --release "$RELEASE_TAG" --confirm "$CONFIRM_TAG" --expected-sha "$EXPECTED_SHA"
+
+  anonymous-pull:
+    needs: [publish, finalize]
+    if: >-
+      needs.publish.result == 'success' &&
+      needs.finalize.result == 'success' &&
+      github.repository == 'humanitylabs-org/wizard-agent-service' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pull digest and every tag for both architectures without credentials
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          python3 scripts/ci/ghcr_image.py verify
+          --image "$IMAGE" --sha "$GITHUB_SHA" --digest "$DIGEST" --release "$RELEASE_TAG"

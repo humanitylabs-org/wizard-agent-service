@@ -51,13 +51,13 @@ class ProvenanceContract(unittest.TestCase):
             self.assertIn('--source-ref', command)
             self.assertIn('refs/heads/main', command)
 
-    def test_verified_release_uses_exact_digest_and_does_not_claim_a_build(self):
+    def test_verified_release_prepare_does_not_write_alias_or_claim_build(self):
         registry = Mock()
         registry.manifest.side_effect = [(fixtures.DIGEST, {}), None, (fixtures.DIGEST, {})]
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, self.helper.env(temp, event='workflow_dispatch'), clear=True), patch.object(ci, 'Registry', return_value=registry), patch.object(ci, 'platform_manifests'), patch.object(ci.subprocess, 'run') as run, patch.object(ci, 'docker') as docker:
             ci.publish(self.helper.args(release='0.3.0', confirm='0.3.0', expected_sha=fixtures.SHA))
             self.assertIn('built=false', Path(temp, 'output').read_text())
-            self.assertEqual(docker.call_args.args[0], ['buildx', '--builder', 'isolated-builder', 'imagetools', 'create', '--tag', fixtures.IMAGE + ':0.3.0', fixtures.IMAGE + '@' + fixtures.DIGEST])
+            docker.assert_not_called()
             self.assertEqual(run.call_args.args[0][:3], ['gh', 'attestation', 'verify'])
 
     def test_fresh_build_marks_built_output(self):
@@ -69,6 +69,79 @@ class ProvenanceContract(unittest.TestCase):
             ci.publish(self.helper.args())
             self.assertIn('built=true', Path(temp, 'output').read_text())
 
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_finalize_missing_provenance_refuses_all_aliases(self, registry_class, docker):
+        registry = registry_class.return_value
+        registry.manifest.return_value = None
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.helper.env(temp), clear=True), patch.object(
+                ci, 'platform_manifests'), patch.object(
+                ci, 'verify_existing_provenance', side_effect=RuntimeError('missing provenance')):
+            with self.assertRaisesRegex(RuntimeError, 'provenance'):
+                ci.finalize(self.helper.args())
+        docker.assert_not_called()
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_finalize_mismatching_sha_refuses_overwrite(self, registry_class, docker):
+        registry = registry_class.return_value
+        registry.manifest.side_effect = [('sha256:' + 'c' * 64, {}), None]
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.helper.env(temp), clear=True), patch.object(
+                ci, 'platform_manifests'), patch.object(ci, 'verify_existing_provenance'):
+            with self.assertRaisesRegex(RuntimeError, 'SHA tag collision'):
+                ci.finalize(self.helper.args())
+        docker.assert_not_called()
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_finalize_existing_exact_sha_creates_version_alias(self, registry_class, docker):
+        registry = registry_class.return_value
+        registry.manifest.side_effect = [
+            (fixtures.DIGEST, {}), None, (fixtures.DIGEST, {}), (fixtures.DIGEST, {})]
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.helper.env(temp, event='workflow_dispatch'), clear=True), patch.object(
+                ci, 'platform_manifests'), patch.object(ci, 'verify_existing_provenance'):
+            ci.finalize(self.helper.args(
+                release='0.3.0', confirm='0.3.0', expected_sha=fixtures.SHA))
+        self.assertEqual(
+            [call.args[0] for call in docker.call_args_list],
+            [['buildx', '--builder', 'isolated-builder', 'imagetools', 'create',
+              '--tag', fixtures.IMAGE + ':0.3.0',
+              fixtures.IMAGE + '@' + fixtures.DIGEST]])
+
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_finalize_fresh_digest_creates_sha_alias(self, registry_class, docker):
+        registry = registry_class.return_value
+        registry.manifest.side_effect = [None, (fixtures.DIGEST, {})]
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.helper.env(temp), clear=True), patch.object(
+                ci, 'platform_manifests'), patch.object(ci, 'verify_existing_provenance'):
+            ci.finalize(self.helper.args())
+        self.assertEqual(
+            docker.call_args.args[0],
+            ['buildx', '--builder', 'isolated-builder', 'imagetools', 'create',
+             '--tag', fixtures.IMAGE + ':sha-' + fixtures.SHA,
+             fixtures.IMAGE + '@' + fixtures.DIGEST])
+
+    @patch.object(ci, 'docker')
+    @patch.object(ci, 'Registry')
+    def test_finalize_existing_version_refuses_before_alias_write(
+            self, registry_class, docker):
+        registry = registry_class.return_value
+        registry.manifest.side_effect = [
+            (fixtures.DIGEST, {}), (fixtures.DIGEST, {})]
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, self.helper.env(temp, event='workflow_dispatch'), clear=True), patch.object(
+                ci, 'platform_manifests'), patch.object(ci, 'verify_existing_provenance'):
+            with self.assertRaisesRegex(RuntimeError, 'release tag already exists'):
+                ci.finalize(self.helper.args(
+                    release='0.3.0', confirm='0.3.0', expected_sha=fixtures.SHA))
+        docker.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
