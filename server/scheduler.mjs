@@ -7,6 +7,7 @@ import { Transform } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 import { CronExpressionParser } from 'cron-parser'
 import { parse as parseYaml } from 'yaml'
+import { lintReport, REPORTER_INSTRUCTIONS } from './reporter.mjs'
 
 export const SCHEDULE_INPUT = '[Wizard schedule]'
 export const isSilentResult = value => {
@@ -168,7 +169,10 @@ function latestInstant(job, now) {
 // There is deliberately no bounded seen-list and no log/file scanning for delivery.
 function scheduleInput(job, deliver = 'thread') {
   const base = scheduleBaseInput(job)
-  return deliver === 'notification' ? base.replace(/ in this thread/g, '') + NOTIFY_INSTRUCTION : base
+  if (job.kind === 'remind') return deliver === 'notification' ? base + NOTIFY_INSTRUCTION : base
+  return (deliver === 'notification' ? base.replace(/ in this thread/g, '') : base)
+    + `\n\nreport=${job.report || 'status'}\n${REPORTER_INSTRUCTIONS}`
+    + (deliver === 'notification' ? "\nThis report is for the owner's Notifications, not this chat. Do not send it yourself.\n" : '')
 }
 function scheduleBaseInput(job) {
   const skill = job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''
@@ -204,7 +208,7 @@ export class Scheduler {
       CREATE TABLE IF NOT EXISTS schedule_imports (source TEXT PRIMARY KEY, job_id TEXT NOT NULL);`)
     // Additive migration of the durable occurrence ledger, including pre-feature jobs.
     const columns = new Set(this.db.prepare('PRAGMA table_info(schedule_occurrences)').all().map(row => row.name))
-    for (const column of ['started_at', 'finished_at', 'outcome']) {
+    for (const column of ['started_at', 'finished_at', 'outcome', 'report_lint', 'report_correction', 'report_correction_receipt', 'report_final_lint']) {
       if (!columns.has(column)) this.db.exec(`ALTER TABLE schedule_occurrences ADD COLUMN ${column} TEXT`)
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
@@ -261,7 +265,13 @@ export class Scheduler {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
         try {
-          const run = await this.lookup(JSON.parse(row.data), receipt)
+          const occurrence = JSON.parse(row.data)
+          let run = await this.lookup(occurrence, receipt)
+          if (run) {
+            const checked = await this.checkReport(row, occurrence, run)
+            if (checked.pending) return
+            run = checked.run
+          }
           if (!run || !['queued', 'accepted', 'pending', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) return
           const job = this.get(row.job_id)
           // An approval wait is a visible owner decision. For an ordinary schedule the run remains active; for a
@@ -270,7 +280,6 @@ export class Scheduler {
           const terminal = watcherDecision || ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
           const output = typeof run.output === 'string' ? run.output : ''
           let outcome = watcherDecision ? 'posted' : run.status === 'completed' ? (isSilentResult(output) || !output.trim() ? 'silent' : 'posted') : terminal ? 'failed' : 'running'
-          const occurrence = JSON.parse(row.data)
           if (occurrence.deliver === 'notification' && run.status === 'completed') {
             const note = notificationFromOutput(output)
             if (note) {
@@ -319,9 +328,34 @@ export class Scheduler {
     return this.refreshing
   }
   save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
+  async checkReport(row, occurrence, run) {
+    if (['remind', 'return'].includes(occurrence.kind) || run.status !== 'completed') return { run, pending: false }
+    const kind = occurrence.report || 'status'
+    let result = row.report_lint ? JSON.parse(row.report_lint) : lintReport(isSilentResult(run.output) ? '[SILENT]' : run.output || '', { kind })
+    if (!row.report_lint) this.db.prepare('UPDATE schedule_occurrences SET report_lint=? WHERE key=?').run(JSON.stringify(result), row.key)
+    if (result.ok) return { run, pending: false }
+    let correction = row.report_correction ? JSON.parse(row.report_correction) : null
+    if (!correction) {
+      correction = { ...occurrence, key: `${row.key}:reporter`, createThread: false,
+        body: { session_id: occurrence.thread, input: `[reporter] Your last report does not meet the report format: ${result.reasons.join('; ')}. Rewrite it now in the format, nothing else.\n\nreport=${kind}\n${REPORTER_INSTRUCTIONS}` } }
+      // Freeze before admission: an ambiguous response retries the identical durable request.
+      this.db.prepare('UPDATE schedule_occurrences SET report_correction=? WHERE key=?').run(JSON.stringify(correction), row.key)
+    }
+    let receipt = row.report_correction_receipt ? JSON.parse(row.report_correction_receipt) : null
+    if (!receipt) {
+      receipt = await this.deliver(correction)
+      if (!receipt?.run_id) throw new Error('corrective admission missing run')
+      this.db.prepare('UPDATE schedule_occurrences SET report_correction_receipt=? WHERE key=?').run(JSON.stringify(receipt), row.key)
+    }
+    const rewritten = await this.lookup(correction, receipt)
+    if (!rewritten || !['completed', 'failed', 'cancelled', 'interrupted'].includes(rewritten.status)) return { run, pending: true }
+    result = lintReport(rewritten.output || '', { kind })
+    this.db.prepare('UPDATE schedule_occurrences SET report_final_lint=? WHERE key=?').run(JSON.stringify(result), row.key)
+    return { run: rewritten, pending: false } // Never correct a second time, even if still invalid.
+  }
   normalize(input, prior = null) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('invalid schedule')
-    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target', 'deliver']
+    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target', 'deliver', 'report']
     if (Object.keys(input).some(key => !allowed.includes(key))) throw fail('unknown schedule field')
     const now = this.now()
     const job = { ...(prior ?? {}), ...input }
@@ -337,6 +371,8 @@ export class Scheduler {
       if (Object.hasOwn(input, 'when')) delete job.window
       job.when = normalizeWhen(job.when, job.timezone, now)
     }
+    job.report = job.report ?? 'status'
+    if (!['status', 'digest'].includes(job.report)) throw fail('report must be status or digest')
     job.kind = job.kind ?? 'run'
     if (!KINDS.includes(job.kind)) throw fail(`kind must be ${KINDS.join(', ')}`)
     if (job.kind === 'remind' && !job.prompt) throw fail('a reminder needs its text in prompt')
@@ -446,7 +482,7 @@ export class Scheduler {
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
-      kind: job.kind ?? 'run', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
+      kind: job.kind ?? 'run', report: job.report || 'status', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))

@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isSilentResult, isScheduleInput } from './scheduler.mjs'
+export { SUPERVISOR_SPELL } from './supervisor.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'

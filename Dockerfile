@@ -6,6 +6,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY server ./server
+COPY hermes-plugin/wizard-supervisor-tools ./hermes-plugin/wizard-supervisor-tools
+COPY skills ./skills
 COPY ops/settings.example.json ops/launcher.example.json ./ops/
 # WIZARD_UX_API_COMPAT keeps <prefix>api/transcribe and api/route (native multipart voice) answered behind the shell.
 ENV NODE_ENV=production \

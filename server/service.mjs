@@ -25,11 +25,12 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
+import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
@@ -147,6 +148,8 @@ export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard,
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+
+${SUPERVISOR_SPELL}
 
 ${FINISH_REPORT_INSTRUCTIONS}
 
@@ -2432,7 +2435,7 @@ export function speechText(value) {
 
 export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
-  const paths = ['schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
@@ -4377,35 +4380,7 @@ function buildWizardServer(options, lifetime) {
     if (!run.ok) throw Object.assign(new Error('share run admission failed'), { status: run.status })
     return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
   })
-  const scheduler = options.schedulerStatePath ? new Scheduler({
-    statePath: resolve(String(options.schedulerStatePath)),
-    hermesHome: options.schedulerHermesHome ?? '',
-    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
-    now: options.schedulerNow ?? Date.now,
-    intervalMs: options.schedulerIntervalMs ?? 15_000,
-    ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
-    ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
-    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
-    lookup: async (occurrence, receipt) => {
-      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
-      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
-      if (!selfOrigin) return null
-      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
-        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
-        headers: { 'X-Wizard-Internal-Token': internalToken, ...(occurrence.deliver === 'notification' ? { 'X-Wizard-Schedule-Raw': '1' } : {}) }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
-      })
-      if (!result.ok) { await result.body?.cancel(); return null }
-      return result.json()
-    },
-    onWatchResult: async job => {
-      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
-      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
-      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
-      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
-      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
-      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
-    },
-    deliver: async occurrence => {
+  const deliverBackgroundOccurrence = async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       if (occurrence.kind === 'return') {
@@ -4440,9 +4415,43 @@ function buildWizardServer(options, lifetime) {
         ...(occurrence.kind === 'watch' ? { 'X-Wizard-Watcher-Preserve': wasArchived ? '1' : '0' } : {}) })
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
       return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
+    }
+  const lookupBackgroundOccurrence = async (occurrence, receipt) => {
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      if (!selfOrigin) return null
+      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
+        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
+        headers: { 'X-Wizard-Internal-Token': internalToken, 'X-Wizard-Schedule-Raw': '1' }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+      })
+      if (!result.ok) { await result.body?.cancel(); return null }
+      return result.json()
+    }
+  const scheduler = options.schedulerStatePath ? new Scheduler({
+    statePath: resolve(String(options.schedulerStatePath)),
+    hermesHome: options.schedulerHermesHome ?? '',
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    intervalMs: options.schedulerIntervalMs ?? 15_000,
+    ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
+    ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    lookup: lookupBackgroundOccurrence,
+    onWatchResult: async job => {
+      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
+      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
+      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
+      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
     },
+    deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
+    deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
+    intervalMs: options.supervisorIntervalMs || 15_000 }) : null
+  if (supervisor) lifetime.own(() => supervisor.close(), () => supervisor.quiesce())
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
@@ -5058,6 +5067,40 @@ function buildWizardServer(options, lifetime) {
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/supervisor/') || url.pathname.startsWith('/wizard/v1/agent-supervisor/')) {
+        if (!supervisor) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const internal = url.pathname.startsWith('/wizard/internal/')
+        let agentId
+        if (internal) {
+          const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+          const token = String(options.heavyToken || '')
+          if (!token || isAgentIngress(request) || principal.kind === 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']
+            || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
+          agentId = MAIN_AGENT_ID
+        } else {
+          // Uses the exact same per-agent gateway key and restricted socket admission as existing tools.
+          agentId = bridge?.agentFor(request) || ''
+          if (!agentId || agentId === MAIN_AGENT_ID || principal.kind !== 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
+        }
+        try {
+          // Privacy is checked BEFORE history, queue lookup, lessons search, or ledger writes.
+          const agent = agents?.read(agentId)
+          const privacy = (!agents && agentId === MAIN_AGENT_ID) || (agent?.privacy === 'standard' && agent?.permissions?.shared_with_agents !== false) ? 'shareable' : 'private-agent'
+          if (privacy !== 'shareable') throw Object.assign(new Error('Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'), { status: 403 })
+          const value = JSON.parse((await readBoundedBody(request, 128 * 1024)).toString('utf8'))
+          if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('invalid body'), { status: 400 })
+          const { session_id: sessionId, ...args } = value
+          if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionId)) throw Object.assign(new Error('session required'), { status: 400 })
+          const owner = agentId === MAIN_AGENT_ID ? runQueue?.mutationOwnerForSession(sessionId) : await routedQueues?.mutationOwner(agent, sessionId)
+          if (!owner) throw Object.assign(new Error('An authenticated active Wizard run is required'), { status: 409 })
+          const action = url.pathname.split('/').at(-1)
+          const result = supervisor.call(action, args, { agent_id: agentId, thread_id: sessionId, run_id: owner.publicRunId, privacy })
+          sendJson(response, 200, result)
+          void supervisor.tick().catch(() => console.error('[supervisor] delivery pending'))
+        } catch (error) { sendJson(response, error instanceof SyntaxError ? 400 : error.status || 500, { error: error instanceof SyntaxError ? 'invalid body' : error.status ? error.message : 'Supervisor request failed' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {
@@ -6221,8 +6264,10 @@ function buildWizardServer(options, lifetime) {
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
     if (options.schedulerEnabled === true && process.env.WIZARD_SCHEDULER === '1') scheduler?.start()
+    supervisor?.start()
   })
   server.scheduler = scheduler
+  server.supervisor = supervisor
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''

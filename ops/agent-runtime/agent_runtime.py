@@ -457,7 +457,17 @@ class RestrictedDriver:
         # fail, which only stops that agent.
         copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
-        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
+        bundles = ('plugins/wizard-supervisor-tools', 'skills/reporter', 'skills/supervisor')
+        asset_copy = ''
+        for rel in bundles:
+            if not (managed / rel).is_dir():
+                continue  # Older Service releases have no Supervisor bundle.
+            parent, leaf = rel.split('/')
+            asset_copy += (f'; test ! -L /opt/data/{parent}; mkdir -p /opt/data/{parent};'
+                           f' cp -R /managed/{rel} "$tmp/{leaf}"; chown -R {AGENT_UID}:{AGENT_UID} "$tmp/{leaf}";'
+                           f' if [ -e /opt/data/{rel} ] || [ -L /opt/data/{rel} ]; then mv -T /opt/data/{rel} "$tmp/old-{leaf}"; fi;'
+                           f' mv -T "$tmp/{leaf}" /opt/data/{rel}')
+        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy}{asset_copy};'
                   f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
         name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
         try:
