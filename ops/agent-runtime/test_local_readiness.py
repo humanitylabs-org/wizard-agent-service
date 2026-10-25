@@ -28,10 +28,13 @@ class ProvisioningReadinessTests(unittest.TestCase):
             with self.assertRaises(Failure):self.p.require_weights(self.app,'cid')
         self.docker.assert_not_called()
 
-    def test_attested_provider_unchanged(self):
+    def test_attested_provider_retries_restart_disconnect_before_client(self):
         self.app['private_inference']['kind']='attested-relay'
-        self.p.require_weights(self.app,'cid');self.p.wait_ready(self.app)
-        self.docker.assert_not_called()
+        self.p.request=Mock(side_effect=[Failure('notready',503),{'status':'connected'}])
+        self.p.require_weights(self.app,'cid')
+        with patch('private_providers.time.sleep') as sleep:self.p.wait_ready(self.app)
+        self.docker.assert_not_called();sleep.assert_called_once_with(0.25)
+        for call in self.p.request.call_args_list:self.assertEqual(call.args,(self.app,'GET','/api/connection'))
 
     def test_bounded_bodyless_ready_poll(self):
         self.p.request=Mock(side_effect=[Failure('notready',503),{'weights_ready':True,'status':'not_connected'},

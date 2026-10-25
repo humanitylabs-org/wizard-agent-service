@@ -99,14 +99,15 @@ class PrivateProviders:
 
     def wait_ready(self, app):
         spec = app['private_inference']
-        if spec.get('kind') != 'local' or not spec.get('weights_ready'):
-            return
-        # Reconciliation restarts the model. Only poll bodyless readiness, never a prompt or token write.
+        requires_weights = spec.get('kind') == 'local' and bool(spec.get('weights_ready'))
+        # Every reconciliation restarts the provider, including attested relays.
+        # Poll bodyless readiness before minting a client; never a prompt/token.
+
         deadline = time.monotonic() + 60
         while True:
             try:
                 value = self.request(app, 'GET', '/api/connection')
-                if value.get('weights_ready') is True and value.get('status') == 'connected':
+                if value.get('status') == 'connected' and (not requires_weights or value.get('weights_ready') is True):
                     return
             except self.failure:
                 pass

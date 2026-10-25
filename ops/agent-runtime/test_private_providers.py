@@ -34,6 +34,10 @@ class PrivateProviderTest(unittest.TestCase):
                     self.send_response(403); self.end_headers(); return False
                 return True
 
+            def do_GET(self):
+                if self.path != '/api/connection':self.send_response(404);self.end_headers();return
+                self.send_response(200);self.end_headers();self.wfile.write(b'{"status":"connected"}')
+
             def do_POST(self):
                 if not self.owner_write(): return
                 value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
