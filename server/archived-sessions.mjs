@@ -3,8 +3,8 @@
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
-export function readArchivedSessions(sessionDbPath, { limit = 100 } = {}) {
-  if (!Number.isInteger(limit) || limit < 1 || limit > 100000) throw new Error('invalid_archive_limit')
+export function readArchivedSessions(sessionDbPath, { all = false, limit = all ? -1 : 100 } = {}) {
+  if (!Number.isInteger(limit) || (limit !== -1 && (limit < 1 || limit > 100000)) || (limit === -1 && !all)) throw new Error('invalid_archive_limit')
   if (!sessionDbPath || !existsSync(sessionDbPath)) return []
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
