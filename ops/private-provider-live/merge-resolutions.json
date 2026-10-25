@@ -1,61 +1,91 @@
 {
   "schema": 1,
-  "reviewed_live_base": "b4114746e0373cd6aacae0f44655dd707eb10731",
-  "provider_sha": "888ecee067cde661f069875dc5915a7abe341103",
+  "reviewed_live_base": "4be54416627ab3f578a951166a084e459e9edd9c",
+  "provider_sha": "5e445fca7c87da825e8d669fbf35e3e6eeeb5acb",
   "resolutions": [
     {
       "path": "docs/ui-preferences.md",
-      "sha256": "b8febe7f83f68861e097f08b64f9a38665391a0de30e23649de8c93d6e363cdd",
+      "sha256": "d0888bda239535a241d83e10e7657feb02b6f6271fd78f372aa61a70b802e8fa",
       "replacement": "{\"archiveAfterDays\":7,\"compact\":false,\"chatLayout\":\"day\",\"readyOrder\":\"newest\",\"subjectOrder\":[],\"pinnedChats\":[],\"spaces\":[]}\n"
     },
     {
       "path": "qa/agent-parity/features.json",
-      "sha256": "e8bd0f15046f00441f48d90896bcbefbb482c6032b6589addfcda2b78d080d5b",
-      "replacement": "      \"id\": \"private-provider-admission\",\n      \"description\": \"Provider loss rejects new sessions/runs only for already migrated agents, without affecting other runtime kinds\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"Use real Wizard HTTP for main, host-profile, legacy container and Unix restricted kinds. Admit a normal run with no provider app, then install a stopped capability and mark the synthetic container/restricted record as previously migrated. Assert 503 before upstream dispatch for marked agents; main/profile remain usable. Migration lifecycle is covered independently.\",\n      \"source_refs\": [\"server/agents-http.mjs\", \"server/agents.mjs\"],\n      \"reference_tests\": [\"tests/legacy-private-compat.test.ts\", \"tests/private-provider-launch.test.ts\"],\n      \"fixture\": \"private-provider-admission\",\n      \"policy_exemptions\": []\n    },\n    {\n      \"id\": \"chats-spaces\",\n      \"description\": \"Agent-owned thread collections persist independently of agent runtime kind\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.\",\n      \"source_refs\": [\"server/ui-preferences.mjs\"],\n      \"reference_tests\": [\"tests/ui-preferences.test.ts\", \"tests/thread-spaces.test.ts\", \"tests/thread-spaces-http.test.ts\"],\n"
+      "sha256": "aef7235b6ba883dc009f7dc6b3807457f77da2df6c88a3a52f847c689117c1e1",
+      "replacement": "      \"id\": \"private-provider-admission\",\n      \"description\": \"Provider loss rejects new sessions/runs only for already migrated agents, without affecting other runtime kinds\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"Use real Wizard HTTP for main, host-profile, legacy container and Unix restricted kinds. Admit a normal run with no provider app, then install a stopped capability and mark the synthetic container/restricted record as previously migrated. Assert 503 before upstream dispatch for marked agents; main/profile remain usable. Migration lifecycle is covered independently.\",\n      \"source_refs\": [\"server/agents-http.mjs\", \"server/agents.mjs\"],\n      \"reference_tests\": [\"tests/legacy-private-compat.test.ts\", \"tests/private-provider-launch.test.ts\"],\n      \"fixture\": \"private-provider-admission\",\n      \"policy_exemptions\": []\n    },\n    {\n      \"id\": \"chats-spaces\",\n      \"description\": \"Agent-owned thread collections persist independently of agent runtime kind\",\n      \"layer\": \"server\",\n      \"how_to_test\": \"PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.\",\n      \"source_refs\": [\"server/ui-preferences.mjs\", \"server/spaces-tools.mjs\", \"server/thread-spaces.mjs\"],\n      \"reference_tests\": [\"tests/ui-preferences.test.ts\", \"tests/thread-spaces.test.ts\", \"tests/thread-spaces-http.test.ts\", \"tests/spaces-tools.test.ts\"],\n"
     },
     {
-      "path": "server/routed-run-queue.mjs",
-      "sha256": "d3d8108d78dfb994f21ac46f0803fc83f8983062e94e5d68db259d77a0e96524",
-      "replacement": "        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(payload.status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },\n        // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.\n        steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),\n"
+      "path": "server/agents-http.mjs",
+      "sha256": "e988d60621dc3cb1cf7e1b0e057a26cf6c01df5cfaea7df01eff7eb6cb130930",
+      "replacement": "import { indexedSearchWords } from './session-truth.mjs'\nimport { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'\nimport { join } from 'node:path'\nimport { existsSync } from 'node:fs'\n"
+    },
+    {
+      "path": "server/agents-http.mjs",
+      "sha256": "7f2580856d8b5c656810639c3568264ada6e90ed862e1586a46676b8c8169746",
+      "replacement": "        }\n        const payload=searchParams.get('mode')==='body'\n          ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}\n          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})\n"
+    },
+    {
+      "path": "server/agents.mjs",
+      "sha256": "63c881aa3aad022faa75d4d9c47d47a8b80d06c7f66628a0ed4812a1d807120b",
+      "replacement": "  if (agent.permissions.shared_with_agents === true) sealed('a private agent is never a source')\n  // Model choices are validated against the catalogue on create/update. Existing unknown IDs remain readable.\n"
+    },
+    {
+      "path": "server/agents.mjs",
+      "sha256": "d58f2e0e7a73585d05cbb5c09287a92b5d06118979f97bf6260671a58bca55ab",
+      "replacement": "    const harnessPermissions = permissions => { const { other_agents, shared_with_agents, ...rest } = permissions; return rest }\n    const harnessChanged = migrated || JSON.stringify([agent.model, harnessPermissions(agent.permissions)]) !== JSON.stringify([next.model, harnessPermissions(next.permissions)]) || harnessStale(next)\n    // The host helper holds the lifecycle lock, stops the legacy writers, and\n    // retires every plaintext home copy BEFORE publishing the sealed record.\n    // A failure leaves the old metadata and host-side rollback source intact.\n    if (migrated) {\n      if (!runtime?.scrubPrivateMigration) fail(503, 'private_migration_scrub_unavailable', 'agent.runtime')\n      await runtime.scrubPrivateMigration(id)\n    }\n"
+    },
+    {
+      "path": "server/agents.mjs",
+      "sha256": "e61a356a2e33ecf69ea9ae9039105d3312981365d8a3a9636fe2e8e651843eb3",
+      "replacement": "    stateHome: id => {\n      const agent = read(id)\n      if (!agent) return ''\n      if (id === MAIN_AGENT_ID) return options.mainHome || ''\n      if (agent.runtime.kind === 'profile') return options.mainHome ? join(options.mainHome, 'profiles', agent.runtime.profile) : ''\n      return join(folder(id), 'home')\n    },\n    agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, assertProviderAvailable, create, update, setRunning, remove,\n"
+    },
+    {
+      "path": "server/archived-sessions.mjs",
+      "sha256": "a0f03879bb63774c2753d4d87d77ab7129524543f0bf3bc9d6f61a95cc327e5f",
+      "replacement": "export function readArchivedSessions(sessionDbPath, { all = false, limit = all ? -1 : 100 } = {}) {\n  if (!Number.isInteger(limit) || (limit !== -1 && (limit < 1 || limit > 100000)) || (limit === -1 && !all)) throw new Error('invalid_archive_limit')\n"
+    },
+    {
+      "path": "server/archived-sessions.mjs",
+      "sha256": "ac6e98621b06275340f1372ff518a4f49dc86ae3eebea88ac51c104dadcbd6db",
+      "replacement": "       LIMIT ?\n    `).all(limit).map((session) => ({\n"
     },
     {
       "path": "server/service.mjs",
-      "sha256": "0ab2fee8167bde305baa17d03dca720eb05aba9c1f68365c626edab4ce680511",
-      "replacement": "import { createSpaceFiling } from './thread-spaces.mjs'\n"
+      "sha256": "a8688ef2070cf56bc86e3bd06f5873c1bb1ca384d28a19666a05d89c808e03d8",
+      "replacement": "import { createSpacesTools } from './spaces-tools.mjs'\nimport { createSpaceFiling } from './thread-spaces.mjs'\n"
     },
     {
       "path": "server/ui-preferences.mjs",
-      "sha256": "60343d0b6cdbe74e00fb5aab91b817386a7ead9a5f8d6e84e747a7e0dcd9a434",
+      "sha256": "ab351a9ac43a104333bb59da821b2a56e3388bd15ac31e3b89ea7dafb1617c38",
       "replacement": "export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })\n"
     },
     {
       "path": "server/ui-preferences.mjs",
-      "sha256": "bd971249db8b24745ec3d9b97bb4c1ad092f64babb08b3256e03fa8740979cdd",
+      "sha256": "c6ac44878a6b0bd11c4702bc64fce3cb577d200253228ecfa73092266b6e29ae",
       "replacement": "  && Object.keys(s).every(k => ['id', 'name', 'threads', 'createdAt', 'agent'].includes(k)) && ['id', 'name', 'threads', 'createdAt'].every(k => Object.hasOwn(s, k))\n  && (!Object.hasOwn(s, 'agent') || (typeof s.agent === 'string' && /^[a-z0-9][a-z0-9-]{0,47}(?![\\s\\S])/u.test(s.agent)))\n  && typeof s.id === 'string' && SPACE_ID.test(s.id)\n  && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\\u0000-\\u001f\\u007f]/u.test(s.name)\n  && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length\n  && typeof s.createdAt === 'string' && /^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,3})?(?:Z|[+-]\\d\\d:\\d\\d)$/.test(s.createdAt) && realDate(s.createdAt)\n"
     },
     {
       "path": "tests/agent-archive-list.node.mjs",
-      "sha256": "a2345b34e146496c158b35bbc05893526b35843199ea94ae30b06a2e51d37914",
+      "sha256": "9fe82e3dd1c70974925b8c753909cdecc6f746069eb8b6817f37a97b83d98930",
       "replacement": "  catch(e){res.writeHead(e.status||500,{'Content-Type':'text/plain'});res.end(String(e.message))}});\n"
     },
     {
       "path": "tests/ui-preferences.test.ts",
-      "sha256": "18be2368ca350ee5898667b24614de38b58b751e90ee2659ecc63ac6ce2223ac",
+      "sha256": "3faf12ed2e696576223dc22b5167e5b8787a3bde7272f4b1f506c00e49e5a531",
       "replacement": "    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })\n"
     },
     {
       "path": "tests/ui-preferences.test.ts",
-      "sha256": "34c7f5de932f67e1c9f54eecea87953be3cf47fdcb0b46abf19e684ec5d69ed5",
+      "sha256": "7353f9aedb59049e5e22f821b751a94978a8043f3e031161f8b5a11b78010815",
       "replacement": "        { createdAt: 'yesterday' }, { createdAt: '2026-10-24' }, { createdAt: '2026-02-31T00:00:00Z' }, { createdAt: '2026-10-24T25:00:00Z' }, { extra: true }, { id: undefined }].map(p => [{ ...space, ...p }])]\n"
     },
     {
       "path": "tests/ui-preferences.test.ts",
-      "sha256": "80d0b97df0c8dc7fbce92b2d2b16dc1735116f27eb753ae039cf51e1d032a1bb",
+      "sha256": "cc0d24bba92801730cb6e5f970de161c72cb8a9decc15703faa5a660a7bd7551",
       "replacement": "    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })\n"
     },
     {
       "path": "tests/ui-preferences.test.ts",
-      "sha256": "ff1faeced2b624b737e71b85564bb38755937984fdb0383651c41e95609f6be8",
+      "sha256": "db6d9d3c8cf9c4aa159f82cf47fbf0fc7194df8ba836594f1419e652ff9ee299",
       "replacement": "    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })\n"
     }
   ]

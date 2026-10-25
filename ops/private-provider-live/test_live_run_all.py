@@ -3,7 +3,7 @@ from pathlib import Path
 spec=importlib.util.spec_from_file_location('launch',Path(__file__).with_name('live-run-all.py'));assert spec and spec.loader;m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 BASE={'containers':{'runtipi':{'image_id':'wam'}},'releases':{'service':{'sha':'live-feature-not-main'}}}
 PLAN={'schema':1,'no_drain':True,'migration_agent':'private','rollback_scope':'attempt','commands':{x:['explicit-operation',x] for x in m.REQUIRED}}
-RIG={'status':'passed','checks':dict.fromkeys(m.CHECKS,'passed'),'privacy_checks_passed':6,'reset':{'provider_key_present':False,'apps':0,'provider_volumes':[]},'wam_image_id':'wam'}
+RIG={'status':'passed','checks':dict.fromkeys(m.CHECKS,'passed'),'privacy_checks_passed':6,'reset':{'provider_key_present':False,'apps':0,'provider_volumes':[],'remaining_synthetic_containers':[],'remaining_synthetic_agent_dirs':[]},'wam_image_id':'wam','evidence':{'privacy':{'privacy_checks_passed':6},'d-verified':{'completed_migrated_request':True},'key-migrated':{'checks':{'key-location':'passed'}},'f-verified':{'other_agent_chat_completed':True,'vision_helper_completed':True,'colour':'red'}}}
 class Fake:
  attempt='unit-attempt'
  def __init__(self,fail=None):self.calls=[];self.fail=fail
@@ -59,4 +59,14 @@ class Tests(unittest.TestCase):
     if op=='privacy':r['checks_passed']=5
     return r
   f,r=self.launch(Partial());self.assertEqual(r['status'],'rolled_back');self.assertNotIn('migrate',f.calls)
+ def test_success_flags_without_actual_inference_evidence_block(self):
+  import copy
+  for name in ['f-verified','d-verified','key-migrated','privacy']:
+   rig=copy.deepcopy(RIG);rig['evidence'].pop(name)
+   with self.subTest(evidence=name):
+    f,r=self.launch(rig=rig,dry=True);self.assertEqual(r['status'],'blocked');self.assertEqual(f.calls,[])
+ def test_surviving_synthetic_runtime_blocks(self):
+  import copy
+  rig=copy.deepcopy(RIG);rig['reset']['remaining_synthetic_containers']=['survivor']
+  f,r=self.launch(rig=rig,dry=True);self.assertEqual(r['status'],'blocked');self.assertEqual(f.calls,[])
 if __name__=='__main__':unittest.main()

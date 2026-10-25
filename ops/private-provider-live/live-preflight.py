@@ -74,7 +74,9 @@ def ui_fingerprint(home):
 
 
 def fingerprint(home):
-    return {'containers': inspect(), 'units': units(), 'releases': releases(home), 'ui': ui_fingerprint(home)}
+    from live_sources import discover
+    return {'containers': inspect(), 'units': units(), 'releases': releases(home),
+            'ui': ui_fingerprint(home), 'wam_sources': discover(home)}
 
 
 def main():
@@ -112,8 +114,12 @@ def main():
         else:
             evidence = json.loads(a.rig_evidence.read_text())
             report['rig_evidence_sha256'] = hashlib.sha256(a.rig_evidence.read_bytes()).hexdigest()
-            if evidence.get('status') != 'passed':
-                report['blockers'].append('Exact-release rehearsal did not pass.')
+            spec = __import__('importlib.util', fromlist=['spec_from_file_location'])
+            module_spec = spec.spec_from_file_location('launch_admission', Path(__file__).with_name('live-run-all.py'))
+            assert module_spec and module_spec.loader
+            admission = spec.module_from_spec(module_spec)
+            module_spec.loader.exec_module(admission)
+            report['blockers'].extend(admission.validate_rig(evidence))
             if evidence.get('wam_image_id') != before['containers']['runtipi']['image_id']:
                 report['blockers'].append('Rig/live WAM image parity unproven or stale.')
             if evidence.get('wam_main_sha256') != report['wam_main_sha256']:

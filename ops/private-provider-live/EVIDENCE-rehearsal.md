@@ -72,8 +72,8 @@
 ## Resume: pp-rehearsal-2
 
 - Recovered guest is reachable, marker `pp-private-providers`, uid/gid 1000. Before any reset, saved seven remaining probe scripts plus SHA256 inventory to `pp-launch/live/guest-saved/` on Thales and the matching control-plane directory. `/home/rig/pp-candidates` is absent: the old request/migration/installer adapters and `live_candidate.py` / `live_ops.py` did not survive the baseline reset.
-- The recovered baseline is **not live-parity**: four Runtipi state directories are owner uid1000, while live directories are root-owned. Guest WAM is old `latest`, image `sha256:0a1f04fa318d05f02ae846440d5ac7b3e724e7025270bad7726cbda7494f1f6f`, main.mjs `27499acdf76556ede6181b0c067aad530070bf496f8da62d9ae603936a75e869`.
-- Fresh read-only live inspect confirms WAM `sha256:07df73e79ee3bea5465cd27d90f99191317075e7a669678a8d066c51473d4116`, main.mjs `6e2b3e410f1e54fce473452d79102edc3c11e36ae69237e4ab232e8f43ebef42`. This digest is **linux/amd64**, while the guest is aarch64 with a `rosetta` binfmt registration. Exact-digest parity must therefore explicitly use amd64 rather than silently substituting an arm64 build.
+- The recovered baseline is **not live-parity**: four Runtipi state directories are owner uid1000, while live directories are root-owned. Guest WAM is old `latest`, image `sha256:0a1f04fa318d05f02ae846440d5ac7b3e724e7025270bad7726cbda7494f1f6f`, main.mjs `27499acdf76556ede6181b0c067aad530070bf496f8da62d9ae603936a76e869`.
+- Fresh read-only live inspect confirms WAM `sha256:07df73e79ee3bea5465cd27d90f99191317076e7a669678a8d066c51473d4116`, main.mjs `6e2b3e410f1e54fce473452d79102edc3c11e36ae69237e4ab232e8f43ebef42`. This digest is **linux/amd64**, while the guest is aarch64 with a `rosetta` binfmt registration. Exact-digest parity must therefore explicitly use amd64 rather than silently substituting an arm64 build.
 - Staged `rig-prepare.py` for durable parent admission: marker/clean-fixture checks, immutable source validation/copy, exact pinned WAM/client pull, rig-only WAM replacement, root-owned metadata setup, and uid1000 read-back. This is prerequisite preparation, not a complete rehearsal or live-run orchestrator. Seven fake-orchestration safety tests passed. Thales `--validate` passed without VM mutation.
 - Fresh `DRY-RUN-2.json` remains honestly **blocked**, with two readiness blockers: missing exact-release acceptance and unfinished full live orchestration. The before/after protected-container, unit and Service/runtime fingerprints are equal. Authenticated Runtipi GET succeeded; no provider is installed live. No key was read/injected, no paid turn occurred, and no live restart/mutation or Private access occurred.
 - Checks (a)–(f) remain NOT RUN. This helper's actual durable submission (`pp-rehearsal-2-prepare-parity`) returned **HTTP 409 heavy admission refused**, no receipt and no running/queued job. The next required action is genuine-parent admission of `PARENT-SUBMIT-2.json`; do not bypass the refusal with a foreground SSH VM job. No additional James authorization or Miguel realtime code is needed for this prerequisite. Tooling checkpoint before this admission-result update: `6b17f3f21873797c06bb2c9f096364f9f35991f7` (pushed and remote SHA verified).
@@ -103,10 +103,10 @@ The native durable submission returned **HTTP 409, heavy admission refused** fro
 | Final reset: no key, zero apps | UNVERIFIED: guest unreachable; old baseline receipt is not current evidence |
 
 ## Source preparation completed
-- Service/runtime source export: `888ecee067cde661f069875dc5915a7abe341103`.
+- Service/runtime source export: `888ecee067cde661f069876dc5915a7abe341103`.
 - UX export: `f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6`.
 - Client: `ghcr.io/humanitylabs-org/wizard-private-client:0.1.0@sha256:c562bef2166e6e1054be8eed34229cf0ead4574002da28f8fe5d4f09ad0e6631`.
-- **Prepared, not deployed/tested on rig:** relay-only provider `07eca5e30ca7873ab8cfda503175768fc55f66d4`, pushed as `defleur-agents/wizard-tinfoil` branch `ops/relay-only-launch`. This replays the seven relay commits through old `b2ad0d5` onto current upstream main `cbfa896fdd1d484f9c96c44d8b5ad7c20dc3474e`, preserving current billing/UI changes, without realtime SDK commit `9a32d08` or PR #4. Git ancestry check confirms exclusion. Two replay conflicts were resolved by keeping current version 0.3.1 and adding the relay descriptor response.
+- **Prepared, not deployed/tested on rig:** relay-only provider `07eca5e30ca7873ab8cfda503176768fc55f66d4`, pushed as `defleur-agents/wizard-tinfoil` branch `ops/relay-only-launch`. This replays the seven relay commits through old `b2ad0d5` onto current upstream main `cbfa896fdd1d484f9c96c44d8b5ad7c20dc3474e`, preserving current billing/UI changes, without realtime SDK commit `9a32d08` or PR #4. Git ancestry check confirms exclusion. Two replay conflicts were resolved by keeping current version 0.3.1 and adding the relay descriptor response.
 - Provider unit suite: **23 run, 1 skipped, zero failures**. No paid inference performed.
 - Recovery safety suite: **3 passed** (healthy start, bounded broken-hostagent repair, two-failure disk preservation).
 - All three exported archives on Thales match locally computed git-archive SHA256s; see `SOURCE-MANIFEST.json`.
@@ -119,11 +119,40 @@ The actual run successfully authenticated a Runtipi **GET** and established that
 Observed live deployment, requiring fresh re-discovery before any future promotion:
 - Service release `b4114746e0373cd6aacae0f44655dd707eb10731` (`fix/replay-dedupe-memory`), **not** the mobile UX checkout's unrelated HEAD.
 - Runtime release `f93a26b9eca83d31213b09de522c4f79dcfb930c`.
-- WAM/Runtipi image `ghcr.io/humanitylabs-org/wizard-app-manager@sha256:07df73e79ee3bea5465cd27d90f99191317075e7a669678a8d066c51473d4116`.
+- WAM/Runtipi image `ghcr.io/humanitylabs-org/wizard-app-manager@sha256:07df73e79ee3bea5465cd27d90f99191317076e7a669678a8d066c51473d4116`.
 - Live `/app/main.mjs` SHA256 `6e2b3e410f1e54fce473452d79102edc3c11e36ae69237e4ab232e8f43ebef42`.
-- Root-owned Runtipi `app-data` is 0755, not writable by uid1000; live `user-config`, `apps`, `state` are currently 0777. Installation must still use API GET/PUT/GET and rehearsal must not exploit the looser directories.
+- Root-owned Runtipi `app-data` is 0765, not writable by uid1000; live `user-config`, `apps`, `state` are currently 0777. Installation must still use API GET/PUT/GET and rehearsal must not exploit the looser directories.
 
 ## Durable handoff
 The requested Service branch `ops/private-providers-live-run` contains the real read-only preflight, tested recovery runner, immutable release pins, source manifest, and this evidence. It does **not** contain a finished `live-run-all`. Working copies and sanitized actual dry-run receipt are retained in the requested local `pp-launch/live` directory and matching external-volume Thales directory. Archive staging is under the latter's `sources/`.
 
 Next operation belongs to the genuine parent: submit the staged recovery job, consume its actual receipt, recover guest scripts without a disk reset, then continue exact-build rehearsal and full tooling reconstruction. **Do not ask James for a restart yet.** No new owner authorization or Miguel change is needed merely to admit recovery; Miguel's realtime SDK remains outside this relay-only release.
+
+
+## pp-final-rehearsal — attempt 17 (actual success)
+
+The canonical external-volume path recovered before this run. Re-mirrored 557 local/tooling files with zero SHA256 mismatches, then ran the authorized direct shared-lock attempt 17. The foreground SSH process exited 0. The exact remote receipt was copied back and independently hash-read on Thales; both copies are SHA256 `e4d984412977131bd9c004ddf0f5fa97ca2bcda7f38f31ade76fa35ac1317488`.
+
+- a PASS: completed legacy chat before provider installation.
+- b PASS: actual Runtipi API installation/user-config readback and completed attested SDK inference.
+- c PASS: all six privacy probes.
+- d PASS: completed migrated inference through the same queued route, home identity and canonical history retained. Unexempted post-migration credential-location check PASS; retirement receipt recorded four paths without secret values.
+- e PASS: uninstall yields HTTP 503 `private_provider_unavailable`; sealed marker retained; no plaintext fallback.
+- f PASS: other synthetic agent chat completed; a real red-image vision helper completed through its same in-seal client, using `deepseek-v4-1-flash`, and identified red. UID-safe exact-container/configured-UID inspection worked without broadening mode0700 permissions.
+- Final reset PASS: zero synthetic containers/homes, zero provider apps/volumes, provider credential absent. Phase-specific guest regression/migration/removal logs were collected privately.
+
+### Candidate staging and live source discovery
+
+Current live Service base was `4be54416627ab3f578a951166a084e459e9edd9c`, not the old reviewed base. Reviewed 17 hunks across nine files and retained current body-search worker, bounded archive list, Spaces tools, sharing wall, chat layout and permission-only-update filtering while preserving provider migration/scrub/admission and exact-runtime queue lookup. `MERGE-REVIEW.md` records the choices. The first integrated run correctly blocked on 28 focused-test failures from a stale one-argument confidential-provider assertion; the corrected resolution preserves catalogue validation and the pre-install legacy route.
+
+The second actual Thales staging run PASSED: candidate `8aa4372ff0c64ae2e053032da789395d03c70540` contains the discovered live base plus #161 `5e445fca7c87da825e8d669fbf35e3e6eeeb5acb`; runtime is from that same candidate tree; UX is #220 `f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6`. Focused Service/runtime/UX suites passed. Candidate archive SHA256 `254b962b442018c768f434d4a9734b0192ee44f0e82c574f5d5b3e1bd5f0712a` (22,844,108 bytes) is retained privately on both hosts; no production pointer was changed.
+
+Added `live_sources.py` to fingerprint the independently selected CLI launcher, manager API unit WorkingDirectory and runtime `--wam` sources. The actual box selects three different trees; merely updating the workspace cannot update the API daemon or immutable owner launcher. Added `release_transaction.py`: durable attempt-owned snapshots of allowlisted code pointers/reviewed text, compare-and-swap promotion, write-ahead crash ownership, all-target drift prevalidation, exact readback and rollback. Real scratch-filesystem tests exercise success, crash recovery, foreign drift and rejection of agent/data/credential targets. This helper is NOT a complete production adapter plan.
+
+All 76 lightweight tooling tests PASS. Rig admission now requires actual migrated inference, credential-location, real red-image vision and zero surviving synthetic runtimes, not just summary success flags.
+
+### Remaining live gate — still BLOCKED, not a green full dry run
+
+Actual read-only `DRY-RUN-FINAL-17.json` authenticated Runtipi GET and WAM image/daemon parity PASS; all protected before/after fingerprints (now including all three WAM source selections) are identical. The sole preflight blocker remains incomplete full promotion/rollback adapters. No live restart, provider install, Private-home read, Private prompt, public merge or other live mutation occurred.
+
+The filesystem transaction helper cannot substitute for API-owned post-seal rollback. Product `rollback-private-migration` currently rejects an already sealed record (`private_migration_already_sealed`); Service rejects changing `previously_migrated` back to false. A full attempt rollback after a successful seal therefore needs an owner-authenticated, attempt-fenced product restore contract (or an explicitly approved alternate recovery design), not a direct Private-directory read/write. Complete WAM CLI/API/runtime deployment, provider lifecycle/user-config, live six-check/regression, Private-only API migration and verify adapters still have to be integrated into the production plan. Do not delete this gate or replace missing adapters with successful shell commands.

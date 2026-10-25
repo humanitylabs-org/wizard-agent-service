@@ -36,6 +36,13 @@ def validate_rig(rig):
  if rig.get('privacy_checks_passed')!=6:blockers.append('six privacy checks incomplete')
  reset=rig.get('reset',{})
  if reset.get('provider_key_present') is not False or reset.get('apps')!=0 or reset.get('provider_volumes')!=[]:blockers.append('verified rig reset missing')
+ if reset.get('remaining_synthetic_containers')!=[] or reset.get('remaining_synthetic_agent_dirs')!=[]:blockers.append('synthetic runtime reset readback missing')
+ evidence=rig.get('evidence',{})
+ if evidence.get('privacy',{}).get('privacy_checks_passed')!=6:blockers.append('actual privacy receipt incomplete')
+ if evidence.get('d-verified',{}).get('completed_migrated_request') is not True:blockers.append('completed migrated inference unproven')
+ if evidence.get('key-migrated',{}).get('checks',{}).get('key-location')!='passed':blockers.append('post-migration credential-location receipt incomplete')
+ vision=evidence.get('f-verified',{})
+ if vision.get('other_agent_chat_completed') is not True or vision.get('vision_helper_completed') is not True or vision.get('colour')!='red':blockers.append('real regression chat and red-image vision evidence incomplete')
  return blockers
 
 class Commands:
