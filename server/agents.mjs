@@ -850,7 +850,7 @@ export function createAgentRegistry(options = {}) {
     } catch { /* no fallback for a migrated agent */ }
     fail(503, 'private_provider_unavailable', 'agent.model.provider')
   }
-  async function preparePrivateMigration(agent) {
+  async function preparePrivateMigration(agent, attempt) {
     await assertProviderAvailable(agent, { migration: true })
     if (agent.runtime.private_client) return false
     let identity = { uid: agent.runtime.uid, gid: agent.runtime.gid }
@@ -862,8 +862,11 @@ export function createAgentRegistry(options = {}) {
       }
     }
     if (![identity?.uid, identity?.gid].every(v => Number.isInteger(v) && v > 0 && v <= 2147483647)) fail(409, 'agent_identity_invalid', 'agent.runtime')
+    if (attempt !== undefined && !/^[a-f0-9]{32}$/.test(attempt)) fail(400, 'invalid_migration_attempt', 'agent.runtime')
+    const sourceRuntime = structuredClone(agent.runtime)
     Object.assign(agent.runtime, identity)
-    agent.runtime.migration_source = { provider: agent.model.provider, isolation: agent.runtime.isolation || '' }
+    agent.runtime.migration_source = { provider: agent.model.provider, isolation: agent.runtime.isolation || '',
+      attempt: attempt || randomBytes(16).toString('hex'), model: structuredClone(agent.model), runtime: sourceRuntime }
     sealRuntime(agent)
     return true
   }
@@ -1061,6 +1064,28 @@ export function createAgentRegistry(options = {}) {
     return { agent: read(id), replayed: false }
   }
 
+  async function restorePrivateMigration(agent, body) {
+    const attempt = body.restore_private_provider
+    if (!/^[a-f0-9]{32}$/.test(attempt) || Object.keys(body).length !== 1) fail(400, 'invalid_migration_attempt', 'agent.runtime')
+    const source = agent.runtime.migration_source || agent.runtime.private_restore_source
+    if (!source || source.attempt !== attempt || source.provider !== 'tinfoil'
+      || source.model?.provider !== 'tinfoil' || source.runtime?.private_client || source.runtime?.isolation) fail(409, 'private_restore_scope_mismatch', 'agent.runtime')
+    if (!runtime?.unmigratePrivateProvider) fail(503, 'private_restore_unavailable', 'agent.runtime')
+    // This endpoint alone can reverse a sealed legacy migration. Ordinary model
+    // PATCHes still cannot unseal, and privacy/permissions are never restored.
+    await runtime.unmigratePrivateProvider(agent.id, { attempt, phase: 'prepare' })
+    const old = structuredClone(agent)
+    old.model = source.model
+    old.runtime = { ...source.runtime, private_restore_attempt: attempt, private_restore_source: source }
+    writeHarnessFiles(old)
+    writeJsonAtomic(join(folder(agent.id), 'agent.json'), old, 0o600)
+    await runtime.unmigratePrivateProvider(agent.id, { attempt, phase: 'commit' })
+    invalidateCatalog(agent.id)
+    writeServiceState(agent.id, { desired: 'running', started_at: now(), last_error: '' })
+    await refreshCatalog(agent.id).catch(() => undefined)
+    return read(agent.id)
+  }
+
   async function update(id, body) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
@@ -1091,6 +1116,7 @@ export function createAgentRegistry(options = {}) {
       appsChanged()
       return read(id)
     }
+    if (body.restore_private_provider !== undefined) return restorePrivateMigration(agent, body)
     if (body.role !== undefined && body.role !== 'standard') fail(409, 'invalid_agent_role', 'agent.role')
     if (agent.privacy === 'private') {
       // #59: nothing turns a private agent into something another agent can read.
@@ -1127,7 +1153,7 @@ export function createAgentRegistry(options = {}) {
     }
     // Migration is an explicit owner PATCH, not a side effect of start, reads, or app sync.
     let migrated = false
-    if (body.migrate_private_provider === true) migrated = await preparePrivateMigration(next)
+    if (body.migrate_private_provider === true) migrated = await preparePrivateMigration(next, body.private_migration_attempt)
     if (agent.runtime?.private_client && next.model.provider !== agent.model.provider) {
       if (!isConfidentialProvider(next.model.provider, providerApps()) && next.privacy !== 'private') {
         if (!runtime?.delete) fail(503, 'runtime_unavailable', 'agent.runtime')
@@ -1475,6 +1501,7 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
   return {
     identity: (id) => call('POST', `/agents/${encodeURIComponent(id)}/identity`),
     scrubPrivateMigration: (id) => call('POST', `/agents/${encodeURIComponent(id)}/scrub-private-migration`),
+    unmigratePrivateProvider: (id, body) => call('POST', `/agents/${encodeURIComponent(id)}/unmigrate-private-provider`, body),
     rollbackPrivateMigration: (id) => call('POST', `/agents/${encodeURIComponent(id)}/rollback-private-migration`),
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),

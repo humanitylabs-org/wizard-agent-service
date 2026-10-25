@@ -24,7 +24,7 @@ async function fixture(identity = { uid: 1000, gid: 1000 }) {
   writeFileSync(join(dir, 'home', 'history.db'), 'synthetic-history-only')
   writeFileSync(join(dir, 'home', 'config.yaml'), 'legacy-config-untouched')
   calls.length = 0
-  return { registry, calls, dir, file, old, appsJsonPath, runtime }
+  return { registry, calls, dir, file, old, appsJsonPath, runtime: runtime as any }
 }
 it.each(['explicit-patch'])('migrates legacy metadata via %s, writes managed files, preserves synthetic history and reruns idempotently', async (route) => {
   const { registry, calls, dir, file } = await fixture()
@@ -58,4 +58,30 @@ it.each([{ uid: 0, gid: 1000 }, { uid: 1000, gid: 0 }, { uid: undefined, gid: un
   expect(calls).toEqual(['identity'])
   expect(existsSync(join(dir, 'managed'))).toBe(false)
   expect(readFileSync(join(dir, 'home/config.yaml'), 'utf8')).toBe('legacy-config-untouched')
+})
+it('only matching owner rollback restores original confidential route after seal, retaining history and permissions', async () => {
+  const { registry, runtime, calls, dir, file, old } = await fixture()
+  const attempt = 'a'.repeat(32)
+  runtime.unmigratePrivateProvider = async (_id: string, body: any) => { calls.push(body.phase) }
+  await registry.update('legacy', { migrate_private_provider: true, private_migration_attempt: attempt })
+  await expect(registry.update('legacy', { restore_private_provider: 'b'.repeat(32) })).rejects.toMatchObject({ error: 'private_restore_scope_mismatch' })
+  await expect(registry.update('legacy', { restore_private_provider: attempt, privacy: 'standard' })).rejects.toMatchObject({ error: 'invalid_migration_attempt' })
+  await registry.update('legacy', { restore_private_provider: attempt })
+  const restored = JSON.parse(readFileSync(file, 'utf8'))
+  expect(restored.model).toEqual(old.model)
+  expect(restored.privacy).toBe('private')
+  expect(restored.permissions).toEqual(old.permissions)
+  expect(restored.runtime.private_client).toBeUndefined()
+  expect(restored.runtime.private_restore_attempt).toBe(attempt)
+  expect(calls.slice(-2)).toEqual(['prepare', 'commit'])
+  expect(readFileSync(join(dir, 'home/history.db'), 'utf8')).toBe('synthetic-history-only')
+})
+it('leaves sealed metadata and harness intact when runtime refuses host-source rollback', async () => {
+  const { registry, runtime, file } = await fixture()
+  const attempt = 'c'.repeat(32)
+  await registry.update('legacy', { migrate_private_provider: true, private_migration_attempt: attempt })
+  const before = readFileSync(file, 'utf8')
+  runtime.unmigratePrivateProvider = async () => { throw new Error('host-source-unavailable') }
+  await expect(registry.update('legacy', { restore_private_provider: attempt })).rejects.toThrow('host-source-unavailable')
+  expect(readFileSync(file, 'utf8')).toBe(before)
 })

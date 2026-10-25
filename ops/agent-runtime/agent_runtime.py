@@ -946,6 +946,8 @@ def offline_census(driver, agent: dict) -> dict:
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if action in {'start', 'apply'} and (driver.agents.root / agent['id'] / 'runtime' / 'private-restore.json').exists():
+        raise RuntimeFailure('private_restore_pending', 409)
     if action in {'start', 'apply'} and not driver.agents.providers.is_private(agent) and (driver.agents.root / agent['id'] / 'runtime' / 'key-scrub.json').exists():
         raise RuntimeFailure('private_migration_pending', 409)
     if isinstance(driver, ImportDriver):
@@ -1203,6 +1205,66 @@ def driver_for(agent: dict, driver, restricted_driver):
     return driver
 
 
+def unmigrate_private_provider(agents, agent, payload, legacy, sealed):
+    """Attempt-fenced restore; called under BOTH lifecycle and process locks.
+
+    Only the existing host credential source is used. No plaintext undo copy,
+    home scan, privacy downgrade, or arbitrary runtime payload is accepted.
+    """
+    from provider_key_scrub import atomic
+    attempt = payload.get('attempt') if isinstance(payload, dict) else None
+    phase = payload.get('phase') if isinstance(payload, dict) else None
+    source = agent['runtime'].get('migration_source') or agent['runtime'].get('private_restore_source') or {}
+    if (not isinstance(attempt, str) or not re.fullmatch(r'[a-f0-9]{32}', attempt)
+            or source.get('attempt') != attempt or source.get('provider') != 'tinfoil'
+            or source.get('model', {}).get('provider') != 'tinfoil'
+            or source.get('runtime', {}).get('private_client') or source.get('runtime', {}).get('isolation')):
+        raise RuntimeFailure('private_restore_scope_mismatch', 409)
+    if (not agents.tinfoil_key() or agents.tinfoil_key_file is None
+            or agents.tinfoil_key_file.resolve().is_relative_to(agents.home(agent['id']).resolve())):
+        raise RuntimeFailure('private_migration_host_source_unavailable', 503)
+    root = agents.root / agent['id'] / 'runtime'
+    root.mkdir(mode=0o700, exist_ok=True)
+    fence = root / 'private-restore.json'
+    prior = json.loads(fence.read_text()) if fence.exists() else {}
+    if prior and prior.get('attempt') != attempt:
+        raise RuntimeFailure('private_restore_scope_mismatch', 409)
+    def save(status):
+        atomic(fence, json.dumps({'schema': 1, 'attempt': attempt, 'status': status}).encode())
+    if phase == 'prepare':
+        if not agents.providers.is_private(agent):
+            if agent['runtime'].get('private_restore_attempt') != attempt:
+                raise RuntimeFailure('private_restore_scope_mismatch', 409)
+            return {'ok': True, 'attempt': attempt, 'phase': phase}
+        if sealed is None:
+            raise RuntimeFailure('restricted_runtime_unavailable', 503)
+        if prior.get('status') != 'prepared':
+            save('pending')  # fence all starts before the first destructive write
+            if (root / 'private-compose.json').exists():
+                sealed.delete(agent)  # down, revoke client/network, remove compose
+            else:
+                agents.providers.revoke(agent)
+            save('prepared')
+    elif phase == 'commit':
+        if (agent['runtime'].get('private_client') or agents.providers.is_private(agent)
+                or agent['runtime'].get('private_restore_attempt') != attempt):
+            raise RuntimeFailure('private_restore_scope_mismatch', 409)
+        # An idempotent retry after commit must not rewrite a running home's env.
+        if not fence.exists():
+            return {'ok': True, 'attempt': attempt, 'phase': phase}
+        if prior.get('status') != 'prepared':
+            raise RuntimeFailure('private_restore_not_prepared', 409)
+        agents.add_provider_keys(agent)
+        (root / 'key-scrub.json').unlink(missing_ok=True)
+        # Call the exact original driver while holding the restart fence. A
+        # failed apply leaves it in place for an explicit retry, never auto-start.
+        legacy.apply(agent)
+        fence.unlink()
+    else:
+        raise RuntimeFailure('invalid_restore_phase', 400)
+    return {'ok': True, 'attempt': attempt, 'phase': phase}
+
+
 def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None):
     if restricted_driver is not None:
         restricted_driver.legacy_driver = driver
@@ -1231,7 +1293,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|deliver|place|fetch|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|unmigrate-private-provider|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1279,7 +1341,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     agent = agents.read(agent_id)
                     if action in {'apply', 'start'} and agents.providers.is_private(agent) and chosen is not restricted_driver:
                         raise RuntimeFailure('private_migration_generation_changed', 409)
-                    if action == 'rollback-private-migration':
+                    if action == 'unmigrate-private-provider':
+                        result = unmigrate_private_provider(agents, agent, payload, driver, restricted_driver)
+                    elif action == 'rollback-private-migration':
                         if agents.providers.is_private(agent):
                             raise RuntimeFailure('private_migration_already_sealed', 409)
                         # Restore only the active env from the host-side legacy source;
