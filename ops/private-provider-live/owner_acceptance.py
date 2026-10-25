@@ -91,13 +91,23 @@ class Owner:
             return e.code,reply
     def require(self,path,body=None,method=None,allowed=(200,)):
         code,result=self.request(path,body,method)
-        if code not in allowed:raise RuntimeError('owner API rejected '+path.split('?')[0]+' HTTP '+str(code))
+        if code not in allowed:
+            import re
+            error=str(result.get('error',''))
+            (self.root/'owner-error.json').write_text(json.dumps({'path':path.split('?')[0],'http_status':code,'error':error if re.fullmatch(r'[a-z0-9_.:-]{1,80}',error) else 'withheld'}))
+            raise RuntimeError('owner API rejected '+path.split('?')[0]+' HTTP '+str(code))
         return result
     def ready(self,aid):
         deadline=time.monotonic()+180
         while time.monotonic()<deadline:
             code,_=self.request('/wizard/hermes/api/sessions?agent='+aid)
             if code==200:return
+            import re
+            meta=self.require('/wizard/v1/agents/'+aid)['agent']
+            status={k:meta.get(k) for k in ['id','status','model','runtime']}
+            detail=str(meta.get('status_detail',''))
+            status['status_detail']=detail if re.fullmatch(r'[a-z0-9_.:-]{0,80}',detail) else 'withheld'
+            (self.root/('ready-'+aid+'.json')).write_text(json.dumps(status))
             time.sleep(1)
         raise RuntimeError('canonical history readiness timed out')
     def create(self,kind='probe'):
@@ -105,6 +115,7 @@ class Owner:
         before=self.require('/wizard/v1/agents').get('agents',[])
         if any(a.get('id')==aid for a in before):raise RuntimeError('foreign throwaway agent collision')
         data=self.require('/wizard/v1/agents',{'label':aid,'harness':'hermes','permissions':{'preset':'private' if kind=='probe' else 'standard','read_standard_chats':False},'model':{'provider':'wizard-tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST',(201,))
+        (self.root/('created-'+aid+'.json')).write_text(json.dumps(data))
         if data['agent']['id']!=aid:raise RuntimeError('throwaway agent identity changed')
         self.ready(aid);return aid
     def chat(self,aid):

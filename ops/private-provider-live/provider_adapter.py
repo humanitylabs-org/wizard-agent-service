@@ -156,6 +156,7 @@ class Provider:
         cfg=cli.Config();registry=cli.write_registry(cfg,self.rt)
         rows=[x for x in registry['apps'] if x.get('id')=='wizard-tinfoil']
         if len(rows)!=1 or rows[0].get('urn')!=URN or not rows[0].get('private_inference'):raise RuntimeError('canonical provider registry readback failed')
+        atomic(self.root/'provider-registry-projection.json',json.dumps({k:rows[0].get(k) for k in ['id','status','urn','private_inference']}).encode())
         return {'urn':URN,'override_api_readback':True,'app_status':status,'source_sha':SHA,'dependency_parity':True,'canonical_registry_unique':True}
     def connect(self,legacy_source,runtime_origin,runtime_auth_file):
         # The authenticated runtime owns metadata reconciliation. The installer
