@@ -21,7 +21,7 @@ const TOOL = {
       session_id: { type: 'string', description: 'This Wizard thread\'s id, exactly as given in your run instructions' },
       name: { type: 'string', description: 'create: short label for the promised result' },
       instructions: { type: 'string', description: 'create: what to check and what finished result is owed' },
-      every_minutes: { type: 'integer', minimum: 1, maximum: 1440, description: 'create: minutes between quiet checks (default 10)' },
+      every_minutes: { type: 'integer', minimum: 1, maximum: 1440, description: 'create: minutes between quiet checks (default 30)' },
       watcher_id: { type: 'string', description: 'stop: one watcher id; omit to stop every watcher on this thread' },
     },
     required: ['action', 'session_id'],
@@ -55,9 +55,14 @@ export function followUpTool({ scheduler, running = () => false, mainAgent = 'he
         const action = String(args.action || '')
         if (action === 'create') {
           if (!running()) return bad('The Wizard scheduler is switched off on this box (WIZARD_SCHEDULER is not 1), so nothing would be delivered. Tell the owner instead of promising a follow-up.')
-          const every = args.every_minutes === undefined ? 10 : Number(args.every_minutes)
+          const every = args.every_minutes === undefined ? 30 : Number(args.every_minutes)
           if (!Number.isInteger(every) || every < 1 || every > 1440) return bad('every_minutes must be 1 to 1440')
-          const job = scheduler.create({ name: args.name, kind: 'watch', when: { every }, prompt: args.instructions, thread: sessionId, agent })
+          // A retried tool call must not create a second watcher for the same owed result. Use only
+          // this agent/thread's active jobs; a terminal or explicitly stopped watcher is never revived.
+          const existing = scheduler.followUps(sessionId, { agent }).find(job =>
+            job.name === String(args.name ?? '').trim() && job.prompt === String(args.instructions ?? '').trim()
+            && job.when.every === every)
+          const job = existing ?? scheduler.create({ name: args.name, kind: 'watch', when: { every }, prompt: args.instructions, thread: sessionId, agent })
           return ok(scheduler.project(job))
         }
         if (action === 'list') {

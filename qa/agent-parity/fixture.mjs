@@ -1,4 +1,4 @@
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -35,7 +35,9 @@ export async function scene(kind, serverOptions = {}) {
   writeFileSync(join(agentHome, 'synthetic.txt'), 'PARITY_SYNTHETIC_DOCUMENT\n')
   const stt = { text: 'Synthetic voice words.' }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
-  titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL);
+  titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL,
+    source TEXT, model TEXT, ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0,
+    parent_session_id TEXT, last_activity_at REAL, pinned INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
     CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);`)
   const searchDb = serverOptions.fixtureSearchIndex && kind!=='main' ? new DatabaseSync(join(agentHome,'state.db')) : null
@@ -92,7 +94,7 @@ export async function scene(kind, serverOptions = {}) {
     }
     if (path === '/api/sessions' && req.method === 'POST') {
       const row = { ...body, id: body.id || body.session_id, created_at: Date.now() / 1000, messages: [] }
-      sessions.set(row.id, row); titleDb.prepare('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)').run(row.id, row.title || '', row.title_source || 'llm', row.created_at); return json(201, { session: row })
+      sessions.set(row.id, row); titleDb.prepare('INSERT OR REPLACE INTO sessions (id,title,title_source,started_at) VALUES (?, ?, ?, ?)').run(row.id, row.title || '', row.title_source || 'llm', row.created_at); return json(201, { session: row })
     }
     if (path === '/api/sessions') {
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100)
@@ -161,12 +163,12 @@ export async function scene(kind, serverOptions = {}) {
   const start = async () => {
     const priorScheduler = process.env.WIZARD_SCHEDULER
     if (followUpParity) process.env.WIZARD_SCHEDULER = '1'
-    try { wizard = createWizardServer({ ...options, ...optionOverrides }); base = `http://127.0.0.1:${(await listen(wizard)).port}` }
+    try { wizard = createWizardServer({ ...options, ...serverOptions, ...optionOverrides }); await wizard.agentSocketsReady; base = `http://127.0.0.1:${(await listen(wizard)).port}` }
     finally { if (priorScheduler === undefined) delete process.env.WIZARD_SCHEDULER; else process.env.WIZARD_SCHEDULER = priorScheduler }
   }
   await start()
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, ...init.headers } }) }
-  const closeServer = s => new Promise(resolve => { s.closeAllConnections(); s.close(resolve) })
+  const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
   return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
@@ -181,6 +183,18 @@ export async function scene(kind, serverOptions = {}) {
           let data = ''; res.on('data', c => { data += c }); res.on('end', () => resolve({ status: res.statusCode, json: async () => JSON.parse(data) }))
         })
         req.on('error', reject); req.end(JSON.stringify(rpc))
+      })
+    },
+    agentMcp: async (method, params = {}) => {
+      syncMessages()
+      const headers = { Authorization: `Bearer ${kind === 'main' ? 'parity-main-gateway' : 'parity-gateway-secret'}`, 'Content-Type': 'application/json' }
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+      if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body })
+      return new Promise((resolve, reject) => {
+        const req = httpRequest({ socketPath: join(folder, 'gateway', 'gateway.sock'), agent: false, path: '/wizard/mcp', method: 'POST', headers }, res => {
+          let text = ''; res.setEncoding('utf8'); res.on('data', chunk => { text += chunk }); res.on('end', () => resolve(new Response(text, { status: res.statusCode, headers: res.headers })))
+        })
+        req.on('error', reject); req.end(body)
       })
     },
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, ...init.headers } }),

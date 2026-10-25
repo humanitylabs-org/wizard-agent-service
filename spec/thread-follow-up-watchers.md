@@ -25,7 +25,7 @@ A follow-up watcher is a durable scheduled check owned by one existing Wizard ch
 
 Actions:
 
-- `create`: name, instructions, optional interval in minutes.
+- `create`: name, instructions, optional interval in minutes (default **30**, configurable from 1 to 1440). Identical active requests (same agent, thread, trimmed name/instructions and interval) return the existing watcher instead of adding duplicate checks.
 - `list`: active watchers on this thread.
 - `stop`: stop one watcher by ID or every active watcher on this thread.
 
@@ -48,3 +48,15 @@ An active watcher is projected as `followUp` on its thread row.
 ## Verification
 
 Automated coverage must prove persistence, silence, one-shot disable, no overlapping occurrences, explicit cancellation, archive/Snooze independence, UI labels/actions, plugin session binding, and authenticated route boundaries. Browser QA must prove the actions on a mobile viewport and same-thread resurfacing after a synthetic terminal check.
+## Recovery and duplication boundaries
+
+Checks inspect durable heavy/helper receipts even when continuation delivery was suppressed or superseded,
+then revalidate the latest genuine owner request before acting. Receipt content is evidence, not instructions.
+Already-consumed results and cancelled or redirected work must not be replayed. This guidance does not
+bypass the heavy queue's admission/freshness guards or automatically scan and revive arbitrary threads.
+
+Ported from the private recovery/census workflows: retry-safe active-watcher deduplication and explicit
+receipt/freshness guidance. Existing durable occurrence keys, quiet pending checks, non-overlap, restoration
+retry and terminal disable remain the single implementation. Global orphan scans, direct Hermes database
+unarchive writes, host paths, credentials and owner-specific census policy are intentionally not ported: they
+require a separately scoped recovery contract and must not cross routed/private-agent boundaries.

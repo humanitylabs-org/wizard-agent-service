@@ -93,15 +93,18 @@ function lockedRoute(modelConfig) {
   } catch { return null }
 }
 
-// Search only caller-approved session IDs in this runtime, with the same visibility rules
-// as the list truth reader. Never discover agents or open their stores here.
+// The trigram index is complete only when it exists and no FTS rebuild is mid-way
+// (Hermes records rebuild progress in state_meta while backfilling).
 function trigramIndexReady(db) {
   try {
     if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
-    const meta=db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
     return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
   } catch { return false }
 }
+
+// Search only caller-approved session IDs in this runtime, with the same visibility rules
+// as the list truth reader. Never discover agents or open their stores here.
 export const indexedSearchWords = query => {
   const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean)
   return words.length && words.every(w => /^[\x00-\x7f]+$/.test(w)) && words.some(w => w.length >= 3) ? words : []

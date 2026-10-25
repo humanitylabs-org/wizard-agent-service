@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Scheduler, importHermesSchedules, isSilentResult, isScheduleInput, projectFollowUps, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
+import { Scheduler, notificationFromOutput, importHermesSchedules, isSilentResult, isScheduleInput, projectFollowUps, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createWizardServer, listen, latestVisibleSessionMessages, projectWizardMessageHistory } from '../server/service.mjs'
 import { followUpTool } from '../server/follow-ups.mjs'
@@ -533,6 +533,27 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect((await api(f.origin, `/${created.id}/run`, 'POST')).status).toBe(404)
   })
 
+  it('deliver: notification reads the unscrubbed answer through the real run route and keeps the thread and owner views silent', async () => {
+    const f = await fixture({ fixtureOutput: '**Disk almost full**\nThales is at 93%.\n[SILENT]' })
+    const sent: any[] = []
+    f.server.scheduler.notifier = { available: () => true, send: async (n: any) => { sent.push(n); return { app: 'notifications' } } }
+    const created = await (await api(f.origin, '', 'POST', job({ enabled: false, deliver: 'notification' }))).json()
+    const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
+    await f.server.scheduler.tick(false); await f.server.scheduler.refreshRuns()
+    expect(f.bodies[0].input).toContain("the owner's Notifications, not this chat")
+    expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key }])
+    expect(f.server.scheduler.project(f.server.scheduler.get(created.id)).lastRun.outcome).toBe('notified')
+    expect(f.sessions.get(receipt.thread)).toMatchObject({ hidden: true })
+    const row = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
+    const runId = JSON.parse(row.receipt).run_id
+    // The raw view is internal-only: an owner asking for it still gets the scrubbed run.
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'X-Wizard-Schedule-Raw': '1' }
+    const run = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers })).json()
+    expect(run.output).toBe('')
+    const history = await (await fetch(`${f.origin}/wizard/hermes/api/sessions/${receipt.thread}/messages?view=wizard`, { headers })).json()
+    expect(history.messages).toEqual([])
+  })
+
   it.each(['fixture report', 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
     const f = await fixture({ fixtureOutput })
     const created = await (await api(f.origin, '', 'POST', job({ enabled: false }))).json()
@@ -766,6 +787,10 @@ describe('windows, reminders and trickled agent work', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list' }) })).json()
     expect(listed.result.tools.map((t: any) => t.name)).not.toContain('wizard_follow_up')
     const second = (await call({ action: 'create', session_id: 'wizard_origin', name: 'Second dependency', instructions: 'Wait again.' })).value
+    expect(second.nextRun).toBe('2026-10-21T00:30:00.000Z')
+    const retried = (await call({ action: 'create', session_id: 'wizard_origin', name: ' Second dependency ', instructions: ' Wait again. ' })).value
+    expect(retried.id).toBe(second.id)
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups).toHaveLength(1)
     const stopBody = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_origin' }) }
     expect((await fetch(`${origin}/wizard/follow-ups/stop`, stopBody)).status).toBe(403)
     const stopped = await fetch(`${origin}/wizard/follow-ups/stop`, { ...stopBody,
@@ -884,5 +909,66 @@ describe('Boomerang returns (kind return)', () => {
     expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
     s.delete(back.id)
     expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
+  })
+})
+
+describe('deliver: notification (alerts go to the notifications slot, not Chats)', () => {
+  const notifier = (up = true, fail = false) => {
+    const sent: any[] = []
+    return { sent, available: () => up, send: async (n: any) => { if (fail) throw Error('down'); sent.push(n); return { app: 'notifications' } } }
+  }
+  it('freezes a silent notification instruction into the run and sends the answer to the slot once', async () => {
+    const n = notifier(); let bodies: any[] = []
+    const s = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r1' } }, { notifier: n,
+      lookup: async () => ({ status: 'completed', output: '**Disk almost full**\nThales is at 93%. Free space or approve cleanup.\n[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' }))
+    expect(j.deliver).toBe('notification')
+    clock += 5 * 60_000; await s.tick()
+    expect(bodies[0].deliver).toBe('notification')
+    expect(bodies[0].body.input).toContain("the owner's Notifications, not this chat")
+    expect(isSilentResult('**Disk almost full**\nThales is at 93%.\n[SILENT]')).toBe(true)
+    await s.refreshRuns(); await s.refreshRuns()
+    expect(n.sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%. Free space or approve cleanup.', key: expect.stringMatching(/^schedule:/) }])
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('sends nothing for a [SILENT]-only answer', async () => {
+    const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => ({ status: 'completed', output: '[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    expect(n.sent).toEqual([]); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('silent')
+  })
+  it('falls back to the thread when the slot is empty or stopped, and retries a failed send', async () => {
+    let bodies: any[] = []
+    const s1 = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r' } }, { notifier: notifier(false) })
+    s1.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s1.tick()
+    expect(bodies[0].deliver).toBeUndefined()
+    expect(bodies[0].body.input).not.toContain('Notifications')
+    await s1.close(); schedulers.splice(schedulers.indexOf(s1), 1); rmSync(join(root, 'scheduler.sqlite3'), { force: true })
+    let fail = true; const sent: any[] = []
+    const flaky = { available: () => true, send: async (x: any) => { if (fail) throw Error('down'); sent.push(x) } }
+    const s2 = scheduler(undefined, { notifier: flaky, lookup: async () => ({ status: 'completed', output: 'Backup failed\nRestore check could not reach R2.\n[SILENT]' }) })
+    const j = s2.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s2.tick()
+    expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'failed', error: 'Notification not delivered; will retry', finishedAt: null })
+    fail = false; await s2.refreshRuns()
+    expect(sent).toHaveLength(1); expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('observes a notification occurrence past the 6 h run window', async () => {
+    let state: any = { status: 'running' }; const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => state })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    clock += 8 * 3600_000; state = { status: 'completed', output: 'Render done\nAll 3 clips exported.\n[SILENT]' }
+    await s.refreshRuns()
+    expect(n.sent).toHaveLength(1); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('notified')
+  })
+  it('validates deliver and keeps returns as threads', () => {
+    const s = scheduler()
+    expect(s.create(job()).deliver).toBe('thread')
+    expect(() => s.create(job({ deliver: 'email' }))).toThrow(/deliver must be/)
+    expect(() => s.create({ name: 'R', kind: 'return', when: { once: '2026-10-22T00:00:00Z' }, thread: 'wizard_1_abc', deliver: 'notification' })).toThrow(/return always/)
+  })
+  it('extracts title and message from an answer', () => {
+    expect(notificationFromOutput('# Job done\nAll 3 renders finished.\n[SILENT]')).toEqual({ title: 'Job done', message: 'All 3 renders finished.' })
+    expect(notificationFromOutput('One line only [SILENT]')).toEqual({ title: '', message: 'One line only' })
+    expect(notificationFromOutput('[SILENT]')).toBeNull()
   })
 })
