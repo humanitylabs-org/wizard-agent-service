@@ -6,6 +6,31 @@ SERVICE='b8eb2268d07fc4b29b081771bd9e05dcbf56d776'
 UX='f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6'
 ROOT=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live/staging')
 
+def combine_feature_catalogue(base,ours,theirs):
+ """Preserve disjoint feature records; reject competing edits to one ID."""
+ result={}
+ for key in dict.fromkeys([*ours,*theirs,*base]):
+  if key=='features':continue
+  b,o,t=base.get(key),ours.get(key),theirs.get(key)
+  if o==t:result[key]=o
+  elif o==b:result[key]=t
+  elif t==b:result[key]=o
+  else:raise RuntimeError('competing catalogue metadata edits: '+key)
+ maps=[]
+ for data in (base,ours,theirs):
+  rows=data['features'];mapped={x['id']:x for x in rows}
+  if len(mapped)!=len(rows):raise RuntimeError('duplicate feature IDs')
+  maps.append(mapped)
+ bmap,omap,tmap=maps;rows=[]
+ for key in dict.fromkeys([*omap,*tmap,*bmap]):
+  b,o,t=bmap.get(key),omap.get(key),tmap.get(key)
+  if o==t:value=o
+  elif o==b:value=t
+  elif t==b:value=o
+  else:raise RuntimeError('competing catalogue feature edits: '+key)
+  if value is not None:rows.append(value)
+ result['features']=rows;return result
+
 def remote(data):
  assert sys.platform=='darwin'
  attempt=data['attempt'];assert len(attempt)==32 and all(c in '0123456789abcdef' for c in attempt)
@@ -18,7 +43,13 @@ def remote(data):
   if left<=0:raise RuntimeError('staging budget exhausted')
   p=subprocess.run(argv,cwd=cwd,env=env,capture_output=True,timeout=left,input=payload)
   log=root/('step-'+str(len(logs))+'.log');log.write_bytes(p.stdout+p.stderr);logs.append({'argv':argv,'returncode':p.returncode,'log':str(log)})
-  if p.returncode:raise RuntimeError('staging step failed: '+str(len(logs)-1))
+  if p.returncode:
+   if argv[:2]!=['git','apply'] or b'error:' in p.stderr.lower():raise RuntimeError('staging step failed: '+str(len(logs)-1))
+   conflicted=run(['git','diff','--name-only','--diff-filter=U'],cwd).splitlines()
+   if conflicted!=['qa/agent-parity/features.json']:raise RuntimeError('unreviewed staging conflict')
+   name=conflicted[0];versions=[json.loads(run(['git','show',':'+str(i)+':'+name],cwd)) for i in (1,2,3)]
+   combined=combine_feature_catalogue(*versions);(cwd/name).write_text(json.dumps(combined,indent=2)+'\n');run(['git','add',name],cwd)
+   resolutions.append({'file':name,'class':'disjoint-intent','decision':'Preserve current live feature records and incoming provider admission records by stable ID; competing edits fail closed.','feature_ids':[x['id'] for x in combined['features']]})
   return p.stdout.decode().strip()
  svc=root/('service-'+base[:12]);ux=root/'ux'
  try:
