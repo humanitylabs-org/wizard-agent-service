@@ -900,6 +900,43 @@ export function createAgentRegistry(options = {}) {
     writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
 
+  // Upgrade only Service-managed containers. Host profiles/imports own their harness;
+  // never traverse their home or rewrite user data. Keep a pending marker until apply
+  // succeeds, so a crash/failed runtime RPC cannot turn a rewritten stamp into success.
+  let harnessMigration
+  function migrateManagedHarnesses() {
+    if (harnessMigration) return harnessMigration
+    harnessMigration = (async () => {
+      if (!runtime?.apply) return
+      for (const id of folderIds()) {
+        const agent = readRaw(id)
+        if (!agent || agent.runtime.kind !== 'container' || agent.imported || agent.runtime.admission === 'importing') continue
+        const home = join(folder(id), restricted(agent) ? 'managed' : 'home')
+        const pending = join(folder(id), '.harness-apply-pending')
+        try {
+          let missingToken = false
+          if (wantsGateway(agent, gatewayUrlFor(agent))) {
+            const token = gatewayKey(id)
+            try { missingToken = !token || !readFileSync(join(home, '.env'), 'utf8').split(/\r?\n/u).includes(`WIZARD_MCP_TOKEN=${token}`) }
+            catch { missingToken = true }
+          }
+          if (!harnessStale(agent) && !missingToken && !existsSync(pending)) continue
+          writeTextAtomic(pending, 'managed harness upgrade\n')
+          writeHarnessFiles(agent) // same ownership/stamp rules as an owner update
+          if (serviceState(id).desired !== 'stopped') {
+            invalidateCatalog(id)
+            if (restricted(agent)) await options.beforeRestrictedStart?.(id)
+            const result = await runtime.apply(id)
+            if (result?.ok === false) throw new Error('runtime_failed')
+            writeServiceState(id, { started_at: now(), last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
+          }
+          rmSync(pending, { force: true })
+        } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
+      }
+    })().finally(() => { harnessMigration = null })
+    return harnessMigration
+  }
+
   const idempotency = () => readJson(idempotencyPath) ?? {}
 
   async function create(body, { idempotencyKey = '', deferStart = false } = {}) {
@@ -1316,7 +1353,7 @@ export function createAgentRegistry(options = {}) {
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
+    syncApps, migrateManagedHarnesses, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
     grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
