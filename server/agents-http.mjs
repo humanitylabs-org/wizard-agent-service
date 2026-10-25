@@ -46,7 +46,7 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
 
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
-async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
+export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
   let next = 0
