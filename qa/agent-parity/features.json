@@ -36,6 +36,16 @@
   ],
   "features": [
     {
+      "id": "android-shell-recording-custody",
+      "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/shell-recording-routes.test.mjs. The real parkReply function runs for main, host-profile, container and restricted routes with asynchronous shell and synchronous full-app recorders; it preserves session, agent, typed draft and audio, and acknowledges only after durable held custody. Meeting cancellation also awaits native bytes before acknowledgement. This is synthetic source-executed evidence, not live provider or physical-phone proof. Companion UX PR: humanitylabs-org/wizard-ux#504.",
+      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/core/device-recording.js"],
+      "reference_tests": ["wizard-ux/tests/shell-recording-routes.test.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-spaces",
       "description": "Owner-created thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
