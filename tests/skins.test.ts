@@ -107,6 +107,11 @@ describe('Nostr wire primitives', () => {
 })
 
 describe('My skins folders', () => {
+  it('instructs agents to fork built-in and downloaded skins and preserves script consent', async () => {
+    const { WIZARD_RUN_INSTRUCTIONS: text } = await import('../server/service.mjs')
+    for (const part of ['Skins/<name>/', 'Skins/active', 'no forked_from', 'forked_from set', '<current skin> custom', 'first create a new skin folder', 'base: their current palette', 'after EVERY edit', 'Agents cannot approve scripts']) expect(text).toContain(part)
+    expect(text).not.toContain('edit only their My skin')
+  })
   it('migrates existing My skin without changing CSS or scripts, switches and clears the active layer', () => {
     const { skins, root } = local(), path = join(root, 'Skins', 'My skin')
     mkdirSync(path, { recursive: true }); writeFileSync(join(path, 'skin.css'), CSS); writeFileSync(join(path, 'skin.js'), 'export const x = 1')
@@ -301,6 +306,70 @@ async function api(net: any, extra: any = {}) {
   return { ...localBox, origin, call }
 }
 describe('HTTP routes', () => {
+  it('persists recipes, patches display metadata without renaming, removes and restores complete folders', async () => {
+    const { call, root, origin } = await api(await network())
+    const made = await (await call('', 'POST', { name: 'Quiet', base: 'obsidian-light', tweaks: { 'wizard/app-borders': false }, activate: true, css: 'a{}' })).json()
+    expect(made.id).toBe('Quiet')
+    const listing = await (await call('')).json()
+    expect(listing.active).toBe('Quiet')
+    expect(listing.skins.find((s: any) => s.id === 'Quiet')).toMatchObject({ base: 'obsidian-light', tweaks: { 'wizard/app-borders': false }, has_recipe: true })
+    writeFileSync(join(root, 'Skins', made.id, 'skin.js'), 'export default () => {}')
+    const patched = await (await call('/Quiet', 'PATCH', { name: 'Morning', base: 'grove', tweaks: { 'wizard/app-borders': true } })).json()
+    expect(patched.skins.find((s: any) => s.id === 'Quiet')).toMatchObject({ id: 'Quiet', name: 'Morning', base: 'grove', tweaks: { 'wizard/app-borders': true } })
+    expect(JSON.parse(readFileSync(join(root, 'Skins', 'Quiet', 'skin.json'), 'utf8')).name).toBe('Morning')
+    const removed = await (await call('/Quiet', 'DELETE', {})).json()
+    expect(removed.list.active).toBe(null)
+    expect(removed.list.skins.some((s: any) => s.id === 'Quiet')).toBe(false)
+    expect(await (await fetch(origin + '/wizard/v1/my-skin')).text()).toBe('')
+    const restored = await (await call('/restore', 'POST', { trash: removed.trash })).json()
+    expect(restored.list.active).toBe(null)
+    expect(restored.list.skins.find((s: any) => s.id === 'Quiet')).toMatchObject({ name: 'Morning', has_script: true })
+    expect(readFileSync(join(root, 'Skins', 'Quiet', 'skin.css'), 'utf8')).toBe('a{}')
+    expect((await call('/restore', 'POST', { trash: removed.trash })).status).toBe(404)
+    const again = await (await call('/Quiet', 'DELETE', {})).json()
+    await call('', 'POST', { name: 'Quiet' })
+    expect((await call('/restore', 'POST', { trash: again.trash })).status).toBe(409)
+    for (const values of [{ base: '../x' }, { base: 2 }, { tweaks: [] }, { tweaks: null }, { tweaks: { bad: true } }, { tweaks: { 'wizard/a': 'false' } }, { tweaks: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`wizard/a${i}`, true])) }]) {
+      expect((await call('', 'POST', { name: 'Invalid', ...values })).status).toBe(400)
+      expect((await call('/Quiet', 'PATCH', values)).status).toBe(400)
+    }
+    expect((await call('/Quiet', 'PATCH', { name: '' })).status).toBe(400)
+    expect((await call('/restore', 'POST', { trash: '../x' })).status).toBe(400)
+    expect((await call('', 'POST', { name: 'Bad', activate: 'yes' })).status).toBe(400)
+    expect((await call('/Quiet', 'PATCH', { base: 'grove' }, { Origin: 'https://evil.example' })).status).toBe(403)
+    expect((await call('/Quiet', 'DELETE', {}, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403)
+    expect((await call('/restore', 'POST', { trash: again.trash }, { Origin: 'https://evil.example' })).status).toBe(403)
+    for (const id of ['store', 'restore']) {
+      await call('', 'POST', { name: id })
+      expect((await call('/' + id, 'PATCH', { base: 'grove' })).status).toBe(200)
+      expect((await call('/' + id, 'DELETE', {})).status).toBe(200)
+    }
+  })
+  it('idempotent preview uploads and independent tweak edits survive two clients', async () => {
+    const { call } = await api(await network())
+    const input = { name: 'Imported', base: 'grove', tweaks: { 'wizard/a': true }, migration_key: 'skin-stable-preview-id', activate: true }
+    const results = await Promise.all([call('', 'POST', input), call('', 'POST', input)])
+    expect(await results[0].json()).toEqual(await results[1].json())
+    await Promise.all([call('/Imported', 'PATCH', { tweaks: { 'wizard/b': false } }), call('/Imported', 'PATCH', { tweaks: { 'wizard/c': true } })])
+    const list = await (await call('')).json()
+    expect(list.skins.filter((s: any) => s.name === 'Imported')).toHaveLength(1)
+    expect(list.skins.find((s: any) => s.id === 'Imported').tweaks).toEqual({ 'wizard/a': true, 'wizard/b': false, 'wizard/c': true })
+    expect((await call('', 'POST', { ...input, migration_key: '../bad' })).status).toBe(400)
+    const max = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`wizard/a${i}`, true]))
+    await call('', 'POST', { name: 'Max', tweaks: max })
+    expect((await call('/Max', 'PATCH', { tweaks: { 'wizard/extra': false } })).status).toBe(400)
+  })
+  it('prunes removed folders after seven days, including an active legacy folder', () => {
+    const { root, stateDir } = local()
+    let time = 100
+    const skins = createSkins({ root, stateDir, now: () => time })!
+    skins.create({ name: 'My skin', activate: true })
+    const removed = skins.remove('My skin')
+    expect(skins.list().active).toBe(null)
+    time += 7 * 86400 + 1
+    skins.list()
+    expect(() => skins.restore({ trash: removed.trash })).toThrow('trash_not_found')
+  })
   it('exercises every API route, script activation and verified blob response', async () => {
     const net = await network(), { call, origin, root } = await api(net), event = listing(net.blossom)
     expect((await call('')).status).toBe(200)

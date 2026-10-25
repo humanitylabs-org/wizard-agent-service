@@ -10,6 +10,17 @@ export class SkinsError extends Error {
 }
 const fail = (code, status = 400) => { throw new SkinsError(status, code) }
 const HEX = /^[a-f0-9]{64}$/
+const BASE = /^[a-z0-9-]{1,32}$/
+const TWEAK = /^[a-z0-9-]+\/[a-z0-9-]+$/
+function recipe(input) {
+  const out = {}
+  if (input.base !== undefined) { if (typeof input.base !== 'string' || !BASE.test(input.base)) fail('invalid_base'); out.base = input.base }
+  if (input.tweaks !== undefined) {
+    if (!input.tweaks || typeof input.tweaks !== 'object' || Array.isArray(input.tweaks) || Object.keys(input.tweaks).length > 64 || Object.entries(input.tweaks).some(([id, on]) => !TWEAK.test(id) || typeof on !== 'boolean')) fail('invalid_tweaks')
+    out.tweaks = { ...input.tweaks }
+  }
+  return out
+}
 const SLUG = /^[a-z0-9-]{1,48}$/
 const ADDRESS = /^30117:([a-f0-9]{64}):([a-z0-9-]{1,48})$/
 const CAPS = { 'skin.css': ['text/css', MY_SKIN_MAX_BYTES], 'preview.webp': ['image/webp', 512 * 1024], 'composition.json': ['application/json', 8 * 1024] }
@@ -98,6 +109,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
   const filesRoot = resolve(root), skinsRoot = join(filesRoot, 'Skins'), state = resolve(stateDir)
   const net = { allowPrivate: false, ...transport }
   const query = transport.relayRequest || relayRequest, broadcast = transport.relayPublish || relayPublish
+  const trashRoot = join(state, 'trash')
   const cacheRoot = join(state, 'blobs'), packsRoot = join(state, 'packs'), publishedRoot = join(state, 'published')
   let cached = null, pending = null
   const busy = new Set()
@@ -107,7 +119,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     try { return await action() } finally { busy.delete(id) }
   }
   function storage() {
-    for (const dir of [state, cacheRoot, packsRoot, publishedRoot]) { mkdirSync(dir, { recursive: true, mode: 0o700 }); if (!lstatSync(dir).isDirectory()) fail('skins_state_unavailable', 503) }
+    for (const dir of [state, cacheRoot, packsRoot, publishedRoot, trashRoot]) { mkdirSync(dir, { recursive: true, mode: 0o700 }); if (!lstatSync(dir).isDirectory()) fail('skins_state_unavailable', 503) }
   }
   function folders() {
     if (!lstatSync(filesRoot).isDirectory()) fail('skins_unavailable', 503)
@@ -133,12 +145,13 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
   }
   function metadata(id) { return { name: id, ...readJson(join(folder(id), 'skin.json')) } }
   function list() {
+    pruneTrash()
     const selected = active()
     const skins = readdirSync(skinsRoot, { withFileTypes: true }).filter(d => d.isDirectory() && validSkinId(d.name)).map(d => {
       const meta = metadata(d.name), path = folder(d.name)
       let css = Buffer.alloc(0), bytes = 0
       try { bytes = lstatSync(join(path, 'skin.css')).size; css = boundedRead(join(path, 'skin.css'), MY_SKIN_MAX_BYTES) } catch {}
-      return { id: d.name, name: meta.name, summary: meta.summary || '', base: meta.base || 'nebula', bytes, empty: mySkinEmpty(sanitizeMySkin(css)),
+      return { id: d.name, name: meta.name, summary: meta.summary || '', base: meta.base || 'nebula', tweaks: meta.tweaks || {}, has_recipe: Object.hasOwn(meta, 'base') || Object.hasOwn(meta, 'tweaks'), bytes, empty: mySkinEmpty(sanitizeMySkin(css)),
         has_script: Boolean(lstatSafe(join(path, 'skin.js'))?.isFile()), forked_from: meta.forked_from || null, published: meta.published || null }
     })
     return { active: selected, skins }
@@ -149,11 +162,18 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     atomicWrite(join(skinsRoot, 'active'), id === null ? '' : id + '\n', 0o664)
     return list()
   }
-  function create({ name, css = '', meta = {}, extra = {} }) {
+  function create({ name, css = '', base = undefined, tweaks = undefined, migration_key = undefined, activate = false, meta = {}, extra = {} }) {
+    const values = recipe({ base, tweaks })
+    if (typeof activate !== 'boolean') fail('invalid_activate')
     if (!validSkinId(name)) fail('invalid_skin_name')
     if (typeof css !== 'string' || css.includes('\0')) fail('invalid_css')
     if (Buffer.byteLength(css) > MY_SKIN_MAX_BYTES) fail('skin_too_large', 413)
+    if (migration_key !== undefined && (typeof migration_key !== 'string' || !/^[a-z0-9-]{1,80}$/.test(migration_key))) fail('invalid_migration_key')
     folders()
+    if (migration_key) {
+      const prior = list().skins.find(s => metadata(s.id).migration_key === migration_key)
+      if (prior) { if (activate) setActive(prior.id); return { id: prior.id } }
+    }
     let id = name, path
     for (let count = 1; count < 10000; count++) {
       const suffix = count === 1 ? '' : ` ${count}`
@@ -165,10 +185,48 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     if (!path) fail('too_many_skins', 409)
     try {
       atomicWrite(join(path, 'skin.css'), css, 0o664)
-      atomicWrite(join(path, 'skin.json'), JSON.stringify({ name, base: 'nebula', ...meta }) + '\n', 0o664)
+      atomicWrite(join(path, 'skin.json'), JSON.stringify({ name, base: 'nebula', ...meta, ...values, ...(migration_key ? { migration_key } : {}) }) + '\n', 0o664)
       for (const [file, body] of Object.entries(extra)) { if (file !== 'skin.css' && CAPS[file]) atomicWrite(join(path, file), body, 0o664) }
     } catch (e) { rmSync(path, { recursive: true, force: true }); throw e }
+    if (activate) setActive(id)
     return { id }
+  }
+  function patch(id, input) {
+    const values = recipe(input), path = folder(id), meta = metadata(id)
+    if (input.name !== undefined) { if (!shortText(input.name, 64, true)) fail('invalid_skin_name'); values.name = input.name }
+    if (values.tweaks) values.tweaks = recipe({ tweaks: { ...(meta.tweaks || {}), ...values.tweaks } }).tweaks
+    atomicWrite(join(path, 'skin.json'), JSON.stringify({ ...meta, ...values }) + '\n', 0o664)
+    return list()
+  }
+  function pruneTrash() {
+    storage()
+    for (const entry of readdirSync(trashRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^[a-f0-9]{32}$/.test(entry.name)) continue
+      const path = join(trashRoot, entry.name), info = readJson(join(path, 'trash.json'))
+      if (typeof info.removed_at === 'number' && now() - info.removed_at > 7 * 86400) rmSync(path, { recursive: true, force: true })
+    }
+  }
+  function remove(id) {
+    if (busy.has(id)) fail('skin_busy', 409)
+    const path = folder(id), selected = active()
+    pruneTrash()
+    const trash = randomBytes(16).toString('hex'), target = join(trashRoot, trash)
+    mkdirSync(target, { mode: 0o700 })
+    atomicWrite(join(target, 'trash.json'), JSON.stringify({ id, removed_at: now() }))
+    // Write the empty pointer before moving: legacy My skin must not migrate back.
+    if (selected === id) setActive(null)
+    renameSync(path, join(target, 'skin'))
+    return { trash, list: list() }
+  }
+  function restore({ trash }) {
+    if (typeof trash !== 'string' || !/^[a-f0-9]{32}$/.test(trash)) fail('invalid_trash')
+    pruneTrash(); folders()
+    const target = join(trashRoot, trash), info = readJson(join(target, 'trash.json'))
+    if (!lstatSafe(target)?.isDirectory() || !validSkinId(info.id) || info.id === 'active' || !lstatSafe(join(target, 'skin'))?.isDirectory()) fail('trash_not_found', 404)
+    if (lstatSafe(join(skinsRoot, info.id))) fail('skin_exists', 409)
+    renameSync(join(target, 'skin'), join(skinsRoot, info.id))
+    rmSync(target, { recursive: true, force: true })
+    return { id: info.id, list: list() }
   }
   function uploadKey() {
     storage()
@@ -336,7 +394,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     cached = null
     return { event_id: event.id, a: item.a, relays: results }
   }
-  return { list, setActive, create, store, blob, add, report,
+  return { list, setActive, create, patch, remove, restore, store, blob, add, report,
     pack: (id, input) => exclusive(id, () => pack(id, input)),
     publish: (id, event) => exclusive(id, () => publish(id, event)), migrate }
 }
