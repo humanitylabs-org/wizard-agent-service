@@ -1293,7 +1293,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|unmigrate-private-provider|deliver|place|fetch|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|unmigrate-private-provider|private-migration-status|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1337,11 +1337,19 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
+                with lifecycle_lock(driver if action == 'unmigrate-private-provider' else chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
                     agent = agents.read(agent_id)
                     if action in {'apply', 'start'} and agents.providers.is_private(agent) and chosen is not restricted_driver:
                         raise RuntimeFailure('private_migration_generation_changed', 409)
-                    if action == 'unmigrate-private-provider':
+                    if action == 'private-migration-status':
+                        if not agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_not_sealed', 409)
+                        receipt = json.loads((agents.root / agent_id / 'runtime' / 'key-scrub.json').read_text())
+                        cid = container_for('agent-' + agent_id, RESTRICTED_SERVICE)
+                        code = "import sys,os,json;from pathlib import Path;needle=sys.stdin.buffer.read();assert needle;hits=0;count=0\nfor d,dirs,names in os.walk('/opt/data',followlinks=False):\n for n in names:\n  p=Path(d)/n\n  if p.is_symlink() and not p.is_file():continue\n  if not p.is_file():continue\n  count+=1;over=b''\n  with p.open('rb') as f:\n   while chunk:=f.read(1048576):\n    chunk=over+chunk;hits+=int(needle in chunk or b'TINFOIL_API_KEY' in chunk);over=chunk[-max(len(needle),64):]\nprint(json.dumps({'files_scanned':count,'credential_matches':hits}))"
+                        scan = json.loads(docker(['exec', '-i', cid, '/opt/hermes/.venv/bin/python', '-c', code], input_text=agents.tinfoil_key(), timeout=180).stdout)
+                        result = {'sealed': True, 'retirement_status': receipt.get('status'), 'retired_files': receipt.get('count'), **scan}
+                    elif action == 'unmigrate-private-provider':
                         result = unmigrate_private_provider(agents, agent, payload, driver, restricted_driver)
                     elif action == 'rollback-private-migration':
                         if agents.providers.is_private(agent):

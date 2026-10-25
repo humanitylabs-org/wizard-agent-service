@@ -53,4 +53,21 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):self.call('commit')
         self.assertTrue((self.runtime/'private-restore.json').exists());self.call('commit')
         self.assertFalse((self.runtime/'private-restore.json').exists())
+    def test_status_rpc_exposes_only_counts_and_stdin_source(self):
+        from email.message import Message
+        import io
+        self.agent['schema']=1
+        (self.home.parent/'agent.json').write_text(json.dumps(self.agent))
+        (self.runtime/'key-scrub.json').write_text(json.dumps({'status':'completed','count':3,'paths':['synthetic']}))
+        handler=object.__new__(ar.make_handler('fixture-auth',self.agents,self.legacy,restricted_driver=self.sealed))
+        handler.headers=Message();handler.headers['Authorization']='Bearer fixture-auth'
+        handler.rfile=io.BytesIO();handler.path='/agents/probe/private-migration-status'
+        replies=[];handler._json=lambda c,b:replies.append((c,b))
+        def mocked(args,**kwargs):
+            self.assertEqual(args[:2],['exec','-i'])
+            self.assertNotIn('synthetic-host-only-12345',' '.join(args))
+            self.assertEqual(kwargs['input_text'],'synthetic-host-only-12345')
+            return SimpleNamespace(stdout=json.dumps({'files_scanned':9,'credential_matches':0}))
+        with patch.object(ar,'container_for',return_value='synthetic-main'),patch.object(ar,'docker',side_effect=mocked):handler.do_POST()
+        self.assertEqual(replies,[(200,{'sealed':True,'retirement_status':'completed','retired_files':3,'files_scanned':9,'credential_matches':0})])
 if __name__=='__main__':unittest.main()
