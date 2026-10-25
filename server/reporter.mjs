@@ -27,7 +27,12 @@ export function lintReport(text, { kind = 'status' } = {}) {
   if (kind === 'status') {
     if (body.split(/\s+/).filter(Boolean).length > 120) reasons.push('keep the body within 120 words')
     const allowed = ['What happened:', 'What you need to do:', 'Still open:']
-    for (const match of body.matchAll(/\*\*([^*\n]+:)\*\*/g)) if (!allowed.includes(match[1])) reasons.push(`label not allowed: ${match[1]}`)
+    const labels = []
+    for (const match of lines.slice(1, -1).join('\n').matchAll(/\*\*([^*\n]+)\*\*/g)) {
+      labels.push(match[1])
+      if (!allowed.includes(match[1])) reasons.push(`label not allowed: ${match[1]}`)
+    }
+    if (new Set(labels).size !== labels.length) reasons.push('use each report label at most once')
     if (/^\s*#{1,6}\s/m.test(body)) reasons.push('use the report labels, not headings')
     const open = body.split('**Still open:**')[1]?.split(/\n\*\*(?:What happened|What you need to do):\*\*/)[0] || ''
     if ((open.match(/^\s*(?:[-*•]|\d+[.)])\s/gm) || []).length > 2) reasons.push('Still open has at most two bullets')

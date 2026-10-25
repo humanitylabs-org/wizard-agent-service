@@ -14,7 +14,7 @@ describe('Reporter shared plain-words contract', () => {
     expect(lintReport(valid)).toEqual({ ok:true, reasons:[] })
     expect(lintReport('[SILENT]')).toEqual({ ok:true, reasons:[] })
   })
-  it.each(['Not bold.', '**No sentence**', '**What I did:** Changed it.', '**Result:** all good.'])('rejects invalid opening %s', opening => {
+  it.each(['Not bold.', '**No sentence**', '**First sentence. Second sentence.**', '**What I did:** Changed it.', '**Result:** all good.'])('rejects invalid opening %s', opening => {
     expect(lintReport(`${opening}\n${status}`).ok).toBe(false)
   })
   it.each(['lane','gate','waive','receipt','cutover','soak','parity','unblock','PR #123','issue #12','feat/reporter','abcdef1234567','v0.3.44','0.3.44'])('rejects internal jargon or identifiers: %s', jargon => {
@@ -23,6 +23,8 @@ describe('Reporter shared plain-words contract', () => {
   })
   it('limits status labels, word count, and Still open bullets', () => {
     expect(lintReport(`**The check finished.**\n**Does it work:** Yes.\n${status}`).ok).toBe(false)
+    expect(lintReport(`**The check finished.**\n**Extra heading**\n${status}`).ok).toBe(false)
+    expect(lintReport(`**The check finished.**\n**Still open:**\n- One\n**Still open:**\n- Two\n- Three\n${status}`).ok).toBe(false)
     expect(lintReport(`**The check finished.**\n${'word '.repeat(121)}\n${status}`).ok).toBe(false)
     expect(lintReport(`**The check finished.**\n**Still open:**\n- One\n- Two\n- Three\n${status}`).ok).toBe(false)
     expect(lintReport(`**The check finished.**\n**Still open:**\n- One\n- Two\n${status}`).ok).toBe(true)

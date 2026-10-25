@@ -1,5 +1,7 @@
 # Supervisor + Reporter release candidate
 
+## Reuse:
+
 REUSE: `DurableRunQueue`, the scheduler's authenticated delivery/readback callbacks, existing main loopback token, per-agent gateway credentials and restricted Unix-socket admission, shared finish/status instruction delivery, and `parseStatus`.
 EXTEND: Scheduler job/occurrence records and completion observation; managed harness assets and restricted stopped-home synchronization; four-kind agent acceptance fixtures. Existing live code is preserved.
 NEW: `server/supervisor.mjs` is the service-owned ledger/outbox, `server/reporter.mjs` the reusable pure report checker, and `wizard-supervisor-tools` a supported Hermes plugin. These are back-end capabilities, not a second UI component; no front end is introduced.

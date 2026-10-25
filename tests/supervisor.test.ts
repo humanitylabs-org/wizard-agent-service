@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { Supervisor, SUPERVISOR_PRIVATE_REFUSAL } from '../server/supervisor.mjs'
 import { installSupervisorAssets } from '../server/supervisor-assets.mjs'
@@ -109,6 +111,20 @@ describe('Supervisor durable feedback workflow', () => {
     ambiguous = false; s = new Supervisor(opts); services.push(s); await s.tick(); await s.tick()
     expect(keys).toHaveLength(2); expect(new Set(keys).size).toBe(1)
     expect(s.rows('reviews')).toHaveLength(1)
+  })
+  it('explicit host installer appends reporter to agent cron jobs without losing original skills or changing script-only tasks', () => {
+    const home = root(); mkdirSync(join(home,'cron'))
+    const jobs = {jobs:[{id:'active',enabled:true,skill:'cold-read-reports',skills:['existing'],prompt:'Read'}, {id:'system',no_agent:true,script:'system.sh'}, {id:'paused',enabled:false,prompt:'Wait'}]}
+    const path=join(home,'cron/jobs.json'), raw=JSON.stringify(jobs)
+    writeFileSync(path,raw)
+    const args=['scripts/install-supervisor-assets.mjs','--hermes-home',home,'--attach-cron-reporter']
+    const first=JSON.parse(execFileSync(process.execPath,args,{encoding:'utf8'}))
+    const second=JSON.parse(execFileSync(process.execPath,args,{encoding:'utf8'}))
+    expect(first.cronAttached).toBe(1); expect(second.cronAttached).toBe(0)
+    const updated=JSON.parse(readFileSync(path,'utf8')).jobs
+    expect(updated[0].skills).toEqual(['existing','cold-read-reports','reporter'])
+    expect(updated[1]).toEqual(jobs.jobs[1]); expect(updated[2]).toEqual(jobs.jobs[2])
+    expect(readFileSync(path+'.before-reporter','utf8')).toBe(raw)
   })
   it('installs the same six context-injected tools and both skills into every declared home', () => {
     const r = root()
