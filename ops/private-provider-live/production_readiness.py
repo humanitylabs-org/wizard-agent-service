@@ -23,7 +23,7 @@ def check(plan,rig,live,tooling):
     try:
         rt=api(plan['home'],live['wam_sources']['selected']['api']['resolved']);installed=urns(rt)
         if URN in installed or not blank_config(user_config(rt)):blockers.append('private provider app or user-config already belongs to another attempt')
-        if OLD in installed:rt.list_backups(OLD) # API capability and auth; no backup created
+        if OLD in installed:rt.req('GET','/backups/'+OLD+'?page=1&pageSize=1000') # Read-only API capability, compatible with the installed pre-rollout CLI.
         owner=Owner(plan['home'],plan['service_origin'],plan['owner_proof_file'],Path(plan['home']), '0'*32)
         legacy=owner.require('/wizard/v1/agents/private')['agent']
         if legacy.get('privacy')!='private' or legacy.get('model',{}).get('provider')!='tinfoil' or legacy.get('runtime',{}).get('isolation')=='restricted':blockers.append('Private is not the expected unmigrated legacy confidential route')
