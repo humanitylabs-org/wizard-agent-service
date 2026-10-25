@@ -583,7 +583,7 @@ function modelAllowed(agent, value) {
  * state.db, the run queue or the main memory. ctx adds: { isAllowedProxyRequest, sendJson, secretGuard,
  * projectStatusMarkers, projectWizardMessageHistory, fetchImpl, mainSecrets }
  */
-export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead }) {
+export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchParams, request, response, body, bodyRead, rawRunRead = false }) {
   const { registry, sendJson } = ctx
   if (isPrivateAgent(registry,agent.id) && method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('q') && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   const deleting = method === 'DELETE' && /^\/api\/sessions\/[A-Za-z0-9._:-]{1,200}$/u.test(upstreamPath) && searchParams.size === 0
@@ -794,7 +794,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
-    if (messageHistory || /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) result = ctx.projectStatusMarkers(result)
+    // The scheduler's own internal read of a notification run keeps [SILENT]-ending output intact, as on main.
+    if (messageHistory || (!rawRunRead && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath))) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
     if (messageHistory && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
     // A finished run's output carries the same MEDIA lines the history will; project it identically.

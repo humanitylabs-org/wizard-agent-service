@@ -41,15 +41,17 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
+import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from './chat-photo-authority.mjs'
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
+import { createSkins, SkinsError } from './skins.mjs'
 import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
@@ -360,6 +362,9 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
            session_turn_leases.conversation_id IS NOT NULL
            OR (
              COALESCE(sessions.last_activity_description, '') <> ''
+             -- A background helper heartbeats its parent's activity while the parent's own
+             -- turn is over. That parent is waiting, not working: it must not hold a slot.
+             AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
              AND COALESCE(sessions.last_activity_at, 0) >= ?
            )
          )
@@ -612,7 +617,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -1460,18 +1465,36 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   // both, and the merged copy lands after the owner's newest question, reading as extra replies
   // to it. Drop that copy when it is the earlier message plus only text other rows on this page
   // already paint; anything else stays, so no text can disappear.
+  // Hermes stores one message either as a string (its text-only projection turns each image part
+  // into "[screenshot]") or as the original multipart list; a compaction replay can use the other
+  // form. Compare their text, whitespace-insensitive, so both forms count as the same message.
+  // Recalled <memory-context> blocks are hidden from the owner and may be present in only one form.
+  const replayText = (content) => {
+    if (typeof content === 'string') return visibleMemoryText(content)
+    if (!Array.isArray(content)) return null
+    const parts = content.slice(0, 64).map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      if (['image', 'image_url', 'input_image'].includes(part.type)) return '[screenshot]'
+      return typeof part.text === 'string' ? part.text : ''
+    })
+    return visibleMemoryText(parts.join('\n'))
+  }
+  const squash = (text) => String(text ?? '').replace(/\s+/g, '')
   const replayKey = (item) => {
     const role = item?.role ?? item?.author
     const at = item?.timestamp
-    return (role === 'user' || role === 'assistant') && typeof item?.content === 'string' && typeof at === 'number' && Number.isFinite(at)
-      ? `${role}\u0000${at}` : ''
+    return (role === 'user' || role === 'assistant') && typeof replayText(item?.content) === 'string' && typeof at === 'number' && Number.isFinite(at)
+      ? `${String(item?.session_id ?? '')}\u0000${role}\u0000${at}` : ''
   }
-  const mergedReplay = (earlier, later, pageTexts) => {
+  const mergedReplay = (earlierText, laterText, pageTexts) => {
+    const earlier = squash(earlierText)
+    const later = squash(laterText)
     if (later === earlier) return true
     if (!earlier || !later.startsWith(earlier)) return false
     let rest = later.slice(earlier.length)
-    for (const text of pageTexts) if (text && rest.includes(text)) rest = rest.split(text).join('')
-    return !rest.trim()
+    for (const text of pageTexts.map(squash)) if (text && rest.includes(text)) rest = rest.split(text).join('')
+    return !rest
   }
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
@@ -1487,14 +1510,15 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
         return key && firstByKey.get(key) !== index ? [index] : []
       }))
       const pageTexts = repeated.size
-        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [sourceOf(item, index).content]))]
+        ? [...new Set(value.flatMap((item, index) => repeated.has(index) || !replayKey(sourceOf(item, index)) ? [] : [replayText(sourceOf(item, index).content)]))]
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
-          if (mergedReplay(earlier.content, sourceItem.content, pageTexts.filter((text) => text !== earlier.content))) return []
+          const earlierText = replayText(earlier.content)
+          if (mergedReplay(earlierText, replayText(sourceItem.content), pageTexts.filter((text) => text !== earlierText))) return []
         }
         const role = sourceItem?.role ?? sourceItem?.author
         const content = historyContentStrings(sourceItem?.content ?? sourceItem?.text ?? sourceItem?.output).join('\n')
@@ -2022,6 +2046,12 @@ export function createCanonicalHelmPhotoResolver({ artifactDir, helmOrigin, lega
 // localhost app origins), and an Origin, when present, must be this host.
 // On the box-local listener a trusted local proxy may forward the browser-facing Host as X-Forwarded-Host (as
 // for /wizard/thread-dispositions); requests through Serve are judged on their own Host only.
+function skinOriginRefused(request) {
+  if (['cross-site', 'same-site'].includes(request.headers['sec-fetch-site'])) return true
+  if (!request.headers.origin) return false
+  try { return new URL(request.headers.origin).host !== (request.headers['x-forwarded-host'] || request.headers.host) } catch { return true }
+}
+
 function setupWriteRefusal(request, tailnetIngress) {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return 415
   const site = request.headers['sec-fetch-site']
@@ -2036,6 +2066,28 @@ function setupWriteRefusal(request, tailnetIngress) {
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+// The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
+// (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+export function scheduleNotifier({ bridge, appsJsonPath }) {
+  const pick = () => {
+    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+    let chosen = ''
+    try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
+    const running = providers.filter(app => app.status === 'running')
+    return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
+  }
+  return {
+    available: () => pick()?.status === 'running',
+    send: async ({ title, message }) => {
+      const app = pick()
+      if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      if (!result || result.isError) throw new Error('notify failed')
+      return { app: app.id }
+    },
+  }
+}
+
 // The shell's own https address as the App Manager records it in apps.json (view.url of the app that provides
 // `shell`, e.g. https://box.tailnet.ts.net:8796/wizard-os-home/). A fresh box has no settings.json yet, so without
 // this the shell's first GET /wizard/v1/setup through Tailscale Serve was refused (host_not_allowed) and first-run
@@ -2467,6 +2519,7 @@ function buildWizardServer(options, lifetime) {
         list: (agentId) => [...(onboarding?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
         call: async (name, args, agentId) => await spacesTools?.call(name, args, agentId) || onboarding?.call(name, args, agentId),
       },
+      agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
       appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
@@ -2498,6 +2551,7 @@ function buildWizardServer(options, lifetime) {
     : null)
   let agentSockets
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
@@ -3273,6 +3327,13 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
+  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
+  let heavyRowsAt = 0, heavyRowsCache = []
+  const heavyJobRows = () => {
+    if (!heavyWork?.queue?.rows) return []
+    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
+    return heavyRowsCache
+  }
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -3811,6 +3872,14 @@ function buildWizardServer(options, lifetime) {
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
+          if (!operator) {
+            // A thread whose own Thales job is still owed stays in Working, not Ready.
+            try {
+              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(heavyJobRows(), listedSessionIds))) {
+                const t = sessionTruth.get(id); if (t) t.heavyPending = true
+              }
+            } catch { /* heavy queue unreadable: no wait projection */ }
+          }
           result = filterSessionList(
             result,
             operator,
@@ -3895,6 +3964,7 @@ function buildWizardServer(options, lifetime) {
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
+      for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
       const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
@@ -3967,9 +4037,9 @@ function buildWizardServer(options, lifetime) {
     }
   })()
 
-  const safeQueueValue = (value, record) => {
+  const safeQueueValue = (value, record, raw = false) => {
     let result = Buffer.from(JSON.stringify(value))
-    result = projectStatusMarkers(result)
+    if (!raw) result = projectStatusMarkers(result)
     result = projectWizardFileMarkers(result)
     const forbidden = [hermesKey, inboxToken, ...inboxTrustedRoots, ...(record.trustedPaths ?? [])].filter((item) => typeof item === 'string' && item)
     if (forbidden.some((item) => result.includes(Buffer.from(item)))) {
@@ -3978,12 +4048,15 @@ function buildWizardServer(options, lifetime) {
     return JSON.parse(result.toString('utf8'))
   }
 
-  const safeQueuedRunPayload = (record) => {
+  const safeQueuedRunPayload = (record, raw = false) => {
     const value = runQueue.publicPayload(record)
     if (value.status === 'completed' && record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output))
-    return safeQueueValue(value, record)
+    return safeQueueValue(value, record, raw)
   }
-  const sendQueuedRun = (response, status, record, headers = {}) => sendJson(response, status, safeQueuedRunPayload(record), headers)
+  const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
+  // The scheduler's own read of a `deliver: notification` run: its answer ends in [SILENT] (quiet thread), so the
+  // display scrub would erase the notification text. Internal token only; owners always get the scrubbed view.
+  const scheduleRawRead = (request) => request.headers['x-wizard-schedule-raw'] === '1' && internalCall(request)
 
   const streamQueuedRunEvents = async (initialRecord, operator, request, response) => {
     const queuedPayload = safeQueuedRunPayload(initialRecord)
@@ -4211,10 +4284,10 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '') => {
+  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
@@ -4272,12 +4345,14 @@ function buildWizardServer(options, lifetime) {
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     lookup: async (occurrence, receipt) => {
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
       if (!selfOrigin) return null
       const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
-        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
+        headers: { 'X-Wizard-Internal-Token': internalToken, ...(occurrence.deliver === 'notification' ? { 'X-Wizard-Schedule-Raw': '1' } : {}) }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
       })
       if (!result.ok) { await result.body?.cancel(); return null }
       return result.json()
@@ -4298,6 +4373,13 @@ function buildWizardServer(options, lifetime) {
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+      }
+      // A notification job's own thread is history, not a chat: hidden from Chats. If the slot was down and this
+      // occurrence falls back to the thread, the thread is shown again so the alert is still seen.
+      if ((occurrence.deliver === 'notification' || occurrence.fallback) && occurrence.thread.startsWith('wizard_schedule_')) {
+        const hidden = occurrence.deliver === 'notification'
+        const marked = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, { hidden }, '', 'PATCH')
+        if (!marked.ok) throw Object.assign(new Error('schedule thread visibility failed'), { status: marked.status })
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
@@ -4326,6 +4408,13 @@ function buildWizardServer(options, lifetime) {
   // My skin (my-skin.mjs): the owner's own stylesheet in their Files root, outside every image.
   const mySkin = options.mySkin === false ? null : createMySkin({ root: options.userFilesRoot || options.mediaRoot || '', path: options.mySkinPath || '' })
   if (mySkin && options.mySkinEnsure !== false) mySkin.ensure()
+  const skins = options.mySkin === false ? null : createSkins({
+    root: options.userFilesRoot || options.mediaRoot || '',
+    stateDir: options.skinsStateDir || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'skins') : join(bridgeOsHome || wizardOsHome(), 'skins')),
+    ...(options.skins || {}),
+  })
+  // Lazy migration keeps unavailable/symlinked Files roots from preventing service startup.
+  try { skins?.migrate() } catch { /* API reads report unavailable; the shell still renders */ }
   const ownerTimeZone = () => { try { return readSettings(settingsPath).settings?.clock?.timezone || '' } catch { return '' } }
   // A box whose state or staging folder is not writable (a sandboxed unit without the path in
   // ReadWritePaths) keeps running without resumable uploads; clients fall back to /wizard/files/upload.
@@ -4744,6 +4833,44 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
       }
+      if (url.pathname === '/wizard/v1/skins' || url.pathname.startsWith('/wizard/v1/skins/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (!skins) { sendJson(response, 503, { error: 'skins_unavailable' }); return }
+        try {
+          const route = url.pathname.slice('/wizard/v1/skins'.length)
+          const action = /^\/([^/]+)\/(pack|publish)$/.exec(route)
+          const blob = /^\/store\/blob\/([a-f0-9]{64})$/.exec(route)
+          const allowed = route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || action ? ['POST'] : []
+          if (!allowed.length) { sendJson(response, 404, { error: 'not_found' }); return }
+          if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
+          let input = {}
+          if (request.method !== 'GET') {
+            if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+            try { input = JSON.parse((await readBoundedBody(request, 768 * 1024)).toString('utf8')) } catch (e) { throw new SkinsError(e?.status === 413 ? 413 : 400, e?.status === 413 ? 'body_too_large' : 'invalid_request') }
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SkinsError(400, 'invalid_request')
+          }
+          let output
+          if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css })
+          else if (route === '/active') output = skins.setActive(input.id)
+          else if (route === '/store') output = await skins.store({ refresh: url.searchParams.get('refresh') === '1', authors: url.searchParams.get('authors') || '' })
+          else if (blob) {
+            const value = await skins.blob(blob[1])
+            response.writeHead(200, { 'Content-Type': value.mime, 'Content-Length': String(value.body.length), 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" })
+            response.end(value.body); return
+          }
+          else if (route === '/store/add') output = await skins.add(input.a)
+          else if (route === '/store/report') output = await skins.report(input)
+          else if (action) {
+            let id
+            try { id = decodeURIComponent(action[1]) } catch { throw new SkinsError(400, 'invalid_skin_id') }
+            output = action[2] === 'pack' ? await skins.pack(id, input) : await skins.publish(id, input.event)
+          }
+          sendJson(response, 200, output, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, error instanceof SkinsError ? error.status : 503, { error: error instanceof SkinsError ? error.code : 'skins_unavailable' }) }
+        return
+      }
       if (url.pathname === '/wizard/v1/my-skin/script') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!['GET', 'HEAD'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, HEAD' }); return }
@@ -4774,12 +4901,7 @@ function buildWizardServer(options, lifetime) {
         // Owner-only writes from this same origin: a cross-site page can't send text/css without a preflight
         // this service never answers, and Sec-Fetch-Site/Origin are checked as well.
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site' || request.headers['sec-fetch-site'] === 'same-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        if (request.headers.origin) {
-          let host
-          try { host = new URL(request.headers.origin).host } catch { host = '' }
-          if (host !== (request.headers['x-forwarded-host'] || request.headers.host)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (!mySkin) { sendJson(response, 503, { error: 'my_skin_unavailable' }); return }
         try {
           if (request.method === 'DELETE') mySkin.reset()
@@ -4875,6 +4997,24 @@ function buildWizardServer(options, lifetime) {
             scheduler.delete(job.id); sendJson(response, 200, { deleted: true, id: job.id, name: job.name })
           } else sendJson(response, 404, { error: 'not_found' })
         } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/agents/')) {
+        // The main agent's read-only cross-agent tools (Hermes plugin wizard-agents): the same six
+        // wizard_agents__* tools container agents get on /wizard/mcp, read as the main agent. Same loopback
+        // token and refusal rules as schedules; the registry's live seals decide every read.
+        if (!bridge || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'agent read denied' }); return }
+        const tool = `wizard_agents__${url.pathname.slice('/wizard/internal/agents/'.length)}`
+        if (!SHARED_AGENT_TOOLS.includes(tool)) { sendJson(response, 404, { error: 'not_found' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 8 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        const result = await bridge.callTool(tool, value && typeof value === 'object' && !Array.isArray(value) ? value : {}, GATEWAY_MAIN_AGENT)
+        sendJson(response, result?.isError ? 403 : 200, result)
         return
       }
       if (url.pathname.startsWith('/wizard/internal/heavy/')) {
@@ -5458,7 +5598,7 @@ function buildWizardServer(options, lifetime) {
             }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
-              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead, rawRunRead: scheduleRawRead(request),
             })
             return
           }
@@ -5482,7 +5622,7 @@ function buildWizardServer(options, lifetime) {
         }
         if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
           await runQueue.tick(true)
-          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId))
+          sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId), {}, scheduleRawRead(request))
           return
         }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop' && !queuedProxyRecord.upstreamRunId) {
@@ -5833,7 +5973,8 @@ function buildWizardServer(options, lifetime) {
           // the existing marker/media/shareability projection order.
           const historySource = result
           result = projectWizardFileMarkers(result, messageHistory)
-          if (messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) result = projectStatusMarkers(result)
+          const scheduleRaw = !messageHistory && scheduleRawRead(request)
+          if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
