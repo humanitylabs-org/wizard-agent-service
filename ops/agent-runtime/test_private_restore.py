@@ -70,4 +70,24 @@ class RestoreTests(unittest.TestCase):
             return SimpleNamespace(stdout=json.dumps({'files_scanned':9,'credential_matches':0}))
         with patch.object(ar,'container_for',return_value='synthetic-main'),patch.object(ar,'docker',side_effect=mocked):handler.do_POST()
         self.assertEqual(replies,[(200,{'sealed':True,'retirement_status':'completed','retired_files':3,'files_scanned':9,'credential_matches':0})])
+    def test_provider_reconcile_rpc_is_authenticated_count_only(self):
+        from email.message import Message
+        import io
+        handler=object.__new__(ar.make_handler('fixture-auth',self.agents,self.legacy,restricted_driver=self.sealed))
+        handler.path='/providers/reconcile';handler.headers=Message();handler.rfile=io.BytesIO(b'{}');handler.headers['Content-Length']='2'
+        replies=[];handler._json=lambda c,b:replies.append((c,b))
+        with patch.object(self.agents.providers,'reconcile_installed',return_value=[{'private_path':'must-not-escape'}]) as reconcile:
+            handler.do_POST();reconcile.assert_not_called();self.assertEqual(replies.pop(),(401,{'error':'unauthorized'}))
+            handler.headers['Authorization']='Bearer fixture-auth';handler.do_POST();self.assertEqual(replies.pop(),(503,{'ok':False,'failure_count':1}))
+        handler.rfile=io.BytesIO(b'{}')
+        with patch.object(self.agents.providers,'reconcile_installed',return_value=[]):handler.do_POST()
+        self.assertEqual(replies,[(200,{'ok':True,'failure_count':0})])
+    def test_provider_reconcile_rejects_nonempty_payload_before_reconcile(self):
+        from email.message import Message
+        import io
+        handler=object.__new__(ar.make_handler('fixture-auth',self.agents,self.legacy,restricted_driver=self.sealed))
+        handler.path='/providers/reconcile';handler.headers=Message();handler.headers['Authorization']='Bearer fixture-auth';handler.headers['Content-Length']='20';handler.rfile=io.BytesIO(b'bad body')
+        replies=[];handler._json=lambda c,b:replies.append((c,b))
+        with patch.object(self.agents.providers,'reconcile_installed') as reconcile:handler.do_POST();reconcile.assert_not_called()
+        self.assertEqual(replies,[(400,{'error':'invalid_payload'})])
 if __name__=='__main__':unittest.main()

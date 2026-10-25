@@ -1293,6 +1293,20 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
+            if self.path == '/providers/reconcile':
+                # Owner-runtime control plane: installers must not import Agents
+                # and traverse unrelated private records in their own process.
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                    if length not in {0, 2} or (length and self.rfile.read(length) != b'{}'):
+                        self._json(400, {'error': 'invalid_payload'})
+                        return
+                    failures = agents.providers.reconcile_installed()
+                    self._json(503 if failures else 200, {'ok': not failures, 'failure_count': len(failures)})
+                except Exception as error:
+                    sys.stderr.write(f'[agent-runtime] provider reconciliation failed: {type(error).__name__}\n')
+                    self._json(502, {'error': 'runtime_failed'})
+                return
             m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|unmigrate-private-provider|private-migration-status|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
