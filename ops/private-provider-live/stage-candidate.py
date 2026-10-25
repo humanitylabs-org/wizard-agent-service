@@ -2,7 +2,7 @@
 """Build a fresh tested candidate from the actual live Service base on Thales."""
 import argparse,hashlib,json,os,shutil,subprocess,sys,tarfile,time
 from pathlib import Path
-SERVICE='888ecee067cde661f069875dc5915a7abe341103'
+SERVICE='5e445fca7c87da825e8d669fbf35e3e6eeeb5acb'
 UX='f34c7a35a8d5f4adbca9eeb57cb83837b1664ba6'
 ROOT=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live/staging')
 

@@ -33,4 +33,25 @@ class ProbeAdapterTests(unittest.TestCase):
   self.assertEqual(requests[1][1]['session_id'],'wizard_server_created');self.assertTrue(written[0][1]['completed'])
  def test_provider_closure_is_not_counted_as_completion(self):
   code,requests,written=self.run_probe(closed=True);self.assertEqual(code,42);self.assertEqual(len(requests),1);self.assertEqual(written,[])
+class RegressionAdapterTests(unittest.TestCase):
+ def test_restricted_uid_config_is_read_through_exact_synthetic_container(self):
+  import ast,yaml
+  tree=ast.parse((ROOT/'legacy-extra.py').read_text())
+  branch=next(n for n in ast.walk(tree) if isinstance(n,ast.If) and ast.unparse(n.test)=="phase == 'regression'")
+  calls=[];saved={}
+  route='http://agent-pp-test-other-client:3301/v1'
+  # Deliberately use the normalized no-double-quote serialization.
+  config=yaml.safe_dump({'model':{'provider':'custom','base_url':route},'auxiliary':{'vision':{'provider':'custom','model':'deepseek-v4-1-flash','base_url':route}}})
+  def run(argv,timeout=240):
+   calls.append(argv)
+   if argv[:2]==['python3',str(ROOT/'probe-guest.py')]:return b''
+   if argv[:3]==['docker','exec','exact-synthetic-container']:
+    self.assertEqual(argv[3:],['/bin/cat','/opt/data/config.yaml']);return config.encode()
+   self.assertEqual(argv[:7],['docker','exec','-w','/opt/hermes','exact-synthetic-container','/opt/hermes/.venv/bin/python','-c']);return b'{"success":true}'
+  env={'R':ROOT,'yaml':yaml,'json':json,'req':lambda *a:(201,{'agent':{'id':'pp-test-other'}}),'running':lambda aid:None,'hermes':lambda aid:{'Id':'exact-synthetic-container','Config':{'User':'10000:10000'}},'run':run,'save':lambda name,data:saved.update({name:data})}
+  exec(compile(ast.Module(body=branch.body,type_ignores=[]),'<regression-adapter>','exec'),env)
+  self.assertTrue(saved['f-verified']['vision_helper_completed'])
+  self.assertTrue(any(c[3:]==['/bin/cat','/opt/data/config.yaml'] for c in calls))
+  self.assertTrue(all('--user' not in c for c in calls))
+
 if __name__=='__main__':unittest.main()

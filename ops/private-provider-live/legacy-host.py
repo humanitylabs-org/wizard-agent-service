@@ -14,7 +14,7 @@ from pathlib import Path
 r=Path('/home/rig/pp-launch-3');assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers'
 source=r/"""+repr('run-'+p.name)+""";source.write_text("""+repr(code)+""");source.chmod(0o600)
 p=subprocess.run(['python3',str(source)],input=sys.stdin.buffer.read(),capture_output=True)
-log=r/"""+repr(p.name+'.log')+""";log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
+log=r/"""+repr(p.name+'-'+('-'.join(sys.argv[2:]) or 'default')+'.log')+""";log.write_bytes(p.stdout+p.stderr);log.chmod(0o600)
 print(p.stdout.decode() if p.returncode==0 else 'FAILED; private guest log: '+str(log))
 print('RETURN_CODE='+str(p.returncode))
 """

@@ -1,6 +1,6 @@
 """Additional exact-target acceptance steps, disposable pp-rig only."""
 from pathlib import Path
-import os,sys,json,subprocess,urllib.request,urllib.error,time,hashlib
+import os,sys,json,subprocess,urllib.request,urllib.error,time,hashlib,yaml
 assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers' and os.geteuid()==1000
 R=Path('/home/rig/pp-launch-3');O=Path('/home/rig/.wizard-os');A=O/'agents'
 proof=(O/'agent-runtime/owner-proof').read_text().strip()
@@ -54,8 +54,14 @@ elif phase=='regression':
  aid='pp-test-other'
  c,b=req('/wizard/v1/agents',{'label':aid,'harness':'hermes','permissions':{'preset':'standard','read_standard_chats':False},'model':{'provider':'wizard-tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST');assert c==201 and b['agent']['id']==aid
  running(aid);run(['python3',str(R/'probe-guest.py'),aid],timeout=420)
- main=hermes(aid);config=(A/aid/'home/config.yaml').read_text();assert 'auxiliary:\n  vision:\n    provider: custom\n    model: "deepseek-v4-1-flash"' in config and config.count('base_url: "http://agent-'+aid+'-client:3301/v1"')==2
- assert 'TINFOIL_API_KEY' not in config
+ main=hermes(aid);config=run(['docker','exec',main['Id'],'/bin/cat','/opt/data/config.yaml']).decode();parsed=yaml.safe_load(config)
+ # Hermes may round-trip config.yaml after its first turn. Assert semantic
+ # routes, not quote style/indentation from the initial managed serialization.
+ model=parsed.get('model',{});vision=(parsed.get('auxiliary') or {}).get('vision') or {};url='http://agent-'+aid+'-client:3301/v1'
+ assert model.get('provider')=='custom' and model.get('base_url')==url,'primary route changed'
+ assert vision.get('provider')=='custom' and vision.get('model')=='deepseek-v4-1-flash' and vision.get('base_url')==url,'vision route changed'
+ assert 'TINFOIL_API_KEY' not in config,'plaintext credential placeholder returned'
+ save('f-preflight',{'other_agent_chat_completed':True,'primary_route':'same in-seal client','vision_route':'same in-seal client','vision_model':vision['model']})
  code="""import asyncio,json,os\nfrom pathlib import Path\nfrom PIL import Image\nfrom tools.vision_tools import vision_analyze_tool\np=Path('/opt/data/pp-red.png');Image.new('RGB',(64,64),(255,0,0)).save(p)\nr=json.loads(asyncio.run(vision_analyze_tool(str(p),'What is the dominant solid colour? Reply with the colour name only.')))\nassert r.get('success') is True and 'red' in str(r.get('analysis','')).lower(), 'vision result not verified'\nprint(json.dumps({'success':True,'colour':'red','route':'configured auxiliary.vision'}))\n"""
  result=json.loads(run(['docker','exec','-w','/opt/hermes',main['Id'],'/opt/hermes/.venv/bin/python','-c',code],timeout=240));assert result['success']
  save('f-verified',{'other_agent_chat_completed':True,'vision_helper_completed':True,'vision_model':'deepseek-v4-1-flash','vision_route':'same in-seal client','colour':'red'})

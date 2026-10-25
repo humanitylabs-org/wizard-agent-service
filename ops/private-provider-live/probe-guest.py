@@ -9,7 +9,7 @@ stage='session';c=0;b={}
 def fail(rc):
  error=b.get('error','')
  if isinstance(error,dict):error={k:v for k,v in error.items() if k in ['code','field']}
- doc={'stage':stage,'http':c,'exit':rc,'error':error,'state':b.get('status') or b.get('state')}
+ doc={'stage':stage,'http':c,'exit':rc,'error':error,'state':b.get('status') or b.get('state'),'queue_reason':b.get('queue_reason'),'queue_position':b.get('queue_position')}
  # Only synthetic route/error metadata; never request or model response bodies.
  text=json.dumps(doc)
  assert not re.search('TINFOIL_API_KEY|Bearer ',text)

@@ -6,7 +6,7 @@ L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live')
 s=importlib.util.spec_from_file_location('prep',L/'rig-prepare.py');assert s and s.loader
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
 key=sys.stdin.buffer.read();assert key and b'TINFOIL_API_KEY=' in key
-ATTEMPT=int(sys.argv[1]) if len(sys.argv)>1 else 1;assert 1<=ATTEMPT<=14
+ATTEMPT=int(sys.argv[1]) if len(sys.argv)>1 else 1;assert 15<=ATTEMPT<=18
 receipt={'lane':'pp-key-scrub','status':'running','checks':dict.fromkeys('abcdef','not_run'),'privacy_checks_passed':0,'root_cause':'Explicit migration retires plaintext home copies before seal publication. Pre-migration privacy proof exempts only the verified legacy home and exact services; migrated key-location has no exemptions. Final attempt starts from a reset covering generic sealed services by exact project and home mount.','tooling_base_commit':'87fd22d','repair_attempt':ATTEMPT}
 preparation=json.loads((L/'RIG-PREPARATION.json').read_text())
 for field in ['wam_image_id','wam_main_sha256','source']:receipt[field]=preparation[field]
