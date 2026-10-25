@@ -44,7 +44,8 @@ if phase=='verify-migrated':
  for n in clients[0]['NetworkSettings']['Networks']:assert json.loads(run(['docker','network','inspect',n]))[0]['Internal'] is True
  run(['python3',str(R/'probe-guest.py'),aid],timeout=420)
  # A completed EHBP inference requires the client attestation gate; retain route/topology evidence.
- save('d-verified',{'home_inode_retained':True,'uid':1000,'gid':1000,'history_readback':True,'completed_migrated_request':True,'internal_networks_only':True,'no_legacy_key':True,'client_image':clients[0]['Config']['Image']})
+ assert not Path('/sys/module/br_netfilter').exists() and not Path('/proc/sys/net/bridge/bridge-nf-call-iptables').exists(),'bridge-filter absence lost during migration'
+ save('d-verified',{'br_netfilter_absent':True,'bridge_filter_sysctl_absent':True,'home_inode_retained':True,'uid':1000,'gid':1000,'history_readback':True,'completed_migrated_request':True,'internal_networks_only':True,'no_legacy_key':True,'client_image':clients[0]['Config']['Image']})
 elif phase=='regression':
  aid='pp-test-other'
  c,b=req('/wizard/v1/agents',{'label':aid,'harness':'hermes','permissions':{'preset':'standard','read_standard_chats':False},'model':{'provider':'wizard-tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST');assert c==201 and b['agent']['id']==aid
@@ -56,7 +57,6 @@ elif phase=='regression':
  save('f-verified',{'other_agent_chat_completed':True,'vision_helper_completed':True,'vision_model':'deepseek-v4-1-flash','vision_route':'same in-seal client','colour':'red'})
 elif phase=='remove':
  sys.path.insert(0,'/opt/pp-rig/src/wam');from wam import cli,registry
- from local_projection import projection
  rt=cli.Config().runtipi();urn='wizard-tinfoil_private:wizardapps';rt.uninstall(urn);assert rt.wait_status(urn,{'missing'},timeout=180)=='missing'
  cli.write_registry(cli.Config(),rt)
  assert not any(a.get('id')=='wizard-tinfoil' for a in json.loads((O/'apps.json').read_text()).get('apps',[]))

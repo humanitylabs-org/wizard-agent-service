@@ -28,6 +28,9 @@ for name,target in [('service.tar','service'),('tinfoil-relay.tar','tinfoil')]:
   return tarfile.data_filter(member,path)
  with tarfile.open('/home/rig/pp-launch-2/'+name) as tf:tf.extractall(dst,filter=filt)
 ''')
+ overlay=json.loads((L/'SERVICE-ENGINE-FIX.json').read_text());payload=(L/overlay['archive']).read_bytes()
+ assert __import__('hashlib').sha256(payload).hexdigest()==overlay['sha256'],'service engine overlay digest mismatch'
+ r.python("from pathlib import Path;import os,sys,tarfile,io,hashlib;assert os.geteuid()==1000;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';data=sys.stdin.buffer.read();assert hashlib.sha256(data).hexdigest()=="+repr(overlay['sha256'])+";tf=tarfile.open(fileobj=io.BytesIO(data));allowed="+repr(set(overlay['files']))+";assert all((m.name.rstrip('/') in {'ops','ops/agent-runtime'} and m.isdir()) or (m.name in allowed and m.isfile()) for m in tf);tf.extractall('/home/rig/pp-launch-3/service',filter='data');print('service_engine_feature_commit='+"+repr(overlay['service_feature_commit'])+")",payload=payload)
  r.python("import subprocess;from pathlib import Path;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';subprocess.run(['systemctl','stop','pp-agent-runtime','pp-agent-service'],check=True)",root=True)
  try:print(r.run(['python3','/home/rig/pp-launch-3/guest.py','setup'],timeout=1800),flush=True)
  except Exception:

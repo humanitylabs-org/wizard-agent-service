@@ -157,8 +157,19 @@ elif step=='connect':
  key=(R/'legacy-key.env').read_text().split('=',1)[1].strip()
  q=urllib.request.Request('http://127.0.0.1:18804/api/connect',json.dumps({'apiKey':key}).encode(),{'Content-Type':'application/json','Origin':'http://127.0.0.1:18804','X-Wizard-Request':'1'},method='POST')
  with urllib.request.urlopen(q,timeout=180) as f:data=json.load(f)
- assert data.get('connected') is True or data.get('status') in ['connected','ready'],{k:v for k,v in data.items() if k in ['status','connected','error']}
- save('provider-connected',{'connected':True,'models':len(data.get('models',[]))})
+ assert data.get('credentialStored') is True,'provider credential was not stored'
+ # Model-list/attestation verification does not authenticate a key. Complete one
+ # short app SDK request, then require the product's verified readback.
+ cid=run(['docker','ps','-q','--filter','label=com.docker.compose.service=wizard-tinfoil']).decode().split();assert len(cid)==1,'provider container selection failed'
+ token=json.loads(run(['docker','exec',cid[0],'python3','-c',"import json;from pathlib import Path;print((Path('/data')/'gateway-token.json').read_text())"]))['token']
+ body={'model':'glm-5-3','messages':[{'role':'user','content':'Reply exactly PP_AUTH.'}],'max_tokens':64,'thinking':{'type':'disabled'},'stream':False}
+ q=urllib.request.Request('http://127.0.0.1:18804/v1/chat/completions',json.dumps(body).encode(),{'Content-Type':'application/json','Authorization':'Bearer '+token},method='POST')
+ with urllib.request.urlopen(q,timeout=180) as f:authenticated=json.load(f)
+ del token
+ assert 'PP_AUTH' in str(authenticated['choices'][0]['message']['content']),'provider authentication inference did not complete'
+ with urllib.request.urlopen('http://127.0.0.1:18804/api/connection',timeout=30) as f:data=json.load(f)
+ assert data.get('credentialVerified') is True and data.get('status')=='connected','provider credential not verified by completed inference'
+ save('provider-connected',{'connected':True,'credential_verified':True,'verified_via':'completed app SDK inference','models':len(data.get('models',[])),'attestation_mode':data.get('verification',{}).get('mode')})
 elif step=='create-probe':
  c,b=req('/wizard/v1/agents',{'label':'pp-test-probe','harness':'hermes','permissions':{'preset':'private','read_standard_chats':False},'model':{'provider':'wizard-tinfoil','model':'glm-5-3','allowed_models':['glm-5-3','deepseek-v4-1-flash'],'fallback':False}},'POST')
  assert c==201,(c,b);aid=b['agent']['id'];assert aid=='pp-test-probe';save('probe-created',{'agent':aid,'created':True})

@@ -1,0 +1,9 @@
+{
+  "base_service_commit": "888ecee067cde661f069875dc5915a7abe341103",
+  "service_feature_commit": "5114d2d036afb655e86cd49c45fc7ea611559a2d",
+  "archive": "service-engine-fix.tar",
+  "sha256": "30f8975d2fc029d88f402739e9b91b0441e69bf8b9c395b3840b8f66baba3e97",
+  "files": ["ops/agent-runtime/provider_container.py", "ops/agent-runtime/test_provider_container.py"],
+  "reason": "No-key actual Engine response was HTTP 499: run(input=...) closes dial-stdio stdin before creation completes. Keep tunnel open until full response; bounded timer; no daemon body diagnostics.",
+  "unit_tests": {"passed": 40, "subtests_passed": 33, "baseline_regression_reproduced": true}
+}

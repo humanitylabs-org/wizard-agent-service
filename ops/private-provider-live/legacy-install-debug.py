@@ -4,6 +4,7 @@ import importlib.util,subprocess,sys,json,hashlib
 L=Path('/Volumes/ThalesMedia/AI-Wizards/private-providers/pp-launch/live')
 s=importlib.util.spec_from_file_location('prep',L/'rig-prepare.py');assert s and s.loader;m=importlib.util.module_from_spec(s);s.loader.exec_module(m);r=m.Rig(L.parents[1])
 receipt={'lane':'pp-install-fix','mode':'no-key-install','status':'blocked','key_supplied':False,'wam_cli_archive_sha256':hashlib.sha256((L/'wam-cli.tar').read_bytes()).hexdigest()}
+receipt['service_engine_fix']=json.loads((L/'SERVICE-ENGINE-FIX.json').read_text())
 try:
  r.python("from pathlib import Path;assert Path('/etc/pp-rig').read_text().strip()=='pp-private-providers';assert not Path('/home/rig/pp-launch-3/legacy-key.env').exists()")
  subprocess.run([sys.executable,str(L/'rig-rehearse-3.py'),'setup-resume'],check=True)
