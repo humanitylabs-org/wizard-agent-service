@@ -1,6 +1,9 @@
 # Supervisor + Reporter release candidate
 
-## Reuse:
+Reuse:
+- supervision: NEW Supervisor review ledger and Reporter checker
+
+The new row is in this repository's `docs/COMPONENTS.md`: back-end only, no UI fork.
 
 REUSE: `DurableRunQueue`, the scheduler's authenticated delivery/readback callbacks, existing main loopback token, per-agent gateway credentials and restricted Unix-socket admission, shared finish/status instruction delivery, and `parseStatus`.
 EXTEND: Scheduler job/occurrence records and completion observation; managed harness assets and restricted stopped-home synchronization; four-kind agent acceptance fixtures. Existing live code is preserved.
