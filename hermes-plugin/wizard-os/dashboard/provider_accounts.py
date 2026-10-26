@@ -58,6 +58,7 @@ def _iso(value):
 
 
 _CLAUDE_TIERS = {'default_claude_max_20x': 'Max 20x', 'default_claude_max_5x': 'Max 5x', 'default_claude_pro': 'Pro'}
+_CLAUDE_SUBSCRIPTIONS = {'max': 'Max', 'pro': 'Pro', 'team': 'Team', 'enterprise': 'Enterprise', 'free': 'Free'}
 _CLAUDE_WINDOWS = (('five_hour', 'Session'), ('seven_day', 'All models · weekly'),
                    ('seven_day_opus', 'Opus · weekly'), ('seven_day_sonnet', 'Sonnet · weekly'))
 
@@ -121,7 +122,10 @@ def _anthropic_quota(token):
         prof = _anthropic_get('profile', token)
         raw = str((prof.get('account') or {}).get('email') or '').strip()
         email = raw[:120] if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
-        plan = _CLAUDE_TIERS.get(str((prof.get('organization') or {}).get('rate_limit_tier') or ''))
+        org = prof.get('organization') or {}
+        kind = str(org.get('organization_type') or '').strip().lower()
+        kind = kind[len('claude_'):] if kind.startswith('claude_') else kind
+        plan = _CLAUDE_TIERS.get(str(org.get('rate_limit_tier') or '')) or _CLAUDE_SUBSCRIPTIONS.get(kind)
     except Exception:
         pass  # A missing label never breaks usage.
     usage = {'fetchedAt': _iso(datetime.now(timezone.utc)), 'limits': rows, 'paid': None} if rows else None
