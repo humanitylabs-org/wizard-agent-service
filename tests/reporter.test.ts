@@ -74,6 +74,43 @@ describe('scheduled corrective run is durable and bounded', () => {
     const row=f.s.latest(j.id); expect(JSON.parse(row.report_lint).ok).toBe(false); expect(JSON.parse(row.report_final_lint).ok).toBe(false)
     expect(row.finished_at).toBeTruthy()
   })
+  it.each(['run', 'watch'])('does not apply the reporter retroactively to old %s occurrences after restart', async kind => {
+    const f = fixture()
+    const j = f.s.create({ name: 'Old check', kind, when: { every: 1 }, prompt: 'Check', thread: 'old-thread' })
+    await f.s.runNow(j.id)
+    await f.s.tick(false)
+    const row = f.s.latest(j.id), old = JSON.parse(row.data)
+    delete old.report
+    old.body.input = 'Original pre-upgrade instructions'
+    f.s.db.prepare('UPDATE schedule_occurrences SET data=? WHERE key=?').run(JSON.stringify(old), row.key)
+    await f.s.close(); services.splice(services.indexOf(f.s), 1)
+    f.results.set(f.calls[0].key, { status: 'completed', output: 'Legacy report without formatting.' })
+    const restarted = new Scheduler(f.opts); services.push(restarted)
+    await restarted.refreshRuns(); await restarted.refreshRuns()
+    expect(f.calls).toHaveLength(1)
+    expect(restarted.latest(j.id)).toMatchObject({ outcome: 'posted', report_lint: null, report_correction: null })
+  })
+  it.each(['failed', 'cancelled', 'interrupted'])('preserves original notification and watcher success when correction is %s', async status => {
+    for (const kind of ['run', 'watch']) {
+      const notices: any[] = [], restored: any[] = []
+      const f = fixture({ notifier: { available: () => true, send: async (n: any) => notices.push(n) }, onWatchResult: async (_j: any, run: any) => restored.push(run) })
+      const j = f.s.create({ name: 'Check', kind, when: { every: 1 }, prompt: 'Check', thread: 'original-thread', deliver: kind === 'run' ? 'notification' : 'thread' })
+      await f.s.runNow(j.id)
+      await f.s.tick(false)
+      const original = { status: 'completed', output: 'The original check succeeded.', started_at: '2026-10-25T12:00:00.000Z', finished_at: '2026-10-25T12:00:10.000Z' }
+      f.results.set(f.calls[0].key, original)
+      await f.s.refreshRuns(); expect(f.calls).toHaveLength(2)
+      f.results.set(f.calls[1].key, { status, output: '' })
+      await f.s.close(); services.splice(services.indexOf(f.s), 1)
+      const restarted = new Scheduler(f.opts); services.push(restarted)
+      await restarted.refreshRuns(); await restarted.refreshRuns()
+      expect(f.calls).toHaveLength(2)
+      expect(restarted.latest(j.id)).toMatchObject({ outcome: kind === 'run' ? 'notified' : 'posted', error: null, finished_at: original.finished_at })
+      expect(JSON.parse(restarted.latest(j.id).report_final_lint).ok).toBe(false)
+      if (kind === 'run') expect(notices).toHaveLength(1)
+      else { expect(restored).toEqual([original]); expect(restarted.get(j.id).enabled).toBe(false) }
+    }
+  })
   it('freezes the corrective request before admission and reuses its key after an ambiguous failure and restart', async () => {
     let ambiguous=true; const attempts:any[]=[]
     const f=fixture({deliver:async(o:any)=>{attempts.push(o); if(o.key.endsWith(':reporter')&&ambiguous) throw Error('lost response'); return {run_id:o.key}}})
