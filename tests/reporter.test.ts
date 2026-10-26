@@ -94,3 +94,14 @@ describe('scheduled corrective run is durable and bounded', () => {
     expect(f.calls[1].body.input).toContain('Keep the status line\'s state "check", subject "Wizard OS" and title "Wizard OS · Translate bar" exactly')
   })
 })
+
+describe('report kind for jobs without an explicit choice', () => {
+  it('keeps weekly reviews, roundups and digests as digests so their body is never cut down', async () => {
+    const { reportKind } = await import('../server/scheduler.mjs')
+    expect(reportKind({ name: 'Hermes · Weekly process review', skill: 'weekly-process-review' })).toBe('digest')
+    expect(reportKind({ name: 'AI Wizards · Weekly content ideas' })).toBe('digest')
+    expect(reportKind({ name: 'Topics · Daily roundup' })).toBe('digest')
+    expect(reportKind({ name: "Backups · Verify tonight's run" })).toBe('status')
+    expect(reportKind({ name: 'Hermes · Weekly process review', report: 'status' })).toBe('status')
+  })
+})

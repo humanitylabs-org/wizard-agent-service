@@ -9,6 +9,14 @@ import { CronExpressionParser } from 'cron-parser'
 import { parse as parseYaml } from 'yaml'
 import { lintReport, REPORTER_INSTRUCTIONS } from './reporter.mjs'
 import { parseStatus } from './thread-status.mjs'
+// Jobs created before the Reporter (or without a choice) get a kind from what they are: a roundup, brief,
+// review or digest is the product itself and must keep its body (26 Oct 2026: a 2,000-word weekly process
+// review was rewritten down to 150 words). Everything else is a short status report.
+const DIGEST = /\b(weekly|digest|round-?up|brief(ing)?|newsletter|feed|review|ideas|events)\b/i
+export function reportKind(job) {
+  if (job?.report === 'status' || job?.report === 'digest') return job.report
+  return DIGEST.test(`${job?.name || ''} ${job?.skill || ''}`) ? 'digest' : 'status'
+}
 
 export const SCHEDULE_INPUT = '[Wizard schedule]'
 export const isSilentResult = value => {
@@ -172,7 +180,7 @@ function scheduleInput(job, deliver = 'thread') {
   const base = scheduleBaseInput(job)
   if (job.kind === 'remind') return deliver === 'notification' ? base + NOTIFY_INSTRUCTION : base
   return (deliver === 'notification' ? base.replace(/ in this thread/g, '') : base)
-    + `\n\nreport=${job.report || 'status'}\n${REPORTER_INSTRUCTIONS}`
+    + `\n\nreport=${reportKind(job)}\n${REPORTER_INSTRUCTIONS}`
     + (deliver === 'notification' ? "\nThis report is for the owner's Notifications, not this chat. Do not send it yourself.\n" : '')
 }
 function scheduleBaseInput(job) {
@@ -376,8 +384,8 @@ export class Scheduler {
       if (Object.hasOwn(input, 'when')) delete job.window
       job.when = normalizeWhen(job.when, job.timezone, now)
     }
-    job.report = job.report ?? 'status'
-    if (!['status', 'digest'].includes(job.report)) throw fail('report must be status or digest')
+    if (job.report != null && !['status', 'digest'].includes(job.report)) throw fail('report must be status or digest')
+    job.report = reportKind(job)
     job.kind = job.kind ?? 'run'
     if (!KINDS.includes(job.kind)) throw fail(`kind must be ${KINDS.join(', ')}`)
     if (job.kind === 'remind' && !job.prompt) throw fail('a reminder needs its text in prompt')
@@ -487,7 +495,7 @@ export class Scheduler {
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
-      kind: job.kind ?? 'run', report: job.report || 'status', window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
+      kind: job.kind ?? 'run', report: reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))
