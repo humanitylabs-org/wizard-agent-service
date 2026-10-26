@@ -75,6 +75,15 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(out['accountCount'], 0)
         self.assertTrue(out['actions']['add'])
 
+    def test_exact_email_hash_without_the_email(self):
+        import hashlib
+        out = m.provider_accounts('chatgpt', lambda _: [row(), row('b', 'r2')], self.fetch)
+        want = hashlib.sha256(b'private@example.com').hexdigest()[:16]
+        self.assertEqual([a['emailHash'] for a in out['accounts']], [want, want])
+        self.assertNotIn('private@example.com', json.dumps(out))
+        plain = row(label='Work'); plain['access_token'] = 'opaque'
+        self.assertNotIn('emailHash', m.provider_accounts('claude', lambda _: [plain], self.fetch)['accounts'][0])
+
     def test_labels_mask_email_and_credential_like_values(self):
         out = m.provider_accounts('chatgpt', lambda _: [row(label='private@example.com')], self.fetch)
         self.assertEqual(out['accounts'][0]['name'], 'p***@e***')
