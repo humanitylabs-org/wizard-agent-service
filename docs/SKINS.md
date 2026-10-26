@@ -18,7 +18,10 @@ All `/wizard/v1/skins` endpoints require the existing owner principal and access
 | Method | Suffix under `/wizard/v1/skins` | Body / result |
 | --- | --- | --- |
 | GET | (none) | `{active, skins}` |
-| POST | (none) | `{name, css?}` → `{id}` (unique new folder, no overwrite) |
+| POST | (none) | `{name, css?, base?, tweaks?, activate?}` → `{id}` (unique new folder, no overwrite; base defaults to nebula) |
+| PATCH | `/<encoded-id>` | `{name?, base?, tweaks?}` → updated listing; display name changes do not rename the folder |
+| DELETE | `/<encoded-id>` | `{}` → `{trash, list}`; moves the complete folder into private state trash and clears active if worn |
+| POST | `/restore` | `{trash}` → `{id, list}`; restores folder (409 if id is taken), does not automatically wear it |
 | PUT | `/active` | `{id: string|null}` → updated listing |
 | GET | `/store?refresh=1&authors=<hex,hex>` | Verified Store; normal cache TTL 300 seconds |
 | GET | `/store/blob/<sha256>` | Verified local bytes; advertised MIME, immutable private cache |
@@ -26,6 +29,8 @@ All `/wizard/v1/skins` endpoints require the existing owner principal and access
 | POST | `/store/report` | `{a, reason}` → `{ok:true}`; kind 1984 signed by box upload key |
 | POST | `/<encoded-id>/pack` | `{slug?, summary?, preview_webp_b64?}` → `{unsigned, slug}` |
 | POST | `/<encoded-id>/publish` | `{event}` → `{event_id, a, relays}` |
+
+Recipes are stored in each folder’s `skin.json`. Base palette ids match `/^[a-z0-9-]{1,32}$/`; tweaks map ids matching `/^[a-z0-9-]+\/[a-z0-9-]+$/` to booleans (at most 64). PATCH merges the supplied tweak keys into the stored map (independent devices do not overwrite unrelated tweaks), preserves other metadata and leaves CSS/scripts intact. Lists include the actual base, tweaks and `has_recipe` so clients can hide the empty legacy `My skin` bootstrap without hiding an explicitly named recipe. Preview migration may supply a stable `migration_key` (1–80 lowercase alphanumeric/hyphen characters); repeated creates with that key return the same folder, including across tabs. Private trash tokens are random; removed folders expire lazily after seven days. Undo clients may restore and then PUT `/active` if the removed skin was worn.
 
 Pack uploads sanitized CSS, optional bounded WebP, and optional composition JSON. It stores an exact pending template. Publish rejects any changed template, bad signature, stale local CSS or tampered/missing remote blob before broadcasting. Remote availability is checked with HEAD plus a fresh hash-verified GET. Successful publication persists the event privately and the specified `published` metadata in `skin.json`; the next pack derives its version and original `published_at` from the prior event. A moved folder with publication metadata can retrieve the prior event from relays; an unavailable prior event is an explicit refusal rather than a guessed version. Per-folder pack/publish calls are mutually exclusive within one service process.
 
