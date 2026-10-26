@@ -92,6 +92,20 @@ class AccountsTest(unittest.TestCase):
         self.assertNotIn('emailHash', account)
         self.assertNotIn('other@example.com', json.dumps(account))
 
+    def test_long_anthropic_profile_email_is_hashed_whole(self):
+        import hashlib
+        long_email = ('a' * 60) + '@' + ('d' * 100) + '.example'
+        original = m._anthropic_get
+        m._anthropic_get = lambda path, token: {'account': {'email': long_email}} if path == 'profile' else {}
+        try:
+            plan, usage, email = m._anthropic_quota('opaque')
+            self.assertEqual(email, long_email)
+            claude = row(label='Work'); claude['access_token'] = 'opaque-long'
+            account = m.provider_accounts('claude', lambda _: [claude], self.fetch)['accounts'][0]
+        finally:
+            m._anthropic_get = original
+        self.assertEqual(account['emailHash'], hashlib.sha256(long_email.encode()).hexdigest()[:16])
+
     def test_labels_mask_email_and_credential_like_values(self):
         out = m.provider_accounts('chatgpt', lambda _: [row(label='private@example.com')], self.fetch)
         self.assertEqual(out['accounts'][0]['name'], 'p***@e***')

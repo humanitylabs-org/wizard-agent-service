@@ -121,7 +121,8 @@ def _anthropic_quota(token):
     try:
         prof = _anthropic_get('profile', token)
         raw = str((prof.get('account') or {}).get('email') or '').strip()
-        email = raw[:120] if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
+        # The pattern already bounds the length; keep the exact address so emailHash matches the app's own hash.
+        email = raw if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
         org = prof.get('organization') or {}
         kind = str(org.get('organization_type') or '').strip().lower()
         kind = kind[len('claude_'):] if kind.startswith('claude_') else kind
