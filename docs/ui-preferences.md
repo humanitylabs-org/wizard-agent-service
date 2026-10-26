@@ -30,6 +30,40 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
   Wizard UX ships `skills/wizard-spaces` with an owner HTTP read/merge/write/readback helper and
   the requested-collection/back-fill skill; this is not an MCP-token authorization bypass.
 
+## Launcher preferences and atomic migration
+
+`launcher` is optional (absent remains absent in GET, preserving the old response defaults).
+PUT replaces the launcher object, just as it replaces a spaces array. It accepts only:
+
+- `nativeLinks`: up to 50 unique `{id,name,icon,href,colors?,phoneOnly?,desc?}` records.
+  App ids match `[a-z0-9][a-z0-9-]{0,63}`; names 1–80 chars, icons 1–160,
+  descriptions 1–240, hrefs 1–2048, all nonblank without control characters.
+  Hrefs accept HTTP(S), `tel:`, `sms:` and Android `intent:…#Intent;…;end` only.
+  Colors are one or two hex colors; phoneOnly is boolean. Unknown record fields fail.
+- `recents`, `desktopQuick`, `autoOpen`, `hostedThreadApps`: up to 100 unique app ids each.
+  These are owner choices, not claims of installed apps; shells intersect with the current registry.
+- `displayNames`: up to 100 app-id → nonblank, control-free names (80 chars max).
+
+`migrations` is an optional map of up to 100 marker → UTC ISO timestamp entries.
+Markers match `[a-z0-9][a-z0-9._-]{0,79}`; timestamps must name real calendar dates.
+The existing 5 MiB request/file limit still applies; no app data or settings schema is changed.
+
+`POST /wizard/v1/ui-preferences/seed` accepts exactly `{marker,launcher}`. Same owner
+access, JSON Content-Type, cross-site refusal and byte bounds as PUT. A missing marker
+fills **only absent launcher keys**, preserving existing owner choices (including empty
+arrays), existing fields and unknown future stored fields. The server timestamps the
+marker and commits both marker and data with one restricted-mode atomic rename.
+Response: `{seeded:true,preferences:{…}}`. If the marker exists, it returns
+`{seeded:false,preferences:{…}}` without touching the file or its mtime. Invalid payloads
+are 400 even on this no-op path. Corrupt existing launcher/migration/file data returns
+503 without replacing it; a missing file can be seeded. A full marker map returns 400.
+
+The read/check/merge/write is synchronous, with no await, under the **same process-local
+critical section as PUT**. Concurrent HTTP seeds cannot both win or lose a partial PUT.
+This is not a cross-process filesystem lock: run one Agent Service writer per owner store,
+as before. Shells must not write a migration-complete marker in browser storage. Old
+services may lack this route; clients keep compatibility defaults without making a PUT.
+
 The service saves `ui-preferences.json` under its Wizard OS home, using a restricted
 mode and atomic rename. It never rewrites operator-owned `settings.json`, app config,
 Hermes configuration or user data. Writes within one service process merge
