@@ -17,6 +17,35 @@ const text = (value, max, field, optional = false) => {
 }
 const terminal = run => ['completed', 'failed', 'cancelled', 'interrupted'].includes(run?.status)
 const uid = prefix => `${prefix}_${randomUUID()}`
+// Wizard thread titles are "Project · Feature" within 32 characters. The service shortens, never a model;
+// report/build titles (60 chars) stay intact in the ledger, only the thread label is fitted.
+export const THREAD_TITLE_MAX = 32
+const PREFIX = 'Supervisor · '
+const STOP = new Set(['a', 'an', 'the', 'of', 'to', 'for', 'and', 'or', 'in', 'on', 'with', 'too'])
+const tidy = value => value.replace(/[\s.,;:!?·\-—–(]+$/u, '').trim()
+function fitTopic(topic, room) {
+  let t = String(topic ?? '').replace(/\s+/g, ' ').trim().replace(/^supervisor\s*[·:]\s*/iu, '').trim()
+  const head = t.split(/:| - | — |,|\(/u)[0].trim()
+  if (tidy(head)) t = head
+  t = tidy(t)
+  if (!t) return ''
+  const words = []
+  for (const word of t.split(' ')) { if ([...words, word].join(' ').length > room) break; words.push(word) }
+  while (words.length && STOP.has(words.at(-1).toLowerCase().replace(/[^\p{L}]/gu, ''))) words.pop()
+  return tidy(words.join(' ')) || t.split(' ')[0].slice(0, room)
+}
+export function supervisorThreadTitle(topic) {
+  return PREFIX + (fitTopic(topic, THREAD_TITLE_MAX - PREFIX.length) || 'Review')
+}
+/** Builder briefs may carry their own "Project · Feature" title; fit it to the same 32-character rule. */
+export function builderThreadTitle(title) {
+  const t = String(title ?? '').replace(/\s+/g, ' ').trim()
+  if (/^supervisor\s*[·:]/iu.test(t) || !t.includes(' · ')) return supervisorThreadTitle(t)
+  const [project, ...rest] = t.split(' · ')
+  const p = project.trim().slice(0, 16)
+  const feature = fitTopic(rest.join(' · '), THREAD_TITLE_MAX - p.length - 3)
+  return feature ? `${p} · ${feature}` : supervisorThreadTitle(t)
+}
 const PRIVATE = 'Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'
 export { PRIVATE as SUPERVISOR_PRIVATE_REFUSAL }
 
@@ -69,7 +98,7 @@ export class Supervisor {
     for (const review of this.db.prepare("SELECT * FROM reviews WHERE state='queued' ORDER BY rowid").all()) {
       if (open >= 2) break
       this.db.prepare("UPDATE reviews SET state='open' WHERE id=?").run(review.id)
-      this.enqueue(`supervisor-review:${review.id}`, { thread: review.thread, title: `Supervisor · ${this.reportBy(review.report).title}`, createThread: true,
+      this.enqueue(`supervisor-review:${review.id}`, { thread: review.thread, title: supervisorThreadTitle(this.reportBy(review.report).title), createThread: true,
         input: `[supervisor review]\nLoad and follow the skill "supervisor".\n${JSON.stringify(this.reportBy(review.report))}` })
       open++
     }
@@ -149,7 +178,7 @@ export class Supervisor {
     const b = { id: uid('build'), title: text(args.title, 60, 'title'), brief: text(args.brief, 32000, 'brief'), thread: uid('wizard_builder') }
     this.transaction(() => {
       this.db.prepare('INSERT INTO builds VALUES(?,?,?,?,?)').run(b.id, review.id, b.thread, 'running', JSON.stringify(b))
-      this.enqueue(`supervisor-build:${b.id}`, { thread: b.thread, title: b.title, createThread: true,
+      this.enqueue(`supervisor-build:${b.id}`, { thread: b.thread, title: builderThreadTitle(b.title), createThread: true,
         input: `[supervisor build]\n${b.brief}\nWhen finished, call supervisor_report with kind=completion summarising what shipped, where, and how you verified it.` })
     })
     return { build_id: b.id, thread: b.thread }
