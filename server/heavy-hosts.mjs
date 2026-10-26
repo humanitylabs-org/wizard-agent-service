@@ -17,6 +17,8 @@ export function heavyHostConfigs(env = process.env) {
       root: setting('REMOTE_ROOT', 'WIZARD_HEAVY_REMOTE_ROOT'),
       lock: setting('REMOTE_LOCK', 'WIZARD_HEAVY_REMOTE_LOCK'),
       python: setting('REMOTE_PYTHON', 'WIZARD_HEAVY_REMOTE_PYTHON', legacy ? '/opt/homebrew/bin/python3' : '/usr/bin/python3'),
+      // Preserve every legacy Thales SSH byte; only the new host needs identity forwarded.
+      ...(legacy ? {} : { workerHost: name }),
       settings: Object.fromEntries(['AGENT_IMAGE', 'DOCKER_BIN', 'DOCKER_HOST'].map(key =>
         [`WIZARD_HEAVY_${key}`, setting(key, `WIZARD_HEAVY_${key}`)])),
     }]

@@ -78,6 +78,8 @@ def public(row):
 
 def heavy_root():
     value = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
+    if os.environ.get('WIZARD_HEAVY_HOST', 'thales') not in ('', 'thales', 'forum'):
+        raise ValueError('invalid configured heavy host')
     if not value or not Path(value).is_absolute():
         raise ValueError('heavy lane not configured: set WIZARD_HEAVY_ROOT')
     return Path(value).resolve()
@@ -304,7 +306,7 @@ def finish(db, root, row, state, code=None, reason=''):
         with log.open('rb') as stream:
             for block in iter(lambda: stream.read(65536), b''):
                 digest.update(block)
-    receipt = {'job_id': row['id'], 'host': json.loads(row['spec']).get('host', 'thales'), 'state': state, 'exit_code': code,
+    receipt = {'job_id': row['id'], 'host': os.environ.get('WIZARD_HEAVY_HOST') or json.loads(row['spec']).get('host', 'thales'), 'state': state, 'exit_code': code,
                'finished_at': time.time(), 'log_path': str(log),
                'log_sha256': digest.hexdigest(), 'reason': reason,
                'spec_sha256': hashlib.sha256(row['spec'].encode()).hexdigest()}

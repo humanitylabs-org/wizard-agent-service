@@ -86,6 +86,23 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.raw_rpc({'action': 'submit', 'job_id': 'heavy_' + uuid.uuid4().hex,
                                      'spec': {**spec, 'host': 'other'}}).returncode, 1)
 
+    def test_configured_worker_host_receipt_without_host_in_spec(self):
+        for host in ('forum', 'thales'):
+            with unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_HOST': host}):
+                # Each configured host has its own dispatcher/spool, as in production.
+                self.root = self.base / host / 'spool'
+                job, spec = self.submit("print('configured host')")
+                result = self.wait(job, ('completed',))
+                self.assertEqual(result['receipt']['host'], host)
+                import hashlib
+                self.assertEqual(result['receipt']['spec_sha256'],
+                                 hashlib.sha256(json.dumps(spec, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
+                self.ids.remove(job)
+        with unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_HOST': ''}):
+            self.root = self.base / 'legacy' / 'spool'
+            job, _ = self.submit("print('legacy host')")
+            self.assertEqual(self.wait(job, ('completed',))['receipt']['host'], 'thales')
+
     def test_busy_queue_duplicate_and_receipt(self):
         a, spec_a = self.submit("import time; from pathlib import Path; Path('once').open('a').write('a'); time.sleep(2); print('first done')")
         self.wait(a, ('running',))

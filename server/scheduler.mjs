@@ -338,8 +338,9 @@ export class Scheduler {
   }
   save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
   async checkReport(row, occurrence, run) {
-    if (['remind', 'return'].includes(occurrence.kind) || run.status !== 'completed') return { run, pending: false }
-    const kind = occurrence.report || 'status'
+    // Only reservations that actually included the reporter contract may be corrected.
+    if (!['status', 'digest'].includes(occurrence.report) || ['remind', 'return'].includes(occurrence.kind) || run.status !== 'completed') return { run, pending: false }
+    const kind = occurrence.report
     let result = row.report_lint ? JSON.parse(row.report_lint) : lintReport(isSilentResult(run.output) ? '[SILENT]' : run.output || '', { kind })
     if (!row.report_lint) this.db.prepare('UPDATE schedule_occurrences SET report_lint=? WHERE key=?').run(JSON.stringify(result), row.key)
     if (result.ok) return { run, pending: false }
@@ -364,7 +365,7 @@ export class Scheduler {
     if (!rewritten || !['completed', 'failed', 'cancelled', 'interrupted'].includes(rewritten.status)) return { run, pending: true }
     result = lintReport(rewritten.output || '', { kind })
     this.db.prepare('UPDATE schedule_occurrences SET report_final_lint=? WHERE key=?').run(JSON.stringify(result), row.key)
-    return { run: rewritten, pending: false } // Never correct a second time, even if still invalid.
+    return { run: rewritten.status === 'completed' ? rewritten : run, pending: false } // A wording failure cannot erase successful work. Never correct twice.
   }
   normalize(input, prior = null) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('invalid schedule')

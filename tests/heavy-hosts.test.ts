@@ -42,7 +42,7 @@ it('isolates forum root/python/settings from the single-host Mac settings', () =
   const c = heavyHostConfigs({ WIZARD_BUILD_HOSTS: 'thales,forum', WIZARD_BUILD_HOST: 'mac', WIZARD_HEAVY_ROOT: '/mac',
     WIZARD_HEAVY_DOCKER_HOST: 'unix:///mac/docker.sock', WIZARD_HEAVY_REMOTE_PYTHON: '/mac/python',
     WIZARD_HEAVY_FORUM_ROOT: '/srv/work', WIZARD_HEAVY_FORUM_REMOTE_SCRIPT: '/srv/work/heavy/worker.py' })
-  expect(c.forum).toMatchObject({ host: 'forum', workRoot: '/srv/work', python: '/usr/bin/python3', script: '/srv/work/heavy/worker.py' })
+  expect(c.forum).toMatchObject({ workerHost: 'forum', host: 'forum', workRoot: '/srv/work', python: '/usr/bin/python3', script: '/srv/work/heavy/worker.py' })
   expect(c.forum.lock).toBeUndefined()
   expect(c.forum.settings.WIZARD_HEAVY_DOCKER_HOST).toBeUndefined()
   expect(() => heavyHostConfigs({ WIZARD_BUILD_HOSTS: 'thales,unknown' })).toThrow('invalid heavy hosts')

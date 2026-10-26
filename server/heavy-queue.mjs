@@ -12,13 +12,17 @@ const fail = (message, status = 400) => Object.assign(new Error(message), { stat
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
 
 /** One short SSH RPC, never a build/wait held inside the HTTP request. */
-export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3', workRoot, settings }) {
+export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3', workRoot, settings, workerHost }) {
   if (!host || !script || !root || !lock) throw new Error('heavy worker configuration incomplete')
   return payload => new Promise((resolve, reject) => {
     const heavyRoot = workRoot ?? (process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT)
     if (!heavyRoot || !posix.isAbsolute(heavyRoot)) return reject(fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503))
     // Operator-only allowlist: never forward the bridge's tokens or ambient env.
     const forwarded = [`WIZARD_HEAVY_ROOT=${heavyRoot}`]
+    if (workerHost !== undefined) {
+      if (!['thales', 'forum'].includes(workerHost)) return reject(fail('invalid heavy worker host', 503))
+      forwarded.push(`WIZARD_HEAVY_HOST=${workerHost}`)
+    }
     const rules = {
       WIZARD_HEAVY_AGENT_IMAGE: value => /^[a-zA-Z0-9][a-zA-Z0-9._/@:-]{0,255}$/.test(value),
       WIZARD_HEAVY_DOCKER_BIN: value => posix.isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value) && !value.split('/').includes('..'),
