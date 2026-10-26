@@ -121,7 +121,8 @@ def _anthropic_quota(token):
     try:
         prof = _anthropic_get('profile', token)
         raw = str((prof.get('account') or {}).get('email') or '').strip()
-        email = raw[:120] if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
+        # The pattern already bounds the length; keep the exact address so emailHash matches the app's own hash.
+        email = raw if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
         org = prof.get('organization') or {}
         kind = str(org.get('organization_type') or '').strip().lower()
         kind = kind[len('claude_'):] if kind.startswith('claude_') else kind
@@ -213,9 +214,16 @@ def provider_accounts(provider, read=None, fetch=None):
             with _LOCK:
                 raw = _CACHE.get(('email', hashlib.sha256(row['access_token'].encode()).hexdigest()))
         email = _masked(raw or row.get('label'))
+        extra = {}
+        # A short one-way hash of the exact email lets the connection app tell "the same account" apart from two
+        # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
+        # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
+        # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
+        exact = str(raw or '').strip().lower()
+        if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
+            extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
         state = str(row.get('last_status') or 'ready')
         state = state if state in {'ready', 'ok', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
-        extra = {}
         if slug == 'anthropic' and all(str(r.get('source', '')) == 'claude_code' for r, _ in aliases):
             # Hermes' mirror of the host Claude Code login: the Claude app already shows that login
             # (with its usage) as its own row, so it folds this pool grant into that row.
