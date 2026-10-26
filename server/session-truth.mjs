@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-write.mjs'
 import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
@@ -14,6 +15,7 @@ const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hi
 export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
 export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
+  AGENT_TO_AGENT_PREFIX,
   SCHEDULE_INPUT,
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
@@ -268,6 +270,8 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       ORDER BY timestamp DESC${tieOrder}
     `)
     const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user'
+      AND timestamp <= ? ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
     const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
@@ -295,6 +299,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
+        if (row.role === 'assistant' && isAgentToAgentRequest(triggeringUser.get(id, timestamp)?.content)) continue
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
         const provenanceAssistant = visibleProvenanceReply(row)

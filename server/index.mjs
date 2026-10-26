@@ -120,6 +120,7 @@ server = createWizardServer({
   runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   schedulerStatePath: process.env.WIZARD_SCHEDULER_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'schedules.sqlite3'),
+  supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,

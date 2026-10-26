@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -274,6 +274,8 @@ describe('schedule last/next run projections', () => {
   })
 })
 
+const plainReport = (sentence: string) => `**${sentence}**\n[WIZARD_STATUS_V1]{"state":"done","ask":"The check finished"}[/WIZARD_STATUS_V1]`
+
 describe('thread-bound one-shot follow-up watchers', () => {
   it('stays quiet while pending, disables itself on the first visible result, and never runs again', async () => {
     const calls: any[] = []
@@ -285,7 +287,7 @@ describe('thread-bound one-shot follow-up watchers', () => {
     expect(calls[0].body.input).toContain('one-shot follow-up')
     expect(calls[0].body.input).toContain('respond exactly [SILENT]')
     expect(s.project(s.get(watch.id))).toMatchObject({ enabled: true, lastRun: { outcome: 'silent' } })
-    run = { status: 'completed', output: 'Export finished.' }
+    run = { status: 'completed', output: plainReport('Export finished.') }
     clock += 5 * 60_000; await s.tick()
     expect(calls).toHaveLength(2)
     expect(s.project(s.get(watch.id))).toMatchObject({ enabled: false, nextRun: null, lastRun: { outcome: 'posted' } })
@@ -311,7 +313,7 @@ describe('thread-bound one-shot follow-up watchers', () => {
     let restorationAvailable = false
     const deliver = async (occurrence: any) => { calls.push(occurrence); return { run_id: 'watch-visible' } }
     const options = {
-      lookup: async () => ({ status: 'completed', output: 'Dependency finished.' }),
+      lookup: async () => ({ status: 'completed', output: plainReport('Dependency finished.') }),
       onWatchResult: async () => {
         restoreAttempts++
         if (!restorationAvailable) throw new Error('temporary restoration outage')
@@ -374,6 +376,126 @@ describe('thread-bound one-shot follow-up watchers', () => {
 })
 
 describe('paused read-only Hermes import', () => {
+  function source(jobs: any[], config?: string) {
+    mkdirSync(join(process.env.HERMES_HOME!, 'cron'), { recursive: true })
+    writeFileSync(join(process.env.HERMES_HOME!, 'cron', 'jobs.json'), JSON.stringify({ jobs }))
+    if (config !== undefined) writeFileSync(join(process.env.HERMES_HOME!, 'config.yaml'), config)
+  }
+  const weekly = (extra: any = {}) => ({ id: 'weekly', name: 'Weekly', schedule: { kind: 'cron', expr: '0 1 * * 1' }, prompt: 'Analyse the collected context.', ...extra })
+
+  it.each([undefined, 'timezone: null\n', 'timezone: "UTC" # source clock\n', 'clock:\n  timezone: Asia/Bangkok\n'])('defaults to source UTC, never the owner clock (%s)', config => {
+    clock = Date.parse('2026-10-24T00:00:00Z')
+    source([weekly()], config)
+    const s = scheduler(undefined, { timezone: 'Asia/Bangkok' })
+    const r = importHermesSchedules(s).results[0]
+    expect(r).toMatchObject({ status: 'would import (paused)', timezone: 'UTC', nextRun: '2026-10-26T01:00:00.000Z', thread: null })
+    expect(r.promptLength).toBe(r.schedule.prompt.length)
+    expect(r.schedule.enabled).toBe(false)
+    expect(s.list()).toEqual([])
+    expect(s.db.prepare('SELECT count(*) AS n FROM schedule_imports').get().n).toBe(0)
+  })
+
+  it('uses top-level YAML timezone, with row timezone taking precedence', () => {
+    source([weekly(), weekly({ id: 'override', timezone: 'UTC' })], '"timezone": "America/New_York" # source\n')
+    const results = importHermesSchedules(scheduler()).results
+    expect(results[0]).toMatchObject({ timezone: 'America/New_York', nextRun: '2026-10-26T05:00:00.000Z' })
+    expect(results[1]).toMatchObject({ timezone: 'UTC', nextRun: '2026-10-26T01:00:00.000Z' })
+  })
+
+  it.each(['timezone: [invalid\n', 'timezone: Not/AZone\n'])('does not silently import in the wrong timezone on invalid source configuration', config => {
+    source([weekly()], config)
+    const s = scheduler()
+    expect(() => importHermesSchedules(s, { dryRun: false })).toThrow('Hermes config unavailable or invalid')
+    expect(s.list()).toEqual([])
+  })
+
+  it.each(['context.py', 'context.sh', 'context.bash', "nested/context's data.py"])('prefixes a quoted absolute pre-run command and appends delivery override (%s)', script => {
+    source([weekly({ script, no_agent: false, prompt: 'Publish through a chat posting tool, then reply exactly [SILENT].' })], 'cron:\n  script_timeout_seconds: 120\n')
+    const s = scheduler()
+    const r = importHermesSchedules(s).results[0]
+    expect(r.status).toBe('would import (paused)')
+    expect(r.schedule.prompt).toMatch(/^Before following the task below, run this exact command first in the terminal/)
+    expect(r.schedule.prompt).toContain(join(process.env.HERMES_HOME!, 'scripts'))
+    expect(r.schedule.prompt).toContain(/\.(sh|bash)$/.test(script) ? 'bash ' : 'python3 ')
+    expect(r.schedule.prompt).toContain('120 seconds')
+    expect(r.schedule.prompt).toContain('full stdout')
+    expect(r.schedule.prompt).toContain('This run happens inside its Wizard chat')
+    expect(r.schedule.prompt).toContain('do not publish through that script or tool')
+    expect(r.schedule.prompt).toContain('Reply [SILENT] only when there is genuinely nothing to report.')
+    expect(r.promptLength).toBe(r.schedule.prompt.length)
+    if (script.includes("'")) expect(r.schedule.prompt).toContain("'\"'\"'")
+  })
+
+  it('keeps configured interpreter and workdir in the pre-run command; pure scripts remain refused with preview fields', () => {
+    const workdir = join(root, 'work'); mkdirSync(workdir)
+    source([weekly({ script: 'context.py', interpreter: join(root, 'venv', 'bin', 'python3'), workdir }), weekly({ id: 'system', no_agent: true, script: 'health.sh' })])
+    const results = importHermesSchedules(scheduler()).results
+    expect(results[0].schedule.prompt).toContain(`cd '${workdir}' && '${join(root, 'venv', 'bin', 'python3')}'`)
+    expect(results[0].schedule.prompt).toContain('3600 seconds')
+    expect(results[0].schedule.prompt).toContain('For the rest of this agent turn')
+    expect(results[0].schedule.prompt).toContain('resolve every relative path against it')
+    expect(results[0].schedule.prompt).toContain('AGENTS.md')
+    expect(results[1]).toEqual({ id: 'system', name: 'Weekly', status: 'not imported: script-only system job (no agent turn) — move to a host timer or Supervisor health check', timezone: 'UTC', nextRun: null, thread: null, promptLength: null })
+  })
+
+  it.each(['../escape.py', '/outside/scripts/context.py', 'bad\u0000.py'])('refuses scripts outside the source scripts directory (%s)', script => {
+    source([weekly({ script })])
+    expect(importHermesSchedules(scheduler()).results[0].status).toBe('not imported: unsupported or invalid job')
+  })
+
+  it('refuses symlink escapes even through a parent of a missing script, and refuses non-Python interpreter overrides', () => {
+    const scripts = join(process.env.HERMES_HOME!, 'scripts'); mkdirSync(scripts)
+    symlinkSync(root, join(scripts, 'outside'))
+    source([weekly({ script: 'outside/missing.py' }), weekly({ id: 'bad-python', script: 'context.py', interpreter: '/bin/bash' })])
+    expect(importHermesSchedules(scheduler()).results.map((r: any) => r.status)).toEqual(['not imported: unsupported or invalid job', 'not imported: unsupported or invalid job'])
+  })
+
+  it('validates the resolved target of an existing Python interpreter symlink', () => {
+    const venv = join(root, 'venv', 'bin'); mkdirSync(venv, { recursive: true })
+    const other = join(root, 'not-python'); writeFileSync(other, 'synthetic executable')
+    const interpreter = join(venv, 'python3'); symlinkSync(other, interpreter)
+    source([weekly({ script: 'context.py', interpreter })])
+    expect(importHermesSchedules(scheduler()).results[0].status).toBe('not imported: unsupported or invalid job')
+  })
+
+  it('includes nullable preview fields for invalid rows without turning empty jobs into delivery-note-only jobs', () => {
+    source([null, weekly({ id: 'bad/id' }), weekly({ id: 'empty', prompt: '' }), weekly({ id: 'invalid-zone', timezone: 'Not/AZone' })])
+    const s = scheduler()
+    const results = importHermesSchedules(s, { dryRun: false }).results
+    expect(results.map((r: any) => r.status)).toEqual(['not imported: invalid job', 'not imported: invalid id', 'not imported: unsupported or invalid job', 'not imported: unsupported or invalid job'])
+    for (const r of results) expect(r).toMatchObject({ nextRun: null, promptLength: null, thread: null })
+    expect(results[0].timezone).toBeNull()
+    expect(s.list()).toEqual([])
+  })
+
+  it('maps validated source ids to existing threads, persists paused copies and previews saved jobs idempotently', async () => {
+    source([weekly(), weekly({ id: 'unbound' })])
+    let s = scheduler()
+    const threads = { weekly: 'existing.chat:reports-1' }
+    expect(importHermesSchedules(s, { threads }).results[0].thread).toBe(threads.weekly)
+    const result = importHermesSchedules(s, { dryRun: false, threads }).results
+    const job = s.get(result[0].scheduleId)
+    expect(job).toMatchObject({ enabled: false, thread: threads.weekly, timezone: 'UTC' })
+    expect(job.createThread).toBeUndefined()
+    expect(result[1].thread).toBeNull()
+    const saved = s.list()
+    await s.close(); schedulers.splice(schedulers.indexOf(s), 1)
+    s = scheduler()
+    const again = importHermesSchedules(s, { dryRun: false, threads: { weekly: 'other-thread' } }).results[0]
+    expect(again).toMatchObject({ status: 'already imported', thread: threads.weekly, promptLength: job.prompt.length, nextRun: '2026-10-26T01:00:00.000Z' })
+    expect(s.list()).toEqual(saved)
+    s.delete(job.id)
+    expect(importHermesSchedules(s).results[0]).toMatchObject({ status: 'already imported', nextRun: null, promptLength: null })
+    expect(s.list()).toHaveLength(1)
+  })
+
+  it.each([null, [], 'bad', { 'bad/id': 'thread' }, { weekly: '' }, { weekly: 'bad/id' }, { weekly: null }, { weekly: 42 }])('rejects invalid thread mappings before any writes (%j)', threads => {
+    source([weekly()])
+    const s = scheduler()
+    expect(() => importHermesSchedules(s, { dryRun: false, threads })).toThrow('invalid threads')
+    expect(s.list()).toEqual([])
+  })
+
   it('imports native cron/interval/once/skill/model fields paused; dry-run and retries do not mutate or duplicate anything', () => {
     const path = join(process.env.HERMES_HOME!, 'cron', 'jobs.json'); mkdirSync(join(process.env.HERMES_HOME!, 'cron'))
     const raw = JSON.stringify({ jobs: [
@@ -385,15 +507,16 @@ describe('paused read-only Hermes import', () => {
     ] }, null, 2)
     writeFileSync(path, raw, { mode: 0o400 })
     const s = scheduler()
-    expect(importHermesSchedules(s, { dryRun: true }).results.map((r: any) => r.status)).toEqual(['would import (paused)', 'would import (paused)', 'would import (paused)', 'not imported: script job', 'not imported: script job'])
+    expect(importHermesSchedules(s, { dryRun: true }).results.map((r: any) => r.status)).toEqual(['would import (paused)', 'would import (paused)', 'would import (paused)', 'would import (paused)', 'not imported: script-only system job (no agent turn) — move to a host timer or Supervisor health check'])
     expect(s.list()).toEqual([])
     const result = importHermesSchedules(s, { dryRun: false })
-    expect(result.results.filter((r: any) => r.status === 'imported (paused)')).toHaveLength(3)
+    expect(result.results.filter((r: any) => r.status === 'imported (paused)')).toHaveLength(4)
     expect(s.list().every((j: any) => !j.enabled)).toBe(true)
+    expect(s.list().every((j: any) => j.prompt.endsWith('Reply [SILENT] only when there is genuinely nothing to report.'))).toBe(true)
     expect(s.list().find((j: any) => j.name === 'Daily').model).toBe('fixture-model')
-    expect(s.list().find((j: any) => j.name === 'Every')).toMatchObject({ skill: 'one', prompt: 'Also load and follow the skill "two".' })
+    expect(s.list().find((j: any) => j.name === 'Every')).toMatchObject({ skill: 'one', prompt: expect.stringContaining('Also load and follow the skill "two".') })
     expect(importHermesSchedules(s, { dryRun: false }).results[0].status).toBe('already imported')
-    expect(s.list()).toHaveLength(3)
+    expect(s.list()).toHaveLength(4)
     expect(readFileSync(path, 'utf8')).toBe(raw)
   })
 })
@@ -473,7 +596,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       if (path === '/v1/runs' && req.method === 'POST') {
         const key = String(req.headers['idempotency-key'])
         const session = sessions.get(body.session_id); if (session) session.archived = false
-        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? 'fixture report', error: 'credential-fixture-do-not-expose' }) }
+        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? plainReport('The check finished.'), error: 'credential-fixture-do-not-expose' }) }
         send(202, admitted.get(key)); return
       }
       if (path.startsWith('/v1/runs/') && path.endsWith('/events')) {
@@ -554,7 +677,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(history.messages).toEqual([])
   })
 
-  it.each(['fixture report', 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
+  it.each([plainReport('The check finished.'), 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
     const f = await fixture({ fixtureOutput })
     const created = await (await api(f.origin, '', 'POST', job({ enabled: false }))).json()
     const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
@@ -569,8 +692,8 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       expect(events).not.toContain('[SILENT]')
       expect(events).not.toContain('message.delta')
     } else {
-      expect(history.messages.map((m: any) => m.content)).toEqual(['fixture report'])
-      expect(events).toContain('fixture report')
+      expect(history.messages.map((m: any) => m.content)).toEqual(['**The check finished.**'])
+      expect(events).toContain('The check finished.')
     }
     expect(events).toContain('run.completed')
     await f.server.scheduler.tick(false)
@@ -579,7 +702,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
 
   it.each([
     ['nothing changed [SILENT]', true, true],
-    ['Dependency finished.', false, false],
+    [plainReport('Dependency finished.'), false, false],
   ])('keeps Done and Defer quiet while pending, then resurfaces only a visible watcher result: %s', async (fixtureOutput, archived, deferred) => {
     const f = await fixture({ fixtureOutput })
     f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
@@ -646,14 +769,18 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     const f = await fixture()
     expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: true })).status).toBe(200)
     expect(f.server.scheduler.list()).toHaveLength(0)
-    expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: false })).status).toBe(200)
+    expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: false, threads: { importable: 'bad/id' } })).status).toBe(400)
+    expect(f.server.scheduler.list()).toHaveLength(0)
+    const imported = await api(f.origin, '/import-hermes', 'POST', { dryRun: false, threads: { importable: 'existing-report-thread' } })
+    expect(imported.status).toBe(200)
+    expect((await imported.json()).results[0]).toMatchObject({ thread: 'existing-report-thread', timezone: 'UTC', nextRun: expect.any(String), promptLength: expect.any(Number) })
     expect(f.server.scheduler.list()).toHaveLength(1)
     expect(f.server.scheduler.list()[0].enabled).toBe(false)
     expect(readFileSync(join(path, 'jobs.json'), 'utf8')).toBe(raw)
     expect(f.bodies).toHaveLength(0)
   })
 
-  it('defaults new jobs and paused imports to the current owner timezone without changing existing jobs', async () => {
+  it('defaults new jobs to the owner clock but imports to the source clock without changing existing jobs', async () => {
     const settingsPath = join(root, 'owner-settings.json')
     writeFileSync(settingsPath, JSON.stringify({ schema: 1, clock: { timezone: 'America/New_York' } }))
     const f = await fixture({ settingsPath })
@@ -666,7 +793,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     const path = join(process.env.HERMES_HOME!, 'cron'); mkdirSync(path)
     writeFileSync(join(path, 'jobs.json'), JSON.stringify({ jobs: [{ id: 'tz-import', name: 'Imported', prompt: 'report', schedule: { kind: 'cron', expr: '0 9 * * *' } }] }))
     const imported = await (await api(f.origin, '/import-hermes', 'POST', { dryRun: false })).json()
-    expect(imported.results[0].schedule.timezone).toBe('Europe/London')
+    expect(imported.results[0].schedule.timezone).toBe('UTC')
   })
 
   it('never starts its timer by default, even if the option alone is true', async () => {
@@ -708,7 +835,7 @@ describe('windows, reminders and trickled agent work', () => {
     const work = s.create({ name: 'Overnight merge', when: { at: 'overnight' }, prompt: 'Merge the PR', thread: 'wizard_t2' })
     const r = s.transaction(() => s.reserve(remind, clock)), w = s.transaction(() => s.reserve(work, clock))
     expect(r.body.input).toContain('reminded'); expect(r.body.input).not.toContain('[SILENT]')
-    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).not.toContain('[SILENT]')
+    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).toContain('Reporter format')
     expect(isScheduleInput(r.body.input) && isScheduleInput(w.body.input)).toBe(true)
     expect(r.body.session_id).toBe('wizard_t1')
     expect(() => s.create({ name: 'x', kind: 'remind', when: { at: 'morning' }, skill: 'k' })).toThrow(/reminder needs/)
@@ -719,7 +846,7 @@ describe('windows, reminders and trickled agent work', () => {
     const admitted: string[] = []
     const status: Record<string, string> = {}
     const s = scheduler(async (o: any) => { admitted.push(o.jobId); status[o.jobId] = 'running'; return { run_id: o.jobId } },
-      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId] }) })
+      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId], output: '[SILENT]' }) })
     const jobs = Array.from({ length: 6 }, (_, i) => s.create({ name: `Work ${i}`, when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: `wizard_w${i}` }))
     const reminders = Array.from({ length: 2 }, (_, i) => s.create({ name: `R ${i}`, kind: 'remind', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'note', thread: `wizard_r${i}` }))
     await s.tick()

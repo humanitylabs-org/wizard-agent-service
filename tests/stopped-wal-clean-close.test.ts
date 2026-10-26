@@ -119,17 +119,17 @@ it.each(['runtipi', 'restricted'])('R6_HOT_JOURNAL: %s crashed rollback-journal 
   for (const mode of ['clean', 'hot']) {
     const s = await scene({ driver }), secondary = await s.create('Offline')
     const home = join(s.agentsDir, secondary.id, 'home')
-    execFileSync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' })
+    await execFileAsync('python3', [join(process.cwd(), 'tests/fixtures/hot-rollback-journal.py'), home, mode, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' })
     const filesBeforeStop = readdirSync(home).sort()
     const stop = await s.call(`/wizard/v1/agents/${secondary.id}/stop`, 'POST', {})
     let catalog: any = null
     try { catalog = JSON.parse(readFileSync(join(s.agentsDir, '.session-catalog.json'), 'utf8')).agents[secondary.id] } catch {}
     const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_secondary_committed', source: 'wizard-mobile' })
     // What the secondary will have when it restarts (SQLite rolls the hot journal back on first open with write access).
-    const recovered = execFileSync('python3', ['-c', `import sqlite3,shutil,tempfile,os,sys
+    const recovered = (await execFileAsync('python3', ['-c', `import sqlite3,shutil,tempfile,os,sys
 d=tempfile.mkdtemp(dir=sys.argv[2])
-[shutil.copy2(os.path.join(sys.argv[1],n), d) for n in os.listdir(sys.argv[1])]
-print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' }).trim()
+[shutil.copy2(os.path.join(sys.argv[1],n), d) for n in os.listdir(sys.argv[1]) if os.path.isfile(os.path.join(sys.argv[1],n))] # only SQLite files, not managed skills/plugins
+print(sqlite3.connect(os.path.join(d,'state.db')).execute("select count(*) from sessions where id='wizard_secondary_committed'").fetchone()[0])`, home, (process.env.TMPDIR || tmpdir())], { encoding: 'utf8' })).stdout.trim()
     rows.push({ mode, filesBeforeStop, stop: stop.status, sealed: Boolean(catalog?.seal), sealHasId: Boolean(catalog?.ids?.includes('wizard_secondary_committed')),
       sealIds: catalog?.ids?.length ?? null, chosen: chosen.status, mainCreated: s.histories.get('hermes')!.has('wizard_secondary_committed'),
       secondaryHasAfterRecovery: recovered === '1', filesAfter: readdirSync(home).sort() })

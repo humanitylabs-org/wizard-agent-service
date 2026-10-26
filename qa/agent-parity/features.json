@@ -36,6 +36,36 @@
   ],
   "features": [
     {
+      "id": "supervisor-reporter",
+      "description": "Every runtime receives the Supervisor spell and six Hermes session-injected tools; standard agents can report through their authenticated transport. Scheduled replies share Reporter validation.",
+      "layer": "server",
+      "how_to_test": "Admit an ordinary run per kind; inspect shared spell, install asset bundle into disposable homes, call report through main loopback or per-agent credential/socket, check service-derived identity and queued review. Verify private/siloed refusal separately before ledger reads.",
+      "source_refs": [
+        "server/supervisor.mjs",
+        "server/reporter.mjs",
+        "server/supervisor-assets.mjs",
+        "hermes-plugin/wizard-supervisor-tools"
+      ],
+      "reference_tests": [
+        "tests/supervisor.test.ts",
+        "tests/reporter.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "supervisor-reporter",
+      "privacy_seal_exemption": "Private and siloed agents refuse all Supervisor tools without sharing. Covered by tests/supervisor.test.ts and per-routed-kind refusal assertions; no standard runtime kind is exempt.",
+      "policy_exemptions": []
+    },
+    {
+      "id": "owner-thread-agent-write-guard",
+      "description": "Reject self-identified agent-to-agent run/chat/steer writes into existing owner threads before runtime side effects; preserve ordinary sends.",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, POST agent-to-agent prefix and NOT-a-James-message inputs through run, steer, chat and chat/stream. Require HTTP 409 agent_to_agent_thread_write and no upstream writes, then accept a normal owner run and list sessions.",
+      "source_refs": ["server/owner-thread-write.mjs", "server/agents-http.mjs", "server/service.mjs"],
+      "reference_tests": ["tests/owner-thread-write.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "fixture": "owner-thread-agent-write-guard",
+      "policy_exemptions": []
+    },
+    {
       "id": "finish-report-instructions",
       "description": "All agent kinds receive the shared finish-report rule immediately before the final status instructions, preserving short-reply and conversational exceptions.",
       "layer": "server",
