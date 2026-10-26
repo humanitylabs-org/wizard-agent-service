@@ -26,10 +26,11 @@ it('seeds marker and missing keys once, preserves existing launcher choices and 
   expect((readUiPreferences(file) as any).launcher).toEqual(first.preferences.launcher)
 })
 it('rejects invalid bounded fields, schemes, duplicate ids, timestamps, unknown keys and prototype tricks', () => {
-  for (const value of [null, [], { extra: [] }, { recents: ['Bad ID'] }, { autoOpen: ['a', 'a'] }, { desktopQuick: Array(101).fill('a') }, { hostedThreadApps: true }, { displayNames: { x: '' } },
-    ...[{ href: 'javascript:alert(1)' }, { href: '//evil/' }, { href: 'file:///x' }, { name: 'x'.repeat(81) }, { icon: 'x'.repeat(161) }, { phoneOnly: 1 }, { colors: ['red'] }, { extra: true }].map(p => ({ nativeLinks: [{ ...launcher.nativeLinks[0], ...p }] })),
+  for (const value of [null, [], { extra: [] }, { recents: ['Bad ID'] }, { recents: ['wizard\n'] }, { displayNames: { 'wizard\n': 'Wizard' } }, { autoOpen: ['a', 'a'] }, { desktopQuick: Array(101).fill('a') }, { hostedThreadApps: true }, { displayNames: { x: '' } },
+    ...[{ href: 'javascript:alert(1)' }, { href: '//evil/' }, { href: 'file:///x' }, { name: 'x'.repeat(81) }, { icon: 'x'.repeat(161) }, { phoneOnly: 1 }, { colors: ['red'] }, { colors: ['#fff\n'] }, { extra: true }].map(p => ({ nativeLinks: [{ ...launcher.nativeLinks[0], ...p }] })),
     { nativeLinks: [launcher.nativeLinks[0], launcher.nativeLinks[0]] }, { nativeLinks: Array(51).fill(launcher.nativeLinks[0]) }, JSON.parse('{"__proto__":[]}')]) expect(() => validateUiPreferences({ launcher: value })).toThrow('invalid_preferences')
-  for (const migrations of [{ a: 'yesterday' }, { a: '2026-02-31T00:00:00Z' }, { a: '2026-10-26T25:00:00Z' }, { 'Bad marker': '2026-10-26T00:00:00Z' }, Object.fromEntries(Array.from({ length: 101 }, (_, i) => ['x'+i, '2026-10-26T00:00:00Z']))]) expect(() => validateUiPreferences({ migrations })).toThrow()
+  for (const migrations of [{ a: 'yesterday' }, { a: '2026-10-26T00:00:00Z\n' }, { 'marker\n': '2026-10-26T00:00:00Z' }, { a: '2026-02-31T00:00:00Z' }, { a: '2026-10-26T25:00:00Z' }, { 'Bad marker': '2026-10-26T00:00:00Z' }, Object.fromEntries(Array.from({ length: 101 }, (_, i) => ['x'+i, '2026-10-26T00:00:00Z']))]) expect(() => validateUiPreferences({ migrations })).toThrow()
+  expect(() => seedUiPreferences(join(home(), 'bad-marker.json'), { ...seed, marker: 'marker\n' })).toThrow('invalid_preferences')
   for (const href of ['https://example.com/', 'tel:', 'sms:', 'intent://#Intent;package=example.app;end']) expect(() => validateUiPreferences({ launcher: { nativeLinks: [{ ...launcher.nativeLinks[0], href }] } })).not.toThrow()
 })
 it('never seeds over corrupt or invalid owner data; failed writes leave no marker', () => {

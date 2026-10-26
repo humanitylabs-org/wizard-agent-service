@@ -17,17 +17,17 @@ const validSpace = s => !!s && typeof s === 'object' && !Array.isArray(s)
   && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(s.name)
   && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length
   && typeof s.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(s.createdAt) && realDate(s.createdAt)
-const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
-const MARKER = /^[a-z0-9][a-z0-9._-]{0,79}$/
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}(?![\s\S])/u
+const MARKER = /^[a-z0-9][a-z0-9._-]{0,79}(?![\s\S])/u
 const text = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\u0000-\u001f\u007f]/u.test(v)
 const ids = v => Array.isArray(v) && v.length <= 100 && v.every(id => typeof id === 'string' && APP_ID.test(id)) && new Set(v).size === v.length
-const iso = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(v) && realDate(v)
+const iso = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z(?![\s\S])/u.test(v) && realDate(v)
 const nativeLink = a => isPlainObject(a) && Object.keys(a).every(k => ['id', 'name', 'icon', 'colors', 'href', 'phoneOnly', 'desc'].includes(k))
   && typeof a.id === 'string' && APP_ID.test(a.id) && text(a.name, 80) && text(a.icon, 160) && text(a.href, 2048)
   && /^(?:https?:\/\/[^\s]+|tel:[+0-9*#;,]*|sms:[+0-9;,]*|intent:(?:\/\/)?#Intent;[^\s]*;end)$/.test(a.href)
   && (!Object.hasOwn(a, 'desc') || text(a.desc, 240))
   && (!Object.hasOwn(a, 'phoneOnly') || typeof a.phoneOnly === 'boolean')
-  && (!Object.hasOwn(a, 'colors') || (Array.isArray(a.colors) && a.colors.length >= 1 && a.colors.length <= 2 && a.colors.every(c => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(c))))
+  && (!Object.hasOwn(a, 'colors') || (Array.isArray(a.colors) && a.colors.length >= 1 && a.colors.length <= 2 && a.colors.every(c => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?(?![\s\S])/iu.test(c))))
 const launcherValidators = {
   nativeLinks: v => Array.isArray(v) && v.length <= 50 && v.every(nativeLink) && new Set(v.map(a => a.id)).size === v.length,
   recents: ids, desktopQuick: ids, autoOpen: ids, hostedThreadApps: ids,
