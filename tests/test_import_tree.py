@@ -104,9 +104,9 @@ class ImportTreeTests(unittest.TestCase):
 
     def test_old_config_formats_and_parse_errors_do_not_leak_values(self):
         cases = {
-            'config.json.old': '{"model": {"apiKey": "synthetic-json-value"}}',
-            'config.toml': '[model]\nclient_secret="synthetic-toml-value"\n',
-            'config.yml': 'headers: {Authorization: synthetic-header-value}\n',
+            'config.json.old': '{"model": {"apiKey": "fake-json-value"}}',
+            'config.toml': '[model]\nclient_secret="fake-toml-value"\n',
+            'config.yml': 'headers: {Authorization: fake-header-value}\n',
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -115,9 +115,9 @@ class ImportTreeTests(unittest.TestCase):
                 p.write_text(text)
                 plan = h.scan(self.home, owner_home=self.owner)
                 self.assertIn('old/' + name, {c['path'] for c in plan['credentials']})
-                self.assertNotIn('synthetic-json-value', json.dumps(plan))
-                self.assertNotIn('synthetic-toml-value', json.dumps(plan))
-                self.assertNotIn('synthetic-header-value', json.dumps(plan))
+                self.assertNotIn('fake-json-value', json.dumps(plan))
+                self.assertNotIn('fake-toml-value', json.dumps(plan))
+                self.assertNotIn('fake-header-value', json.dumps(plan))
         (self.home / 'config.yaml').write_text('model: {api_key: synthetic-bad-value\n')
         out = io.StringIO()
         with contextlib.redirect_stderr(out):
