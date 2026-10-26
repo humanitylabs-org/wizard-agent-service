@@ -222,7 +222,7 @@ def inline_blockers(credentials):
 
 def refuse_inline(credentials):
     blocked = inline_blockers(credentials)
-    require(not blocked, 'inline_credentials_require_secret_store: ' + json.dumps(
+    require(not blocked, 'inline_credentials_require_secret_store: Move these inline credentials into the agent secret store, replace them with supported references, then rescan and approve. Key names only: ' + json.dumps(
         [{'path': c['path'], 'key': c['item']} for c in blocked], sort_keys=True))
 
 

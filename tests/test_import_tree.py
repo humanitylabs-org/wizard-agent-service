@@ -85,13 +85,6 @@ class ImportTreeTests(unittest.TestCase):
         self.assertEqual(tree.detach_hardlinks(self.home), 2)
         self.assertEqual((folder / 'external-alias').stat().st_nlink, 1)
         self.assertNotEqual((folder / 'external-alias').stat().st_ino, outside.stat().st_ino)
-        calls = []
-        def chown(path, uid, gid, **kwargs):
-            calls.append(path)
-            if len(calls) == 17:
-                raise OSError('interrupted fixture')
-            return os_chown(path, uid, gid, **kwargs)
-        os_chown = os.chown
         # Matching entries need no chown at all (including after a restart).
         with patch.object(tree.os, 'chown', side_effect=AssertionError('unnecessary chown')):
             result = tree.ownership(self.home, os.getuid(), os.getgid())
@@ -108,6 +101,68 @@ class ImportTreeTests(unittest.TestCase):
         os.link(outside, self.home / 'shared')
         with self.assertRaisesRegex(ValueError, 'ownership_shared_inode'):
             tree.ownership(self.home, os.getuid(), os.getgid())
+
+    def test_old_config_formats_and_parse_errors_do_not_leak_values(self):
+        cases = {
+            'config.json.old': '{"model": {"apiKey": "synthetic-json-value"}}',
+            'config.toml': '[model]\nclient_secret="synthetic-toml-value"\n',
+            'config.yml': 'headers: {Authorization: synthetic-header-value}\n',
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                p = self.home / 'old' / name
+                p.parent.mkdir(exist_ok=True)
+                p.write_text(text)
+                plan = h.scan(self.home, owner_home=self.owner)
+                self.assertIn('old/' + name, {c['path'] for c in plan['credentials']})
+                self.assertNotIn('synthetic-json-value', json.dumps(plan))
+                self.assertNotIn('synthetic-toml-value', json.dumps(plan))
+                self.assertNotIn('synthetic-header-value', json.dumps(plan))
+        (self.home / 'config.yaml').write_text('model: {api_key: synthetic-bad-value\n')
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            self.assertEqual(h.main(['scan', str(self.home), '--owner-home', str(self.owner), '--out', str(Path(self.tmp.name) / 'plan.json')]), 1)
+        self.assertIn('import_io_or_format_error', out.getvalue())
+        self.assertNotIn('synthetic-bad-value', out.getvalue())
+
+    def test_reown_dispatches_same_tree_code_to_one_constrained_helper(self):
+        import import_tree as tree
+        import restricted_import as restricted
+        def fake_helper(home, code, **kwargs):
+            self.assertEqual(home, self.home)
+            self.assertEqual(kwargs, {'uid': 0, 'privileged': True,
+                'data': {'uid': os.getuid(), 'dry_run': True}, 'timeout': 1800})
+            # This process stands in only for the mount namespace, not walker
+            # logic: execute the exact helper script against a synthetic root.
+            result = subprocess.run([sys.executable, '-c', code.replace("'/opt/data'", repr(str(home)))],
+                input=json.dumps(kwargs['data']), text=True, capture_output=True, check=True)
+            return result
+        with patch.object(restricted, 'helper', side_effect=fake_helper) as helper:
+            result = restricted.reown(self.home, os.getuid(), dry_run=True)
+        helper.assert_called_once()
+        self.assertEqual(result, tree.ownership(self.home, os.getuid(), dry_run=True))
+
+    def test_detach_failure_keeps_original_and_cleans_temporary_file(self):
+        import import_tree as tree
+        outside = self.owner / 'outside'
+        outside.write_text('synthetic')
+        linked = self.home / 'linked'
+        os.link(outside, linked)
+        with patch.object(tree.shutil, 'copyfileobj', side_effect=OSError('fixture disk full')):
+            with self.assertRaisesRegex(OSError, 'fixture disk full'):
+                tree.detach_hardlinks(self.home)
+        self.assertEqual(linked.stat().st_ino, outside.stat().st_ino)
+        self.assertEqual(linked.read_text(), 'synthetic')
+        self.assertEqual(list(self.home.glob('.wizard-import-copy-*')), [])
+        tree.detach_hardlinks(self.home)
+        self.assertNotEqual(linked.stat().st_ino, outside.stat().st_ino)
+
+    def test_ownership_root_symlink_refused(self):
+        import import_tree as tree
+        alias = self.owner / 'alias'
+        alias.symlink_to(self.home, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'ownership_root_symlink'):
+            tree.ownership(alias, os.getuid(), dry_run=True)
 
     def test_ownership_restart_skips_completed_entries(self):
         import import_tree as tree
