@@ -44,10 +44,11 @@ import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import hermes_lock
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
-DEFAULT_IMAGE = "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2"
+DEFAULT_IMAGE = hermes_lock.load()['runtime_image']
 DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
 # The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
 RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
@@ -382,8 +383,7 @@ class RestrictedDriver:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
         env["CLAUDE_TOKEN_FILE"] = ""  # retired path; never trust an inherited override
         image = agent["runtime"].get("image") if agent.get("imported") else self.image
-        if image:
-            env["AGENT_IMAGE"] = image
+        env["AGENT_IMAGE"] = image or DEFAULT_IMAGE
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -829,6 +829,29 @@ def offline_census(driver, agent: dict) -> dict:
     return {**after, "ids": index['ids']}
 
 
+def guard_image_change(driver, agent):
+    """Never converge an existing agent to a different Hermes during config/start.
+
+    Compare immutable local image IDs, not mutable tag spellings. Stop/delivery
+    stay available. Imports have their separately journalled lifecycle.
+    """
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    ids = docker(['ps', '-aq', '--filter', f'label=com.docker.compose.project={driver.project(agent["id"])}',
+                  '--filter', f'label=com.docker.compose.service={service}'], timeout=60).stdout.split()
+    if not ids:
+        return  # first install consumes the exact frozen default
+    if len(ids) != 1:
+        raise RuntimeFailure('hermes_image_identity_ambiguous', 409)
+    current = docker(['inspect', '--format', '{{.Image}}', ids[0]], timeout=60).stdout.strip()
+    target = docker(['image', 'inspect', '--format', '{{.Id}}', DEFAULT_IMAGE], timeout=60, check=False).stdout.strip()
+    if re.fullmatch(r'sha256:[0-9a-f]{64}', current) and current == target:
+        return
+    try:
+        hermes_lock.authorize()
+    except (ValueError, OSError):
+        raise RuntimeFailure('hermes_updates_paused', 409) from None
+
+
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
     if isinstance(driver, ImportDriver):
@@ -844,6 +867,8 @@ def lifecycle_action(driver, agent: dict, action: str) -> dict:
         return inspect_runtime(driver, agent)[0]
     if action == 'census':
         return offline_census(driver, agent)
+    if action in ('apply', 'start') and not agent.get('imported') and isinstance(driver, (ComposeDriver, RuntipiDriver, RestrictedDriver)):
+        guard_image_change(driver, agent)
     result = getattr(driver, action)(agent)
     if action == 'stop' and result.get('ok') is not False:
         try:
@@ -1181,6 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
     args = ap.parse_args(argv)
+    if args.image != DEFAULT_IMAGE or os.environ.get('WIZARD_RESTRICTED_AGENT_IMAGE', DEFAULT_IMAGE) not in ('', DEFAULT_IMAGE):
+        ap.error('Hermes image differs from the shared exact lock; use a reviewed coordinated promotion')
     if not args.token_file:
         ap.error("--token-file is required for the HTTP helper")
     token = args.token_file.read_text().strip()
