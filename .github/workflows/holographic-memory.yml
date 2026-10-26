@@ -36,7 +36,8 @@ jobs:
       - name: Stock fact add, restart recall, native backup and Wizard import recall
         run: |
           mkdir -p "$RUNNER_TEMP/memory-proof"
-          TMPDIR="$RUNNER_TEMP/memory-proof" .proof-venv/bin/python tests/holographic_container_proof.py | tee memory-proof.json
+          TMPDIR="$RUNNER_TEMP/memory-proof" .proof-venv/bin/python tests/holographic_container_proof.py > memory-proof.json
+          .proof-venv/bin/python -m json.tool memory-proof.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: holographic-memory-proof

@@ -70,6 +70,12 @@ home, applies real Wizard import wiring, and recalls/prefetches there. Both test
 containers and volumes are deleted and cleanup is verified. No inference calls,
 owner-home mounts, live Service/gateway restart, or deployment occurs.
 
+It also repeats stock tool injection/add/recall/restart/prefetch for isolated
+main-home, named host-profile and managed-container scopes; these are disposable
+stock runtime scopes, not a claim of live Wizard transport coverage. The contract
+is indexed in `qa/agent-parity/features.json`. All disposable homes and volumes
+are removed, with cleanup verified.
+
 This is a deterministic tool/prefetch integration proof, not a paid model-chat
 quality evaluation. A fact lives in the durable provider DB, not necessarily in
 always-loaded `MEMORY.md`.

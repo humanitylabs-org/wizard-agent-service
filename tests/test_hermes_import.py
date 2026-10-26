@@ -606,6 +606,7 @@ class ImportTests(unittest.TestCase):
         cfg['memory'].pop('provider')  # Wizard supplies the absent default.
         cfg['plugins'] = {'hermes-memory-store': {'db_path': str(database), 'hrr_dim': 2048}}
         (self.home / 'config.yaml').write_text(yaml.safe_dump(cfg))
+        self.assertEqual(self.plan()['summary']['memory_provider'], 'holographic')
         result = self.apply()
         target = self.wizard / 'agents/fixture-agent/home'
         wired = m.load_yaml((target / 'config.yaml').read_text())
@@ -634,6 +635,13 @@ class ImportTests(unittest.TestCase):
             cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
             with self.assertRaisesRegex(m.ImportFailure, 'memory_path_outside_home'):
                 m.configure_memory(cfg, plan)
+
+    def test_holographic_rejects_paths_that_import_quarantines_or_prunes(self):
+        for path in ('cache/facts.db', 'backups/facts.db', 'plugins/unapproved/facts.db',
+                     'profiles/other/facts.db', 'hooks/facts.db', 'data/apps/facts.db'):
+            cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
+            with self.assertRaisesRegex(m.ImportFailure, 'memory_path_not_portable'):
+                m.configure_memory(cfg, self.plan())
 
     def test_holographic_is_exposed_in_an_imported_api_allowlist(self):
         cfg = {'plugins': {'enabled': ['other']}, 'platform_toolsets': {'api_server': ['terminal'], 'cli': ['skills']}}

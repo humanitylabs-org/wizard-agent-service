@@ -78,6 +78,38 @@ finally: m.shutdown_all()
 '''
 
 
+def scope_parity(kind, config):
+    """Stock main/profile home semantics in disposable containers, not live host routing."""
+    home = {'main': '/opt/data/.hermes', 'host-profile': '/opt/data/.hermes/profiles/proof', 'container': '/opt/data'}[kind]
+    name = f'wizard-memory-{kind}-' + secrets.token_hex(5)
+    volume = name + '-home'
+    try:
+        docker('volume', 'create', volume)
+        docker('run', '--rm', '--network', 'none', '--user', '0:0', '--entrypoint', 'chown', '-v', volume + ':/opt/data', IMAGE, '10000:10000', '/opt/data')
+        docker('run', '--rm', '-i', '--network', 'none', '--user', '10000:10000', '-v', volume + ':/opt/data', '--entrypoint', PYTHON, IMAGE, '-c',
+               "import sys; from pathlib import Path; p=Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); (p/'config.yaml').write_text(sys.stdin.read())", home, input=config)
+        docker('run', '-d', '--name', name, '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+               '--security-opt', 'no-new-privileges:true', '--user', '10000:10000', '--memory', '1g', '--pids-limit', '128',
+               '--tmpfs', '/tmp:rw,nosuid,nodev,size=128m,mode=1777', '-v', volume + ':/opt/data',
+               '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=' + home, '-e', 'API_SERVER_ENABLED=true',
+               '-e', 'API_SERVER_HOST=127.0.0.1', '-e', 'API_SERVER_KEY=synthetic-memory-test-key-not-a-credential',
+               '--entrypoint', '/opt/hermes/.venv/bin/hermes', IMAGE, 'gateway', 'run')
+        healthy(name)
+        before = json.loads(docker('exec', name, PYTHON, '-c', PROBE, 'add', FACT).strip().splitlines()[-1])
+        first = json.loads(docker('inspect', name))[0]['State']['StartedAt']
+        docker('restart', '--time', '20', name)
+        healthy(name)
+        assert first != json.loads(docker('inspect', name))[0]['State']['StartedAt']
+        after = json.loads(docker('exec', name, PYTHON, '-c', PROBE, 'recall', FACT).strip().splitlines()[-1])
+        return {'kind': kind, 'hermes_home': home, 'before_restart': before, 'after_restart': after, 'restart_verified': True,
+                'evidence_scope': 'stock runtime home/tool behavior; not live Wizard transport'}
+    finally:
+        subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
+        subprocess.run(['docker', 'volume', 'rm', volume], capture_output=True)
+        assert name not in docker('ps', '-a', '--format', '{{.Names}}').splitlines()
+        assert volume not in docker('volume', 'ls', '--format', '{{.Name}}').splitlines()
+
+
 def main():
     suffix = secrets.token_hex(5)
     names = [f'wizard-memory-proof-{suffix}', f'wizard-memory-import-{suffix}']
@@ -115,8 +147,8 @@ console.log(hermesConfigYaml({id:'cobalt-proof',privacy:'standard',model:{provid
             assert first['State']['StartedAt'] != second['State']['StartedAt']
             report['restart_verified'] = True
             report['after_restart'] = probe(names[0], 'recall')
-            docker('exec', names[0], PYTHON, '-c', "from pathlib import Path; from hermes_cli.backup import _write_full_zip_backup; assert _write_full_zip_backup(Path('/tmp/facts.zip'),Path('/opt/data'))")
-            docker('cp', names[0] + ':/tmp/facts.zip', str(temp / 'facts.zip'))
+            docker('exec', names[0], PYTHON, '-c', "from pathlib import Path; from hermes_cli.backup import _write_full_zip_backup; assert _write_full_zip_backup(Path('/opt/data/backups/facts.zip'),Path('/opt/data'))")
+            docker('cp', names[0] + ':/opt/data/backups/facts.zip', str(temp / 'facts.zip'))
             import zipfile
             with zipfile.ZipFile(temp / 'facts.zip') as archive:
                 assert 'memory_store.db' in archive.namelist()
@@ -142,6 +174,10 @@ console.log(hermesConfigYaml({id:'cobalt-proof',privacy:'standard',model:{provid
             assert all((m['Type']=='volume' and m['Name']==volumes[0]) or (m['Type']=='tmpfs' and m['Destination']=='/tmp') for m in mounts)
             assert second['HostConfig']['ReadonlyRootfs'] and second['Config']['User']=='10000:10000'
             report['isolated_nonroot_readonly_container'] = True
+            report['runtime_kinds'] = {'restricted': {'before_restart': report['before_restart'], 'after_restart': report['after_restart'], 'restart_verified': True}}
+            for kind in ('main', 'host-profile', 'container'):
+                report['runtime_kinds'][kind] = scope_parity(kind, config)
+            assert set(report['runtime_kinds']) == {'main', 'host-profile', 'container', 'restricted'}
     finally:
         for name in names:
             subprocess.run(['docker', 'rm', '-f', name], capture_output=True)

@@ -321,7 +321,7 @@ def scan(source, *, owner_home=None):
             'dependencies': sorted(deps.values(), key=lambda d: (d['kind'], d['path'])),
             'summary': {'portable_bytes': sum(n for _, n, _ in rows), 'files': len(rows),
                         'sessions': sessions, 'state_db_bytes': next((n for r, n, _ in rows if r == 'state.db'), 0),
-                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'builtin'),
+                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'holographic'),
                         'skills': sum(p.startswith('skills/') and p.endswith('/SKILL.md') for p in paths),
                         'model': {k: v for k, v in (cfg.get('model') or {}).items() if k in {'provider', 'default'}},
                         'plugins': sorted({p.split('/')[1] for p in paths if p.startswith('plugins/') and len(p.split('/')) > 2}),
@@ -643,6 +643,11 @@ def configure_memory(cfg, plan):
     require(relative and '..' not in Path(relative).parts and not Path(relative).is_absolute()
             and '$' not in relative, 'memory_path_outside_home')
     assert isinstance(relative, str)  # require() above raises for None
+    parts = Path(relative).parts
+    require(parts and not excluded(relative) and parts[0] not in {'profiles', 'hooks'}
+            and parts[:2] != ('data', 'apps')
+            and (parts[0] != 'plugins' or (len(parts) > 2 and parts[1] in plan.get('approved_plugins', []))),
+            'memory_path_not_portable')
     settings['db_path'] = '$HERMES_HOME/' + relative
 
 
