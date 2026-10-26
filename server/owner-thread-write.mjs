@@ -12,7 +12,9 @@ export function inputText(value) {
 }
 export function isAgentToAgentRequest(input) {
   const text = inputText(input).trim()
-  return text.startsWith(AGENT_TO_AGENT_PREFIX) || text.includes('NOT a James message')
+  // The marker is a header, so only the first line counts. A report that merely quotes the phrase (26 Oct
+  // 2026: a Supervisor builder's completion report) must still reach its own Supervisor review thread.
+  return text.startsWith(AGENT_TO_AGENT_PREFIX) || text.split('\n', 1)[0].includes('NOT a James message')
 }
 export class OwnerThreadWriteError extends Error {
   constructor() {

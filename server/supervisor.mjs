@@ -261,7 +261,10 @@ export class Supervisor {
           const receipt = await this.deliver(JSON.parse(row.data))
           if (!receipt?.run_id) throw new Error('admission missing run')
           this.db.prepare('UPDATE supervisor_outbox SET receipt=? WHERE key=?').run(JSON.stringify(receipt), row.key)
-        } catch { /* Durable frozen input + stable idempotency key survive ambiguous admission. */ }
+        } catch (error) {
+          // Durable frozen input + stable idempotency key survive ambiguous admission; say why it is waiting.
+          console.error(`[supervisor] delivery pending ${row.key}: ${error?.status || ''} ${String(error?.message || error).slice(0, 200)}`)
+        }
       }
     })().finally(() => { this.inflight = null })
     return this.inflight
