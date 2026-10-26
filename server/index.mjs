@@ -1,3 +1,4 @@
+import { browserBoundaryFromEnv } from './browser-boundary.mjs'
 import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
@@ -133,6 +134,7 @@ server = createWizardServer({
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
 
   requireAccess,
+  browserBoundary: browserBoundaryFromEnv(),
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
