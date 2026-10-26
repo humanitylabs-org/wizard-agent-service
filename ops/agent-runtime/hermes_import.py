@@ -30,9 +30,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
+import hermes_lock
 
 SCHEMA = 1
-IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
+IMAGE = hermes_lock.load()['runtime_image']
 OUTSIDE_TOOLS = 'web search browser x_search vision video image_gen video_gen tts delegation connections homeassistant spotify'.split()
 TOOLS = 'git gh ssh node npm python3 uv sqlite3 curl jq rg bw op systemctl docker'.split()
 # Directory names, at a home root (also applied to named profile roots).
