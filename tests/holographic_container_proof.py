@@ -82,6 +82,11 @@ def scope_parity(kind, config):
     """Stock main/profile home semantics in disposable containers, not live host routing."""
     home = {'main': '/opt/data/.hermes', 'host-profile': '/opt/data/.hermes/profiles/proof', 'container': '/opt/data'}[kind]
     name = f'wizard-memory-{kind}-' + secrets.token_hex(5)
+    # A real host profile normally attaches to its host's multiplex gateway.
+    # This throwaway has no host gateway; use stock standalone mode to keep the
+    # memory-home contract test self-contained, without creating a host service.
+    if kind == 'host-profile':
+        config += '\ngateway:\n  standalone: true\n  multiplex_profiles: false\n'
     volume = name + '-home'
     try:
         docker('volume', 'create', volume)
@@ -103,6 +108,9 @@ def scope_parity(kind, config):
         after = json.loads(docker('exec', name, PYTHON, '-c', PROBE, 'recall', FACT).strip().splitlines()[-1])
         return {'kind': kind, 'hermes_home': home, 'before_restart': before, 'after_restart': after, 'restart_verified': True,
                 'evidence_scope': 'stock runtime home/tool behavior; not live Wizard transport'}
+    except BaseException as error:
+        logs = subprocess.run(['docker', 'logs', name], text=True, capture_output=True)
+        raise RuntimeError(f'{kind}: {error}; gateway logs: {logs.stdout[-6000:]} {logs.stderr[-6000:]}') from error
     finally:
         subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
         subprocess.run(['docker', 'volume', 'rm', volume], capture_output=True)
