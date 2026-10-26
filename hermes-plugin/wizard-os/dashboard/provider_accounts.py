@@ -216,7 +216,9 @@ def provider_accounts(provider, read=None, fetch=None):
         extra = {}
         # A short one-way hash of the exact email lets the connection app tell "the same account" apart from two
         # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
-        exact = str(raw or (row.get('label') if '@' in str(row.get('label') or '') else '') or '').strip().lower()
+        # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
+        # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
+        exact = str(raw or '').strip().lower()
         if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
             extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
         state = str(row.get('last_status') or 'ready')
