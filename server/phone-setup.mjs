@@ -8,7 +8,9 @@
 //   signin       the owner must open auth_url and sign in to Tailscale
 //   https        signed in; Serve is not on yet (https_enable_url, when present, turns HTTPS on for the tailnet)
 //   serving      https://<this box>.<tailnet>.ts.net/ answers through Tailscale Serve
-//   phone_seen   the owner's phone reached it (or an iOS/Android device of the owner is online)
+//   phone_seen   the owner's phone opened Wizard through the address (a verified owner request from a phone).
+//                A phone that is merely online on the tailnet is not connected: it may not have the Wizard app or
+//                address yet, so it is only listed in `phones`.
 //
 // Once serving, it records the address and owner in Wizard OS settings (network.base_url, network.aliases,
 // access.tailscale) through updateSettings, so tailnet-access.mjs authorizes the owner's phone without a
@@ -233,11 +235,6 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     if (current?.backend_state === 'Running' && current.serve?.on && statusOrigin(current) && settings().setup.phone_started_at) {
       try {
         recordServing(current)
-        const saved = settings()
-        if (!saved.setup.phone_seen_at && saved.access.tailscale.origin
-          && (Array.isArray(current.peers) ? current.peers : []).some((peer) => isPhone(peer) && peer.online === true)) {
-          markSetup('phone_seen_at', nowIso(now))
-        }
       } catch (e) { error = error || e?.code || 'settings_unavailable' }
     }
     return view(current, error)
