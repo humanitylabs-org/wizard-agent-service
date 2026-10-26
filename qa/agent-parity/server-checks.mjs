@@ -67,6 +67,8 @@ export const serverChecks = {
     assert.equal(noContentType.status, 409, 'a non-JSON content-type cannot bypass admission')
     assert.equal(s.seen.filter(r => r.method === 'POST').length, before, 'rejected writes never reach Hermes')
     await admit(s, { input: 'Normal owner request remains accepted' })
+    // A report that only quotes the marker below its first line (a Supervisor update) is admitted on every kind.
+    await admit(s, { input: '[supervisor update]\n{"what_happened":"resolved the \'NOT a James message\' finding"}' })
     assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
   },
   'finish-report-instructions': async s => {
