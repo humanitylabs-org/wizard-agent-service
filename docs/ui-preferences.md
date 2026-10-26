@@ -48,8 +48,10 @@ PUT replaces the launcher object, just as it replaces a spaces array. It accepts
 Markers match `[a-z0-9][a-z0-9._-]{0,79}`; timestamps must name real calendar dates.
 The existing 5 MiB request/file limit still applies; no app data or settings schema is changed.
 
-`POST /wizard/v1/ui-preferences/seed` accepts exactly `{marker,launcher}`. Same owner
-access, JSON Content-Type, cross-site refusal and byte bounds as PUT. A missing marker
+`POST /wizard/v1/ui-preferences/seed` accepts exactly `{marker,launcher}`. It explicitly
+requires an owner principal (including the configured gateway owner proof); access verification,
+JSON Content-Type, cross-site refusal and byte bounds apply as on PUT. Existing GET/PUT
+access behavior is unchanged. A missing marker
 fills **only absent launcher keys**, preserving existing owner choices (including empty
 arrays), existing fields and unknown future stored fields. The server timestamps the
 marker and commits both marker and data with one restricted-mode atomic rename.
