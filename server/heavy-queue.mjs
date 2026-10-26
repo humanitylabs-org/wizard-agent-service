@@ -1,3 +1,4 @@
+import { heavyHost, heavyHostConfigs } from './heavy-hosts.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, posix } from 'node:path'
@@ -11,10 +12,10 @@ const fail = (message, status = 400) => Object.assign(new Error(message), { stat
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
 
 /** One short SSH RPC, never a build/wait held inside the HTTP request. */
-export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3' }) {
+export function heavySshTransport({ host, script, root, lock, python = '/opt/homebrew/bin/python3', workRoot, settings }) {
   if (!host || !script || !root || !lock) throw new Error('heavy worker configuration incomplete')
   return payload => new Promise((resolve, reject) => {
-    const heavyRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    const heavyRoot = workRoot ?? (process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT)
     if (!heavyRoot || !posix.isAbsolute(heavyRoot)) return reject(fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503))
     // Operator-only allowlist: never forward the bridge's tokens or ambient env.
     const forwarded = [`WIZARD_HEAVY_ROOT=${heavyRoot}`]
@@ -24,7 +25,7 @@ export function heavySshTransport({ host, script, root, lock, python = '/opt/hom
       WIZARD_HEAVY_DOCKER_HOST: value => value.startsWith('unix:///') && value.length > 8 && !/[\x00-\x20\x7f]/.test(value) && !value.slice(7).split('/').includes('..'),
     }
     for (const [name, valid] of Object.entries(rules)) {
-      const value = process.env[name]
+      const value = settings ? settings[name] : process.env[name]
       if (value === undefined) continue
       if (!valid(value)) return reject(fail(`invalid heavy worker setting: ${name}`, 503))
       forwarded.push(`${name}=${value}`)
@@ -42,6 +43,18 @@ export function heavySshTransport({ host, script, root, lock, python = '/opt/hom
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify(payload))
   })
+}
+
+/** Route every action, including status/cancel, to the persisted host only. */
+export function heavyHostTransport(configs = heavyHostConfigs(), factory = heavySshTransport) {
+  const transports = new Map()
+  return payload => {
+    const host = heavyHost(payload)
+    if (!configs[host] || (host !== 'thales' && !posix.isAbsolute(configs[host].workRoot || ''))) throw fail('heavy host not configured', 503)
+    if (!transports.has(host)) transports.set(host, factory(configs[host]))
+    const { host: _host, ...remote } = payload
+    return transports.get(host)(remote)
+  }
 }
 
 export function heavyRpcTransport({ origin, token }) {
@@ -105,7 +118,8 @@ export class DurableHeavyQueue {
   submit({ sessionId, origin, key, spec, route = {}, routeState, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
     if (!validAgentId(agent_id)) throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
-    const configuredRoot = process.env.WIZARD_HEAVY_ROOT || process.env.WIZARD_WORK_ROOT
+    const host = heavyHost(spec)
+    const configuredRoot = heavyHostConfigs()[host]?.workRoot
     if (!configuredRoot || !posix.isAbsolute(configuredRoot)) throw fail('heavy lane not configured: set WIZARD_HEAVY_ROOT', 503)
     const root = posix.resolve(configuredRoot)
     const cwd = typeof spec?.cwd === 'string' && posix.isAbsolute(spec.cwd) ? posix.resolve(spec.cwd) : ''
@@ -113,6 +127,8 @@ export class DurableHeavyQueue {
       || !Array.isArray(spec.argv) || spec.argv.length < 1 || spec.argv.length > 100
       || spec.argv.some(s => typeof s !== 'string' || !s || s.length > 8192 || s.includes('\0'))
       || !Number.isInteger(spec.timeout_seconds) || spec.timeout_seconds < 1 || spec.timeout_seconds > 86400) throw fail('invalid heavy command')
+    // Explicit default is identical to omission, including existing hashes.
+    if (spec.host === 'thales') { const { host: _host, ...legacy } = spec; spec = legacy }
     const requestHash = hash(spec)
     const existing = this.db.prepare('SELECT * FROM heavy_jobs WHERE agent_id=? AND session=? AND origin=? AND key=?').get(agent_id, sessionId, origin, key)
     if (existing) {
@@ -120,7 +136,7 @@ export class DurableHeavyQueue {
       return JSON.parse(existing.data)
     }
     if (this.rows().filter(job => job.agent_id === agent_id && !terminal.has(job.state)).length >= activeLimit) throw fail('agent heavy capacity exceeded', 429)
-    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id, session_id: sessionId, origin, spec, route, watermark,
+    const job = { job_id: `heavy_${randomUUID().replaceAll('-', '')}`, sessionId, agent_id, session_id: sessionId, origin, spec, host, route, watermark,
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
       remote_ack: false, resume: '', continuation_invalidated: false, receipt: null,
       ...(routeState ? { route_state: routeState } : {}),
@@ -145,8 +161,8 @@ export class DurableHeavyQueue {
     for (const job of this.rows()) if (job.sessionId === sessionId && (job.agent_id ?? 'hermes') === agentId) this.save({ ...job,
       continuation_invalidated: true, resume: job.resume || 'suppressed' })
   }
-  summary() {
-    const rows = this.rows()
+  summary(host) {
+    const rows = this.rows().filter(job => !host || (job.host ?? 'thales') === host)
     const workerState = rows.some(r => !terminal.has(r.state) && r.reason === 'worker_unavailable') ? 'unavailable'
       : rows.some(r => r.state === 'running') ? 'running'
         : rows.some(r => r.state === 'queued' && r.reason === 'worker_busy') ? 'busy_external'
@@ -156,7 +172,8 @@ export class DurableHeavyQueue {
       worker_state: workerState,
       queued: rows.filter(r => r.state === 'queued').length,
       unavailable: rows.some(r => !terminal.has(r.state) && r.reason === 'worker_unavailable'),
-      cancellation_pending: rows.filter(r => r.cancel_requested && !terminal.has(r.state)).length }
+      cancellation_pending: rows.filter(r => r.cancel_requested && !terminal.has(r.state)).length,
+      ...(!host ? { hosts: Object.fromEntries([...new Set([...Object.keys(heavyHostConfigs()), ...rows.map(job => job.host ?? 'thales')])].map(name => [name, this.summary(name)])) } : {}) }
   }
   start() {
     if (this.closed) return this
@@ -175,8 +192,10 @@ export class DurableHeavyQueue {
     if (!this.busy) this.busy = this._tick().finally(() => { this.busy = null })
     return this.busy
   }
-  async _tick() {
-    for (const snapshot of this.rows()) {
+  async _pollHost(snapshots, host) {
+    // Preserve legacy RPC bytes when the default host is omitted.
+    const transport = payload => this.transport(host === 'thales' ? payload : { ...payload, host })
+    for (const snapshot of snapshots) {
       if (this.closed) return
       let job = this.get(snapshot.job_id)
       if (!terminal.has(job.state)) {
@@ -186,10 +205,10 @@ export class DurableHeavyQueue {
           if (job.cancel_requested) {
             // cancel-before-submit is a durable local tombstone; status resolves
             // ambiguous submissions before deciding no remote cancellation is needed.
-            remote = await this.transport({ action: 'status', job_id: job.job_id })
-            if (remote) remote = await this.transport({ action: 'cancel', job_id: job.job_id })
+            remote = await transport({ action: 'status', job_id: job.job_id })
+            if (remote) remote = await transport({ action: 'cancel', job_id: job.job_id })
             else remote = { job_id: job.job_id, state: 'cancelled', reason: '', receipt: null }
-          } else remote = await this.transport(job.remote_ack
+          } else remote = await transport(job.remote_ack
             ? { action: 'status', job_id: job.job_id }
             : { action: 'submit', job_id: job.job_id, spec: job.agent_id && job.agent_id !== 'hermes'
               ? { ...job.spec, agent_id: job.agent_id } : job.spec })
@@ -204,6 +223,15 @@ export class DurableHeavyQueue {
         }
       }
     }
+  }
+  async _tick() {
+    const groups = new Map()
+    for (const job of this.rows()) {
+      const host = job.host ?? 'thales'
+      if (!groups.has(host)) groups.set(host, [])
+      groups.get(host).push(job)
+    }
+    await Promise.all([...groups].map(([host, jobs]) => this._pollHost(jobs, host)))
     // Finish every worker RPC first. Slow origins cannot delay another dispatch.
     await Promise.all(this.rows().filter(job => job.route_state === 'pending_origin'
       && !job.resume && !job.cancel_requested && !job.continuation_invalidated).map(async job => {

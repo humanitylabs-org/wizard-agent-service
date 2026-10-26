@@ -201,6 +201,8 @@ def validate(spec):
         raise ValueError('invalid command')
     if not isinstance(spec.get('timeout_seconds'), int) or not 1 <= spec['timeout_seconds'] <= 86400:
         raise ValueError('invalid deadline')
+    if spec.get('host', 'thales') not in ('thales', 'forum'):
+        raise ValueError('invalid host')
     lane = spec.get('lane', 'heavy')
     if lane not in LANES:
         raise ValueError('invalid lane')
@@ -302,7 +304,7 @@ def finish(db, root, row, state, code=None, reason=''):
         with log.open('rb') as stream:
             for block in iter(lambda: stream.read(65536), b''):
                 digest.update(block)
-    receipt = {'job_id': row['id'], 'state': state, 'exit_code': code,
+    receipt = {'job_id': row['id'], 'host': json.loads(row['spec']).get('host', 'thales'), 'state': state, 'exit_code': code,
                'finished_at': time.time(), 'log_path': str(log),
                'log_sha256': digest.hexdigest(), 'reason': reason,
                'spec_sha256': hashlib.sha256(row['spec'].encode()).hexdigest()}
@@ -438,7 +440,13 @@ def rpc(root, lock_path, value):
             db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), job_id))
     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
     db.close()
-    # Every RPC ensures each existing lane has a dispatcher (submit/exit races).
+    ensure_dispatchers(root, lock_path)
+    return public(row)
+
+
+def ensure_dispatchers(root, lock_path):
+    # Every RPC (and optional host supervisor) recovers every existing spool.
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     spawn_dispatcher(root, lock_path)
     if (light_root(root) / 'jobs.sqlite3').exists():
         spawn_dispatcher(light_root(root), light_lock(root))
@@ -448,7 +456,6 @@ def rpc(root, lock_path, value):
     if (light_root(agent_spool(root)) / 'jobs.sqlite3').exists():
         light_root(root).mkdir(mode=0o700, exist_ok=True)
         spawn_dispatcher(light_root(agent_spool(root)), light_lock(root))
-    return public(row)
 
 
 if __name__ == '__main__':
@@ -457,6 +464,7 @@ if __name__ == '__main__':
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--lock', required=True, type=Path)
     parser.add_argument('--dispatch', action='store_true')
+    parser.add_argument('--serve', action='store_true', help='recover all spools periodically; optional host service')
     parser.add_argument('--execute')
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
@@ -473,6 +481,10 @@ if __name__ == '__main__':
         execute(args.root, args.execute, args.worker_fd, args.execution_fd)
     elif args.dispatch:
         dispatch(args.root, args.lock)
+    elif args.serve:
+        while True:
+            ensure_dispatchers(args.root, args.lock)
+            time.sleep(5)
     else:
         try:
             print(json.dumps(rpc(args.root, args.lock, json.load(sys.stdin))))
