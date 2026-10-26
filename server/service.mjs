@@ -4414,7 +4414,7 @@ function buildWizardServer(options, lifetime) {
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, 'POST', { 'X-Wizard-Schedule-Kind': occurrence.kind,
         ...(occurrence.kind === 'watch' ? { 'X-Wizard-Watcher-Preserve': wasArchived ? '1' : '0' } : {}) })
-      if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
+      if (!run.ok) throw Object.assign(new Error(`schedule admission failed: ${String(run.payload?.error?.message || run.payload?.error || run.payload?.message || '').slice(0, 160)}`), { status: run.status })
       return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
     }
   const lookupBackgroundOccurrence = async (occurrence, receipt) => {
