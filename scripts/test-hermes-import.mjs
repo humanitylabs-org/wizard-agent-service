@@ -1,9 +1,11 @@
 // Lightweight importer regression tests; no Docker, account or live Service access.
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-const root = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'hermes-import-test-'))
+// Resolved: macOS temp folders sit behind symlinks (/var, /tmp -> /private/...), which the importer and recovery
+// correctly refuse as symlink_path.
+const root = realpathSync(mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'hermes-import-test-')))
 try {
   for (const name of ['home', 'hermes', 'wizard', 'tmp']) mkdirSync(join(root, name))
   const env = { ...process.env, HOME: join(root, 'home'), HERMES_HOME: join(root, 'hermes'),

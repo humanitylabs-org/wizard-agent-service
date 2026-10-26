@@ -387,6 +387,7 @@ class ImportTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN="fixture-secret"', (self.home / '.env').read_text())
         self.assertTrue(json.loads((self.home / 'cron/jobs.json').read_text())['jobs'][0]['enabled'])
         self.assertTrue(m.load_yaml((self.home / 'config.yaml').read_text())['gateway']['platforms']['telegram']['enabled'])
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'the writer census reads /proc/<pid>/fd and F_SETLEASE: Linux only')
     def test_live_writable_fd_refuses_move(self):
         # A different process, same owner, holding a writable FD blocks rename even for rehearsal.
         import subprocess, sys
