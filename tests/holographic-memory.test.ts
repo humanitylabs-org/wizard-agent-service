@@ -13,6 +13,9 @@ for (const privacy of ['standard', 'private']) {
       expect(cfg.memory).toEqual({ provider: 'holographic', memory_enabled: true, user_profile_enabled: true,
         user_char_limit: 1234, memory_char_limit: 5678 })
       expect(cfg.plugins.enabled).toContain('holographic')
+      // An explicit allowlist suppresses Hermes' first-load grandfathering.
+      // Keep the Service-owned plugin installed by installSupervisorAssets on.
+      expect(cfg.plugins.enabled).toContain('wizard-supervisor-tools')
       expect(cfg.plugins['hermes-memory-store']).toEqual({ db_path: '$HERMES_HOME/memory_store.db', auto_extract: false })
       expect(cfg.agent.disabled_toolsets).not.toContain('memory')
       expect(cfg.agent.disabled_toolsets).not.toContain('holographic')

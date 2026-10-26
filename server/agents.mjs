@@ -417,7 +417,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   if (agent.memory?.notes_chars) lines.push(`  memory_char_limit: ${agent.memory.notes_chars}`)
   // Stock Hermes ships this provider in the pinned runtime image. Keep state in
   // this agent's persisted home, never the image layer or the Service's home.
-  lines.push('plugins:', '  enabled: [holographic]', '  hermes-memory-store:',
+  lines.push('plugins:', '  enabled: [holographic, wizard-supervisor-tools]', '  hermes-memory-store:',
     '    db_path: "$HERMES_HOME/memory_store.db"', '    auto_extract: false')
   return `${lines.join('\n')}\n`
 }

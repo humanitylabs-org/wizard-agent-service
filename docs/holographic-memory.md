@@ -7,7 +7,8 @@ NEW: No runtime, database, memory service, core Hermes patch, or UI component. O
 ## Contract
 
 Every new Service-managed Hermes container selects `memory.provider: holographic`,
-explicitly enables `holographic`, and configures
+explicitly enables `holographic` alongside the existing `wizard-supervisor-tools`,
+and configures
 `plugins.hermes-memory-store.db_path: "$HERMES_HOME/memory_store.db"`.
 The pinned stock runtime already packages this provider; the derivative image
 build checks availability. Nothing is downloaded into an agent at startup.
