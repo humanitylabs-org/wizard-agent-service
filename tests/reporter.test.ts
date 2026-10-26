@@ -77,7 +77,7 @@ describe('scheduled corrective run is durable and bounded', () => {
   it.each(['run', 'watch'])('does not apply the reporter retroactively to old %s occurrences after restart', async kind => {
     const f = fixture()
     const j = f.s.create({ name: 'Old check', kind, when: { every: 1 }, prompt: 'Check', thread: 'old-thread' })
-    await f.s.tick()
+    await f.s.runNow(j.id)
     const row = f.s.latest(j.id), old = JSON.parse(row.data)
     delete old.report
     old.body.input = 'Original pre-upgrade instructions'
@@ -94,7 +94,7 @@ describe('scheduled corrective run is durable and bounded', () => {
       const notices: any[] = [], restored: any[] = []
       const f = fixture({ notifier: { send: async (n: any) => notices.push(n) }, onWatchResult: async (_j: any, run: any) => restored.push(run) })
       const j = f.s.create({ name: 'Check', kind, when: { every: 1 }, prompt: 'Check', thread: 'original-thread', deliver: kind === 'run' ? 'notification' : 'thread' })
-      await f.s.tick()
+      await f.s.runNow(j.id)
       const original = { status: 'completed', output: 'The original check succeeded.', started_at: '2026-10-25T12:00:00Z', finished_at: '2026-10-25T12:00:10Z' }
       f.results.set(f.calls[0].key, original)
       await f.s.refreshRuns(); expect(f.calls).toHaveLength(2)
