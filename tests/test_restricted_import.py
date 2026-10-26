@@ -41,7 +41,7 @@ class RestrictedImportTests(unittest.TestCase):
                 base = Path(mount.split('src=', 1)[1].split(',dst=')[0])
                 (base / '.import-transfer/home').rename(base / 'home')
             return type('Result', (), {'stdout': '', 'returncode': 0})()
-        self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown'), patch.object(r, 'helper'),
+        self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown', return_value={'entries': 1, 'changed': 1}), patch.object(r, 'helper'),
                       patch.object(r.rt.RestrictedDriver, 'start', return_value={'ok': True}),
                       patch.object(r, 'health'), patch.object(r, 'prepare_socket')]
         for p in self.mocks:
@@ -149,6 +149,82 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertFalse((folder / 'home/native-home/.ssh').exists())
         h.undo(result['journal'])
         self.assertTrue(hosts.is_file())
+
+    @LINUX_ONLY
+    def test_many_file_home_archives_profiles_detaches_links_and_resumes_seal(self):
+        folder = self.home / 'many'
+        folder.mkdir()
+        for i in range(1000):
+            (folder / str(i)).write_text('synthetic')
+        external = self.owner / 'external'
+        external.write_text('unchanged')
+        os.link(external, self.home / 'external-alias')
+        os.link(self.home / 'config.yaml', self.home / 'config-alias')
+        for bundle in ['profiles', 'profiles-retired']:
+            profile = self.home / bundle / 'old'
+            profile.mkdir(parents=True)
+            (profile / 'config.yaml').write_text('model: {api_key: synthetic-profile-secret}\n')
+            (profile / 'SOUL.md').write_text('archived identity')
+        self.plan = h.scan(self.home, owner_home=self.owner)
+        self.plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp', image='fixture:restricted')
+        h.approve(self.plan)
+        self.assertGreater(self.plan['summary']['ownership_source_dry_run']['entries'], 1000)
+        inode = (self.home / 'state.db').stat().st_ino
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': 'prepared'}), self.assertRaises(SystemExit):
+            h.apply(self.plan, 'restricted-fixture', self.root)
+        stage = journal.parent / 'stage/agents/restricted-fixture'
+        for bundle in ['profiles', 'profiles-retired']:
+            self.assertFalse((stage / 'home' / bundle).exists())
+            self.assertEqual((stage / 'quarantine' / bundle / 'old/config.yaml').read_text(), 'model: {api_key: synthetic-profile-secret}\n')
+        self.assertEqual((stage / 'home/external-alias').stat().st_nlink, 1)
+        self.assertEqual((stage / 'home/config.yaml').stat().st_nlink, 1)
+        self.assertEqual(external.read_text(), 'unchanged')
+        r.rt.RestrictedDriver.start.assert_not_called()
+        before = journal.read_bytes()
+        h.resume(journal, dry_run=True)
+        r.reown.assert_called_with(stage / 'home', 10000, dry_run=True)
+        self.assertEqual(before, journal.read_bytes())
+        r.rt.RestrictedDriver.start.assert_not_called()
+        result = h.resume(journal)
+        folder = self.root / 'agents/restricted-fixture'
+        self.assertEqual((folder / 'home/state.db').stat().st_ino, inode)
+        self.assertEqual(json.loads(journal.read_text())['state'], 'applied')
+        self.assertFalse((folder / 'home/profiles').exists())
+        self.assertFalse((folder / 'home/profiles-retired').exists())
+        with self.assertRaisesRegex(h.ImportFailure, 'ownership_resume_requires_prepared'):
+            h.resume(journal)
+        h.undo(result['journal'])
+        self.assertEqual((self.home / 'profiles/old/SOUL.md').read_text(), 'archived identity')
+        self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
+        self.assertEqual(external.read_text(), 'unchanged')
+
+    @LINUX_ONLY
+    def test_ownership_failure_retains_prepared_reservation_for_resume(self):
+        with patch.object(r, 'reown', side_effect=RuntimeError('interrupted helper')):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted helper'):
+                h.apply(self.plan, 'restricted-fixture', self.root)
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        self.assertEqual(json.loads(journal.read_text())['step'], 'prepared')
+        record = json.loads((self.root / 'agents/restricted-fixture/agent.json').read_text())
+        self.assertEqual(record['runtime']['admission'], 'importing')
+        r.rt.RestrictedDriver.start.assert_not_called()
+        result = h.resume(journal)
+        h.undo(result['journal'])
+        self.assertTrue((self.home / 'state.db').exists())
+
+    def test_profiles_refuse_option_is_approval_bound(self):
+        (self.home / 'profiles/old').mkdir(parents=True)
+        plan = h.scan(self.home, owner_home=self.owner, profiles_policy='refuse')
+        plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp')
+        h.approve(plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'profiles_require_archive'):
+            h.validate_plan(plan, self.root)
+        plan['profiles_policy'] = 'archive'
+        with self.assertRaisesRegex(h.ImportFailure, 'plan_not_approved'):
+            h.validate_plan(plan, self.root)
+        with self.assertRaisesRegex(h.ImportFailure, 'profiles_policy_invalid'):
+            h.scan(self.home, owner_home=self.owner, profiles_policy='activate')
 
     def test_heavy_grant_requires_explicit_item_and_approval_hash(self):
         self.plan['grants']['heavy'] = True

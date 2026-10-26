@@ -92,6 +92,81 @@ agent authority. Verify `gh auth status` and private `git fetch --dry-run` as ui
 
 Status: implementation/acceptance preview, **not approved for a live cutover**. No UI or remote-agent link is introduced. The scheduler is deliberately untouched: only `paused` and `take-over` (Hermes owns its own cron) exist.
 
+## Portable-tree admission safety
+
+Reuse:
+- REUSE the owner CLI, approval digest, stopped-writer census, staging journal, restricted admission lock and constrained ownership helper.
+- EXTEND credential inventory to every retained `config.yaml`/`config.yml`, JSON/TOML equivalent and suffixed backup at any depth; extend the helper with fd-relative tree operations and a bounded resume command.
+- NEW: none at the capability level; `import_tree.py` is the importer's shared internal implementation, not a second importer or runtime authority.
+
+### Inline credentials: names-only refusal, not silent credential loss
+
+`scan` inventories inline credential **key names** in old nested configs as well
+as the active root config. `summary.inline_credentials_blocking` is an owner-facing
+list of paths and keys; no values or parser source lines enter reports. Literal
+`${ENV_NAME}` references are not inline credentials. Retained configs containing
+inline credentials refuse `apply` before reservation/move, even if their old
+`config-field` entry was approved. This deliberately chooses refusal over guessing
+how an arbitrary legacy field maps to a secret store. Move those values to the
+agent's approved secret store/dotenv/auth entry, replace the config value with a
+supported reference, then rescan and approve. Forbidden host authority must be
+removed, not moved into an agent's secret store. Newly discovered retained inline
+fields also refuse during the final staged credential inventory. Invalid config
+parsing returns only a symbolic error. This is structured config coverage, not a
+claim to detect secrets in arbitrary prose, scripts or binary files.
+
+### Hardlinks
+
+Before modifying files or transferring ownership, the stopped moved tree detaches
+multi-link regular files using private, fsynced sibling copies and atomic replace.
+It never locates or follows the inode's other names. External aliases retain their
+bytes, mode and ownership; links and linked directories are never traversed.
+Single-link databases retain their inode. An interrupted detachment leaves the
+original name complete; ordinary undo remains available. Undo restores original
+bytes and metadata, **not hardlink topology**. Private copies can increase disk
+use by the size of the linked files; copy failure leaves the journal recoverable.
+The ownership helper independently refuses any remaining shared inode.
+
+### Profiles are archives, not extra active agents
+
+`scan --profiles archive` is the default and is covered by the approval digest.
+It archives **all** `profiles/*` together with top-level historical bundles named
+`profiles-*` or `profiles_*` in the owner-only, unmounted quarantine. These originals
+may contain inline credentials, but never enter the admitted home, registry or
+managed config. `summary.profiles_archived` names the archived roots. Empty/log-only
+profile shells are archived too. Undo restores them. `--profiles refuse` instead
+rejects a source containing profile roots; automatic activation/import-as-agents
+is intentionally unsupported. Profile multiplexing remains disabled in both modes.
+
+### Ownership count and interrupted sealing
+
+`summary.ownership_source_dry_run` counts **all source entries**, including the root,
+directories, files and symlink entries (not their targets), before quarantine.
+It reports entries, mismatching uid/gid entries and hardlinked files without
+changing ownership. This is not the portable-file count. The final seal counts
+only the retained staged tree, using one constrained helper process with a
+30-minute budget, fd-relative no-follow stat/chown, and no per-file subprocesses
+or full-tree progress list. Entries already owned by uid/gid 10000 are skipped;
+ownership metadata is the durable per-entry checkpoint after interruption.
+
+```sh
+# Only for a journal interrupted at prepared/sealed, before placement:
+wizard agent import hermes resume "$IMPORT_JOURNAL" --dry-run
+wizard agent import hermes resume "$IMPORT_JOURNAL"
+```
+
+The dry run does not seal, publish or start anything. Resume continues the existing
+reserved import from ownership sealing through health verification, under the
+same owner and lifecycle locks. It refuses admitted/running homes or other crash
+windows: use `undo` for those, then reapply. Completed counts are stored in the
+owner-only journal. The helper still has no network, imported code, live runtime
+mount, host home or host service namespace. Full-home timing remains an acceptance
+measurement, not a promise based on synthetic tests.
+
+The owner launcher dependency fix is tracked separately in PR #155 (python-dotenv
+alongside PyYAML). Until that lands, use `WIZARD_IMPORT_PYTHON` with both packages
+or run the module with the isolated uv dependencies used by the test runner.
+
 ## Commands
 
 From this checkout, add `ops/agent-runtime` to PATH or call its `wizard` executable directly. It uses an isolated uv interpreter with PyYAML; the host runtime helper also needs uv, or `WIZARD_IMPORT_PYTHON` naming an interpreter with PyYAML.
