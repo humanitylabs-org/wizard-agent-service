@@ -121,6 +121,7 @@ server = createWizardServer({
   runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   schedulerStatePath: process.env.WIZARD_SCHEDULER_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'schedules.sqlite3'),
+  supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
@@ -131,13 +132,7 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   agentHeavy: process.env.WIZARD_AGENT_HEAVY || 'off',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
-  heavyWorker: {
-    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
-    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
-    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
-    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
-    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
-  },
+
   requireAccess,
   browserBoundary: browserBoundaryFromEnv(),
   ownerProof,

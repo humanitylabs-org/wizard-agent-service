@@ -5,6 +5,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable, Transform } from 'node:stream'
+import { guardOwnerThreadWrite, isTurnWritePath, OwnerThreadWriteError, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -24,11 +25,12 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
+import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
@@ -147,6 +149,10 @@ export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard,
 The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
 
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+
+${SUPERVISOR_SPELL}
+
+${FINISH_REPORT_INSTRUCTIONS}
 
 ${STATUS_INSTRUCTIONS}`
 
@@ -1255,6 +1261,7 @@ function legacyInternalHistoryMessage(message) {
   if (role === 'assistant' && normalized === EMPTY_ASSISTANT_SENTINEL) return true
   if (role === 'user' && normalized === EMPTY_TOOL_RESPONSE_NUDGE) return true
   return [
+    '[Agent-to-agent',
     '[ASYNC DELEGATION BATCH COMPLETE',
     '[Wizard follow-through]',
     '[CONTEXT COMPACTION — REFERENCE ONLY]',
@@ -1335,7 +1342,8 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   if (operator) projected = projectOperatorMessages(projected, completions, records)
   let rows = []
   try { rows = sessionMessageRows(JSON.parse(projected.toString('utf8'))) } catch { return { latest: null, lastUser: null } }
-  const visible = rows.flatMap((message) => {
+  const safeRows = withoutAgentToAgentTurns(rows)
+  const visible = safeRows.flatMap((message) => {
     const role = message?.role ?? message?.author
     const displayKind = String(message?.display_kind ?? '')
     if (!['user', 'assistant'].includes(role) || (displayKind && displayKind !== 'final') || historyValueIsProcessWakeup(message) || legacyInternalHistoryMessage(message)) return []
@@ -1356,6 +1364,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   return {
     latest,
     lastUser: visible.find((message) => message.role === 'user') ?? null,
+    ...(safeRows.length !== rows.length ? { suppressedAgentTurns: true } : {}),
     status,
     appId,
     latestAssistantAt: latestAssistant?.created_at ?? null,
@@ -2431,7 +2440,7 @@ export function speechText(value) {
 
 export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
-  const paths = ['schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
@@ -2523,11 +2532,12 @@ function buildWizardServer(options, lifetime) {
   let onboarding = null
   let followUps = null
   let spacesTools = null
+  let supervisorTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
         list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        call: async (name, args, agentId) => (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -3838,6 +3848,7 @@ function buildWizardServer(options, lifetime) {
           if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null))
           return {
             ...session,
+            ...(messages.suppressedAgentTurns ? { latest_message: null, last_user_message: null, preview: messages.latest?.content ?? '' } : {}),
             ...(messages.latest ? { latest_message: messages.latest } : {}),
             ...(messages.lastUser ? { last_user_message: messages.lastUser } : {}),
             ...(messages.appId ? { wizard_app_id: messages.appId } : {}),
@@ -4376,35 +4387,7 @@ function buildWizardServer(options, lifetime) {
     if (!run.ok) throw Object.assign(new Error('share run admission failed'), { status: run.status })
     return { run_id: String(run.payload?.run_id || run.payload?.id || '') }
   })
-  const scheduler = options.schedulerStatePath ? new Scheduler({
-    statePath: resolve(String(options.schedulerStatePath)),
-    hermesHome: options.schedulerHermesHome ?? '',
-    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
-    now: options.schedulerNow ?? Date.now,
-    intervalMs: options.schedulerIntervalMs ?? 15_000,
-    ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
-    ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
-    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
-    lookup: async (occurrence, receipt) => {
-      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
-      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
-      if (!selfOrigin) return null
-      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
-        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
-        headers: { 'X-Wizard-Internal-Token': internalToken, ...(occurrence.deliver === 'notification' ? { 'X-Wizard-Schedule-Raw': '1' } : {}) }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
-      })
-      if (!result.ok) { await result.body?.cancel(); return null }
-      return result.json()
-    },
-    onWatchResult: async job => {
-      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
-      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
-      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
-      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
-      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
-      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
-    },
-    deliver: async occurrence => {
+  const deliverBackgroundOccurrence = async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
       if (occurrence.kind === 'return') {
@@ -4437,11 +4420,67 @@ function buildWizardServer(options, lifetime) {
       }
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, 'POST', { 'X-Wizard-Schedule-Kind': occurrence.kind,
         ...(occurrence.kind === 'watch' ? { 'X-Wizard-Watcher-Preserve': wasArchived ? '1' : '0' } : {}) })
-      if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
+      if (!run.ok) throw Object.assign(new Error(`schedule admission failed: ${String(run.payload?.error?.message || run.payload?.error || run.payload?.message || '').slice(0, 160)}`), { status: run.status })
       return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
+    }
+  const lookupBackgroundOccurrence = async (occurrence, receipt) => {
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      if (!selfOrigin) return null
+      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(receipt.run_id)}${query}`, {
+        // A notification answer ends in [SILENT] (quiet thread); the scheduler needs its text before the display scrub.
+        headers: { 'X-Wizard-Internal-Token': internalToken, 'X-Wizard-Schedule-Raw': '1' }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+      })
+      if (!result.ok) { await result.body?.cancel(); return null }
+      return result.json()
+    }
+  const scheduler = options.schedulerStatePath ? new Scheduler({
+    statePath: resolve(String(options.schedulerStatePath)),
+    hermesHome: options.schedulerHermesHome ?? '',
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    intervalMs: options.schedulerIntervalMs ?? 15_000,
+    ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
+    ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    lookup: lookupBackgroundOccurrence,
+    onWatchResult: async job => {
+      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
+      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
+      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
+      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
+      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
+      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
     },
+    deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
+    deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
+    canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
+    intervalMs: options.supervisorIntervalMs || 15_000 }) : null
+  if (supervisor) lifetime.own(() => supervisor.close(), () => supervisor.quiesce())
+  const callSupervisor = async (action, args, agentId, sessionId) => {
+    if (!supervisor) throw Object.assign(new Error('Supervisor unavailable on this box'), { status: 503 })
+    const agent = agents?.read(agentId)
+    const privacy = (!agents && agentId === MAIN_AGENT_ID) || (agent?.privacy === 'standard' && agent?.permissions?.shared_with_agents !== false) ? 'shareable' : 'private-agent'
+    if (privacy !== 'shareable') throw Object.assign(new Error('Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'), { status: 403 })
+    if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionId)) throw Object.assign(new Error('An injected Wizard session is required; use the supervisor Hermes plugin tools.'), { status: 400 })
+    const owner = agentId === MAIN_AGENT_ID ? runQueue?.mutationOwnerForSession(sessionId) : await routedQueues?.mutationOwner(agent, sessionId)
+    if (!owner) throw Object.assign(new Error('An authenticated active Wizard run is required'), { status: 409 })
+    const result = supervisor.call(action, args, { agent_id: agentId, thread_id: sessionId, run_id: owner.publicRunId, privacy })
+    void supervisor.tick().catch(() => console.error('[supervisor] delivery pending'))
+    return result
+  }
+  // Session-aware Hermes adapter rides the EXISTING gateway and socket boundary. Do not advertise
+  // a second set of model tools: only the plugin can inject the actual calling session into them.
+  supervisorTools = { list: () => [], call: async (name, args, agentId) => {
+    if (!/^supervisor_(report|ask|answer|build|lessons|close)$/.test(name)) return undefined
+    const { session_id, ...value } = args
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callSupervisor(name.slice('supervisor_'.length), value, agentId, session_id)) }] } }
+    catch (error) { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: error.status ? error.message : 'Supervisor request failed', status: error.status || 500 }) }] } }
+  } }
+
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
@@ -4619,11 +4658,19 @@ function buildWizardServer(options, lifetime) {
   }
   // Client-authored side stores are projections, never pair-ownership evidence.
   const qualifySeenInput = (request, state) => {
-    if (!state?.threads || typeof state.threads !== 'object') return state
-    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).map(([key, record]) => {
+    if (!state?.threads || typeof state.threads !== 'object' || Array.isArray(state.threads)) return state
+    return { ...state, threads: Object.fromEntries(Object.entries(state.threads).flatMap(([key, record]) => {
       const pair = sideReference(key, record)
-      const agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''))
-      return [sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]
+      let agent
+      try { agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : '')) }
+      catch (error) {
+        // A stale device can retain retired agents or ambiguous legacy ids. One such mark must not
+        // block the whole batch; invisible private agents take the identical drop-only path.
+        if (error instanceof AgentError && ((error.status === 404 && error.check === 'agent.id')
+          || (error.status === 409 && error.check === 'agent.ambiguous_thread'))) return []
+        throw error
+      }
+      return [[sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]]
     })) }
   }
 
@@ -5054,6 +5101,21 @@ function buildWizardServer(options, lifetime) {
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
         sendJson(response, 200, await heavyWork.handleAgent(request, url.pathname, value))
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/supervisor/')) {
+        if (!supervisor || !options.heavyToken) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principal.kind === 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
+        try {
+          const value = JSON.parse((await readBoundedBody(request, 128 * 1024)).toString('utf8'))
+          if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('invalid body'), { status: 400 })
+          const { session_id, ...args } = value
+          sendJson(response, 200, await callSupervisor(url.pathname.split('/').at(-1), args, MAIN_AGENT_ID, session_id))
+        } catch (error) { sendJson(response, error instanceof SyntaxError ? 400 : error.status || 500, { error: error instanceof SyntaxError ? 'invalid body' : error.status ? error.message : 'Supervisor request failed' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {
@@ -5600,6 +5662,13 @@ function buildWizardServer(options, lifetime) {
         // move the store's start time back, so it can neither push out nor reset the owner's private marks.
         const owner = ownerLike(principalOf(request))
         const qualified = qualifySeenInput(request, owner ? state : withoutHiddenSeen(request, state))
+        // An entirely discarded batch is a successful no-op, including old devices sending only a
+        // retired mark without the current state envelope. Never create/reset state from that batch.
+        if (state?.threads && !Array.isArray(state.threads) && Object.keys(state.threads).length > 0
+          && qualified?.threads && Object.keys(qualified.threads).length === 0) {
+          sendJson(response, 200, { state: withoutHiddenSeen(request, threadSeenStore.get(scope)) })
+          return
+        }
         const merged = owner ? threadSeenStore.merge(scope, qualified)
           : threadSeenStore.merge(scope, qualified, { protect: (key) => hiddenSession(request, key), keepInitializedAt: true })
         sendJson(response, 200, { state: withoutHiddenSeen(request, merged) })
@@ -5714,6 +5783,16 @@ function buildWizardServer(options, lifetime) {
             return
           }
         }
+        // Embedders without the agent registry use the same admission rule.
+        let unscopedBody
+        if (!agentResolution && request.method === 'POST' && isTurnWritePath(upstreamPath)) {
+          unscopedBody = await readBoundedBody(request)
+          await guardOwnerThreadWrite({ method: request.method, upstreamPath, body: unscopedBody,
+            sessionExists: async id => {
+              try { await hermesJson(`/api/sessions/${encodeURIComponent(id)}`, {}, true); return true }
+              catch (error) { if (error?.status === 404) return false; throw error }
+            } })
+        }
         if (!isAllowedProxyRequest(request.method ?? '', upstreamPath, url.searchParams) || !sessionPathAllowed(operator, request.method ?? '', upstreamPath)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
         if (runQueue) await runQueueReady
@@ -5773,7 +5852,7 @@ function buildWizardServer(options, lifetime) {
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : await readBoundedBody(request)) : undefined
+        let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
           if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
           const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
@@ -6169,6 +6248,10 @@ function buildWizardServer(options, lifetime) {
       }
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
+      if (error instanceof OwnerThreadWriteError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
       if (error instanceof AgentError && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
@@ -6196,8 +6279,10 @@ function buildWizardServer(options, lifetime) {
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
     if (options.schedulerEnabled === true && process.env.WIZARD_SCHEDULER === '1') scheduler?.start()
+    supervisor?.start()
   })
   server.scheduler = scheduler
+  server.supervisor = supervisor
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''

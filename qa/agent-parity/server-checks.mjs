@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -17,6 +18,66 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'supervisor-reporter': async s => {
+    const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
+    assert.equal(tools.length, 6)
+    assert.ok(tools.every(t => !('session_id' in t.parameters.properties) && !('agent_id' in t.parameters.properties)))
+    for (const skill of ['reporter', 'supervisor']) assert.ok(readFileSync(join(s.agentHome, `skills/${skill}/SKILL.md`), 'utf8').includes(`name: ${skill}`))
+    await admit(s, { input: 'Report this to supervisor and continue' })
+    assert.ok(sent(s).instructions.includes(SUPERVISOR_SPELL))
+    const args = { session_id: 'wizard_parity', client_report_id: 'fixture-report', title: 'Keep it plain', what_happened: 'The report used internal words.', feedback_verbatim: 'Say it plainly.', evidence: [{ type: 'thread', ref: 'wizard_parity' }], proposed_home: 'Reporter skill' }
+    const refused = await s.supervisor('report', args, { Authorization: 'Bearer wrong' })
+    assert.ok([401,403].includes(refused.status))
+    const spoof = await s.supervisor('report', {...args, agent_id: 'other-agent'})
+    assert.equal(spoof.status, 400)
+    const r = await s.supervisor('report', args)
+    assert.equal(r.status, 200, JSON.stringify(await r.clone().json()))
+    const value = await r.json()
+    assert.equal(value.report.agent_id, s.id)
+    assert.equal(value.report.thread_id, 'wizard_parity')
+    assert.match(value.report.run_id, /^wizardq_/)
+    assert.equal(value.report.depth, 0)
+    const again = await s.supervisor('report', args)
+    assert.equal((await again.json()).suppressed, true)
+    const unrelated = await s.supervisor('report', {...args, session_id: 'not-an-active-thread'})
+    assert.equal(unrelated.status, 409)
+    const workerLessons = await s.supervisor('lessons', {session_id: 'wizard_parity', query: ''})
+    assert.equal(workerLessons.status, 403) // sending feedback does not grant a cross-agent reader
+    if (s.kind !== 'main') {
+      for (const [privacy, shared] of [['private', false], ['standard', false]]) {
+        s.setSupervisorSeal(privacy, shared)
+        const sealed = await s.supervisor('report', {...args, client_report_id: 'sealed'})
+        assert.equal(sealed.status, 403)
+        assert.match((await sealed.json()).error, /privacy-seal exemption/)
+        const lessons = await s.supervisor('lessons', {session_id: 'wizard_parity', query: ''})
+        assert.equal(lessons.status, 403)
+      }
+    }
+  },
+  'owner-thread-agent-write-guard': async s => {
+    const before = s.seen.filter(r => r.method === 'POST').length
+    for (const input of ['  [Agent-to-agent test] ping', '[Agent-to-agent follow-up] ping', 'Clearance request, NOT a James message']) {
+      for (const path of ['/v1/runs', '/v1/runs/guard-test/steer', '/api/sessions/wizard_parity/chat', '/api/sessions/wizard_parity/chat/stream']) {
+        const response = await s.request(path, post({ session_id: 'wizard_parity', input, message: input }))
+        assert.equal(response.status, 409, path)
+        assert.equal((await response.json()).error.code, 'agent_to_agent_thread_write')
+      }
+    }
+    const noContentType = await s.request('/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_parity', input: '[Agent-to-agent test] ping' }) })
+    assert.equal(noContentType.status, 409, 'a non-JSON content-type cannot bypass admission')
+    assert.equal(s.seen.filter(r => r.method === 'POST').length, before, 'rejected writes never reach Hermes')
+    await admit(s, { input: 'Normal owner request remains accepted' })
+    // A report that only quotes the marker below its first line (a Supervisor update) is admitted on every kind.
+    await admit(s, { input: '[supervisor update]\n{"what_happened":"resolved the \'NOT a James message\' finding"}' })
+    assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
+  },
+  'finish-report-instructions': async s => {
+    await admit(s, { input: 'Synthetic task-finish prompt delivery check' })
+    const instructions = sent(s).instructions
+    assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
+    assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
+    assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+  },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
     const space = { id: 'parity-space', name: 'Synthetic Space', ...(s.id === 'hermes' ? {} : { agent: s.id }), threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -104,8 +165,17 @@ export const serverChecks = {
   },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
-    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': record } }), method: 'PUT' })
+    const retiredKey = 'agent/retired/direct:retired-thread'
+    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: {
+      [retiredKey]: { ...record, agent_id: 'retired', session_id: 'retired-thread' },
+      'direct:wizard_parity': record,
+    } }), method: 'PUT' })
     assert.equal(r.status, 200)
+    assert.equal((await r.json()).state.threads[retiredKey], undefined)
+    const noop = await s.raw('/wizard/thread-seen', { ...post({ threads: { [retiredKey]: {
+      agent_id: 'retired', session_id: 'retired-thread', seenAt: '2026-10-25T00:00:00Z',
+    } } }), method: 'PUT' })
+    assert.equal(noop.status, 200)
     const unreadAt = now + 1
     const unread = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, unreadAt } } }), method: 'PUT' })
     assert.equal(unread.status, 200)

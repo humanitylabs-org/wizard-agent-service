@@ -81,7 +81,7 @@ describe('standard-agent shared state', () => {
     const memory = f.write(a.id, 'memories/MEMORY.md', 'memory-marker'); f.write(a.id, 'memories/USER.md', 'user-marker')
     f.write(a.id, 'SOUL.md', 'persona-marker'); f.write(a.id, 'skills/group/how/SKILL.md', 'skill-marker'); f.write(a.id, 'wiki/topic.md', 'note-marker')
     expect(f.value(await f.call('memory_read', a.id))).toMatchObject({ source: { id: a.id }, memory: 'memory-marker', user: 'user-marker', 'persona (read-only)': 'persona-marker' })
-    expect(f.value(await f.call('skills_list', a.id)).entries).toEqual(['group/how'])
+    expect(f.value(await f.call('skills_list', a.id)).entries).toEqual(['group/how', 'reporter', 'supervisor']) // service-owned playbooks ship with each managed harness
     expect(f.value(await f.call('skill_read', a.id, { name: 'group/how' })).text).toContain(`Written by ${a.id} for the hermes harness. Tools and paths it names may not exist for you. Adapt it into your own skill before relying on it.`)
     expect(f.value(await f.call('notes_list', a.id)).entries).toEqual(['topic.md'])
     expect(f.value(await f.call('notes_read', a.id, { path: 'topic.md' })).text).toBe('note-marker')

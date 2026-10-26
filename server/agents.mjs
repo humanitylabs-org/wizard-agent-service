@@ -20,6 +20,7 @@ const RESERVED = new Set([MAIN_AGENT_ID, 'main', 'default', 'new', 'options'])
 export const FILES_LEVELS = ['none', 'own', 'shared-read', 'shared-write']
 export const OTHER_AGENTS_LEVELS = ['none', 'titles', 'search', 'read']
 export const HARNESSES = [{ id: 'hermes', label: 'Hermes' }]
+import { installSupervisorAssets, SUPERVISOR_ASSET_HASH } from './supervisor-assets.mjs'
 // Harness toolsets that send content off the box. Everything not granted is disabled in the agent's config.
 export const OUTSIDE_TOOLS = [
   { id: 'web', label: 'Web search and pages' },
@@ -369,6 +370,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   const lines = [
     '# Managed by the Wizard OS Agent Service from agents/<id>/agent.json. Change the agent in the Agents app;',
     '# edits here are overwritten.',
+    `# Supervisor assets: ${SUPERVISOR_ASSET_HASH}`,
     'model:',
     `  default: ${yamlString(agent.model.model)}`,
   ]
@@ -911,6 +913,7 @@ export function createAgentRegistry(options = {}) {
     // Provider keys (TINFOIL_API_KEY) are added by the runtime driver on the host; the Service never holds them.
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
+    installSupervisorAssets(home)
     const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) })
     writeTextAtomic(join(home, 'config.yaml'), config)
     writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)

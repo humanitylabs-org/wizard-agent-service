@@ -140,6 +140,23 @@ class ScopedPluginTests(unittest.TestCase):
         self.submit_spec({**self.args, 'lane': 'heavy'})
         self.assertNotIn('lane', self.received[-1][2]['spec'])
 
+    def test_host_default_is_byte_identical_and_forum_is_forwarded(self):
+        self.submit_spec(self.args)
+        original = self.received[-1][2]
+        self.submit_spec({**self.args, 'host': 'thales'})
+        self.assertEqual(self.received[-1][2], original)
+        self.submit_spec({**self.args, 'host': 'forum', 'lane': 'light'})
+        self.assertEqual(self.received[-1][2]['spec']['host'], 'forum')
+        self.assertEqual(self.received[-1][2]['spec']['lane'], 'light')
+        before = len(self.received)
+        for host in ('other', '', None):
+            self.assertIn('error', self.submit_spec({**self.args, 'host': host}))
+        self.assertEqual(len(self.received), before)
+        with scope({'WIZARD_HEAVY_ORIGIN': self.origin, 'WIZARD_HEAVY_TOKEN': 'fixture'}):
+            prompt = self.ctx.prompt(None)
+            for placement in ('Linux/amd64', 'x86_64 emulator QA', 'Never emulate amd64', 'R2'):
+                self.assertIn(placement, prompt)
+
     def test_light_lane_is_forwarded_with_short_default_deadline(self):
         self.submit_spec({**self.args, 'lane': 'light'})
         self.assertEqual(self.received[-1][2]['spec'],

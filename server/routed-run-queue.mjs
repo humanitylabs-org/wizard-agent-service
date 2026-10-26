@@ -48,6 +48,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
   const ready = Promise.allSettled(registry.list().filter(agent => agent.id !== 'hermes' && existsSync(join(registry.agentsDir, agent.id, 'wizard-run-queue.sqlite3'))).map(get))
   return {
     ready,
+    async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
       if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname)) return registry.fetchAgent(agent,path,init)
