@@ -20,7 +20,7 @@ def dotenv(text):
 
 
 INLINE_SECRET = re.compile(r'(?:^|[_-])(?:api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|client[_-]?secret|authorization)$', re.I)
-CONFIG_PATH = re.compile(r'^config\.(?:ya?ml|json|toml)(?:[._-].*)?$', re.I)
+CONFIG_PATH = re.compile(r'^[.#]?config\.(?:ya?ml|json|toml)(?:[._~#-].*)?$', re.I)
 ENV_REFERENCE = re.compile(r'^\$\{[A-Za-z_][A-Za-z0-9_]*\}$')
 
 
@@ -32,9 +32,10 @@ def config_value(path, text):
     # Parser diagnostics often contain source lines (and thus secret values).
     # Only a symbolic error may cross the importer boundary.
     try:
-        if re.match(r'^config\.json(?:[._-]|$)', PurePosixPath(path).name, re.I):
+        name = PurePosixPath(path).name.lstrip('.#')
+        if re.match(r'^config\.json(?:[._~#-]|$)', name, re.I):
             return json.loads(text)
-        if re.match(r'^config\.toml(?:[._-]|$)', PurePosixPath(path).name, re.I):
+        if re.match(r'^config\.toml(?:[._~#-]|$)', name, re.I):
             import tomllib
             return tomllib.loads(text)
         return yaml.safe_load(text) or {}

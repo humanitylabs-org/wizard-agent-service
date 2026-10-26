@@ -102,7 +102,10 @@ Reuse:
 ### Inline credentials: names-only refusal, not silent credential loss
 
 `scan` inventories inline credential **key names** in old nested configs as well
-as the active root config. `summary.inline_credentials_blocking` is an owner-facing
+as the active root config, including editor backups such as `config.yaml~` and
+`#config.toml#`. Disabled plugins/hooks that will be quarantined are inventoried
+but do not block; approving a plugin makes its config fields blocking again.
+`summary.inline_credentials_blocking` is an owner-facing
 list of paths and keys; no values or parser source lines enter reports. Literal
 `${ENV_NAME}` references are not inline credentials. Retained configs containing
 inline credentials refuse `apply` before reservation/move, even if their old
@@ -119,7 +122,9 @@ claim to detect secrets in arbitrary prose, scripts or binary files.
 
 Before modifying files or transferring ownership, the stopped moved tree detaches
 multi-link regular files using private, fsynced sibling copies and atomic replace.
-It never locates or follows the inode's other names. External aliases retain their
+Each shared-file copy holds a kernel read lease: existing writers through any
+alias refuse the copy, and new writer requests abort it before admission. Missing
+lease support fails closed. It never locates or follows the inode's other names. External aliases retain their
 bytes, mode and ownership; links and linked directories are never traversed.
 Single-link databases retain their inode. An interrupted detachment leaves the
 original name complete; ordinary undo remains available. Undo restores original

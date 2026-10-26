@@ -8,6 +8,47 @@ import json
 import os
 import shutil
 import stat
+import fcntl
+import signal
+from contextlib import contextmanager
+
+
+@contextmanager
+def read_lease(fd):
+    """Fence writes through ANY inode alias, not only names under the home.
+
+    Fail closed on filesystems/platforms without kernel leases. SIGIO aborts a
+    copy as soon as any writer requests a lease break; F_GETLEASE also catches
+    a forced break (including while Python was inside a long blocking read).
+    """
+    if not hasattr(fcntl, 'F_SETLEASE'):
+        raise ValueError('hardlink_read_lease_unavailable')
+    def interrupted(signum, frame):
+        raise ValueError('hardlink_writer_requested')
+    previous = signal.signal(signal.SIGIO, interrupted)
+    held = False
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETOWN, os.getpid())
+        try:
+            fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+            held = True
+        except BlockingIOError:
+            raise ValueError('hardlink_has_writers') from None
+        except OSError:
+            raise ValueError('hardlink_read_lease_unavailable') from None
+        before = os.fstat(fd)
+        yield
+        after = os.fstat(fd)
+        if fcntl.fcntl(fd, fcntl.F_GETLEASE) != fcntl.F_RDLCK or (
+                before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError('hardlink_source_changed')
+    finally:
+        try:
+            if held:
+                fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+        finally:
+            signal.signal(signal.SIGIO, previous)
 
 
 def walk(root):
@@ -40,14 +81,15 @@ def detach_hardlinks(root):
             current = os.fstat(src)
             if (current.st_dev, current.st_ino) != (s.st_dev, s.st_ino):
                 raise ValueError('hardlink_source_changed')
-            dest = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                           0o600, dir_fd=directory)
-            with os.fdopen(dest, 'wb') as out, os.fdopen(os.dup(src), 'rb') as incoming:
-                shutil.copyfileobj(incoming, out, 1024 * 1024)
-                out.flush()
-                os.fchmod(out.fileno(), stat.S_IMODE(s.st_mode))
-                os.utime(out.fileno(), ns=(s.st_atime_ns, s.st_mtime_ns))
-                os.fsync(out.fileno())
+            with read_lease(src):
+                dest = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                               0o600, dir_fd=directory)
+                with os.fdopen(dest, 'wb') as out, os.fdopen(os.dup(src), 'rb') as incoming:
+                    shutil.copyfileobj(incoming, out, 1024 * 1024)
+                    out.flush()
+                    os.fchmod(out.fileno(), stat.S_IMODE(s.st_mode))
+                    os.utime(out.fileno(), ns=(s.st_atime_ns, s.st_mtime_ns))
+                    os.fsync(out.fileno())
             os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
             os.fsync(directory)
             copied += 1

@@ -214,6 +214,28 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertTrue((self.home / 'state.db').exists())
 
     @LINUX_ONLY
+    def test_disabled_plugin_and_hooks_credentials_archive_without_blocking(self):
+        for rel in ['plugins/disabled/config.yaml', 'hooks/old/config.yaml']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True)
+            p.write_text('model: {api_key: fake-archived-value}\n')
+        plan = h.scan(self.home, owner_home=self.owner)
+        plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp', image='fixture:restricted')
+        self.assertEqual(plan['summary']['inline_credentials_blocking'], [])
+        plan['approved_plugins'] = ['disabled']
+        h.approve(plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'inline_credentials_require_secret_store'):
+            h.validate_plan(plan, self.root)
+        plan['approved_plugins'] = []
+        h.approve(plan)
+        result = h.apply(plan, 'restricted-fixture', self.root)
+        home = self.root / 'agents/restricted-fixture/home'
+        self.assertFalse((home / 'plugins/disabled').exists())
+        self.assertFalse((home / 'hooks').exists())
+        h.undo(result['journal'])
+        self.assertEqual((self.home / 'hooks/old/config.yaml').read_text(), 'model: {api_key: fake-archived-value}\n')
+
+    @LINUX_ONLY
     def test_sealed_resume_recreates_socket_preparation_after_restart(self):
         with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': 'sealed'}), self.assertRaises(SystemExit):
             h.apply(self.plan, 'restricted-fixture', self.root)

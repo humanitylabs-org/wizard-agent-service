@@ -107,6 +107,9 @@ class ImportTreeTests(unittest.TestCase):
             'config.json.old': '{"model": {"apiKey": "fake-json-value"}}',
             'config.toml': '[model]\nclient_secret="fake-toml-value"\n',
             'config.yml': 'headers: {Authorization: fake-header-value}\n',
+            'config.yaml~': 'model: {api_key: fake-tilde-value}\n',
+            'config.json~': '{"model": {"apiKey": "fake-tilde-json"}}',
+            '#config.toml#': '[model]\nclient_secret="fake-editor-toml"\n',
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -156,6 +159,74 @@ class ImportTreeTests(unittest.TestCase):
         self.assertEqual(list(self.home.glob('.wizard-import-copy-*')), [])
         tree.detach_hardlinks(self.home)
         self.assertNotEqual(linked.stat().st_ino, outside.stat().st_ino)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'kernel read leases require Linux')
+    def test_external_writable_alias_refuses_before_copy(self):
+        import import_tree as tree
+        external = self.owner / 'external'
+        external.write_text('fake immutable bytes')
+        linked = self.home / 'state.db'
+        os.link(external, linked)
+        code = 'import sys; f=open(sys.argv[1], "ab"); print("ready", flush=True); sys.stdin.read()'
+        child = subprocess.Popen([sys.executable, '-c', code, str(external)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            with self.assertRaisesRegex(ValueError, 'hardlink_has_writers'):
+                tree.detach_hardlinks(self.home)
+            self.assertEqual(linked.stat().st_ino, external.stat().st_ino)
+            self.assertEqual(list(self.home.glob('.wizard-import-copy-*')), [])
+        finally:
+            child.communicate(timeout=10)
+        self.assertEqual(tree.detach_hardlinks(self.home), 1)
+        self.assertEqual(linked.read_text(), 'fake immutable bytes')
+
+    @unittest.skipUnless(sys.platform == 'linux', 'kernel read leases require Linux')
+    def test_new_external_writer_aborts_copy_and_removes_partial_file(self):
+        import signal
+        import import_tree as tree
+        external = self.owner / 'external'
+        external.write_text('fake immutable bytes')
+        linked = self.home / 'state.db'
+        os.link(external, linked)
+        code = ('import sys; print("ready",flush=True); sys.stdin.readline(); '
+                'f=open(sys.argv[1],"ab"); print("opened",flush=True)')
+        child = subprocess.Popen([sys.executable, '-c', code, str(external)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        old_handler = signal.getsignal(signal.SIGIO)
+        def request_write(src, dest, length):
+            child.stdin.write('go\n')
+            child.stdin.flush()
+            child.stdout.readline()  # read lease blocks writer and SIGIO aborts us
+            self.fail('writer must not open before the copy releases its read lease')
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            with patch.object(tree.shutil, 'copyfileobj', side_effect=request_write):
+                with self.assertRaisesRegex(ValueError, 'hardlink_writer_requested'):
+                    tree.detach_hardlinks(self.home)
+        finally:
+            child.communicate(timeout=10)
+        self.assertEqual(signal.getsignal(signal.SIGIO), old_handler)
+        self.assertEqual(linked.stat().st_ino, external.stat().st_ino)
+        self.assertEqual(list(self.home.glob('.wizard-import-copy-*')), [])
+        self.assertEqual(linked.read_text(), 'fake immutable bytes')
+
+    @unittest.skipUnless(sys.platform == 'linux', 'kernel read leases require Linux')
+    def test_copy_holds_read_lease_and_restores_signal_handler(self):
+        import fcntl
+        import signal
+        import import_tree as tree
+        external = self.owner / 'external'
+        external.write_text('fake')
+        os.link(external, self.home / 'linked')
+        original_copy = tree.shutil.copyfileobj
+        old_handler = signal.getsignal(signal.SIGIO)
+        def copy(src, dest, length):
+            self.assertEqual(fcntl.fcntl(src.fileno(), fcntl.F_GETLEASE), fcntl.F_RDLCK)
+            return original_copy(src, dest, length)
+        with patch.object(tree.shutil, 'copyfileobj', side_effect=copy):
+            self.assertEqual(tree.detach_hardlinks(self.home), 1)
+        self.assertEqual(signal.getsignal(signal.SIGIO), old_handler)
 
     def test_ownership_root_symlink_refused(self):
         import import_tree as tree

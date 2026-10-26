@@ -216,12 +216,19 @@ def profile_root(rel):
     return name == 'profiles' or name.startswith(('profiles-', 'profiles_'))
 
 
-def inline_blockers(credentials):
-    return [c for c in credentials if c['kind'] == 'config-field' and not profile_root(c['path'])]
+def inline_blockers(credentials, plan):
+    def retained(path):
+        parts = PurePosixPath(path).parts
+        if profile_root(path) or parts[0] in LOCAL | RUNTIME_NAMES | {'hooks', 'gateway.json'}:
+            return False
+        if parts[0] == 'plugins' and len(parts) > 1:
+            return parts[1] in plan.get('approved_plugins', [])
+        return True
+    return [c for c in credentials if c['kind'] == 'config-field' and retained(c['path'])]
 
 
-def refuse_inline(credentials):
-    blocked = inline_blockers(credentials)
+def refuse_inline(credentials, plan):
+    blocked = inline_blockers(credentials, plan)
     require(not blocked, 'inline_credentials_require_secret_store: Move these inline credentials into the agent secret store, replace them with supported references, then rescan and approve. Key names only: ' + json.dumps(
         [{'path': c['path'], 'key': c['item']} for c in blocked], sort_keys=True))
 
@@ -344,7 +351,6 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
             'summary': {'portable_bytes': sum(n for _, n, _ in rows), 'files': len(rows),
                         'profiles_archived': profile_roots,
                         'ownership_source_dry_run': ownership_count,
-                        'inline_credentials_blocking': inline_blockers(credential_items),
                         'sessions': sessions, 'state_db_bytes': next((n for r, n, _ in rows if r == 'state.db'), 0),
                         'memory_provider': (cfg.get('memory') or {}).get('provider', 'builtin'),
                         'skills': sum(p.startswith('skills/') and p.endswith('/SKILL.md') for p in paths),
@@ -356,6 +362,7 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
                         'credential_names': [n for n in env_names if SECRET_KEY.search(n)],
                         'excluded_local_roots': sorted(set(skipped)), 'symlinks': len(symlinks)}}
     # Review token changes whenever ANY selection/permission/route changes. No secret bytes in the plan.
+    plan['summary']['inline_credentials_blocking'] = inline_blockers(credential_items, plan)
     return plan
 
 
@@ -403,7 +410,7 @@ def validate_plan(plan, wizard_home):
     require(plan.get('mode') in {'paused', 'take-over'}, 'mode_invalid')
     require(plan.get('profiles_policy', 'archive') in {'archive', 'refuse'}, 'profiles_policy_invalid')
     require(plan.get('profiles_policy', 'archive') != 'refuse' or not plan['summary'].get('profiles_archived'), 'profiles_require_archive')
-    refuse_inline(plan.get('credentials', []))
+    refuse_inline(plan.get('credentials', []), plan)
     require(plan.get('mode') != 'take-over' or (plan.get('move') and plan.get('source_units')), 'takeover_requires_move_and_writer_units')
     require(not plan.get('move') or plan.get('source_kind') == 'home', 'move_archive')
     require(plan.get('move') or plan.get('source_kind') == 'archive', 'home_requires_move')
@@ -593,7 +600,7 @@ def validate_backups(directory, journal):
 def sanitize_credentials(home, plan, directory, journal, journal_path):
     current = credential_policy.inventory([r for _, r, _, link in files(home) if not link],
                                           lambda r: managed_path(home, r).read_text())
-    refuse_inline(current)
+    refuse_inline(current, plan)
     # Fresh names discovered after scan cannot inherit a broad/default approval.
     for rel in sorted({c['path'] for c in current} - {'.env', 'config.yaml'}):
         path = managed_path(home, rel)
