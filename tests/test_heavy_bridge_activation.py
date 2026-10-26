@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -85,6 +86,27 @@ class BridgeActivationTests(unittest.TestCase):
         bridge.activate(self.old)
         bridge.activate(self.old, check_only=True)
         self.assertEqual(self.command[1], str(self.old) + bridge.SCRIPT)
+
+    def test_idle_gate_reads_queue_without_mutating_existing_jobs(self):
+        import json
+        import sqlite3
+        path = self.home / '.hermes/state/wizard-mobile/heavy.sqlite3'
+        path.parent.mkdir(parents=True)
+        db = sqlite3.connect(path)
+        db.execute('CREATE TABLE heavy_jobs(id TEXT,data TEXT)')
+        for state in ('queued', 'running', 'cancellation_pending', 'submitting'):
+            db.execute('DELETE FROM heavy_jobs')
+            db.execute('INSERT INTO heavy_jobs VALUES (?,?)', ('existing', json.dumps({'state': state})))
+            db.commit()
+            before = path.read_bytes()
+            with patch.object(deploy, 'HOME', self.home):
+                with self.assertRaisesRegex(RuntimeError, 'heavy queue not idle'):
+                    deploy.require_heavy_idle()
+            self.assertEqual(path.read_bytes(), before)
+        db.execute('DELETE FROM heavy_jobs'); db.commit()
+        with patch.object(deploy, 'HOME', self.home):
+            deploy.require_heavy_idle()
+        db.close()
 
     def test_normal_deploy_requires_activation_and_effective_check(self):
         helper = ROOT / 'ops/activate-heavy-bridge.py'

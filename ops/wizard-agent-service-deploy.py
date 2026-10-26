@@ -14,8 +14,8 @@ Refuses any ref that does not contain the live release: parallel threads deploy 
 branches, and a stale ref would silently roll back another thread's shipped work. Branch new work
 from `live` (kept pointing at the serving sha in the source checkout).
 
-Builds an immutable release under ~/.local/share/wizard-mobile-server/releases/was-<sha>,
-runs the service test suite, switches the `current` symlink, restarts wizard-mobile.service
+Uses a remotely prepared/tested immutable release under
+~/.local/share/wizard-mobile-server/releases/was-<sha>, switches `current`, restarts wizard-mobile.service
 (its unit name is kept for compatibility) and verifies /wizard/health. On failure the prior
 release is restored. Legacy Wizard Mobile UI releases no longer touch the backend.
 """
@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -47,32 +47,6 @@ def run(*args: str, cwd: Path | None = None) -> str:
     if result.returncode:
         raise RuntimeError(f"{' '.join(args)}: {(result.stderr or result.stdout)[-3000:]}")
     return result.stdout.strip()
-
-
-def run_suite(work: Path) -> None:
-    """npm test, with one bounded retry for load-induced vitest timeouts.
-
-    On a busy box (load 20+) a few unrelated vitest cases exceed their 5 s timeout, and a different set
-    each run (25 Oct 2026: three deploys refused this way, each failing other files). A real regression
-    fails again deterministically, so: rerun only the failed vitest files once, serially, with a long
-    timeout, then run the rest of the chain that vitest's failure short-circuited. Anything else fails."""
-    import re  # noqa: PLC0415
-    first = subprocess.run(["npm", "test", "--silent"], cwd=work, env=ENV, text=True, capture_output=True)
-    if not first.returncode:
-        return
-    out = (first.stdout or "") + (first.stderr or "")
-    failed = sorted(set(re.findall(r"FAIL\s+(tests/\S+\.test\.ts)", out)))
-    scripts = json.loads((work / "package.json").read_text()).get("scripts", {})
-    unit = scripts.get("test:unit", "")
-    if not failed or not unit.startswith("vitest run && "):
-        raise RuntimeError(f"npm test: {out[-3000:]}")
-    print(f"npm test failed in {len(failed)} vitest file(s); retrying them serially once: {' '.join(failed)}",
-          file=sys.stderr)
-    run(str(work / "node_modules" / ".bin" / "vitest"), "run", *failed, "--testTimeout=60000",
-        "--hookTimeout=60000", "--maxWorkers=1", cwd=work)
-    run("bash", "-c", unit.split("vitest run && ", 1)[1], cwd=work)
-    if "test:agent-parity" in scripts:
-        run("npm", "run", "--silent", "test:agent-parity", cwd=work)
 
 
 def tree_digest(root: Path) -> str:
@@ -149,6 +123,17 @@ def mark_live(sha: str) -> None:
     subprocess.run(["git", "branch", "-f", "live", sha], cwd=SRC, env=ENV, capture_output=True)
 
 
+def require_heavy_idle() -> None:
+    path = HOME / ".hermes/state/wizard-mobile/heavy.sqlite3"
+    if not path.exists():
+        return
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+        active = [job_id for job_id, data in db.execute("SELECT id,data FROM heavy_jobs")
+                  if json.loads(data).get("state") in {"queued", "running", "cancelling", "cancellation_pending", "submitting"}]
+    if active:
+        raise RuntimeError(f"heavy queue not idle: {len(active)} active jobs; retry after completion")
+
+
 def activate_bridge(target: Path, helper_release: Path) -> None:
     state = run("systemctl", "--user", "show", "wizard-heavy-rpc.service", "-p", "LoadState", "--value")
     if state == "not-found":
@@ -169,32 +154,7 @@ def deploy(ref: str, allow_rewind: bool = False) -> dict:
     guard_rewind(Path(os.path.realpath(live_now)) if live_now.exists() else None, sha, allow_rewind)
     release = ROOT / "releases" / f"was-{sha}"
     if not release.is_dir():
-        stage = ROOT / "releases" / f".was-{sha}.{os.getpid()}.tmp"
-        shutil.rmtree(stage, ignore_errors=True)
-        work = ROOT / "releases" / f".was-{sha}.{os.getpid()}.work"
-        shutil.rmtree(work, ignore_errors=True)
-        try:
-            run("git", "worktree", "add", "-q", "--detach", str(work), sha, cwd=SRC)
-            run("npm", "ci", "--silent", "--no-audit", "--no-fund", cwd=work)
-            run_suite(work)
-            stage.mkdir(mode=0o700)
-            shutil.copytree(work / "server", stage / "server")
-            # Service-owned agent assets (Supervisor/Reporter plugin + skills) are read by server/ at import.
-            for extra in ("hermes-plugin", "skills", "ops"):
-                if (work / extra).is_dir():
-                    shutil.copytree(work / extra, stage / extra, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-            for name in ("package.json", "package-lock.json"):
-                shutil.copy2(work / name, stage / name)
-            run("npm", "ci", "--omit=dev", "--silent", "--no-audit", "--no-fund", cwd=stage)
-            run(str(NODE_DIR / "node"), "--input-type=module", "-e", "await import('./server/service.mjs')", cwd=stage)
-            (stage / "RELEASE_SHA").write_text(sha + "\n")
-            (stage / "SOURCE_REPO").write_text(REPO_URL + "\n")
-            (stage / "SERVER_TREE").write_text(tree_digest(stage / "server") + "\n")
-            os.replace(stage, release)
-        finally:
-            shutil.rmtree(stage, ignore_errors=True)
-            subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=SRC, capture_output=True)
-            shutil.rmtree(work, ignore_errors=True)
+        raise RuntimeError("immutable release missing: prepare and test it on the designated remote worker first; never run heavy tests on the control plane")
     if (release / "RELEASE_SHA").read_text().strip() != sha:
         raise RuntimeError("release identity mismatch")
     current = ROOT / "current"
@@ -214,6 +174,9 @@ def deploy(ref: str, allow_rewind: bool = False) -> dict:
                        log=lambda line: print(f"wizard-agent-service-deploy: {line}", file=sys.stderr, flush=True))
     prior = Path(os.path.realpath(current)) if current.exists() else None
     guard_rewind(prior, sha, allow_rewind)  # re-check: another deploy may have landed during the build
+    require_heavy_idle()
+    if prior:
+        run("app-parity-gate", str(prior), str(release))
     receipt = {
         "status": "activating", "source_repo": REPO_URL, "source_sha": sha,
         "server_tree": (release / "SERVER_TREE").read_text().strip(),
@@ -248,6 +211,7 @@ def rollback() -> dict:
     prior = latest.get("prior_release")
     if not prior or not Path(prior).is_dir():
         raise RuntimeError("no prior release recorded")
+    require_heavy_idle()
     helper_release = Path(os.path.realpath(ROOT / "current"))
     activate_bridge(Path(prior), helper_release)
     switch(Path(prior))

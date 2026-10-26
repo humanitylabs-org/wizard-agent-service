@@ -78,6 +78,7 @@ describe('scheduled corrective run is durable and bounded', () => {
     const f = fixture()
     const j = f.s.create({ name: 'Old check', kind, when: { every: 1 }, prompt: 'Check', thread: 'old-thread' })
     await f.s.runNow(j.id)
+    await f.s.tick(false)
     const row = f.s.latest(j.id), old = JSON.parse(row.data)
     delete old.report
     old.body.input = 'Original pre-upgrade instructions'
@@ -92,10 +93,11 @@ describe('scheduled corrective run is durable and bounded', () => {
   it.each(['failed', 'cancelled', 'interrupted'])('preserves original notification and watcher success when correction is %s', async status => {
     for (const kind of ['run', 'watch']) {
       const notices: any[] = [], restored: any[] = []
-      const f = fixture({ notifier: { send: async (n: any) => notices.push(n) }, onWatchResult: async (_j: any, run: any) => restored.push(run) })
+      const f = fixture({ notifier: { available: () => true, send: async (n: any) => notices.push(n) }, onWatchResult: async (_j: any, run: any) => restored.push(run) })
       const j = f.s.create({ name: 'Check', kind, when: { every: 1 }, prompt: 'Check', thread: 'original-thread', deliver: kind === 'run' ? 'notification' : 'thread' })
       await f.s.runNow(j.id)
-      const original = { status: 'completed', output: 'The original check succeeded.', started_at: '2026-10-25T12:00:00Z', finished_at: '2026-10-25T12:00:10Z' }
+      await f.s.tick(false)
+      const original = { status: 'completed', output: 'The original check succeeded.', started_at: '2026-10-25T12:00:00.000Z', finished_at: '2026-10-25T12:00:10.000Z' }
       f.results.set(f.calls[0].key, original)
       await f.s.refreshRuns(); expect(f.calls).toHaveLength(2)
       f.results.set(f.calls[1].key, { status, output: '' })
