@@ -128,7 +128,7 @@ export class Supervisor {
       privacy: 'shareable', client_report_id: client }
     // An answer without a question binding is not allowed to spawn a review.
     if (kind === 'answer') fail('Use supervisor_answer with the question_id', 409)
-    if (kind === 'completion' && !context.review) fail('A completion must come from a Supervisor review or builder thread', 403)
+    if (kind === 'completion' && context.role !== 'builder') fail('A completion must come from a Supervisor builder thread', 403)
     this.transaction(() => {
       this.db.prepare('INSERT INTO reports VALUES(?,?,?,?,?)').run(report.id, caller.agent_id, caller.thread_id, client, JSON.stringify(report))
       if (context.review) {

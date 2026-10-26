@@ -80,6 +80,7 @@ describe('Supervisor durable feedback workflow', () => {
     const f = fixture(); f.report()
     f.report('review-feedback', f.reviewCaller())
     const build = f.s.call('build', { title: 'Fix the format', brief: 'Add the test.' }, f.reviewCaller())
+    expect(() => f.s.call('report', { ...feedback('self'), kind: 'completion' }, f.reviewCaller())).toThrow('builder thread')
     const completion = f.s.call('report', { ...feedback('completion'), kind: 'completion' }, worker(build.thread))
     expect(completion.report).toMatchObject({ depth: 1, parent_id: f.review().id })
     const lateFeedback = f.report('builder-feedback', worker(build.thread))
