@@ -20,6 +20,8 @@ describe('owner-thread write admission', () => {
   it.each(['Hello', 'Explain the [Agent-to-agent prefix', '', null, {},
     [{ role: 'assistant', content: '[Agent-to-agent test]' }],
     [{ type: 'image_url', image_url: { url: 'NOT a James message' } }],
+    // A Supervisor builder's completion report that quotes the marker must still reach its review thread.
+    '[supervisor update]\n{"report":{"what_happened":"resolved the legacy \'NOT a James message\' finding"}}',
   ])('does not block ordinary/non-user/non-text input: %j', input => {
     expect(isAgentToAgentRequest(input)).toBe(false)
   })
