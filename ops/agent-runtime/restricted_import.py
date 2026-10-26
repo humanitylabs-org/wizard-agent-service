@@ -324,6 +324,9 @@ def resume(h, journal_path, *, dry_run=False):
         h.require(home.exists() and not home.is_symlink(), 'ownership_staging_missing')
         if dry_run:
             return reown(home, rt.AGENT_UID, dry_run=True)
+        # /run may have been lost during a host restart. This recreates only
+        # the reserved socket directories, never starts/imports a runtime.
+        prepare_socket(h, journal['plan'], journal['id'])
         return finish(h, path, journal, d, record, started)
 
 

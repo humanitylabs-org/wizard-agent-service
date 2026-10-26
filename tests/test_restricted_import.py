@@ -213,6 +213,17 @@ class RestrictedImportTests(unittest.TestCase):
         h.undo(result['journal'])
         self.assertTrue((self.home / 'state.db').exists())
 
+    @LINUX_ONLY
+    def test_sealed_resume_recreates_socket_preparation_after_restart(self):
+        with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': 'sealed'}), self.assertRaises(SystemExit):
+            h.apply(self.plan, 'restricted-fixture', self.root)
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        r.prepare_socket.reset_mock()
+        result = h.resume(journal)
+        r.prepare_socket.assert_called_once()
+        self.assertEqual(r.prepare_socket.call_args.args[1:], (self.plan, 'restricted-fixture'))
+        h.undo(result['journal'])
+
     def test_profiles_refuse_option_is_approval_bound(self):
         (self.home / 'profiles/old').mkdir(parents=True)
         plan = h.scan(self.home, owner_home=self.owner, profiles_policy='refuse')
