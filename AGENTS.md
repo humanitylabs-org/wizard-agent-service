@@ -93,13 +93,13 @@ Every change reaches `main` one of two ways: **propose a fix** (`tier: recommend
 DECISIONS #96 (24 Oct 2026). `main` keeps **0 required approvals** and non-strict status checks, so process never blocks work.
 
 - **Humans are the only admins:** James (`jdefleur`), Jan (`JanMesaric`) and Miguel (`mistermizel`). Agent accounts (`defleur-agents`, `oscarhenrycollins`) hold Write and sit on `main`'s review-bypass list; they never change branch rules, collaborators or repository settings.
-- **Fixes ship immediately.** A `tier: recommended fix` PR merges by its author, human or agent, without waiting for another review, once all of these hold:
+- **Fixes ship immediately.** A `tier: recommended fix` PR that is not on the high-risk list below merges by its author, human or agent, without waiting for another review, once all of these hold:
   - a regression test that fails on `main` before the fix and passes after it;
   - the required checks are green;
   - every review thread is resolved (Codex or Agent review findings fixed or answered).
 
   The release carrying it can go to stable the same day (DECISIONS #82).
-- **Everything else needs a review by someone other than its author**, and that reviewer may be an agent (the Agent review workflow or another collaborator's agent). This covers features, maintenance, taste and defaults, and the high-risk list: security or privacy boundaries, host powers or credentials, migrations or anything that deletes or rewrites owner data, and a release that reaches every install. Once the review, the required checks and resolved conversations hold, the author's agent merges; no human has to visit GitHub to click merge.
+- **Everything else needs a review by someone other than its author**, and that reviewer may be an agent (the Agent review workflow or another collaborator's agent). This covers features, maintenance, taste and defaults, and the **high-risk list, fixes included**: security or privacy boundaries, host powers or credentials, migrations or anything that deletes or rewrites owner data, and a release that reaches every install. A high-risk fix still ships the same day; it just gets that review first. Once the review, the required checks and resolved conversations hold, the author's agent merges; no human has to visit GitHub to click merge.
 - **Every PR gets an agent review.** The **Agent review** workflow (`humanitylabs-org/wizard-ux` `tools/pr-agent-review.mjs`) posts one review on each push to a ready PR. It flags taste changed for everyone instead of in your own skin, likely breaking changes, secrets and personal paths or private hosts, and `docs/COMPONENTS.md` reuse problems. Fix every 🔴 before merging; each 🟡 is something the reviewer checks.
 - **The Verified section must reflect real results** before anything merges.
 - **What each tier means for merging:**
@@ -148,3 +148,7 @@ Anything shipped, tagged or handed to a tester is built only from commits alread
 
 Pick up work from the open issues in this repo and from wizard-os `docs/WORK_OUTSTANDING.md`. For how the pieces fit together and what is already decided, read wizard-os `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`.
 <!-- /wizard-os-team-rules -->
+
+## Chat feature parity (this repo)
+
+Every new or changed chat feature must add/update `qa/agent-parity/features.json` and a behavioral per-kind test (main, host-profile, container, restricted). Shared-helper tests alone do not establish parity. `npm run test:agent-parity` is included in `npm test`, CI and the deploy helper's existing mandatory npm-test gate. Missing server checks fail coverage; policy exemptions require explicit executable policy evidence, never a blanket agent exemption. Browser/live evidence must be distinguished from synthetic HTTP fixtures. Never run QA against an existing private agent or read its sessions/home.
