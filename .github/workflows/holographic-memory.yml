@@ -1,0 +1,36 @@
+name: Holographic memory
+on:
+  pull_request:
+    paths:
+      - server/agents.mjs
+      - ops/agent-runtime/hermes_import.py
+      - ops/agent-runtime/hermes-lock.json
+      - tests/holographic*
+      - .github/workflows/holographic-memory.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  stock-container-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Isolated importer dependencies
+        run: |
+          python3 -m venv .proof-venv
+          .proof-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1,<2'
+      - name: Stock fact add, restart recall, native backup and Wizard import recall
+        run: |
+          mkdir -p "$RUNNER_TEMP/memory-proof"
+          TMPDIR="$RUNNER_TEMP/memory-proof" .proof-venv/bin/python tests/holographic_container_proof.py | tee memory-proof.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: holographic-memory-proof
+          path: memory-proof.json

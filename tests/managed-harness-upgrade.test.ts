@@ -35,6 +35,8 @@ it('upgrades only managed harness files, reapplies running agents once, and keep
   expect(s.calls.sort()).toEqual(['legacy', 'restricted'])
   for (const row of [a, stopped, restricted]) {
     expect(readFileSync(join(row.home, 'config.yaml'), 'utf8')).toContain('  wizard:')
+    expect(readFileSync(join(row.home, 'config.yaml'), 'utf8')).toContain('provider: holographic')
+    expect(readFileSync(join(row.home, 'config.yaml'), 'utf8')).toContain('$HERMES_HOME/memory_store.db')
     expect(readFileSync(join(row.home, '.env'), 'utf8')).toContain('WIZARD_MCP_TOKEN=synthetic-gateway-key')
     expect(readFileSync(join(row.root, 'home', 'private-canary.txt'), 'utf8')).toBe('DO NOT TOUCH')
     expect(JSON.parse(readFileSync(join(row.root, 'agent.json'), 'utf8'))).toEqual(row.agent)
