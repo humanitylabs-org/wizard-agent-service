@@ -1,5 +1,12 @@
 name: Holographic memory
 on:
+  push:
+    paths:
+      - server/agents.mjs
+      - ops/agent-runtime/hermes_import.py
+      - ops/agent-runtime/hermes-lock.json
+      - tests/holographic*
+      - .github/workflows/holographic-memory.yml
   pull_request:
     paths:
       - server/agents.mjs
