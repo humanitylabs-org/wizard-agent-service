@@ -3,8 +3,8 @@ import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServe
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { readSettings, wizardOsHome } from './wizard-os-settings.mjs'
-import { readFileSync } from 'node:fs'
+import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
+import { existsSync, readFileSync } from 'node:fs'
 
 const secretFile = (path) => {
   if (!path) return ''
@@ -65,6 +65,13 @@ const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL 
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
 const settingsPath = process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json')
+// Detect previous Wizard use before createWizardServer creates any stores. A stock Hermes
+// may already exist on a genuinely new Wizard install; its private history is never read.
+initializeResponseStyle(settingsPath, { existingInstall: [
+  settingsPath,
+  process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/run-queue.sqlite3'),
+  process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/thread-seen.json'),
+].some(path => existsSync(path)) })
 // The Serve listener: Tailscale Serve (https://<box>.<tailnet>.ts.net/) forwards here, and only here. Every
 // request on it is verified as the owner's tailnet identity, whatever WIZARD_AUTH_MODE says about the
 // box-local listener above. Unset: no tailnet listener (computer-only use).

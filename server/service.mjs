@@ -25,7 +25,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -35,7 +35,7 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
-import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
@@ -277,7 +277,11 @@ function operatorBody(method, pathname, body) {
 // as a follow-up turn; the agent should say what is running and stop, not wait or poll.
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 export function runInstructions(contract = { join: true }) {
-  return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+  let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
+  if (contract.response_style === 'concise') instructions = instructions
+    .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
+    .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
+  return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
@@ -2711,6 +2715,7 @@ function buildWizardServer(options, lifetime) {
       if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
+    responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
     followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
@@ -2768,6 +2773,7 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
     agentExists: id => Boolean(agents?.read(id)),
@@ -3025,7 +3031,7 @@ function buildWizardServer(options, lifetime) {
     return hermesContractInFlight
   }
   const FULL_CONTRACT = { join: true, markdown: true }
-  const assertJoinedDelegationCapability = async () => {
+  const assertJoinedDelegationCapabilityBase = async () => {
     if (joinedDelegation === 'unchecked') return FULL_CONTRACT
     let contract
     try { contract = await runContract() }
@@ -3040,6 +3046,8 @@ function buildWizardServer(options, lifetime) {
     if (joinedDelegation === 'off') return { ...contract, join: false }
     return contract
   }
+
+  const assertJoinedDelegationCapability = async () => ({ ...await assertJoinedDelegationCapabilityBase(), response_style: readSettings(settingsPath).settings.response_style })
 
   const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
     const references = suppliedReferences ?? readWizardAssistantRunReferences(inboxDbPath, sessionIds)
@@ -3346,7 +3354,7 @@ function buildWizardServer(options, lifetime) {
       provider: 'custom:tinfoil-operator',
       require_model_lock: true,
       model_options: { reasoning_effort: 'max' },
-      instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
+      instructions: [runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), appProvenanceRunNote(appCatalog())].join('\n\n'),
       ...runContractFields(await assertJoinedDelegationCapability()),
     })
     if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
@@ -3674,7 +3682,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows()
+  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -4733,6 +4741,11 @@ function buildWizardServer(options, lifetime) {
     return id
   }
   const publicSettingsFor = (request, settings) => {
+    // Owner-only preferences are absent from non-owner round-trips, just like a hidden default.
+    if (principalOf(request).kind !== 'owner') {
+      const { response_style: _ownerStyle, ...publicSettings } = settings
+      settings = publicSettings
+    }
     const id = settings.agents?.default_agent_id
     const agent = agents?.read(id)
     if (agent && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : isPrivateAgent(agents, id) && !mayOpenAgent(request, id))) {
@@ -5154,10 +5167,15 @@ function buildWizardServer(options, lifetime) {
         // Never compare a non-owner guess with the hidden saved identity, even on safe round-trips.
         if (principal.kind !== 'owner' && input.agents && typeof input.agents === 'object') delete input.agents.default_agent_id
         if (principal.kind === 'agent') { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+        if (Object.hasOwn(input, 'response_style')) {
+          if (principal.kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
+          if (!['summary', 'concise'].includes(input.response_style)) { sendJson(response, 400, { error: 'invalid_response_style' }); return }
+        }
         if (!settingsPath) { sendJson(response, 503, { error: 'settings_unavailable' }); return }
         const settings = normalizeSettings({ ...current, ...input, agents: { ...current.agents, ...input.agents } }, settingsOptions)
         let stored = {}
         try { stored = JSON.parse(readFileSync(settingsPath, 'utf8')) } catch { /* new settings store */ }
+        recordResponseStyleSwitch(stored, current.response_style, settings.response_style)
         if (agents?.read(settings.agents.default_agent_id)?.role === 'recovery') throw new AgentError(409, 'recovery_cannot_be_default', 'agents.default_agent_id')
         mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
         const temporary = `${settingsPath}.${process.pid}.tmp`

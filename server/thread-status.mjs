@@ -21,9 +21,15 @@ export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
 const OPEN_MARKER = /\[WIZARD_STATUS_V1\][\s\S]*$/u
 
-// Keep finish-report formatting before status instructions in both runtime prompts: the status
-// marker still governs the final line, and short/conversational replies remain free-form.
-export const FINISH_REPORT_INSTRUCTIONS = 'When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.'
+// Keep the reply-length rule before status instructions in both runtime prompts: the status
+// marker still governs the final line. Replies are concise prose, not a fixed report template.
+export const CONCISE_REPLY_INSTRUCTIONS = 'Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.'
+
+export const SUMMARY_REPLY_INSTRUCTIONS = 'When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.' + ' Briefly restate what we are doing so someone opening the thread cold understands the original request and the result.'
+
+// Existing installs and callers without a preference keep the Summary contract.
+export const FINISH_REPORT_INSTRUCTIONS = SUMMARY_REPLY_INSTRUCTIONS
+export const finishReportInstructions = style => style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : SUMMARY_REPLY_INSTRUCTIONS
 
 // Hermes-only extension: callers for other agents retain the shared finish contract verbatim.
 export const OWNED_OPEN_WORK_INSTRUCTIONS = 'Under **Still open:**, every bullet you own must name its live handle and when it lands (running now, scheduled for <time>, or queued job). Dispatch agent-owned follow-ups within existing authority in this same turn; never offer them as a question or say "say the word". Only owner decisions, money, external sends, or wider authority may be asked of the owner.'
