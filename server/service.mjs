@@ -68,6 +68,7 @@ import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
+import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } from './system-jobs.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
@@ -2111,19 +2112,20 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 // The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
 // (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
 export function scheduleNotifier({ bridge, appsJsonPath }) {
-  const pick = () => {
-    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+  const pick = (agent) => {
+    const providers = bridge.apps(agent).filter(app => app.jobs.includes('notifications'))
     let chosen = ''
     try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
     const running = providers.filter(app => app.status === 'running')
     return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
   }
   return {
-    available: () => pick()?.status === 'running',
-    send: async ({ title, message }) => {
-      const app = pick()
+    available: ({ agent = GATEWAY_MAIN_AGENT } = {}) => pick(agent === 'main' ? GATEWAY_MAIN_AGENT : agent)?.status === 'running',
+    send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
+      agent = agent === 'main' ? GATEWAY_MAIN_AGENT : agent
+      const app = pick(agent)
       if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
-      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, agent)
       if (!result || result.isError) throw new Error('notify failed')
       return { app: app.id }
     },
@@ -2466,7 +2468,7 @@ export function speechText(value) {
 
 export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
-  const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  const paths = ['systemJobsStatePath', 'supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const ownedStatePath = ownedWorkStatePathOf(options)
@@ -4555,6 +4557,29 @@ function buildWizardServer(options, lifetime) {
     deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  const hostJobsActive = options.systemJobsEnabled === true
+  if (hostJobsActive && (!options.systemJobsStatePath || !options.systemJobsUnitDir || !options.systemJobsSocketPath)) throw new Error('Host jobs require explicit state, unit and socket paths')
+  const systemJobs = options.systemJobsStatePath ? new SystemJobs({
+    statePath: resolve(String(options.systemJobsStatePath)),
+    hermesHome: options.systemJobsHermesHome || '',
+    timers: options.systemJobsTimers ?? (hostJobsActive ? new SystemdJobTimers({ unitDir: options.systemJobsUnitDir, socketPath: options.systemJobsSocketPath }) : null),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+  }) : null
+  if (systemJobs) {
+    let socket = null, alertTimer = null
+    lifetime.own(async () => {
+      if (alertTimer) clearInterval(alertTimer)
+      if (socket) await new Promise(resolveClose => socket.close(resolveClose))
+      await systemJobs.close()
+    })
+    if (hostJobsActive) {
+      socket = systemJobsSocket(systemJobs, options.systemJobsSocketPath)
+      socket.on('error', () => { console.error('[system-jobs] host trigger unavailable'); server.close() })
+      systemJobs.reconcile()
+      alertTimer = setInterval(() => { void systemJobs.flushAlerts().catch(() => console.error('[system-jobs] notification pending')) }, 30_000)
+      alertTimer.unref()
+    }
+  }
   const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
     canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
@@ -5305,6 +5330,20 @@ function buildWizardServer(options, lifetime) {
           response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
           response.end(body)
         }
+        return
+      }
+      if (url.pathname === '/wizard/v1/system-jobs' || url.pathname.startsWith('/wizard/v1/system-jobs/')) {
+        // Host execution is never an agent capability, including main/recovery agent credentials.
+        if (principal.kind !== 'owner' || isAgentIngress(request)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.method !== 'GET') {
+          const refusal = setupWriteRefusal(request, tailnetIngress)
+          if (refusal) { sendJson(response, refusal, { error: 'same_origin_json_required' }); return }
+        }
+        await handleSystemJobsApi(request, response, url, { jobs: systemJobs, sendJson, readBody: async req => {
+          try { return JSON.parse((await readBoundedBody(req, 128 * 1024)).toString('utf8')) }
+          catch { throw Object.assign(new Error('Invalid system job body'), { status: 400 }) }
+        } })
         return
       }
       if (url.pathname === '/wizard/v1/schedules' || url.pathname.startsWith('/wizard/v1/schedules/')) {
