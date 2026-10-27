@@ -4,7 +4,10 @@ No live/private homes are accessed. Synthetic key default DOES NOT verify a prov
 Optional INCOGNITO_PROVIDER_KEY_CONTAINER names a credential-only tmpfs container; its value
 is read through Docker stdout into memory and never printed, persisted, or put in Docker argv/env.
 """
-import hashlib, json, os, secrets, sqlite3, subprocess, sys, tempfile, time, urllib.request
+import hashlib, json, os, secrets, signal, sqlite3, subprocess, sys, tempfile, time, urllib.request
+# Let the worker timeout unwind cleanup rather than leaving disposable containers behind.
+def terminate(*_): raise SystemExit(143)
+signal.signal(signal.SIGTERM, terminate)
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'ops/agent-runtime'))
