@@ -48,4 +48,16 @@ test('saved Retry preserves multimodal bytes, trusted paths and continuation aut
  assert.deepEqual(JSON.parse(sent[0].body).input,input);assert.deepEqual(sent[0].trustedPaths,['/synthetic/retained/photo.png']);assert.deepEqual(sent[0].continuation,source.continuation)
  q._update(results[0].record.publicRunId,{status:'failed',payload:{status:'failed'}});q.markOwnerStop(results[0].record.publicRunId)
  await assert.rejects(q.retrySaved(results[0].record.publicRunId,'wizard_files'),/no longer current/)
+ dispatch=false
+ const emptyBody=JSON.stringify({session_id:'wizard_empty',input:''})
+ const empty=(await q.admit({runtime:'direct',sessionId:'wizard_empty',idempotencyKey:'empty',requestHash:queueRequestHash('direct',emptyBody),body:emptyBody})).record
+ q._update(empty.publicRunId,{status:'failed'})
+ await assert.rejects(q.retrySaved(empty.publicRunId,'wizard_empty'),/empty/)
+ const oldBody=JSON.stringify({session_id:'wizard_superseded',input:'old request'})
+ const old=(await q.admit({runtime:'direct',sessionId:'wizard_superseded',idempotencyKey:'old',requestHash:queueRequestHash('direct',oldBody),body:oldBody})).record
+ q._update(old.publicRunId,{status:'failed'})
+ const newBody=JSON.stringify({session_id:'wizard_superseded',input:'new request'})
+ await q.admit({runtime:'direct',sessionId:'wizard_superseded',idempotencyKey:'new',requestHash:queueRequestHash('direct',newBody),body:newBody})
+ await assert.rejects(q.retrySaved(old.publicRunId,'wizard_superseded'),/no longer current/)
+ assert.equal(sent.length,1,'no empty or superseded request was dispatched')
 })
