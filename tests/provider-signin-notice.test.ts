@@ -40,6 +40,19 @@ it('shows a sign-in expired notice with a Fix it link instead of hermes auth adv
   expect(q.latestForSession('wizard_signin')!.body).toBe(body)
 })
 
+it.each(['completed', 'failed'])('repairs old %s receipts without replaying their original request', async status => {
+  let launches = 0
+  const q = new DurableRunQueue({ statePath: join(await temp(), 'queue.db'), pollIntervalMs: 0,
+    activeSessionIds: async () => [], launch: async () => { launches++; return { upstreamRunId: 'upstream', payload: failure('ok') } }, lookup: async () => ({ payload: failure() }) })
+  cleanups.push(() => q.close())
+  const first = await q.admit(request)
+  q._update(first.record!.publicRunId, { status, payload: { ...failure(), status }, updatedAt: 123 })
+  await q.initialize(); await q.initialize()
+  expect(q.get(first.record!.publicRunId)).toMatchObject({ status: 'failed', updatedAt: 123, body })
+  expect(q.publicPayload(first.record!.publicRunId).output).toContain('[Fix it](/troubleshoot/)')
+  expect(launches).toBe(1)
+})
+
 it.each([
   'No Codex credentials stored. Run `hermes auth add openai-codex --type oauth` to authenticate.',
   'Codex auth is missing access_token. Run `hermes auth add openai-codex --type oauth` to re-authenticate. Run `hermes model` to re-authenticate.',

@@ -257,7 +257,7 @@ export class DurableRunQueue {
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
     // Normalize older terminal receipts without replaying or changing saved requests.
-    for (const record of this._rows("status = 'completed' AND runtime = 'direct' AND (payload_json LIKE '%Provider authentication failed:%' OR payload_json LIKE '%credentials%' OR payload_json LIKE '%Codex%')")) {
+    for (const record of this._rows("status IN ('completed','failed') AND runtime = 'direct' AND (payload_json LIKE '%Provider authentication failed:%' OR payload_json LIKE '%credentials%' OR payload_json LIKE '%Codex%')")) {
       const payload = normalizeProviderPreflightFailure(record.payload)
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
