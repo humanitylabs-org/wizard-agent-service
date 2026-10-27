@@ -105,6 +105,27 @@ export class DurableHeavyQueue {
         INSERT INTO heavy_jobs SELECT id,session,origin,key,hash,data,agent_id FROM heavy_jobs_legacy ORDER BY rowid;
         DROP TABLE heavy_jobs_legacy;`)
     }
+    if (this.db.prepare('PRAGMA user_version').get().user_version < 1) {
+      // Pre-delivery ledgers have no acknowledgements for historical results.
+      // Snapshot terminal rows only, under the migration's writer lock, and
+      // commit the version with their stamps so reopening cannot forgive work
+      // that finishes later. Keep any real acknowledgement already recorded.
+      const update = this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?')
+      for (const row of this.db.prepare('SELECT id,data FROM heavy_jobs').all()) {
+        const job = JSON.parse(row.data)
+        if (!terminal.has(job.state) || (job.completion_delivered_at && job.notice_delivered_at)) continue
+        // Rows written by the delivery-tracking release are not legacy: a
+        // dropped result already carrying its notice, or a finished job whose
+        // continuation has not been dispatched yet, is still owed to the owner.
+        if (job.completion_notice || (!job.resume && !job.cancel_requested && !job.continuation_invalidated)) continue
+        const stamp = job.receipt?.finished_at ?? job.created_at
+        update.run(JSON.stringify({ ...job,
+          completion_delivered_at: job.completion_delivered_at || stamp,
+          notice_delivered_at: job.notice_delivered_at || stamp,
+          delivery_backfill: 'legacy-migration' }), row.id)
+      }
+      this.db.exec('PRAGMA user_version=1')
+    }
     })
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     } catch (error) {
@@ -125,7 +146,7 @@ export class DurableHeavyQueue {
     return job
   }
   pendingNotices(agentId, sessionId) {
-    // Derive legacy tombstones too; no migration or new persistence system.
+    // Derive dropped-result notices from the existing ledger, after migration.
     return this.db.prepare('SELECT data FROM heavy_jobs WHERE session=? AND agent_id=? ORDER BY rowid').all(sessionId, agentId)
       .map(row => JSON.parse(row.data)).filter(job => heavyCompletionDropped(job) && !job.notice_delivered_at)
   }
