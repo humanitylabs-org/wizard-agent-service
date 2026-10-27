@@ -6,6 +6,7 @@
 // GET /wizard/v1/bootstrap and never hardcode any of it.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { randomInt } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { appView } from './app-views.mjs'
 import { chatsView, CHATS_DEFAULT } from './chats-views.mjs'
@@ -83,6 +84,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
+    response_style: value.response_style === 'concise' ? 'concise' : 'summary',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
@@ -188,6 +190,31 @@ export function updateSettings(path, mutate) {
   writeFileSync(temporary, text, { mode: 0o644 })
   renameSync(temporary, path)
   return normalizeSettings(raw)
+}
+
+// Bounded, local-only experiment counters. No timestamps, identifiers, content or network sink.
+const counter = n => Number.isSafeInteger(n) && n >= 0 ? n : 0
+export function recordResponseStyleSwitch(raw, before, after) {
+  if (before === after) return
+  const prior = raw.response_style_experiment || {}
+  raw.response_style_experiment = {
+    assigned: ['summary', 'concise'].includes(prior.assigned) ? prior.assigned : before,
+    source: ['new_install', 'existing_install'].includes(prior.source) ? prior.source : 'existing_install',
+    switches: { summary: counter(prior.switches?.summary), concise: counter(prior.switches?.concise) },
+  }
+  raw.response_style_experiment.switches[after] = Math.min(Number.MAX_SAFE_INTEGER, raw.response_style_experiment.switches[after] + 1)
+}
+
+/** Call once at production startup, before stores are created. Never randomize a read or an upgrade. */
+export function initializeResponseStyle(path, { existingInstall = true, choose = () => randomInt(2) } = {}) {
+  if (!path) return
+  return updateSettings(path, raw => {
+    if (['summary', 'concise'].includes(raw.response_style)) return
+    const existing = existingInstall || existsSync(path)
+    const style = existing ? 'summary' : choose() === 0 ? 'summary' : 'concise'
+    raw.response_style = style
+    raw.response_style_experiment = { assigned: style, source: existing ? 'existing_install' : 'new_install', switches: { summary: 0, concise: 0 } }
+  })
 }
 
 function readJsonFile(path, limit = 2 * 1024 * 1024) {
