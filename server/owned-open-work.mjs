@@ -6,6 +6,12 @@
 const OFFER = /\b(?:say the word|want me to|shall I|if you want me to\s+queue|I can\s+queue)\b/iu
 const AGENT = /\b(?:mine|me|I|I['’]ll|Archimedes|agent)\b/iu
 
+// An item that states an existing handle ("already scheduled", "running now", "queued job")
+// may be paid for by a dispatch from an earlier turn of the same thread; the reader
+// credits it only against real earlier handle-creating tool calls, never prose alone.
+const CLAIMED_HANDLE = /\b(?:already\s+(?:scheduled|queued|running|started|dispatched|submitted)|scheduled\s+for|running\s+now|is\s+running|queued\s+(?:job|as)|in\s+the\s+queue)\b/iu
+export const claimsExistingHandle = item => CLAIMED_HANDLE.test(String(item ?? ''))
+
 export function ownedOpenItems(replyText) {
   const text = String(replyText ?? '')
   const label = /\*\*Still open:\*\*/iu.exec(text)

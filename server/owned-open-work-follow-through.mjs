@@ -8,7 +8,7 @@ import { mkdirSync, chmodSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { parseStatus } from './thread-status.mjs'
-import { countDispatchHandles, ownedOpenItems, guardOwnedOpenWork } from './owned-open-work.mjs'
+import { countDispatchHandles, ownedOpenItems, guardOwnedOpenWork, claimsExistingHandle } from './owned-open-work.mjs'
 
 export const OWNED_WORK_KIND = 'owned-open-work'
 export const ownedWorkStatePathOf = options => options.followThrough === false || options.ownedOpenWork === false ? ''
@@ -37,23 +37,38 @@ export function readOwnedOpenWork(path, sessionId) {
     const items = ownedOpenItems(latest.content)
     const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${active} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
     if (rows.length > MAX_ROWS) return null // incomplete tool evidence is not zero handles
+    const claimed = items.filter(claimsExistingHandle).length
+    // Earlier turns of this thread (bounded): real handles that a restated item may point to.
+    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ${active} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
+    const handleCount = countDispatchHandles(rows) + Math.min(claimed, prior)
     return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), messageId: String(latest.message_uid || latest.id),
       userId: Number(user.id), replyId: Number(latest.id), fingerprint: digest(latest.content), at: Number(latest.timestamp),
-      status: parseStatus(latest.content), items, ownedCount: items.length, handleCount: countDispatchHandles(rows),
+      status: parseStatus(latest.content), items, ownedCount: items.length, handleCount,
       continuation: String(user.content ?? '').startsWith(OWNED_WORK_PREFIX) }
   } catch { return null } finally { db?.close() }
 }
 
-export function findOwnedOpenWork(path, now = Date.now()) {
-  if (!path) return []
+// Rowid-range scan only: state.db holds millions of rows, so a time/content predicate
+// over the whole table is a full scan. Callers pass the previous high-water id; the
+// first scan starts a bounded window behind the newest row (ids are monotonic).
+export const OWNED_SCAN_WINDOW = 20_000
+export function scanOwnedOpenWork(path, { now = Date.now(), afterId = null } = {}) {
+  if (!path) return { evidence: [], lastId: afterId }
   let db
   try {
     db = new DatabaseSync(path, { readOnly: true })
-    const sessions = db.prepare(`SELECT DISTINCT session_id FROM messages WHERE role='assistant' AND timestamp>=?
-      AND instr(lower(content),'still open:')>0 ORDER BY timestamp DESC LIMIT 201`).all(now/1000 - MAX_AGE)
-    return sessions.filter(row => /^(?:wizard_|wizard-assistant-)/u.test(row.session_id))
+    const top = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get()?.id ?? 0)
+    const from = afterId == null ? Math.max(0, top - OWNED_SCAN_WINDOW) : Math.min(afterId, top)
+    const sessions = db.prepare(`SELECT DISTINCT session_id FROM messages WHERE id>? AND id<=? AND role='assistant'
+      AND timestamp>=? AND instr(lower(content),'still open:')>0 LIMIT 201`).all(from, top, now/1000 - MAX_AGE)
+    db.close(); db = null
+    const evidence = sessions.filter(row => /^(?:wizard_|wizard-assistant-)/u.test(row.session_id))
       .map(row => readOwnedOpenWork(path, row.session_id)).filter(Boolean)
-  } catch { return [] } finally { db?.close() }
+    return { evidence, lastId: top }
+  } catch { return { evidence: [], lastId: afterId } } finally { db?.close() }
+}
+export function findOwnedOpenWork(path, now = Date.now()) {
+  return scanOwnedOpenWork(path, { now }).evidence
 }
 
 // Recheck at both admission and eventual queue dispatch. A later user message,
@@ -78,7 +93,7 @@ export function requireOwnedWorkContinuation(path, token, now = Date.now()) {
 }
 
 export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = id => readOwnedOpenWork(sessionDbPath, id),
-  find = now => findOwnedOpenWork(sessionDbPath, now), admit, busy = async () => false,
+  find = null, admit, busy = async () => false,
   validate = token => requireOwnedWorkContinuation(sessionDbPath, token), now = Date.now, log = () => {} }) {
   mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
   const db = new DatabaseSync(statePath)
@@ -89,13 +104,28 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     PRIMARY KEY(session_id,run_id), UNIQUE(session_id,reply_id))`)
   const claimFor = evidence => db.prepare('SELECT * FROM owned_work_claims WHERE session_id=? AND (run_id=? OR reply_id=?)')
     .get(evidence.sessionId, evidence.runId, evidence.messageId)
+  // Session-list projection reads only sessions the scanner flagged (or that hold a
+  // claim), so listing hundreds of threads never seeks hundreds of transcripts.
+  const candidates = new Map()
+  for (const row of db.prepare('SELECT session_id, created_at FROM owned_work_claims WHERE created_at>=?').all(now()/1000 - MAX_AGE)) candidates.set(row.session_id, row.created_at)
+  let lastId = null
+  const scan = find ?? (async at => { const result = scanOwnedOpenWork(sessionDbPath, { now: at, afterId: lastId }); lastId = result.lastId; return result.evidence })
   const evidenceFor = sessionId => {
+    if (!candidates.has(sessionId)) return null
+    if (now()/1000 - candidates.get(sessionId) > MAX_AGE) { candidates.delete(sessionId); return null }
     const evidence = read(sessionId)
-    if (!evidence?.status) return null
+    if (!evidence) {
+      // The admitted continuation is running: keep the previous green status hidden until
+      // its own reply lands (then that reply is evaluated, as a continuation, on its own).
+      const pending = db.prepare("SELECT 1 FROM owned_work_claims WHERE session_id=? AND state IN ('claimed','admitted') AND created_at>=? LIMIT 1")
+        .get(sessionId, now()/1000 - 15 * 60)
+      return pending ? { agentId: 'hermes', sessionId, ownedCount: 1, handleCount: 0, continuation: false } : null
+    }
+    if (!evidence.status) return null
     // A known admission failure or expired authority stops the spinner without
     // pretending that a follow-up is running, and never grants a fresh retry.
     const claim = claimFor(evidence)
-    return { ...evidence, continuation: evidence.continuation || Boolean(claim && claim.state !== 'admitted')
+    return { ...evidence, continuation: evidence.continuation || Boolean(claim && claim.state === 'failed')
       || now()/1000-evidence.at > MAX_AGE }
   }
   let ticking = false, stopped = false
@@ -103,7 +133,9 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     if (ticking || stopped) return
     ticking = true
     try {
-      for (const evidence of await find(now())) {
+      const found = await scan(now())
+      for (const evidence of found) if (evidence?.sessionId && evidence.items?.length) candidates.set(evidence.sessionId, now()/1000)
+      for (const evidence of found) {
         if (stopped) break
         if (evidence.agentId !== 'hermes' || evidence.continuation || !evidence.items?.length
           || guardOwnedOpenWork(evidence.status, evidence) === evidence.status || claimFor(evidence)

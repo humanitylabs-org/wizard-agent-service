@@ -202,11 +202,11 @@ describe('owned-work service wiring', () => {
   }
   it('the actual session list shows owned_work and dispatches a hidden service continuation once', async () => {
     const f = await service(); f.add('user', 'Fix the problem'); f.add('assistant', reply())
-    const before = await f.list()
-    expect(before.status).toBe('running'); expect(before.wizard_waiting_on).toBe('owned_work')
-    expect(before.wizard_attention.ask).toBe('Starting the follow-up work it listed.')
     f.enableScan()
     await f.server.ownedOpenWork.tick()
+    // Once admitted, the continuation's own run owns the row; green done never shows.
+    const before = await f.list()
+    expect(before.status).toBe('running'); expect(before.wizard_attention?.state).not.toBe('done')
     await vi.waitFor(() => expect(f.sent).toHaveLength(1))
     expect(f.sent[0].input).toContain(OWNED_WORK_PREFIX)
     expect(f.sent[0].instructions).toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
@@ -226,5 +226,58 @@ describe('owned-work service wiring', () => {
     const f = await service(false); f.add('user', 'Fix'); f.add('assistant', reply())
     expect((await f.list()).wizard_attention.state).toBe('done'); expect(f.sent).toHaveLength(0)
     expect(f.server.ownedOpenWork).toBeUndefined()
+  })
+})
+
+describe('owned open work scan stays cheap on large transcripts', () => {
+  it('scans only rows after the previous high-water id', async () => {
+    const { scanOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { DatabaseSync } = await import('node:sqlite')
+    const path = join(mkdtempSync(join(tmpdir(), 'owned-scan-')), 'state.db')
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, timestamp REAL, active INTEGER DEFAULT 1, display_kind TEXT, message_uid TEXT)`)
+    const now = Date.now()
+    const add = (session, role, content) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run(session, role, content, now / 1000)
+    add('wizard_a', 'user', 'go')
+    add('wizard_a', 'assistant', '**Done.**\n\n**Still open:**\n- Mine: run the soak\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+    const first = scanOwnedOpenWork(path, { now })
+    expect(first.evidence.map(e => e.sessionId)).toEqual(['wizard_a'])
+    const second = scanOwnedOpenWork(path, { now, afterId: first.lastId })
+    expect(second.evidence).toEqual([])
+    db.close()
+  })
+})
+
+describe('owned open work restated from an earlier turn', () => {
+  it('credits "already scheduled" only against a real earlier handle in the same thread', async () => {
+    const { readOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { DatabaseSync } = await import('node:sqlite')
+    const make = (withEarlierHandle: boolean) => {
+      const path = join(mkdtempSync(join(tmpdir(), 'owned-prior-')), 'state.db')
+      const db = new DatabaseSync(path)
+      db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, timestamp REAL, active INTEGER DEFAULT 1, display_kind TEXT, message_uid TEXT)`)
+      const add = (role: string, content: string, extra: any = {}) => db.prepare('INSERT INTO messages(session_id,role,content,tool_calls,tool_call_id,timestamp) VALUES(?,?,?,?,?,?)')
+        .run('wizard_p', role, content, extra.tool_calls ?? null, extra.tool_call_id ?? null, Date.now() / 1000)
+      add('user', 'queue the rest')
+      if (withEarlierHandle) {
+        add('assistant', '', { tool_calls: JSON.stringify([{ id: 'c1', function: { name: 'wizard_schedule', arguments: '{}' } }]) })
+        add('tool', JSON.stringify({ id: 'sched_1', nextRun: 'tonight' }), { tool_call_id: 'c1' })
+      }
+      add('assistant', 'Scheduled.')
+      add('user', 'anything else?')
+      add('assistant', '**Nothing else.**\n\n**Still open:**\n- The rebase runs tonight around 03:40. That is mine, and it is already scheduled.\n[WIZARD_STATUS_V1]{"state":"fyi","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+      db.close()
+      return readOwnedOpenWork(path, 'wizard_p')!
+    }
+    const credited = make(true)
+    expect(credited.ownedCount).toBe(1); expect(credited.handleCount).toBe(1)
+    const unpaid = make(false)
+    expect(unpaid.ownedCount).toBe(1); expect(unpaid.handleCount).toBe(0)
   })
 })
