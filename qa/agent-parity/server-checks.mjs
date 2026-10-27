@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -15,9 +15,32 @@ const admit = async (s, body) => {
   assert.equal(r.status, 202)
   return r.json()
 }
-const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
+const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'provider-signin-recovery': async s => {
+    const input = 'Synthetic saved owner words: keep this exact message.'
+    const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'completed', output: "No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.", usage: { total_tokens: 0 } })
+    const read = () => s.request('/v1/runs/' + first.run_id)
+    const failed = await (await read()).json()
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.wizard_reconnect.provider, 'claude')
+    await read() // observe the unavailable state after the failure, in this exact agent's queue
+    const before = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    s.signin.ready = true
+    for (let i = 0; i < 4; i++) await read()
+    const sends = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    assert.equal(sends.length, before + 1, `${s.kind}: one automatic child after sign-in`)
+    const retried = sends.at(-1).body
+    assert.ok(JSON.stringify(retried.input ?? retried.message).includes(input))
+    assert.equal(retried.model, 'fixture-model')
+    if (s.kind !== 'main') assert.equal(retried.require_model_lock, true)
+    if (s.kind !== 'main') assert.equal(retried.provider, undefined, 'display account id never overrides routed transport')
+    for (let i = 0; i < 4; i++) await read()
+    assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length)
+  },
   'supervisor-reporter': async s => {
     const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
     assert.equal(tools.length, 6)
@@ -77,6 +100,19 @@ export const serverChecks = {
     assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
     assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
     assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+    for (const style of ['concise', 'summary']) {
+      const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
+      assert.equal(put.status, 200)
+      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, style)
+      // Use a fresh thread: the first synthetic run may still be active in its queue.
+      const session_id = `wizard_parity_${style}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
+      const prompt = sent(s).instructions
+      const selected = style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : FINISH_REPORT_INSTRUCTIONS
+      assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
+      assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
+    }
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -140,10 +176,14 @@ export const serverChecks = {
     assert.ok(JSON.stringify(await history(s)).includes('WIZARD_FILE_CHIPS_V1'))
   },
   'assistant-media': async s => {
-    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nMEDIA:${s.media.text}` })
+    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nImage explanation continues here.\nMEDIA:${s.media.text}` })
     const row = (await history(s)).find(m => m.id === 'media-reply')
     const items = envelope(row.content)
     assert.equal(items.length, 2, 'both image and document must be usable')
+    assert.equal(new Set(items.map(item => item.id)).size, 2, 'attachments are not duplicated')
+    const positioned = [...row.content.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)]
+    assert.equal(JSON.parse(positioned[0][1]).inline, true)
+    assert.ok(positioned[0].index < row.content.indexOf('Image explanation continues here.'), 'image keeps MEDIA line position on every runtime')
     assert.ok(!row.content.includes('unavailable')); assert.ok(!row.content.includes(s.agentHome)); assert.ok(!row.content.includes('/opt/data'))
     for (const [i, expected] of [png, Buffer.from('PARITY_SYNTHETIC_DOCUMENT\n')].entries()) {
       const r = await s.raw(`/wizard/attachments/${items[i].id}`)
@@ -196,6 +236,22 @@ export const serverChecks = {
     const tail=await (await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500&cursor='+page.archive_cursor)).json();
     assert.equal(tail.data.length,115); assert.equal(tail.archive_cursor,null); assert.equal(tail.build,page.build);
     if(s.kind!=='main') { const main=await (await s.raw('/wizard/hermes/api/sessions?view=list&window=archive-50&fields=slim')).json(); assert(!main.data.some(row=>row.id.startsWith('wizard_slim_')),'main index never unions a routed runtime'); }
+  },
+  'archive-age': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<12;i++) s.sessions.set(`wizard_age_${i}`,{id:`wizard_age_${i}`,source:'wizard-mobile',title:`Aged ${i}`,created_at:now-20*86400-i,archived:i<4,hidden:false,messages:[{role:'user',content:'Aged preview',timestamp:now-20*86400-i}]});
+    if(s.kind==='main') await s.restart();
+    const list=async days=>{
+      const put=await s.raw('/wizard/v1/ui-preferences',{...post({archiveAfterDays:days}),method:'PUT'}); assert.equal(put.status,200);
+      const r=await s.request('/api/sessions?view=list&window=archive-50&limit=100'); assert.equal(r.status,200); const page=await r.json();
+      return {total:page.archive_total, listed:new Set(page.data.map(row=>row.id))};
+    };
+    const week=await list(7); assert.equal(week.total,12,'one week archives explicit and aged threads');
+    for(const days of [30,0]) {
+      const r=await list(days); assert.equal(r.total,4,`archiveAfterDays ${days} archives only explicit Done threads`);
+      for(let i=4;i<12;i++) assert(r.listed.has(`wizard_age_${i}`),`aged thread ${i} stays listed with archiveAfterDays ${days}`);
+    }
+    await list(7);
   },
   'session-body-search': async s => {
     const row=s.sessions.get('wizard_parity'),now=Date.now()/1000; row.hidden=false;

@@ -65,9 +65,12 @@ const failureProjection = (record) => {
   const payload = record.payload && typeof record.payload === 'object' ? record.payload : {}
   const safeError = typeof payload.safe_error === 'string' ? payload.safe_error : ''
   if (record.status !== 'failed') return { safeError }
+  if (record.providerRecoveryAttempted && annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(record.body, null)).wizard_reconnect) {
+    return { safeError: 'The automatic send could not finish because sign-in still needs attention. Your message is saved. Sign in again, then tap Retry.' }
+  }
   const annotated = annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(record.body, null))
   return annotated.wizard_reconnect
-    ? { safeError: annotated.safe_error, reconnect: annotated.wizard_reconnect }
+    ? { safeError: '', reconnect: { ...annotated.wizard_reconnect, run_id: record.publicRunId } }
     : { safeError }
 }
 
@@ -148,6 +151,7 @@ export class DurableRunQueue {
     // turn with this text after the run started (resent by hand), false when not; a throw retries later.
     steerDelivered = null,
     onPendingSteerReplay = () => {},
+    providerSignInReady = null,
     providerAccessRecovery = false,
     providerAccessWindowSeconds = 6 * 3600,
     providerFailureDismissed = () => false,
@@ -175,6 +179,7 @@ export class DurableRunQueue {
     this.onInterruptRecovery = onInterruptRecovery
     this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
     this.steerDelivered = steerDelivered
+    this.providerSignInReady = providerSignInReady
     this.providerAccessRecovery = providerAccessRecovery === true
     this.providerFailureDismissed = providerFailureDismissed
     this.providerAccessWindowSeconds = Math.max(1, Math.min(6 * 3600, Number(providerAccessWindowSeconds) || 6 * 3600))
@@ -265,6 +270,7 @@ export class DurableRunQueue {
     }
     })
     if (this.database.prepare('SELECT 1 FROM wizard_run_queue WHERE agent_id <> ? LIMIT 1').get(this.agentId)) throw new Error('Wizard run queue belongs to another agent')
+    this.database.exec('CREATE TABLE IF NOT EXISTS wizard_provider_signin_seen (public_run_id TEXT PRIMARY KEY REFERENCES wizard_run_queue(public_run_id) ON DELETE CASCADE);')
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     } catch (error) {
       try { this.database.close() } catch { /* preserve original */ }
@@ -275,7 +281,7 @@ export class DurableRunQueue {
   async initialize() {
     if (this.closed) throw new Error('Wizard run queue is closed')
     // Normalize older terminal receipts without replaying or changing saved requests.
-    for (const record of this._rows("status = 'completed' AND runtime = 'direct' AND payload_json LIKE '%Provider authentication failed:%'")) {
+    for (const record of this._rows("status IN ('completed','failed') AND runtime = 'direct' AND (payload_json LIKE '%Provider authentication failed:%' OR payload_json LIKE '%credentials%' OR payload_json LIKE '%Codex%')")) {
       const payload = normalizeProviderPreflightFailure(record.payload)
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
@@ -447,6 +453,14 @@ export class DurableRunQueue {
     payload.agent_id = current.agent_id
     if (!payload.status) payload.status = current.status
     payload.updated_at ??= current.updatedAt
+    const failure = failureProjection(current)
+    if (current.providerRecoveryAttempted && current.status === 'failed'
+        && annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(current.body, null)).wizard_reconnect) {
+      delete payload.wizard_reconnect; delete payload.wizard_provider_auth
+      payload.safe_error = failure.safeError
+      payload.error = { type: 'provider_recovery_failed', message: failure.safeError }
+      payload.output = ''; if ('final_response' in payload) payload.final_response = ''
+    }
     return payload
   }
 
@@ -555,8 +569,9 @@ export class DurableRunQueue {
         ${ids ? `WHERE session_id IN (${ids.map(() => '?').join(',')})` : ''}
       )
       SELECT current.public_run_id, current.session_id, current.status,
-        current.waiting_reason, current.request_hash, current.idempotency_key,
+        current.waiting_reason, current.request_hash, current.idempotency_key, current.provider_recovery_attempted,
         json_object('safe_error', json_extract(current.payload_json, '$.safe_error'),
+          'wizard_reconnect', current.payload_json -> '$.wizard_reconnect',
           'error', current.payload_json -> '$.error',
           'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
           'runtime', current.payload_json -> '$.runtime',
@@ -605,10 +620,16 @@ export class DurableRunQueue {
       return { record: existing, replayed: true }
     }
     if ((!automatic && this.savedRetry(sessionId)?.publicRunId !== publicRunId)
-        || (automatic && source.waitingReason !== 'provider_access') || this._ownerStopped(source)) throw requestError('saved request is no longer current', 409)
+        || (automatic && source.waitingReason !== 'provider_access' && !(source.status === 'failed' && failureProjection(source).reconnect && !source.providerRecoveryAttempted)) || this._ownerStopped(source)) throw requestError('saved request is no longer current', 409)
     const value = parseJson(source.body, {})
     if (!value.input || (typeof value.input === 'string' && !value.input.trim()) || (Array.isArray(value.input) && !value.input.length)) throw requestError('saved request is empty', 409)
     if (route.model) Object.assign(value, { model: route.model, ...(route.provider ? { provider: route.provider } : {}), require_model_lock: true })
+    if (automatic) {
+      const runtime = source.payload?.runtime || source.payload?.usage?.runtime || {}
+      value.model ||= runtime.model || runtime.requested?.model
+      value.provider ||= runtime.provider || runtime.requested?.provider
+      value.require_model_lock = true // never permit provider fallback on a recovered owner request
+    }
     const body = JSON.stringify(value)
     // One synchronous transaction: a process crash cannot insert a child without its inherited bounds.
     this.database.exec('BEGIN IMMEDIATE')
@@ -667,6 +688,24 @@ export class DurableRunQueue {
     for (const row of this.database.prepare('SELECT scope FROM wizard_provider_backoff WHERE failures=-1').all()) {
       const [runtime, savedProvider] = parseJson(row.scope, [])
       if (runtime === record.runtime && savedProvider === provider) this.database.prepare('DELETE FROM wizard_provider_backoff WHERE scope=?').run(row.scope)
+    }
+  }
+
+  async _resumeDiagnosedSignIns() {
+    if (!this.providerSignInReady) return
+    for (const source of this._rows("status='failed' AND runtime='direct' AND provider_recovery_attempted=0")) {
+      const diagnosis = failureProjection(source).reconnect
+      if (!diagnosis || this._ownerStopped(source) || this.providerFailureDismissed(source) || this.savedRetry(source.sessionId)?.publicRunId !== source.publicRunId
+          || source.createdAt + this.providerAccessWindowSeconds <= nowSeconds()) continue
+      let ready
+      try { ready = await this.providerSignInReady(diagnosis.provider) === true } catch { continue }
+      if (!ready) {
+        this.database.prepare('INSERT OR IGNORE INTO wizard_provider_signin_seen(public_run_id) VALUES(?)').run(source.publicRunId)
+        continue
+      }
+      // A healthy but divergent app credential is not evidence that this failed sign-in was restored.
+      if (!this.database.prepare('SELECT 1 FROM wizard_provider_signin_seen WHERE public_run_id=?').get(source.publicRunId)) continue
+      try { this._retrySavedRow(source.publicRunId, source.sessionId, {}, true) } catch (error) { if (![404, 409].includes(error.status)) throw error }
     }
   }
 
@@ -1101,6 +1140,7 @@ export class DurableRunQueue {
       if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
       else await this._refresh(record, force)
     }
+    await this._resumeDiagnosedSignIns()
     this._resumeProviderAccess()
     await this._reconcileStale()
     await this._recoverInterrupted()
