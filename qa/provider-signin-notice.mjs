@@ -35,6 +35,9 @@ try {
     await expect(page.locator('body')).not.toContainText('hermes auth')
     await expect(page.locator('[data-chretry]').first()).toBeVisible()
     await expect(page.locator('[data-chretry]').first()).toBeEnabled()
+    // The shell may auto-dock the linked app while opening this thread. Let its
+    // placement toast/animation finish so evidence does not capture an overlap.
+    await expect(page.locator('#toast.show')).toHaveCount(0, { timeout: 15000 })
     await page.screenshot({ path: `${dir}/${label}.png`, fullPage: true })
     await link.click()
     // Relative app links open beside the chat inside the shell, not in a tab.
@@ -51,6 +54,7 @@ try {
     expect(new URL(loaded.url).pathname).toBe('/troubleshoot/')
     expect(loaded.state).not.toBe('loading')
     expect(context.pages()).toHaveLength(1)
+    await expect(page.locator('#toast.show')).toHaveCount(0, { timeout: 15000 })
     await page.screenshot({ path: `${dir}/${label}-fix-it.png`, fullPage: true })
     const denied = await context.request.post(origin + '/wizard/hermes/v1/runs', { data: {} })
     expect(denied.status()).toBe(403)
