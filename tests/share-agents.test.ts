@@ -149,14 +149,18 @@ describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)
     const file = (await uploaded.json()).file
     const url = `${base}/wizard/files/${file.id}/content?agent=${agent.id}`
     for (const method of ['GET', 'HEAD']) {
-      let beforeHeaders = false
+      let verificationTicks = 0
       svc.prependOnceListener('request', (_req, res) => {
-        setImmediate(() => { beforeHeaders = !res.headersSent })
+        const tick = () => {
+          if (!res.headersSent) { verificationTicks++; setImmediate(tick) }
+        }
+        setImmediate(tick)
       })
       const response = await fetch(url, { method })
       expect(response.status).toBe(200)
       expect(Buffer.from(await response.arrayBuffer()).length).toBe(method === 'GET' ? data.length : 0)
-      expect(beforeHeaders).toBe(true)
+      // More than the initial async open: verification itself must keep yielding.
+      expect(verificationTicks).toBeGreaterThanOrEqual(3)
     }
     const path = join(dir, 'agents', agent.id, 'home', 'inbox', new Date().toISOString().slice(0, 10), 'large.bin')
     writeFileSync(path, Buffer.alloc(data.length, 66))
