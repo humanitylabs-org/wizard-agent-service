@@ -6,7 +6,7 @@ import { parseStatus } from './thread-status.mjs'
 export const RECEIPT_PREFIX = '[Wizard follow-through] Recovered helper receipt '
 export const receiptKey = id => `wizard-helper-receipt-${id}`
 export const completionDelegationId = text => typeof text === 'string' ? text.match(/^\[ASYNC DELEGATION BATCH COMPLETE\s*[—-]\s*(deleg_[A-Za-z0-9_-]+)\]/u)?.[1] : undefined
-export const internalHelperMessage = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop|Agent-to-agent|supervisor (?:update|build|review|question|closed)|Wizard schedule|Owner requested recovery|James requested recovery|STILL IN PROGRESS)/u.test(text)
+export const internalHelperMessage = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop|Agent-to-agent|supervisor (?:update|build|review|question|closed)|Wizard schedule|Wizard heavy-work (?:completion|notice)|Owner requested recovery|James requested recovery|STILL IN PROGRESS)/u.test(text)
 export const isHumanRequest = row => row.role === 'user' && Boolean(String(row.content || '').trim())
   && !internalHelperMessage(row.content || '')
   && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind)

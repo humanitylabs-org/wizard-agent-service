@@ -69,7 +69,7 @@ test('a typed delivered helper result can resume after ledger cleanup without re
 
 for (const gate of ['needs_you','check']) test(`a genuine ${gate} written after the latest compacted request still holds`,()=>fixture(async({db,path,say,list})=>{
   say('user','Ship the fix',sec-200,0);say('assistant',status(gate),sec-100)
-  for(const machine of ['[Wizard follow-through] Findings','[supervisor update]\nBuild ended','[Wizard schedule] Run later','[CONTEXT COMPACTION — REFERENCE ONLY]']) say('user',machine,sec-50,0)
+  for(const machine of ['[Wizard follow-through] Findings','[supervisor update]\nBuild ended','[Wizard schedule] Run later','[Wizard heavy-work completion] Saved receipt','[Wizard heavy-work notice] Saved receipt','[CONTEXT COMPACTION — REFERENCE ONLY]']) say('user',machine,sec-50,0)
   say('user','A machine wakeup',sec-40,0,'process_wakeup:test')
   assert.equal(currentOwnerResult(db,sid),gate);assert.equal(ownerMovedOn(db,sid,sec-100),false)
   assert.equal(requestWatermark(db,sid)!.at,sec-200)
