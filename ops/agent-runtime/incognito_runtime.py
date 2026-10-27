@@ -241,7 +241,7 @@ class IncognitoManager:
                 origin = 'http://' + port
                 self.ready(origin, api_key)
                 now = self.clock()
-                state.update(lease=now+90, deadline=now+1800)
+                state.update(lease=now+90, deadline=now+7200)
                 self.sessions[(agent['id'], session_id)] = state
                 return {'ok': True, 'origin': origin, 'key': api_key}
             except BaseException:
@@ -270,7 +270,8 @@ class IncognitoManager:
                     self.stop(agent_id, sid)
                 raise self.failure('incognito_expired', 410)
             self._docker(['exec', state['name'], PYTHON, '-c', "import os;os.utime('/opt/data/.lease',None)"])
-            state['lease'] = min(now+90, state['deadline'])
+            state['deadline'] = now+7200  # Service owns the two-hour user-activity idle limit.
+            state['lease'] = now+90
         return {'ok': True}
 
     def close(self):

@@ -173,7 +173,7 @@ class IncognitoTests(unittest.TestCase):
         self.manager.stop('synthetic', SID)
         self.assertEqual(self.docker.resources, {})
 
-    def test_lease_ttl_and_hard_deadline(self):
+    def test_lease_expiry_without_an_absolute_30_minute_cutoff(self):
         self.manager.start(AGENT, SID)
         self.now = 89
         self.manager.lease('synthetic', SID)
@@ -189,6 +189,9 @@ class IncognitoTests(unittest.TestCase):
             self.now += 89
             self.manager.lease('synthetic', SID)
         self.now = 1979
+        self.manager.sweep()
+        self.assertEqual(len(self.manager.sessions), 1)
+        self.now += 91
         self.manager.sweep()
         self.assertEqual(self.docker.resources, {})
 

@@ -52,7 +52,7 @@ test('owner-only private mode; no query/header/agent-credential switch', async t
 })
 test('normal and public-provider agents fail closed before target creation', async t => {
   for (const record of [{ privacy: 'standard' }, { model: { provider: 'openai', model: 'synthetic' } }]) {
-    const s = await rig(t, { agent: record }); assert.ok((await s.request('', 'POST', {})).status >= 400); assert.equal(s.calls.length, 0)
+    const s = await rig(t, { agent: record }); const r = await s.request('', 'POST', {}); assert.equal(r.status, 409); assert.equal((await r.json()).error, record.privacy === 'standard' ? 'incognito_private_only' : 'confidential_provider_required'); assert.equal(s.calls.length, 0)
   }
 })
 test('multi-turn target reuse, separate run stream, no persistent registry hooks or tool/provider overrides', async t => {
@@ -76,6 +76,21 @@ test('multi-turn target reuse, separate run stream, no persistent registry hooks
   assert.equal((await s.request('/' + id + '/v1/runs', 'POST', { input: 'x' })).status, 410)
   assert.ok(s.stopped.includes(id))
   assert.equal((await s.request('/' + id, 'DELETE')).status, 200)
+})
+test('browser heartbeats do not keep an owner-idle chat alive past the configured idle limit', async t => {
+  const s = await rig(t), id = await s.start()
+  for (const stamp of [500, 1000, 1500, 2000, 2500]) {
+    s.setNow(stamp); assert.equal((await s.request('/' + id + '/lease', 'POST', {})).status, 200)
+  }
+  s.setNow(3001); await s.manager.sweep(); assert.ok(s.stopped.includes(id))
+})
+test('new owner message activity renews the idle limit instead of imposing an absolute cutoff', async t => {
+  const s = await rig(t), id = await s.start()
+  for (const stamp of [500, 1000, 1500, 2000, 2500]) {
+    s.setNow(stamp); assert.equal((await s.request('/' + id + '/lease', 'POST', {})).status, 200)
+  }
+  const admission = await s.request('/' + id + '/v1/runs', 'POST', { input: 'synthetic activity before the idle deadline' }); assert.equal(admission.status, 202)
+  s.setNow(3001); await s.manager.sweep(); assert.ok(!s.stopped.includes(id))
 })
 test('ephemeral API key never passes the shared proxy response guard', async t => {
   const s = await rig(t, { leak: true }), id = await s.start()

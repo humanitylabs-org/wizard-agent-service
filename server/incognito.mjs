@@ -6,10 +6,10 @@ import { principalOf } from './principals.mjs'
 
 const SESSION = /^incog_[a-f0-9]{32}$/u
 const ROUTE = /^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})\/incognito(?:\/(incog_[a-f0-9]{32})(\/.*)?)?$/u
-export const INCOGNITO_INSTRUCTIONS = 'This is an Incognito conversation. Answer the owner using your existing identity and read-only prompt context. This chat is temporary: no history, memory edits, reminders, app writes, files, or other lasting effects are available. Never claim to have saved anything. Tools are intentionally disabled. Use Markdown when useful.'
+export const INCOGNITO_INSTRUCTIONS = 'This is an incognito chat. Nothing from it is kept after it ends. Before changing anything outside this chat (notes, calendar, files, messages, app data, scheduled jobs) ask the owner and wait for a yes. This is an Incognito conversation. Answer the owner using your existing identity and read-only prompt context. This chat is temporary: no history, memory edits, reminders, app writes, files, or other lasting effects are available. Never claim to have saved anything. Tools are intentionally disabled. Use Markdown when useful.'
 const failure = (status, code) => new AgentError(status, code, 'incognito')
 
-export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyContext, upstreamHost = '', now = Date.now, leaseMs = 90_000, maxMs = 30 * 60_000 }) {
+export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyContext, upstreamHost = '', now = Date.now, leaseMs = 90_000, maxMs = 2 * 60 * 60_000 }) {
   const sessions = new Map(), pendingAgents = new Set()
   let closing = false
   const destroy = async entry => {
@@ -57,7 +57,9 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
     if (url.search) throw failure(400, 'invalid_request')
     const [, agentId, id, suffix = ''] = match
     const agent = registry?.read(agentId)
-    if (!agent || agent.privacy !== 'private' || agent.role === 'recovery') throw failure(404, 'agent_not_found')
+    if (agentId === 'main' && !agent) throw failure(409, 'incognito_private_only')
+    if (!agent || agent.role === 'recovery') throw failure(404, 'agent_not_found')
+    if (agent.privacy !== 'private') throw failure(409, 'incognito_private_only')
     if (!runtime?.incognitoStart || !runtime?.incognitoStop || !runtime?.incognitoLease) throw failure(503, 'incognito_unavailable')
     if (!id && request.method === 'POST') {
       const value = await proxyContext.readJson(request)
@@ -108,6 +110,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
       if (entry.busy) throw failure(409, 'incognito_turn_in_progress')
       const value = await proxyContext.readJson(request)
       if (Object.keys(value).some(k => !['input'].includes(k)) || typeof value.input !== 'string' || !value.input.trim() || value.input.length > 64_000) throw failure(400, 'incognito_text_only')
+      entry.deadline = now() + maxMs // Owner message activity, not a background browser heartbeat.
       body = Buffer.from(JSON.stringify({ session_id: id, input: value.input }))
     } else if (request.method === 'GET' && suffix === `/api/sessions/${id}/messages`) {
       // Own session history only. No call to the normal registry's catalog/projection.

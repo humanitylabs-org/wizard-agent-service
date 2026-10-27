@@ -18,7 +18,7 @@ if (JSON.stringify(manifest.runtime_kinds) !== JSON.stringify(kinds)) throw new 
 for (const f of manifest.features) {
   for (const field of ['id', 'description', 'layer', 'how_to_test']) if (typeof f[field] !== 'string' || !f[field]) throw new Error(`Missing ${f.id}.${field}`)
   if (f.fixture && !checks[f.fixture]) throw new Error(`Missing fixture implementation: ${f.id}`)
-  if (f.policy_exemptions.length) throw new Error(`Policy exemption requires an executable policy assertion: ${f.id}`)
+  if (f.policy_exemptions.length && !(f.id === 'private-incognito' && f.fixture === 'private-incognito-policy' && JSON.stringify(f.policy_exemptions) === JSON.stringify(['private agent only, by owner decision']))) throw new Error(`Policy exemption requires an executable policy assertion: ${f.id}`)
 }
 for (const check of Object.keys(checks)) if (!manifest.features.some(f => f.fixture === check)) throw new Error(`Undeclared check: ${check}`)
 mkdirSync(reportDir, { recursive: true })

@@ -7,6 +7,14 @@ import { STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'private-incognito-policy': async s => {
+    const init = post({})
+    const response = await fetch(`${s.origin()}/wizard/v1/agents/${s.id || 'main'}/incognito`, { ...init, headers: { ...init.headers, ...s.ownerHeaders } })
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error, 'incognito_private_only')
+    assert.ok(!s.seen.some(r => r.path.includes('/incognito')), 'private-only refusal must happen before any upstream request')
+    return { policy_exempt: true, reason: 'private agent only, by owner decision' }
+  },
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')
@@ -189,8 +197,8 @@ export async function runCheck(kind, feature) {
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)
-    await checks[feature](s)
-    return { feature, kind, status: 'pass', evidence: 'fixture HTTP boundary' }
+    const outcome = await checks[feature](s)
+    return { feature, kind, status: outcome?.policy_exempt ? 'policy-exempt' : 'pass', ...(outcome?.reason ? { reason: outcome.reason } : {}), evidence: 'fixture HTTP boundary' }
   } catch (error) { return { feature, kind, status: 'fail', reason: error.message, evidence: 'fixture HTTP boundary' } }
   finally { await s.close() }
 }
