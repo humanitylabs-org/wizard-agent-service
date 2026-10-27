@@ -70,8 +70,8 @@ describe('thread status tag', () => {
 })
 
 describe('finish-report prompt', () => {
-  it('preserves the approved wording including short-reply and background exceptions', () => {
-    expect(FINISH_REPORT_INSTRUCTIONS).toBe('When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.')
+  it('asks for concise prose with no fixed report template', () => {
+    expect(FINISH_REPORT_INSTRUCTIONS).toBe('Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.')
   })
 
   for (const [kind, instructions] of [
