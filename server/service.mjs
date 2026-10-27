@@ -51,6 +51,7 @@ import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, g
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
+import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -646,7 +647,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending || truth?.supervisorPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -3987,6 +3988,9 @@ function buildWizardServer(options, lifetime) {
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
           }
+          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds)) {
+            const t = sessionTruth.get(id); if (t) t.supervisorPending = true
+          }
           result = filterSessionList(
             result,
             operator,
@@ -4055,7 +4059,7 @@ function buildWizardServer(options, lifetime) {
       if (hermes === null) return null
       // The session listing is refreshed in the background after it expires; a snapshot built from
       // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
-      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}` } catch { return null }
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}|${readSupervisorWaitRevision(options.supervisorStatePath)}` } catch { return null }
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {
@@ -4073,8 +4077,9 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
+      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
