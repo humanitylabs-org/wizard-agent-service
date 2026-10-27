@@ -27,7 +27,7 @@ const app = createWizardServer({ upstreamOrigin: upstream, helmOrigin: upstream,
     if ((path === '/v1/runs' || path === '/api/sessions/chat-recent/chat/stream') && init.method === 'POST') {
       const body = JSON.parse(init.body); if (!body.input) body.input = body.message
       const id = `synthetic-${admissions.length + 1}`
-      admissions.push({ id, session_id: session.id, input: body.input, provider: body.provider, model: body.model, signedIn: signedIn() })
+      admissions.push({ id, session_id: session.id, input: body.input, provider: body.provider, model: body.model, require_model_lock: body.require_model_lock === true, signedIn: signedIn() })
       if (body.provider !== 'anthropic' || body.model !== 'claude-opus-5-5') return jsonResponse({ error: 'This staging thread only supports Claude Opus.' }, 422)
       const list = fixture.fixture.messages.get(session.id)
       if (!list.some(m => m.role === 'user' && JSON.stringify(m.content) === JSON.stringify(body.input))) list.push({ id: `user-${id}`, role: 'user', content: body.input, created_at: new Date().toISOString() })
