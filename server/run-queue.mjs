@@ -600,6 +600,9 @@ export class DurableRunQueue {
     if (!this.providerAccessRecovery || record.runtime !== 'direct' || record.status !== 'failed'
         || record.payload?.error?.type !== 'provider_preflight_failed' || record.providerRecoveryAttempted
         || this._ownerStopped(record)) return record
+    const value = parseJson(record.body, {})
+    if (!value.input || (typeof value.input === 'string' && !value.input.trim()) || (Array.isArray(value.input) && !value.input.length)) return record
+    if (!record.continuation && this.latestForSession(record.sessionId)?.publicRunId !== record.publicRunId) return record
     const deadline = record.providerWaitDeadline || record.createdAt + this.providerAccessWindowSeconds
     if (deadline <= nowSeconds()) return record
     // Negative failures extends the existing backoff row with an access fence, not a time-based blind resend.
@@ -610,8 +613,8 @@ export class DurableRunQueue {
 
   _noteProviderSuccess(record) {
     if (!this.providerAccessRecovery || record.runtime !== 'direct' || record.status !== 'completed') return
-    const provider = parseJson(record.body, {})?.provider
-    if (!provider) return // No cross-provider inference, and no credential or private text probing.
+    // Configured means this queue's own runtime, never another agent or provider.
+    const provider = parseJson(record.body, {})?.provider || 'configured'
     for (const row of this.database.prepare('SELECT scope FROM wizard_provider_backoff WHERE failures=-1').all()) {
       const [runtime, savedProvider] = parseJson(row.scope, [])
       if (runtime === record.runtime && savedProvider === provider) this.database.prepare('DELETE FROM wizard_provider_backoff WHERE scope=?').run(row.scope)
@@ -621,14 +624,20 @@ export class DurableRunQueue {
   _resumeProviderAccess() {
     if (!this.providerAccessRecovery) return
     for (const source of this._rows("status='queued' AND waiting_reason='provider_access'")) {
-      if (this._ownerStopped(source)) { this._releaseProviderSource(source); continue }
+      if (this._ownerStopped(source) || (!source.continuation && this.latestForSession(source.sessionId)?.publicRunId !== source.publicRunId)) { this._releaseProviderSource(source); continue }
       if (source.providerWaitDeadline <= nowSeconds()) {
         this._update(source.publicRunId, {status:'failed', waitingReason:'', retryAfter:0,
           payload:{...source.payload,status:'failed',safe_error:'The AI sign-in did not come back in time. Your message is saved. Tap Retry when you are signed in.'},terminalAt:nowSeconds()})
         continue
       }
       if (this.database.prepare('SELECT 1 FROM wizard_provider_backoff WHERE scope=? AND failures=-1').get(providerScope(source))) continue
-      this._retrySavedRow(source.publicRunId, source.sessionId, {}, true)
+      try { this._retrySavedRow(source.publicRunId, source.sessionId, {}, true) }
+      catch (error) {
+        // A malformed legacy row must not stop the queue or block unrelated requests.
+        if (!Number.isInteger(error.status)) throw error
+        this._update(source.publicRunId, { status: 'failed', waitingReason: '', retryAfter: 0, terminalAt: nowSeconds(),
+          payload: { ...source.payload, status: 'failed', safe_error: 'This saved message could not be resent. Open the chat to try again.' } })
+      }
     }
   }
 
