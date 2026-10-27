@@ -1,4 +1,5 @@
 import { Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 
 // Hermes controlled provider-resolution failures can arrive as HTTP 200 / completed.
 // Match whole messages, never mentions in an ordinary answer or an owner's words.
@@ -11,10 +12,10 @@ const CODEX_REFRESH = new RegExp(`^(?:Codex token refresh failed with status (?:
 
 export function providerSignInEvents() {
   let pending = ''
-  const decoder = new TextDecoder()
+  const decoder = new StringDecoder('utf8')
   return new Transform({
     transform(chunk, _encoding, callback) {
-      pending += decoder.decode(chunk, { stream: true })
+      pending += decoder.write(chunk)
       let end
       while ((end = pending.indexOf('\n\n')) >= 0) {
         this.push(projectProviderSignInEvent(pending.slice(0, end + 2)))
@@ -25,7 +26,7 @@ export function providerSignInEvents() {
       callback()
     },
     flush(callback) {
-      pending += decoder.decode()
+      pending += decoder.end()
       if (pending) this.push(projectProviderSignInEvent(pending))
       callback()
     },
