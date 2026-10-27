@@ -67,6 +67,22 @@ for(const mutation of ['content','timestamp','active-original','missing-lineage'
  if(mutation==='different-uid')db.exec("UPDATE messages SET message_uid='new-request' WHERE id=2")
  assert.equal(continuationCurrent(path,token),false)
 }))
+test('typed completion plus matching tool dispatch admits a machine follow-through after ledger cleanup',()=>fixture(async(ctx)=>{
+ const {db,path,message,sec}=ctx
+ message('tool',JSON.stringify({status:'dispatched',mode:'background',delegation_id:'deleg_review',count:1}),sec-1800)
+ const row=complete(ctx)
+ db.prepare("UPDATE messages SET display_kind='async_delegation_complete' WHERE id=?").run(row.lastInsertRowid)
+ db.exec('DELETE FROM async_delegations')
+ const token=capture(path)
+ assert.equal(continuationCurrent(path,token),true)
+ await withServer(path,async(server)=>{
+  assert.equal((await server.post()).status,202)
+  assert.equal(server.launches,1)
+  assert.equal(server.bodies[0].headers['idempotency-key'],'wizard-helper-receipt-deleg_review')
+  assert.match(server.bodies[0].body.input,/^\[Wizard follow-through\] Recovered helper receipt deleg_review/u)
+ })
+}))
+
 // System-alerts shape: recovered result -> reviewed done -> unrelated automated FYI.
 test('integrated recovered findings stay resolved after a later FYI',()=>fixture(({path,sec,message})=>{
  message('user',RECEIPT_PREFIX+'deleg_review\nSaved review findings',sec-250)
