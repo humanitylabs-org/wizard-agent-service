@@ -4,16 +4,16 @@ import { createHash } from 'node:crypto'
 import { ownerGate, ownerMovedOn, receiptConsumed, completionDelegationId, isReceiptDelivery } from './delegation-receipts.mjs'
 import { parseStatus } from './thread-status.mjs'
 
-export const INTERNAL_HELPER_MESSAGE = /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/u
-export const isHumanRequest = row => row.role === 'user' && Boolean(String(row.content || '').trim())
-  && !INTERNAL_HELPER_MESSAGE.test(row.content || '')
-  && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind)
+// Keep the continuation watermark and owner-gate readers on one machine-input boundary.
+export { isHumanRequest } from './delegation-receipts.mjs'
+import { isHumanRequest, internalHelperMessage } from './delegation-receipts.mjs'
+export const INTERNAL_HELPER_MESSAGE = { test: internalHelperMessage }
 
 // IDs, not timestamps alone: a newly inserted backdated/same-timestamp request also invalidates work.
 export function requestWatermark(db, sessionId) {
   const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
   const rows = db.prepare(`SELECT id,role,content,timestamp ${cols.has('display_kind') ? ',display_kind' : ''}
-    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user' ${cols.has('active') ? 'AND COALESCE(active,1)=1' : ''}
+    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user'
     ORDER BY id DESC LIMIT 513`).all(sessionId)
   const row = rows.find(isHumanRequest)
   if (!row && rows.length > 512) return null // incomplete history is not authority to resume
@@ -68,7 +68,7 @@ export function captureContinuation(path, pending) {
 }
 export function helperAnswerAfter(db, sessionId, completedAt, delegationId) {
   const rows = db.prepare(`SELECT role,content,timestamp,display_kind FROM messages WHERE session_id=?
-    AND timestamp>=? AND COALESCE(active,1)=1 ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
+    AND timestamp>=? ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
   if (rows.length > 512) return null // unknown, not invented evidence of an answered completion
   const completion = rows.findLast(r => (r.role === 'user' && completionDelegationId(r.content) === delegationId) || isReceiptDelivery(r,delegationId))
   return Boolean(completion && rows.some(r => r.role === 'assistant' && Number(r.timestamp) > Number(completion.timestamp)

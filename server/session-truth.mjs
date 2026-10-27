@@ -3,7 +3,7 @@ import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-wri
 import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
 
@@ -51,7 +51,7 @@ function openReadOnly(path) {
 export function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
-  if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
+  if (!isHumanRequest({ role: 'user', content: text, display_kind: kind }) || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
@@ -265,12 +265,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       FROM messages
       WHERE session_id = ?
         AND role IN ('user', 'assistant')
-        AND active = 1
+        AND (role = 'user' OR active = 1)
         AND trim(COALESCE(content, '')) <> ''
       ORDER BY timestamp DESC${tieOrder}
     `)
     const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
-    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user'
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user'
       AND timestamp <= ? ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
