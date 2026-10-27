@@ -281,3 +281,29 @@ describe('owned open work restated from an earlier turn', () => {
     expect(unpaid.ownedCount).toBe(1); expect(unpaid.handleCount).toBe(0)
   })
 })
+
+describe('owned open work waits for a busy thread', () => {
+  it('starts the follow-up once the owner turn releases, without a fresh scan hit', async () => {
+    const { createOwnedWorkFollowThrough, OWNED_WORK_PREFIX: prefix } = await import('../server/owned-open-work-follow-through.mjs')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { DatabaseSync } = await import('node:sqlite')
+    const root = mkdtempSync(join(tmpdir(), 'owned-busy-'))
+    const path = join(root, 'state.db')
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, timestamp REAL, active INTEGER DEFAULT 1, display_kind TEXT, message_uid TEXT)`)
+    const add = (role: string, content: string) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_busy', role, content, Date.now() / 1000)
+    add('user', 'fix it')
+    add('assistant', '**Fixed.**\n\n**Still open:**\n- Mine: run the soak tonight\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+    let busy = true
+    const inputs: string[] = []
+    const worker = createOwnedWorkFollowThrough({ sessionDbPath: path, statePath: join(root, 'claims.db'), busy: async () => busy,
+      validate: async () => undefined, admit: async (_s: string, text: string) => { inputs.push(text) } })
+    await worker.tick(); expect(inputs).toHaveLength(0)
+    busy = false
+    await worker.tick(); await worker.tick()
+    expect(inputs).toHaveLength(1); expect(inputs[0].startsWith(prefix)).toBe(true)
+    worker.close(); db.close()
+  })
+})

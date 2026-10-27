@@ -135,6 +135,14 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     try {
       const found = await scan(now())
       for (const evidence of found) if (evidence?.sessionId && evidence.items?.length) candidates.set(evidence.sessionId, now()/1000)
+      // Flagged threads that were busy (or otherwise skipped) on an earlier scan are re-read
+      // each tick until claimed or aged out; the incremental scan alone would never revisit them.
+      const seen = new Set(found.map(evidence => evidence?.sessionId))
+      for (const [sessionId, at] of candidates) {
+        if (seen.has(sessionId) || now()/1000 - at > MAX_AGE) continue
+        const evidence = read(sessionId)
+        if (evidence && !claimFor(evidence)) found.push(evidence)
+      }
       for (const evidence of found) {
         if (stopped) break
         if (evidence.agentId !== 'hermes' || evidence.continuation || !evidence.items?.length
