@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SystemJobs, SystemdJobTimers, systemJobsSocket } from '../server/system-jobs.mjs'
-import { createWizardServer, listen, scheduleNotifier } from '../server/service.mjs'
+import { createWizardServer, createAgentIngress, listen, scheduleNotifier } from '../server/service.mjs'
 import { triggerSystemJob } from '../scripts/system-job-trigger.mjs'
 import { formatSystemJobs, systemJobsCommand } from '../scripts/system-jobs.mjs'
 
@@ -65,6 +65,7 @@ describe('host system jobs', () => {
     const jobs = store({ timers: { apply: () => { if (broken) throw Error('failed') } } }), j = jobs.create(input())
     jobs.edit(j.id, { enabled: true }); clock += 300000; broken = true; jobs.reconcile()
     expect(jobs.get(j.id).enabled).toBe(false)
+    expect(jobs.list()[0].lastRun).toMatchObject({ outcome: 'timer_failed', notification: 'pending' })
     expect(jobs.list()[0].timerError).toContain('enable it again')
     expect(() => jobs.run(j.id, { scheduled: true })).toThrow(/Enable/)
   })
@@ -189,6 +190,7 @@ describe('host system jobs', () => {
     const socket = systemJobsSocket(jobs, path); servers.push(socket)
     await new Promise(r => socket.once('listening', r))
     expect(statSync(path).mode & 0o777).toBe(0o600)
+    expect(() => systemJobsSocket(jobs, path)).toThrow(/exclusive writer ownership/)
     await expect(triggerSystemJob(path, j.id)).rejects.toThrow(/refused/)
     jobs.edit(j.id, { enabled: true }); await expect(triggerSystemJob(path, j.id)).rejects.toThrow(/refused/)
     clock += 300000; await triggerSystemJob(path, j.id); await settle(jobs)
@@ -202,6 +204,9 @@ describe('owner-facing API and shared notification authority', () => {
     const service = createWizardServer({ distDir: root, agents: false, requireAccess: false,
       ownerProof: 'fixture-owner-proof-with-32-characters', systemJobsStatePath: join(root, 'http.sqlite'), systemJobsHermesHome: join(root, 'source'), systemJobsTimers: { apply: () => {} } })
     servers.push(service); const origin = `http://127.0.0.1:${(await listen(service)).port}`
+    const ingress = createAgentIngress(service, 'synthetic-agent'); servers.push(ingress)
+    const agentOrigin = `http://127.0.0.1:${(await listen(ingress)).port}`
+    expect((await fetch(`${agentOrigin}/wizard/v1/system-jobs`, { headers: { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters' } })).status).toBe(401)
     const req = async (path = '', method = 'GET', body?: any, headers: any = {}) => fetch(`${origin}/wizard/v1/system-jobs${path}`, { method, headers: { 'Content-Type': 'application/json', 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) })
     expect((await req('', 'POST', input(), { 'X-Wizard-Owner-Proof': '' })).status).toBe(403)
     expect((await req('', 'POST', input(), { Origin: 'https://attacker.invalid' })).status).toBe(403)

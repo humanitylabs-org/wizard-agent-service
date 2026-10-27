@@ -110,6 +110,9 @@ export class SystemJobs {
     this.save(job, source)
     return this.project(job)
   }
+  timerFailure(id) {
+    this.db.prepare("INSERT INTO system_job_runs(id,job,started,finished,outcome,alert) VALUES(?,?,?,?,'timer_failed',1)").run(randomUUID(), id, this.now(), this.now())
+  }
   edit(id, patch) {
     if (!plain(patch)) throw fail('Invalid edit')
     const old = this.get(id)
@@ -125,14 +128,14 @@ export class SystemJobs {
     // Disable authority before touching systemd. Old/stale callbacks then fail closed.
     this.save({ ...job, enabled: false })
     try { this.timers?.apply(job); this.save(job) }
-    catch { this.save({ ...job, enabled: false, timerError: 'The host timer could not be updated. Try enabling it again.' }); throw fail('Host timer update failed; schedule is disabled', 503) }
+    catch { this.save({ ...job, enabled: false, timerError: 'The host timer could not be updated. Try enabling it again.' }); this.timerFailure(id); throw fail('Host timer update failed; schedule is disabled', 503) }
     return this.project(job)
   }
   reconcile() {
     for (const job of this.list()) {
       const { lastRun, nextRun, ...stored } = job
       try { this.timers?.apply(stored) }
-      catch { this.save({ ...stored, enabled: false, timerError: 'The host timer could not be updated. Check the host timer service and enable it again.' }) }
+      catch { this.save({ ...stored, enabled: false, timerError: 'The host timer could not be updated. Check the host timer service and enable it again.' }); if (!stored.timerError) this.timerFailure(stored.id) }
     }
   }
   run(id, { scheduled = false } = {}) {
@@ -147,7 +150,7 @@ export class SystemJobs {
       this.save({ ...job, nextAt, enabled: Boolean(nextAt) })
       // Re-arm before executing, but never replay the just-claimed work after a failure.
       try { this.timers?.apply({ ...job, nextAt, enabled: Boolean(nextAt) }) }
-      catch { this.save({ ...job, nextAt, enabled: false, timerError: 'The next maintenance time could not be saved. Enable it again after checking the host timer service.' }) }
+      catch { this.save({ ...job, nextAt, enabled: false, timerError: 'The next maintenance time could not be saved. Enable it again after checking the host timer service.' }); this.timerFailure(id) }
     }
     const receipt = { id: randomUUID(), job: id, startedAt: iso(now), outcome: 'running' }
     this.db.prepare("INSERT INTO system_job_runs(id,job,started,outcome) VALUES(?,?,?,'running')").run(receipt.id, id, now)
