@@ -581,7 +581,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (direct.createdAt) projected.wizard_assigned_at = direct.createdAt
               if (!projected.preview && direct.preview) projected.preview = direct.preview
               if (direct.queuePosition) projected.queue_position = direct.queuePosition
-              if (direct.queueReason) projected.queue_reason = direct.queueReason
+              projected.queue_reason = direct.queueReason || ''
+              if (direct.queueReason === 'provider_access') {
+                delete projected.wizard_safe_error
+                delete projected.wizard_reconnect
+                if (!projected.wizard_request_preview) projected.wizard_request_preview = direct.preview
+              }
             } else if (truth?.active && external && TERMINAL_RUN_STATUSES.has(external.status)) {
               // A notification/recovery turn can resume this session outside the
               // original admission. Its live lease outranks that old terminal
@@ -2666,11 +2671,15 @@ function buildWizardServer(options, lifetime) {
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
+  const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
+    || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
+    || Boolean(record.upstreamRunId && dismissedFailureStore.isDismissed(record.sessionId, record.upstreamRunId, record.agent_id))
   const providerSignInReady = options.providerSignInReady ?? (async provider => {
     const usage = await aiUsageReader.read()
     return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
   })
-  const providerRecoveryOptions = { providerSignInReady,
+  const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
@@ -2940,7 +2949,6 @@ function buildWizardServer(options, lifetime) {
   // The subject each thread was last served with, so the next run can be told to keep it.
   const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
-  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     migrateJson(operatorWorkerStatePath, rows => rows.map(row => ({ ...row, agent_id: row.agent_id ?? MAIN_AGENT_ID, session_id: row.session_id ?? row.operatorSessionId, worker_agent_id: row.worker_agent_id ?? MAIN_AGENT_ID })))
     try {
@@ -5761,6 +5769,9 @@ function buildWizardServer(options, lifetime) {
         }
         try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
         catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Persist the fence first, then synchronously release every waiting send
+        // before acknowledging Dismiss. Startup applies the fence after a crash.
+        runQueue?.dismissProviderAccess(sessionId)
         sendJson(response, 200, { ok: true, dismissed: true, session_id: sessionId })
         return
       }
@@ -5944,6 +5955,15 @@ function buildWizardServer(options, lifetime) {
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
+          if (Object.hasOwn(requested, 'wizard_retry_run_id')) {
+            if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
+            const { wizard_retry_run_id: sourceId, ...validation } = requested
+            directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
+            const retried = await runQueue.retrySaved(sourceId, requested.session_id, requested)
+            threadDispositionStore.clearSession('direct', requested.session_id)
+            sendQueuedRun(response, 202, retried.record, { 'Idempotency-Replayed': String(retried.replayed) })
+            return
+          }
           quietWatcherAdmission = principal.kind === 'service'
             && request.headers['x-wizard-schedule-kind'] === 'watch'
           if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
@@ -6201,7 +6221,17 @@ function buildWizardServer(options, lifetime) {
             const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
-            detailed.wizard_retry_input = (runQueue?.latestForSession(row.id)?.payload?.wizard_provider_auth ? queuedInputTextOf(runQueue.latestForSession(row.id).body) : '') || truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            const saved = runQueue?.savedRetry(row.id)
+            detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            if (saved) {
+              detailed.wizard_retry_run_id = saved.publicRunId
+              detailed.status = saved.status
+              detailed.queue_reason = saved.waitingReason
+              if (saved.waitingReason === 'provider_access') {
+                delete detailed.wizard_safe_error
+                delete detailed.wizard_reconnect
+              }
+            }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
         }
@@ -6369,7 +6399,7 @@ function buildWizardServer(options, lifetime) {
       find: options.followThroughFinder ?? (hermesStatePath ? undefined : createFollowThroughFinder({
         request: (path) => hermesJson(path),
         prefix: FOLLOW_THROUGH_PREFIX,
-        busy: (sessionId) => (runQueue?.latestProjections([sessionId]) ?? []).some((run) => LIVE.has(run.status)),
+        busy: (sessionId) => LIVE.has(runQueue?.latestStatus(sessionId)),
       })),
       enabled: async () => {
         if (!selfOrigin) return false

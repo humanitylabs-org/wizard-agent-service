@@ -682,7 +682,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   let upstream
   try {
     upstream = await (ctx.fetchAgent || registry.fetchAgent)(agent, `${upstreamPath}${query.size ? `?${query}` : ''}`, {
-      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal, wizardRequestHash,
+      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal, wizardRequestHash, wizardDetail: searchParams.get('view') === 'detail',
     })
   } catch (error) {
     if (error instanceof AgentError) throw error
@@ -801,7 +801,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
       const payload=JSON.parse(result.toString('utf8')), row=payload.session||payload;
-      row.wizard_retry_input=row.wizard_retry_input || await fullRetryInput(async offset=> {
+      if (!row.wizard_retry_run_id && !row.wizard_retry_input) row.wizard_retry_input=await fullRetryInput(async offset=> {
         const page=await registry.fetchAgent(agent, `${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
         if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
         const raw=Buffer.from(await page.arrayBuffer());

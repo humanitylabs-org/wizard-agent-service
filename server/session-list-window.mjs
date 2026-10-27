@@ -64,7 +64,7 @@ export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(
 }
 export function slimRow(raw) {
   const s=normalizeFull(raw);
-  return {id:s.id,agent:s.agent || s.agent_id || 'hermes',title:s.title,preview:s.preview.slice(0,160),status:s.status,cardTime:cardTime(s),archived:s.archived};
+  return {id:s.id,agent:s.agent || s.agent_id || 'hermes',title:s.title,preview:s.preview.slice(0,160),status:s.status,...(s.queueReason?{queueReason:s.queueReason}:{}),cardTime:cardTime(s),archived:s.archived};
 }
 export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7 }={}) {
   const snapshots=new Map();
