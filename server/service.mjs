@@ -1978,12 +1978,12 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
       if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
-      if (!userImageReferences && artifact.kind === 'image') {
+      if (!userImageReferences) {
         if (positioned.has(artifact.id)) return ''
         positioned.add(artifact.id)
         // Existing clients strip this envelope and show its image at the bottom.
         // New clients keep its position; no raw path or new permission crosses the wire.
-        return `\n\n<helm_attachments>${JSON.stringify({ items: [artifact], inline: true })}</helm_attachments>\n\n`
+        return `\n\n<helm_attachments>${JSON.stringify({ items: [artifact], inline: artifact.kind === 'image' })}</helm_attachments>\n\n`
       }
       return ''
     }
