@@ -131,6 +131,7 @@ server = createWizardServer({
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
+  providerAccessRecovery: process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.

@@ -313,12 +313,16 @@
       "id": "retry-input",
       "description": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session",
       "layer": "server",
-      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session.",
+      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session. Fail before any answer, clear runtime user history, restart, hydrate the durable saved reference and tap Retry twice; require exact saved words, one new receipt and one dispatch through each authorized runtime transport. Run tests/provider-access-dismiss-startup.node.mjs to prove dismissed provider-access waits never resend through main, host-profile, container or restricted queues, old failures stay failed when recovery is enabled, and already-authorized waits survive restart. The owner Dismiss HTTP action remains main-only; routed queues enforce their own agent-scoped dismissal fence.",
       "source_refs": [
-        "server/session-detail.mjs"
+        "server/session-detail.mjs",
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
       ],
       "reference_tests": [
-        "tests/session-truth-seek.test.ts"
+        "tests/session-truth-seek.test.ts",
+        "tests/provider-access-dismiss-startup.node.mjs",
+        "tests/provider-access-recovery.node.mjs"
       ],
       "fixture": "retry-input",
       "policy_exemptions": []
