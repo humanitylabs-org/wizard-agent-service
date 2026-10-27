@@ -7,7 +7,7 @@ import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -18,7 +18,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         if (!response.ok) throw Object.assign(new Error('routed admission unavailable'),{status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
         return payload
       }
-      const queue = new DurableRunQueue({agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
+      const queue = new DurableRunQueue({providerAccessRecovery,providerAccessWindowSeconds,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
         // An external CLI turn remains protected by Hermes' 409 admission. Only
         // this agent's queue is reconciled here, never another agent's state.db.
         activeSessionIds:async()=>[],canDispatch:async()=>true,
@@ -60,7 +60,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         if (!saved || (!response.ok && response.status !== 404)) return response
         const payload = response.ok ? await response.json() : { id: saved.sessionId }
         const row = payload.session || payload
-        Object.assign(row, { wizard_retry_input: queuedInputTextOf(saved.body), wizard_retry_run_id: saved.publicRunId, status: saved.status })
+        Object.assign(row, { wizard_retry_input: queuedInputTextOf(saved.body), wizard_retry_run_id: saved.publicRunId, status: saved.status, queue_reason: saved.waitingReason })
         return json(200, payload)
       }
       if(parsed.pathname==='/v1/runs'&&method==='POST') {
