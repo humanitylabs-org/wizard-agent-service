@@ -203,7 +203,7 @@ export function decorateThreadAgent(result, agentInfo) {
  */
 export async function handleAgentsApi(ctx, url, request, response) {
   const { registry, sendJson } = ctx
-  const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [] })
+  const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [], incognito_available: Boolean(ctx.incognitoAvailable?.(agent)) })
   const isOptions = url.pathname === '/wizard/v1/agent-options'
   const grantMatch = url.pathname.match(GRANT_ROUTE)
   if (grantMatch || url.pathname.startsWith('/wizard/v1/agent-grants')) {
@@ -500,6 +500,8 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     || (upstreamPath === '/v1/runs' && typeof bodyValue?.session_id === 'string' ? bodyValue.session_id : '')
     || (upstreamPath === '/api/sessions' && method === 'POST' && typeof (bodyValue?.id ?? bodyValue?.session_id) === 'string' ? (bodyValue.id ?? bodyValue.session_id) : '')
   const runId = runIdFromPath(upstreamPath)
+  // Reserved ephemeral namespace never discovers/pins a normal history, even after a Service restart.
+  if (/^incog_/u.test(sessionId) || /^incog_/u.test(runId)) throw new AgentError(410, 'incognito_closed', 'incognito')
   const knownPins = sessionId ? (registry.pinnedAgents?.(sessionId) ?? [registry.pinnedAgent(sessionId)].filter(Boolean)) : []
   if (principalOf(request).kind === 'agent' && !explicit && !knownPins.includes(principalOf(request).agentId) && !runId) {
     if (method !== 'GET') assertAgentTargets(registry, request, knownPins)
@@ -651,7 +653,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
     const followUp = ctx.followUpNote?.(sessionId) || ''
-    value = { ...value, instructions: AGENT_RUN_INSTRUCTIONS + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
+    value = { ...value, instructions: (ctx.runInstructions || AGENT_RUN_INSTRUCTIONS) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }
