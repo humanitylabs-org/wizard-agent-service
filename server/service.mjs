@@ -5865,6 +5865,15 @@ function buildWizardServer(options, lifetime) {
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
+          if (Object.hasOwn(requested, 'wizard_retry_run_id')) {
+            if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
+            const { wizard_retry_run_id: sourceId, ...validation } = requested
+            directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
+            const retried = await runQueue.retrySaved(sourceId, requested.session_id, requested)
+            threadDispositionStore.clearSession('direct', requested.session_id)
+            sendQueuedRun(response, 202, retried.record, { 'Idempotency-Replayed': String(retried.replayed) })
+            return
+          }
           quietWatcherAdmission = principal.kind === 'service'
             && request.headers['x-wizard-schedule-kind'] === 'watch'
           if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
@@ -6122,7 +6131,12 @@ function buildWizardServer(options, lifetime) {
             const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
-            detailed.wizard_retry_input = truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            const saved = runQueue?.savedRetry(row.id)
+            detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            if (saved) {
+              detailed.wizard_retry_run_id = saved.publicRunId
+              detailed.status = saved.status
+            }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
         }
