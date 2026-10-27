@@ -2652,7 +2652,11 @@ function buildWizardServer(options, lifetime) {
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, providerAccessRecovery: options.providerAccessRecovery === true, providerAccessWindowSeconds: options.providerAccessWindowSeconds, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
+  const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
+    || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
+    || Boolean(record.upstreamRunId && dismissedFailureStore.isDismissed(record.sessionId, record.upstreamRunId, record.agent_id))
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, providerFailureDismissed, providerAccessRecovery: options.providerAccessRecovery === true, providerAccessWindowSeconds: options.providerAccessWindowSeconds, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -2917,7 +2921,6 @@ function buildWizardServer(options, lifetime) {
   // The subject each thread was last served with, so the next run can be told to keep it.
   const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
-  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     migrateJson(operatorWorkerStatePath, rows => rows.map(row => ({ ...row, agent_id: row.agent_id ?? MAIN_AGENT_ID, session_id: row.session_id ?? row.operatorSessionId, worker_agent_id: row.worker_agent_id ?? MAIN_AGENT_ID })))
     try {
@@ -3522,6 +3525,7 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
+      providerFailureDismissed,
       providerAccessRecovery: options.providerAccessRecovery === true,
       providerAccessWindowSeconds: options.providerAccessWindowSeconds,
       statePath: runQueueStatePath,
@@ -5700,6 +5704,9 @@ function buildWizardServer(options, lifetime) {
         }
         try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
         catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Persist the fence first, then synchronously release every waiting send
+        // before acknowledging Dismiss. Startup applies the fence after a crash.
+        runQueue?.dismissProviderAccess(sessionId)
         sendJson(response, 200, { ok: true, dismissed: true, session_id: sessionId })
         return
       }

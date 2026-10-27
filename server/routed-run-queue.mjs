@@ -7,7 +7,7 @@ import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -18,7 +18,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         if (!response.ok) throw Object.assign(new Error('routed admission unavailable'),{status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
         return payload
       }
-      const queue = new DurableRunQueue({providerAccessRecovery,providerAccessWindowSeconds,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
+      const queue = new DurableRunQueue({providerAccessRecovery,providerAccessWindowSeconds,providerFailureDismissed,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
         // An external CLI turn remains protected by Hermes' 409 admission. Only
         // this agent's queue is reconciled here, never another agent's state.db.
         activeSessionIds:async()=>[],canDispatch:async()=>true,
