@@ -1,7 +1,7 @@
 import { test } from 'vitest'
 import assert from 'node:assert/strict'
 import { fixture, withServer, sid } from './fixtures/helper-backend.mjs'
-import { captureContinuation, continuationCurrent, requestWatermark } from '../server/helper-continuation.mjs'
+import { captureContinuation, continuationCurrent, requestWatermark, helperAnswerAfter } from '../server/helper-continuation.mjs'
 import { findPendingFollowThroughs, startDelegationFollowThrough } from '../server/delegation-follow-through.mjs'
 import { RECEIPT_PREFIX, receiptConsumed, findIdleUndeliveredHelperReceipts, currentOwnerResult, ownerMovedOn } from '../server/delegation-receipts.mjs'
 import { readHelperStatuses } from '../server/helper-status.mjs'
@@ -9,6 +9,17 @@ const final = state => `Verified outcome\n[WIZARD_STATUS_V1]{"state":"${state}",
 const status = path => readHelperStatuses(path,[sid]).get(sid)
 const complete = ({message,sec}) => message('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_review]\nSaved sanitized findings',sec-250)
 const capture = path => captureContinuation(path,findPendingFollowThroughs(path)[0])
+
+test('rewound helper answer never consumes the pending completion',()=>fixture(({db,sec,message}: any)=>{
+ const id = 'deleg_review'
+ db.exec('ALTER TABLE messages ADD COLUMN compacted INT DEFAULT 0')
+ message('user',`[ASYNC DELEGATION BATCH COMPLETE — ${id}] builder result`,sec-40,'async_delegation_complete')
+ const answer=message('assistant',final('done'),sec-30)
+ db.prepare('UPDATE messages SET active=0 WHERE id=?').run(answer.lastInsertRowid)
+ assert.equal(helperAnswerAfter(db,sid,sec-50,id),false)
+ db.prepare('UPDATE messages SET compacted=1 WHERE id=?').run(answer.lastInsertRowid)
+ assert.equal(helperAnswerAfter(db,sid,sec-50,id),true)
+}))
 
 test('rewound request and outcome never replace retained owner authority',()=>fixture(({db,sec,message}: any)=>{
  db.exec('ALTER TABLE messages ADD COLUMN compacted INT DEFAULT 0')

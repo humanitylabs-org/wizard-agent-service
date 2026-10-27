@@ -84,8 +84,9 @@ export function captureContinuation(path, pending) {
   } catch { return null } finally { db?.close() }
 }
 export function helperAnswerAfter(db, sessionId, completedAt, delegationId) {
+  const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
   const rows = db.prepare(`SELECT role,content,timestamp,display_kind FROM messages WHERE session_id=?
-    AND timestamp>=? ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
+    AND timestamp>=? AND ${retainedMessagesWhere(cols)} ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
   if (rows.length > 512) return null // unknown, not invented evidence of an answered completion
   const completion = rows.findLast(r => (r.role === 'user' && completionDelegationId(r.content) === delegationId) || isReceiptDelivery(r,delegationId))
   return Boolean(completion && rows.some(r => r.role === 'assistant' && Number(r.timestamp) > Number(completion.timestamp)
