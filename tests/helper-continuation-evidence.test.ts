@@ -76,12 +76,12 @@ test('typed completion plus matching tool dispatch admits a machine follow-throu
  const token=capture(path)
  assert.equal(continuationCurrent(path,token),true)
  await withServer(path,async(server)=>{
-  assert.equal((await server.post()).status,202)
+  await new Promise(resolve=>setTimeout(resolve,5200)) // normal five-second watcher tick, not manual Continue
   assert.equal(server.launches,1)
   assert.equal(server.bodies[0].headers['idempotency-key'],'wizard-helper-receipt-deleg_review')
   assert.match(server.bodies[0].body.input,/^\[Wizard follow-through\] Recovered helper receipt deleg_review/u)
- })
-}))
+ },{followThrough:true,joinedDelegation:'off'})
+}),10000)
 
 // System-alerts shape: recovered result -> reviewed done -> unrelated automated FYI.
 test('integrated recovered findings stay resolved after a later FYI',()=>fixture(({path,sec,message})=>{
