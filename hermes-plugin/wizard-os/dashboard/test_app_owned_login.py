@@ -39,6 +39,13 @@ class ConsumerReadbackTests(unittest.TestCase):
         self.assertEqual(self.status()['status'],'not_connected')
         (self.root/'accounts.json').write_text('[{"id":"../outside"}]')
         self.assertEqual(self.status()['status'],'unavailable')
+    def test_explicit_share_cannot_claim_readiness_with_another_plugin_login_setting(self):
+        self.seed()
+        self.cfg['plugins']={'entries':{module.PROVIDER:{'settings':{'claude_config_dir':str(self.root.parent/'host-login')}}}}
+        self.assertEqual(self.status()['status'],'unavailable')
+        self.cfg['plugins']['entries'][module.PROVIDER]['settings']['claude_config_dir']=str(self.root)
+        self.assertEqual(self.status()['status'],'mounted')
+
     def test_ready_connection_does_not_imply_default_model_selection(self):
         self.seed();self.cfg['model']['provider']='other'
         result=self.status();self.assertEqual(result['status'],'mounted');self.assertFalse(result['in_use'])
