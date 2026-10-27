@@ -534,7 +534,7 @@ export class DurableRunQueue {
   /** Retry references are scoped to the original thread; the queue, not display history, owns bytes. */
   savedRetry(sessionId) {
     const record = this.latestForSession(sessionId)
-    return record && ['failed', 'interrupted'].includes(record.status) ? record : null
+    return record && ['failed', 'interrupted'].includes(record.status) && !this._ownerStopped(record) ? record : null
   }
 
   async retrySaved(publicRunId, sessionId, route = {}) {
@@ -546,11 +546,11 @@ export class DurableRunQueue {
     if (this.savedRetry(sessionId)?.publicRunId !== publicRunId || this._ownerStopped(source)) throw requestError('saved request is no longer current', 409)
     const value = parseJson(source.body, {})
     if (!value.input || (typeof value.input === 'string' && !value.input.trim()) || (Array.isArray(value.input) && !value.input.length)) throw requestError('saved request is empty', 409)
-    if (route.model && route.provider) Object.assign(value, { model: route.model, provider: route.provider, require_model_lock: true })
+    if (route.model) Object.assign(value, { model: route.model, ...(route.provider ? { provider: route.provider } : {}), require_model_lock: true })
     const body = JSON.stringify(value)
     return this.admit({ runtime: source.runtime, sessionId, idempotencyKey: key,
       requestHash: queueRequestHash(source.runtime, body), body, trustedPaths: source.trustedPaths,
-      continuation: source.continuation, recoveryAuthorized: source.recoveryAuthorized })
+      continuation: source.continuation, recoveryAuthorized: source.recoveryAuthorized, agent_id: source.agent_id })
   }
 
   // Receipt insertion order is not lease ownership: a newer sibling completion

@@ -51,11 +51,29 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
     async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
-      if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname)) return registry.fetchAgent(agent,path,init)
+      const detail = method === 'GET' && parsed.searchParams.get('view') === 'detail' && parsed.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+      if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname) && !detail) return registry.fetchAgent(agent,path,init)
       const {queue,direct}=await get(agent)
+      if (detail) {
+        const saved = queue.savedRetry(decodeURIComponent(detail[1]))
+        const response = await registry.fetchAgent(agent,path,init)
+        if (!saved || (!response.ok && response.status !== 404)) return response
+        const payload = response.ok ? await response.json() : { id: saved.sessionId }
+        const row = payload.session || payload
+        Object.assign(row, { wizard_retry_input: queuedInputTextOf(saved.body), wizard_retry_run_id: saved.publicRunId, status: saved.status })
+        return json(200, payload)
+      }
       if(parsed.pathname==='/v1/runs'&&method==='POST') {
         const body=JSON.parse(init.body),headers=new Headers(init.headers)
         const key=headers.get('Idempotency-Key')||randomUUID()
+        if (Object.hasOwn(body, 'wizard_retry_run_id')) {
+          try {
+            const {record,replayed} = await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body)
+            const response = json(202,queue.publicPayload(record))
+            if (replayed) response.headers.set('Idempotency-Replayed','true')
+            return response
+          } catch(error) { if(Number.isInteger(error.status))return json(error.status,{error:error.code||'saved_retry_unavailable'});throw error }
+        }
         if (!body.model) {
           let session = null
           try { const response = await direct(`/api/sessions/${encodeURIComponent(body.session_id)}`); if(response.ok) { const payload=await response.json();session=payload.session||payload } else await response.body?.cancel() } catch {}
