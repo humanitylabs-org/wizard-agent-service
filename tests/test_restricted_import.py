@@ -15,6 +15,11 @@ import hermes_import as h
 import restricted_import as r
 
 
+# A full import runs the source writer census (hermes_import.assert_no_writers): /proc/<pid>/fd and F_SETLEASE, Linux
+# only, like the boxes the importer runs on. Elsewhere (macOS) it refuses with FileNotFoundError('/proc') instead.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith('linux'), 'full import needs the Linux /proc writer census')
+
+
 class RestrictedImportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -60,6 +65,7 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertEqual(r.reown.call_args_list[-2].args[1], 10000)
         self.assertEqual(r.reown.call_args_list[-1].args[1], os.getuid())
 
+    @LINUX_ONLY
     def test_registry_authority_allocates_pair_and_moves_inode(self):
         inode = (self.home / 'state.db').stat().st_ino
         result = h.apply(self.plan, 'restricted-fixture', self.root)
@@ -73,6 +79,7 @@ class RestrictedImportTests(unittest.TestCase):
         h.undo(result['journal'])
         self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
         self.assertFalse(folder.exists())
+    @LINUX_ONLY
     def test_outer_crash_steps_restore_exact_source(self):
         before = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
         inode = (self.home / 'state.db').stat().st_ino
@@ -87,6 +94,7 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 self.assertFalse((self.root / 'agents/restricted-fixture').exists())
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
+    @LINUX_ONLY
     def test_undo_crash_during_both_sealed_transfer_windows(self):
         before = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
         inode = (self.home / 'state.db').stat().st_ino
@@ -101,6 +109,7 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
 
+    @LINUX_ONLY
     def test_rw_mount_groups_explicit_and_never_root(self):
         workspace = self.owner / 'workspace'
         workspace.mkdir(mode=0o775)
@@ -119,6 +128,7 @@ class RestrictedImportTests(unittest.TestCase):
             h.apply(self.plan, 'restricted-fixture', self.root)
         h.undo(self.root / 'imports/restricted-fixture/journal.json')
 
+    @LINUX_ONLY
     def test_explicit_gh_file_only_and_heavy_grant_survive_admission(self):
         gh = self.owner / '.config/gh'
         gh.mkdir(parents=True)

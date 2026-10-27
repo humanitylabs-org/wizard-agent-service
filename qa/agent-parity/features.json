@@ -225,12 +225,16 @@
       "id": "tool-progress",
       "description": "Read the SSE run stream",
       "layer": "server",
-      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing.",
+      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing. For model-locked turns (Hermes chat/stream), GET /v1/runs/<id>/events must stream the bridge's tool and text events, queued and direct, without an upstream /events read.",
       "source_refs": [
-        "server/agents-http.mjs"
+        "server/agents-http.mjs",
+        "server/locked-run-bridge.mjs",
+        "server/run-event-log.mjs"
       ],
       "reference_tests": [
-        "tests/agents.test.ts"
+        "tests/agents.test.ts",
+        "tests/locked-run-events.test.ts",
+        "tests/run-event-log.node.mjs"
       ],
       "fixture": "tool-progress",
       "policy_exemptions": []
@@ -869,6 +873,20 @@
         "tests/proxy-queue.test.ts"
       ],
       "fixture": "model-lock",
+      "policy_exemptions": []
+    },
+    {
+      "id": "claude-pool-default",
+      "description": "A legacy Claude Code default starts new main chats on the ready Claude pool's same model; routed agents and explicit picks keep their own route",
+      "layer": "ux",
+      "how_to_test": "With the Claude app reporting a ready non-legacy account and the Hermes default on claude-subscription-directsdk-experimental, verify a new main chat resolves to anthropic with the same model, while new chats and threads of host-profile, container and restricted agents keep each agent's own route, an explicit legacy pick is kept, and boxes with no ready pool account stay on the legacy default.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-models.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/claude-default-pool.test.mjs"
+      ],
+      "fixture": null,
       "policy_exemptions": []
     },
     {

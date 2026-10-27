@@ -213,6 +213,13 @@ describe('setup API (box-local listener)', () => {
     expect(notYet.body.step).toBe('serving')
     expect(notYet.body.phones).toEqual([{ name: 'pixel', os: 'android', online: false }])
     helper.state.peers.push({ id: 'c', name: 'iphone', os: 'iOS', online: true, last_seen: null })
+    // A phone that is online on the tailnet has not opened Wizard yet: still serving, listed as a hint.
+    const online = await call(port, '/wizard/v1/setup/phone')
+    expect(online.body.step).toBe('serving')
+    expect(online.body.phones).toContainEqual({ name: 'iphone', os: 'iOS', online: true })
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe('')
+    // The phone opens Wizard through Serve (recorded by noteOwnerRequest, covered below).
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: new Date().toISOString() } })
     const seen = await call(port, '/wizard/v1/setup/phone')
     expect(seen.body.step).toBe('phone_seen')
     expect(readSettings(settingsPath).settings.setup.phone_seen_at).toMatch(/Z$/)
