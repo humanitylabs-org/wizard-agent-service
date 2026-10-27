@@ -7,6 +7,7 @@ import { createWizardServer, listen } from '../../server/service.mjs'
 import { installSupervisorAssets } from '../../server/supervisor-assets.mjs'
 import { agentSocketPath } from '../../server/agent-sockets.mjs'
 import { PRESETS } from '../../server/agents.mjs'
+import { fakeOpusRouter } from '../opus-router-fixture.mjs'
 
 export const kinds = ['main', 'host-profile', 'container', 'restricted']
 // Where scenes live. Agent ingress sockets sit under the scene (<root>/os/agents/<id>/gateway/ingress.sock) and the
@@ -80,7 +81,8 @@ export async function scene(kind, serverOptions = {}) {
     })
   }
   writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA'] }))
-  writeFileSync(join(root, 'apps.json'), JSON.stringify({ apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }] }))
+  const opusRouter = await fakeOpusRouter()
+  writeFileSync(join(root, 'apps.json'), JSON.stringify({ slots: opusRouter ? {'connection-router':{default:opusRouter.app.id}} : {}, apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }, ...(opusRouter ? [opusRouter.app] : [])] }))
   let sequence = 0
   const handler = async (req, res) => {
     const url = new URL(req.url, 'http://fixture')
@@ -176,7 +178,7 @@ export async function scene(kind, serverOptions = {}) {
     }
   }
   if (supervisorParity) installSupervisorAssets(agentHome)
-  const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
+  const options = { ...(opusRouter ? {routerGrant:opusRouter.token} : {}), ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
     providerSignInReady: async () => signin.ready,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
@@ -194,7 +196,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner,
+  return { opusRouter, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner,
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {
@@ -250,5 +252,5 @@ export async function scene(kind, serverOptions = {}) {
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },
-    close: async () => { await closeServer(wizard); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); searchDb?.close(); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
+    close: async () => { await closeServer(wizard); if(opusRouter) await opusRouter.close(); await closeServer(upstream); if (containerUpstream) await closeServer(containerUpstream); if (socket.listening) await closeServer(socket); searchDb?.close(); titleDb.close(); rmSync(root, { recursive: true, force: true }) } }
 }
