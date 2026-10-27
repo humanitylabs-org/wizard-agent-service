@@ -36,7 +36,7 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
@@ -4937,18 +4937,20 @@ function buildWizardServer(options, lifetime) {
         } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
         return
       }
-      if (url.pathname === '/wizard/v1/ui-preferences') {
+      if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {
+        const seed = url.pathname.endsWith('/seed')
+        if (seed && !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!['GET', 'PUT'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, PUT' }); return }
-        if (request.method === 'PUT' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        if (!(seed ? ['POST'] : ['GET', 'PUT']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT' }); return }
+        if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
         const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
         let patch
-        if (request.method === 'PUT') {
+        if (request.method !== 'GET') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
-          sendJson(response, 200, request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }

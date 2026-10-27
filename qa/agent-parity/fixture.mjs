@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../../server/service.mjs'
@@ -9,6 +9,10 @@ import { agentSocketPath } from '../../server/agent-sockets.mjs'
 import { PRESETS } from '../../server/agents.mjs'
 
 export const kinds = ['main', 'host-profile', 'container', 'restricted']
+// Where scenes live. Agent ingress sockets sit under the scene (<root>/os/agents/<id>/gateway/ingress.sock) and the
+// Service refuses socket paths over 103 bytes (agent-sockets.mjs). macOS's per-user $TMPDIR (/var/folders/…/T/) is
+// long enough to push them past that, so scenes use /tmp there (resolved, so path comparisons stay exact).
+export const sceneTmp = () => process.platform === 'darwin' ? realpathSync('/tmp') : tmpdir()
 export const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh6wAAAABJRU5ErkJggg==', 'base64')
 export const image = `data:image/png;base64,${png.toString('base64')}`
 export const owner = { 'X-Wizard-Owner-Proof': 'parity-synthetic-owner-proof-0123456789abcdef' }
@@ -26,7 +30,7 @@ export async function scene(kind, serverOptions = {}) {
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
   delete optionOverrides.supervisorParity
-  const root = mkdtempSync(join(tmpdir(), 'parity-'))
+  const root = mkdtempSync(join(sceneTmp(), 'parity-'))
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
   mkdirSync(folder, { recursive: true })
