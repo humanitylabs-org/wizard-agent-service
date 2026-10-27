@@ -26,7 +26,8 @@ function cleanName(value) {
 export function createShareAgentRouting({ registry, homeMount = '/opt/data', now = () => new Date(), mainThreadExists, sessionExists }) {
   const agentDir = (id) => join(registry.agentsDir, id)
   const inboxRoot = (id) => join(agentDir(id), 'home', 'inbox')
-  const stagingDir = (id) => join(agentDir(id), 'home', '.wizard-upload-staging')
+  // Only finalized inbox bytes belong in the home mounted into the agent container.
+  const stagingDir = (id) => join(agentDir(id), 'upload-staging')
   // Upload id → stored file, so a completion retried after a crash finds what was already stored.
   const ledgerPath = (id) => join(agentDir(id), 'upload-state', 'stored.json')
   const readLedger = (id) => { try { return JSON.parse(readFileSync(ledgerPath(id), 'utf8')) } catch { return {} } }

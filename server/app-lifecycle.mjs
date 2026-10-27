@@ -63,6 +63,25 @@ async function readBody(req, max) {
   for await (const c of req) { n += c.length; if (n > max) throw new Error('too_large'); chunks.push(c) }
   return Buffer.concat(chunks)
 }
+// App responses can be chunked or endless; enforce the budget before retaining each chunk.
+async function boundedResponse(response, max) {
+  if (!response.body) return Buffer.alloc(0)
+  const reader = response.body.getReader()
+  const chunks = []; let length = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      length += value.byteLength
+      if (length > max) throw new Error('too_large')
+      chunks.push(Buffer.from(value))
+    }
+    return Buffer.concat(chunks, length)
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
+  } finally { reader.releaseLock() }
+}
 function sameOrigin(req, hosts) {
   // Browsers send Origin on every non-GET fetch; it must name this very host (already fenced) over a sane scheme.
   if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) return false
@@ -171,8 +190,7 @@ export function createAppLifecycleRoutes({
         res.writeHead(r.status, { Location: `/apps/${id}/${loc.pathname.slice(root.length)}${loc.search}${loc.hash}` }); res.end(); return
       }
       if (req.method === 'HEAD') await r.body?.cancel().catch(() => undefined)
-      let bytes = req.method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer())
-      if (bytes.length > 16 * 1024 * 1024) throw new Error('too_large')
+      let bytes = req.method === 'HEAD' ? Buffer.alloc(0) : await boundedResponse(r, 16 * 1024 * 1024)
       if (req.method !== 'HEAD') bytes = adaptAppView(id, url.pathname, r.headers.get('content-type') || '', bytes)
       res.writeHead(r.status, {
         'Content-Type': r.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-store',
@@ -257,8 +275,7 @@ export function createAppLifecycleRoutes({
         const r = await fetchImpl(managerUrl + path, { ...init, redirect: 'error', headers: { Authorization: `Bearer ${managerToken}` } })
         const type = String(r.headers.get('content-type') || '').split(';')[0]
         if (!r.ok || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type)) { send(res, 404, { error: 'image_unavailable' }); return true }
-        const bytes = Buffer.from(await r.arrayBuffer())
-        if (bytes.length > 4 * 1024 * 1024) throw new Error('too_large')
+        const bytes = await boundedResponse(r, 4 * 1024 * 1024)
         res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=60', 'X-Content-Type-Options': 'nosniff' }); res.end(bytes)
         return true
       }

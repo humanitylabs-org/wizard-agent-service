@@ -28,7 +28,7 @@ async function fixture(t, extra = {}) {
     if (u.port === '9876' && view) {
       return upstreams[view[1]] ? Response.json({ upstream: upstreams[view[1]], path: `/apps/${view[1]}/` }) : Response.json({ error: 'view_not_found' }, { status: 404 })
     }
-    if (u.port === '12345') return new Response('<h1>Hello</h1>', { headers: { 'content-type': 'text/html' } })
+    if (u.port === '12345') return extra.appResponse?.() || new Response('<h1>Hello</h1>', { headers: { 'content-type': 'text/html' } })
     // A FastAPI-like app server: GET routes answer HEAD with 405.
     if (u.port === '12347') return opts.method === 'HEAD' ? new Response('', { status: 405 }) : new Response('<h1>Strict</h1>', { headers: { 'content-type': 'text/html' } })
     if (extra.lifecycleFails && u.pathname.startsWith('/api/app-lifecycle/')) throw new Error('bridge dropped')
@@ -56,6 +56,32 @@ async function owner(base) {
   const { csrf, expires_in } = await boot.json()
   return { cookie, csrf, expires_in, headers: { Origin: base, Cookie: cookie, 'X-Wizard-CSRF': csrf, 'Idempotency-Key': KEY, 'Content-Type': 'application/json' } }
 }
+
+test('chunked app responses are cancelled at the byte cap before buffering the rest', async (t) => {
+  let pulls = 0, cancelled = false
+  const f = await fixture(t, { appResponse: () => new Response(new ReadableStream({
+    pull(controller) {
+      pulls++
+      controller.enqueue(new Uint8Array(1024 * 1024))
+      // Finite safety ceiling so the pre-fix test fails without exhausting the test process.
+      if (pulls === 40) controller.close()
+    },
+    cancel() { cancelled = true },
+  }, { highWaterMark: 0 })) })
+  const r = await fetch(`${f.base}/apps/hello/`)
+  assert.equal(r.status, 502)
+  assert.equal(cancelled, true)
+  assert.equal(pulls, 17)
+})
+
+test('app streaming accepts empty and exact-limit bodies without truncation', async (t) => {
+  for (const size of [0, 16 * 1024 * 1024]) {
+    const f = await fixture(t, { appResponse: () => new Response(new Uint8Array(size)) })
+    const r = await fetch(`${f.base}/apps/hello/`)
+    assert.equal(r.status, 200)
+    assert.equal((await r.arrayBuffer()).byteLength, size)
+  }
+})
 
 test('owner session + same origin + CSRF are required, manager key stays server-side', async (t) => {
   const { base, calls, refresh, lifeCalls } = await fixture(t)

@@ -1,5 +1,5 @@
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
@@ -5618,16 +5618,23 @@ function buildWizardServer(options, lifetime) {
         const root = realpathSync(join(agents.agentsDir, agent, 'home'))
         const path = realpathSync(join(root, file.path))
         if (!path.startsWith(root + sep)) throw new UploadError(409, 'file_agent_mismatch')
-        const fd = openSync(path, 'r')
+        const handle = await open(path, 'r')
         try {
+          // Verify before sending headers, but yield between bounded reads (including HEAD).
+          // Reuse the open descriptor for GET so a path replacement cannot change the file served.
           const hash = createHash('sha256'), chunk = Buffer.alloc(1024 * 1024)
-          let length = 0, n
-          while ((n = readSync(fd, chunk, 0, chunk.length, length)) > 0) { hash.update(chunk.subarray(0, n)); length += n }
+          let length = 0
+          while (true) {
+            const { bytesRead } = await handle.read(chunk, 0, chunk.length, length)
+            if (!bytesRead) break
+            hash.update(chunk.subarray(0, bytesRead)); length += bytesRead
+            if (length > file.bytes) throw new UploadError(409, 'file_changed')
+          }
           if (length !== file.bytes || hash.digest('hex') !== file.sha256) throw new UploadError(409, 'file_changed')
           response.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': length, 'Content-Disposition': contentDisposition(file.filename), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
           if (request.method === 'HEAD') response.end()
-          else await pipeline(createReadStream(path, { fd, autoClose: false, start: 0 }), response)
-        } finally { closeSync(fd) }
+          else await pipeline(createReadStream(path, { fd: handle.fd, autoClose: false, start: 0 }), response)
+        } finally { await handle.close() }
         return
       }
       if (url.pathname === '/wizard/files/upload' && request.method === 'POST') {

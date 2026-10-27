@@ -104,8 +104,9 @@ describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)
     expect((await post(base, '/wizard/v1/uploads', { ...body, agent: 'hermes' })).status).toBe(409)
     expect((await fetch(base + path, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data })).status).toBe(409)
     expect((await fetch(base + path + q, { method: 'PATCH', headers: { 'Upload-Offset': '0', 'Content-Type': 'application/offset+octet-stream' }, body: data.subarray(0, 8) })).status).toBe(204)
-    const stage = join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging', up.upload_id + '.part')
+    const stage = join(dir, 'agents', agent.id, 'upload-staging', up.upload_id + '.part')
     expect(readFileSync(stage).equals(data.subarray(0, 8))).toBe(true)
+    expect(existsSync(join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging'))).toBe(false)
     await new Promise<void>(resolve => svc.close(() => resolve()))
     servers.splice(servers.indexOf(svc), 1)
     const restarted = createWizardServer(options); servers.push(restarted)
@@ -138,6 +139,28 @@ describe('ordinary chat attachment custody (paperclip/resume/outbox, not shares)
     expect(existsSync(join(dir, 'media', 'Inbox'))).toBe(false)
     expect(existsSync(join(dir, 'state', 'media-files.json'))).toBe(false)
     expect(main.seen.filter(s => s.method === 'POST')).toEqual([])
+  })
+  it('private attachment GET and HEAD yield while verifying bytes and still reject changes', async () => {
+    const { dir, base, svc } = await start()
+    const { agent } = await addPrivate(dir, base)
+    const data = Buffer.alloc(2 * 1024 * 1024, 65)
+    const uploaded = await fetch(`${base}/wizard/files/upload?agent=${agent.id}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Wizard-Filename': 'large.bin' }, body: data })
+    expect(uploaded.status).toBe(201)
+    const file = (await uploaded.json()).file
+    const url = `${base}/wizard/files/${file.id}/content?agent=${agent.id}`
+    for (const method of ['GET', 'HEAD']) {
+      let beforeHeaders = false
+      svc.prependOnceListener('request', (_req, res) => {
+        setImmediate(() => { beforeHeaders = !res.headersSent })
+      })
+      const response = await fetch(url, { method })
+      expect(response.status).toBe(200)
+      expect(Buffer.from(await response.arrayBuffer()).length).toBe(method === 'GET' ? data.length : 0)
+      expect(beforeHeaders).toBe(true)
+    }
+    const path = join(dir, 'agents', agent.id, 'home', 'inbox', new Date().toISOString().slice(0, 10), 'large.bin')
+    writeFileSync(path, Buffer.alloc(data.length, 66))
+    for (const method of ['HEAD', 'GET']) expect((await fetch(url, { method })).status).toBe(409)
   })
   it('one-shot outbox audio is stored only in selected agent home', async () => {
     const { dir, main, base } = await start()
@@ -248,7 +271,7 @@ describe('shares with an agents registry', () => {
     expect(pins.schema).toBe(2)
     expect(pins.threads[JSON.stringify([agent.id, share.thread_id])]).toEqual({ agent_id: agent.id, session_id: share.thread_id, provenance: 'service_admission' })
     // staging is outside the agent's home and empty
-    expect(readdirSync(join(dir, 'agents', agent.id, 'home', '.wizard-upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
+    expect(readdirSync(join(dir, 'agents', agent.id, 'upload-staging')).filter((n) => n.endsWith('.part'))).toEqual([])
     // the upload's file never names a host path
     const upload = await (await fetch(`${base}/wizard/v1/uploads/${share.uploads[0].upload_id}`)).json()
     expect(JSON.stringify(upload)).not.toContain(dir)
