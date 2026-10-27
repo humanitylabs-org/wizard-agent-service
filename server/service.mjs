@@ -25,7 +25,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -2652,7 +2652,17 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
+    agentId, sessionId, jobs, isDelivered: job => {
+      if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
+      const run = agents?.runThread(agentId, job.resume)
+      return run?.session_id === sessionId && run?.heavy_origin === job.origin
+    },
+  })
+  const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
+  const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
+    heavyStatus, heavyNotices }) : null
   const providerSignInReady = options.providerSignInReady ?? (async provider => {
     const usage = await aiUsageReader.read()
     return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
@@ -2660,10 +2670,15 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+    decorateDispatch: (agentId, sessionId, body) => {
+      const note = heavyNotices(agentId, sessionId)
+      return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
+    }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
@@ -3465,6 +3480,8 @@ function buildWizardServer(options, lifetime) {
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
       const upstreamRunId = typeof payload.run_id === 'string' ? payload.run_id : typeof payload.id === 'string' ? payload.id : ''
       if (!upstreamRunId || !new RegExp(`^${ID}$`).test(upstreamRunId)) throw Object.assign(new Error('Hermes queued admission identity was invalid'), { status: 502 })
+      acknowledgeHeavyNotices('hermes', record.sessionId, parseJsonBody(queuedBody))
+      if (record.continuation?.kind === HEAVY_KIND && ['running', 'completed'].includes(payload.status)) heavyWork?.queue.delivered(record.continuation.job_id)
       if (record.trustedPaths.length) {
         runTrustedPaths.set(upstreamRunId, record.trustedPaths)
         runTrustedPaths.set(record.publicRunId, record.trustedPaths)
@@ -3769,7 +3786,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -3808,8 +3825,11 @@ function buildWizardServer(options, lifetime) {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
+      const heavyJobs = heavyWork?.queue.rows()
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
+        const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
+        if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         spaceFiling.apply('hermes', session.id, session.wizard_attention)

@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isSilentResult, isScheduleInput } from './scheduler.mjs'
+import { heavyResultOwed } from './heavy-wait.mjs'
 export { SUPERVISOR_SPELL } from './supervisor.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
@@ -54,6 +55,15 @@ export function parseStatus(text) {
   }
   if (text.replace(MARKER, '').match(OPEN_MARKER)) return null
   return found
+}
+
+// Apply after parsing/backfill, including cached rows: heavy work can change
+// independently of the assistant's final reply. An owner decision still wins.
+export function guardHeavyStatus(status, { jobs, agentId = 'hermes', sessionId, isDelivered } = {}) {
+  if (!['done', 'check'].includes(status?.state)) return status
+  const pending = jobs?.some(job => (job.agent_id ?? 'hermes') === agentId
+    && (job.sessionId ?? job.session_id) === sessionId && heavyResultOwed(job, isDelivered))
+  return pending ? { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' } : status
 }
 
 // Provenance is independent of attention: publishers may send an app-only marker.

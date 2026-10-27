@@ -8,7 +8,7 @@ import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds, providerSignInReady = null }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerSignInReady = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -27,8 +27,11 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           // Agent registry providers are owner-facing account ids (e.g. anthropic),
           // not Hermes' configured transport (e.g. Claude subscription or custom).
           // Never turn a pinned model into a provider switch, including recovered admissions.
-          const { provider: _displayProvider, ...input } = JSON.parse(record.body)
+          const { provider: _displayProvider, ...body } = JSON.parse(record.body)
+          const input = JSON.parse(record.dispatchBody || queue.freezeDispatchBody(record.publicRunId,
+            JSON.stringify(decorateDispatch?.(agent.id, record.sessionId, body) || body)))
           const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:JSON.stringify(input)})
+          onDispatch?.(agent.id, record.sessionId, input)
           if(record.continuation?.kind==='watch'&&record.continuation.preserve_archived===true) {
             await call(`/api/sessions/${encodeURIComponent(record.sessionId)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:true})})
           }

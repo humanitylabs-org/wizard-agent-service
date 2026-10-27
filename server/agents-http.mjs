@@ -713,6 +713,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       try {
         const admission = JSON.parse(result.toString('utf8'))
         registry.noteRun(typeof admission.run_id === 'string' ? admission.run_id : admission.id, agent.id, admission.session_id ?? value?.session_id, request.headers['idempotency-key'] || '')
+        if (['running', 'completed'].includes(admission.status)) ctx.acknowledgeHeavyNotices?.(agent.id, admission.session_id ?? value?.session_id, value)
         ctx.noteAgentInput?.(agent, admission.session_id ?? value?.session_id, admission.run_id ?? admission.id, value, admission.created_at)
       } catch { /* the client validates the admission */ }
     }
