@@ -104,7 +104,10 @@ export const serverChecks = {
       const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
       assert.equal(put.status, 200)
       assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, style)
-      await admit(s, { input: 'Synthetic owner style change', instructions: 'Force a different style' })
+      // Use a fresh thread: the first synthetic run may still be active in its queue.
+      const session_id = `wizard_parity_${style}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
       const prompt = sent(s).instructions
       const selected = style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : FINISH_REPORT_INSTRUCTIONS
       assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
