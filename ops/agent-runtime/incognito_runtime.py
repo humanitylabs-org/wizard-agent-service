@@ -147,6 +147,12 @@ def _docker_command(args):
  return ['sg','docker','-c',shlex.join(['docker',*args])]
 
 
+class SeedCopyError(ValueError):
+ """Content-free seed failure: a fixed reason and the two process exit codes only."""
+ def __init__(self, reason, source_rc, destination_rc):
+  super().__init__(reason);self.reason=reason;self.source_rc=source_rc;self.destination_rc=destination_rc
+
+
 def stream_copy(source, destination, limit):
  """Relay binary content without capture, logging, a host file, or a secret env."""
  a=b=None;count=0
@@ -161,10 +167,11 @@ def stream_copy(source, destination, limit):
    data=os.read(a.stdout.fileno(),65536)
    if not data: break
    count+=len(data)
-   if count>limit: raise ValueError('incognito_seed_too_large')
+   if count>limit: raise SeedCopyError('seed_too_large',None,None)
    b.stdin.write(data);b.stdin.flush()
   b.stdin.close()
-  if a.wait(timeout=10) or b.wait(timeout=10): raise ValueError('incognito_seed_failed')
+  ra=a.wait(timeout=10);rb=b.wait(timeout=10)
+  if ra or rb: raise SeedCopyError('seed_failed',ra,rb)
   return count
  finally:
   for proc in (a,b):
@@ -311,7 +318,9 @@ class IncognitoManager:
                 # container output, environment, seed, URL or session identifiers.
                 kind = re.sub(r'[^A-Za-z0-9_]', '', type(exc).__name__)[:64] or 'Exception'
                 detail = {'step': step, 'exception_class': kind}
-                logging.getLogger(__name__).warning('incognito_start_failed step=%s exception_class=%s', step, kind)
+                if isinstance(exc, SeedCopyError):
+                    detail.update(reason=exc.reason, source_rc=exc.source_rc, destination_rc=exc.destination_rc)
+                logging.getLogger(__name__).warning('incognito_start_failed %s', json.dumps(detail, sort_keys=True))
                 self._remove(state)
                 error = self.failure('incognito_runtime_failed',502)
                 error.detail = detail
