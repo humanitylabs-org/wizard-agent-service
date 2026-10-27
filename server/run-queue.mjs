@@ -32,6 +32,7 @@ const RECOVERY_EXCERPT_CHARS = 120
 const MAX_QUEUED_BODY_BYTES = 12 * 1024 * 1024
 const MAX_QUEUED_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_QUEUED_IMAGES = 9
+const MAX_PROJECTION_INPUTS = 2048
 
 const nowSeconds = () => Date.now() / 1000
 const providerScope = record => {
@@ -71,7 +72,7 @@ const failureProjection = (record) => {
 }
 
 const queuedInputPreview = (body) => {
-  const value = parseJson(body, {})
+  const value = typeof body === 'string' ? parseJson(body, {}) : body
   const input = value?.input
   if (typeof input === 'string') return input.trim().slice(0, 300)
   if (!Array.isArray(input)) return ''
@@ -178,6 +179,8 @@ export class DurableRunQueue {
     this.onPendingSteerReplay = onPendingSteerReplay
     this.leaselessSince = new Map()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
+    // Retain only preview text and the provider hint, never attachment-bearing requests.
+    this.projectionInputs = new Map()
     this.timer = null
     this.tickPromise = null
     this.closed = false
@@ -214,6 +217,9 @@ export class DurableRunQueue {
         ON wizard_run_queue(status, created_at, public_run_id);
       CREATE INDEX IF NOT EXISTS wizard_run_queue_terminal
         ON wizard_run_queue(terminal_at, public_run_id) WHERE terminal_at IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS wizard_run_queue_session_latest
+        ON wizard_run_queue(session_id, CASE WHEN status='unknown' THEN 0 ELSE 1 END,
+          created_at DESC, public_run_id DESC, status);
       CREATE TABLE IF NOT EXISTS wizard_owner_stops (
         run_id TEXT PRIMARY KEY, at REAL NOT NULL
       );
@@ -391,12 +397,16 @@ export class DurableRunQueue {
       return value
     })
     this.database.prepare(`UPDATE wizard_run_queue SET ${entries.map(([key]) => `${allowed[key]} = ?`).join(', ')} WHERE public_run_id = ?`).run(...values, publicRunId)
+    if (entries.some(([key]) => key === 'body')) this.projectionInputs.delete(publicRunId)
     return this.get(publicRunId)
   }
 
   _position(publicRunId) {
-    const queued = this._rows("status = 'queued' AND waiting_reason <> 'provider_access'")
-    const index = queued.findIndex((record) => record.publicRunId === publicRunId)
+    const queued = this.database.prepare(`SELECT public_run_id FROM wizard_run_queue
+      WHERE status = 'queued' AND waiting_reason <> 'provider_access'
+      ORDER BY CASE WHEN retry_order_at>0 THEN retry_order_at ELSE created_at END,
+        CASE WHEN retry_source_id<>'' THEN retry_source_id ELSE public_run_id END, public_run_id`).all()
+    const index = queued.findIndex((record) => record.public_run_id === publicRunId)
     return index < 0 ? 0 : index + 1
   }
 
@@ -503,9 +513,34 @@ export class DurableRunQueue {
     `).all(Number(sinceSeconds), Number(limit)).map((row) => String(row.session_id))
   }
 
+  // Same winner as latestProjections, including unknown's session fence and launching -> queued.
+  // Background discovery needs only this status, not previews, payloads or queue positions.
+  latestStatus(sessionId) {
+    const row = this.database.prepare(`SELECT status FROM wizard_run_queue WHERE session_id = ?
+      ORDER BY CASE WHEN status='unknown' THEN 0 ELSE 1 END, created_at DESC, public_run_id DESC LIMIT 1`).get(sessionId)
+    return row?.status === 'launching' ? 'queued' : row?.status ?? null
+  }
+
+  _projectionInput(row) {
+    const cached = this.projectionInputs.get(row.public_run_id)
+    if (cached && cached.requestHash === row.request_hash) return cached
+    const body = this.database.prepare('SELECT body FROM wizard_run_queue WHERE public_run_id = ?').get(row.public_run_id)?.body
+    const value = parseJson(body, null)
+    const provider = value?.provider
+    const input = { requestHash: row.request_hash, preview: queuedInputPreview(value),
+      body: JSON.stringify(typeof provider === 'string' ? { provider } : {}) }
+    if (this.projectionInputs.size >= MAX_PROJECTION_INPUTS) this.projectionInputs.delete(this.projectionInputs.keys().next().value)
+    this.projectionInputs.set(row.public_run_id, input)
+    return input
+  }
+
   latestProjections(sessionIds) {
     const ids = Array.isArray(sessionIds) ? [...new Set(sessionIds)] : null
     if (ids && !ids.length) return []
+    // Another connection may edit a saved request. Our own edits invalidate the one entry in _update.
+    const version = this.database.prepare('PRAGMA data_version').get().data_version
+    if (version !== this.projectionDataVersion) this.projectionInputs.clear()
+    this.projectionDataVersion = version
     // Rank narrow identities once. A correlated anti-join used to scan the
     // body-heavy queue for every row, blocking foreground reads on this loop.
     return this.database.prepare(`
@@ -517,7 +552,7 @@ export class DurableRunQueue {
         ${ids ? `WHERE session_id IN (${ids.map(() => '?').join(',')})` : ''}
       )
       SELECT current.public_run_id, current.session_id, current.status,
-        current.waiting_reason, current.body, current.idempotency_key,
+        current.waiting_reason, current.request_hash, current.idempotency_key,
         json_object('safe_error', json_extract(current.payload_json, '$.safe_error'),
           'error', current.payload_json -> '$.error',
           'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
@@ -527,12 +562,15 @@ export class DurableRunQueue {
       FROM ranked JOIN wizard_run_queue current USING (public_run_id)
       WHERE ranked.position = 1
       ORDER BY current.created_at, current.public_run_id
-    `).all(...(ids ?? [])).map((row) => this._record(row)).map((record) => ({
+    `).all(...(ids ?? [])).map((row) => {
+      const input = this._projectionInput(row)
+      return { ...this._record(row), body: input.body, preview: input.preview }
+    }).map((record) => ({
       sessionId: record.sessionId,
       status: record.status === 'queued' || record.status === 'launching' ? 'queued' : record.status,
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
-      preview: queuedInputPreview(record.body),
+      preview: record.preview,
       ...failureProjection(record),
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
