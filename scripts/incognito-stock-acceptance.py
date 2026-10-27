@@ -56,6 +56,9 @@ try:
  (normal/'synthetic-mcp.py').write_text(MCP);(normal/'memories').mkdir();(normal/'memories/MEMORY.md').write_text('Synthetic identity animal: otter\n');(normal/'memories/USER.md').write_text('Synthetic owner.\n')
  (normal/'skills/synthetic').mkdir(parents=True);(normal/'skills/synthetic/SKILL.md').write_text('---\nname: synthetic\ndescription: Synthetic skill seed\n---\nSynthetic only.\n')
  with sqlite3.connect(normal/'state.db') as db:db.execute('create table synthetic_normal_history(value text)');db.execute("insert into synthetic_normal_history values ('normal-synthetic-history')")
+ # The synthetic source runs as uid 10000 and must read this host-owned home whatever the
+ # caller's umask (the forum heavy worker uses 077). Synthetic content only.
+ for f in [normal,*normal.rglob('*')]:f.chmod(0o755 if f.is_dir() else 0o644)
  before=snapshot()
  cmd(['network','create','--label','wizard.incognito.rig='+prefix,network])
  common=['--label','wizard.incognito.rig='+prefix,'--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges:true','--memory','1g','--memory-swap','1g','--ulimit','core=0:0','--network',network,'--user','10000:10000','--tmpfs','/tmp:rw,nosuid,nodev,size=64m,mode=1777']
