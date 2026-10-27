@@ -6320,7 +6320,7 @@ function buildWizardServer(options, lifetime) {
       find: options.followThroughFinder ?? (hermesStatePath ? undefined : createFollowThroughFinder({
         request: (path) => hermesJson(path),
         prefix: FOLLOW_THROUGH_PREFIX,
-        busy: (sessionId) => (runQueue?.latestProjections([sessionId]) ?? []).some((run) => LIVE.has(run.status)),
+        busy: (sessionId) => LIVE.has(runQueue?.latestStatus(sessionId)),
       })),
       enabled: async () => {
         if (!selfOrigin) return false
