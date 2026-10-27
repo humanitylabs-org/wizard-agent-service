@@ -240,6 +240,8 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 }
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
+const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
+const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
@@ -268,6 +270,10 @@ export function readApps({ appsJsonPath, launcherPath }) {
       ...(Object.hasOwn(app, 'voice_names') ? { voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
         typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [] } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
+      // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
+      ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
+      ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
