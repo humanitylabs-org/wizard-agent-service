@@ -530,10 +530,20 @@
       "policy_exemptions": []
     },
     {
+      "id": "inline-agent-images",
+      "description": "Agent screenshots appear inline where the reply mentions them",
+      "layer": "ux",
+      "how_to_test": "Render image MEDIA between explanation paragraphs; assert DOM order, no duplicate bottom image, same shared viewer and Back-to-thread. Targeted paired UX checks additionally cover two distinct images on two skins, copy/share and legacy clients.",
+      "source_refs": ["web/core/chat-kit.js", "web/core/chats.js"],
+      "reference_tests": ["wizard-ux/tests/inline-agent-screenshots.test.mjs", "wizard-ux/qa-inline-agent-screenshots.cjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "assistant-media",
-      "description": "Return MEDIA image and file tags from the agent own cache",
+      "description": "Return positioned MEDIA images and safe file tags from the agent own cache",
       "layer": "server",
-      "how_to_test": "Return MEDIA image and file tags from the agent own cache; verify renderable authenticated URLs, not raw paths or unavailable cards.",
+      "how_to_test": "Return MEDIA image and file tags from the agent own cache; verify source-position inline image envelopes, unchanged mixed-file order, unique IDs and renderable authenticated URLs, not raw paths or unavailable cards.",
       "source_refs": [
         "server/service.mjs"
       ],
