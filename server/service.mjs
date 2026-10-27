@@ -4689,6 +4689,11 @@ function buildWizardServer(options, lifetime) {
     return id
   }
   const publicSettingsFor = (request, settings) => {
+    // Owner-only preferences are absent from non-owner round-trips, just like a hidden default.
+    if (principalOf(request).kind !== 'owner') {
+      const { response_style: _ownerStyle, ...publicSettings } = settings
+      settings = publicSettings
+    }
     const id = settings.agents?.default_agent_id
     const agent = agents?.read(id)
     if (agent && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : isPrivateAgent(agents, id) && !mayOpenAgent(request, id))) {
