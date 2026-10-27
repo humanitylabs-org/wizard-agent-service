@@ -25,6 +25,7 @@ for (const provider of ['claude','chatgpt']) for (const failAgain of [false,true
   const body=JSON.stringify({session_id:'held',input:'original words',provider:provider==='claude'?'claude-subscription-directsdk-experimental':'openai-codex',model:provider==='claude'?'claude-opus-4-8':'gpt-6.1-sol',require_model_lock:true})
   const {record}=await q.admit({runtime:'direct',sessionId:'held',idempotencyKey:'first',requestHash:queueRequestHash('direct',body),body})
   assert.equal(q.get(record.publicRunId).status,'failed')
+  assert.equal(q.latestProjections(['held'])[0].reconnect.provider, provider)
   await q.tick(true);assert.equal(sent.length,1)
   signedIn=true;await q.tick(true);await q.tick(true);await q.tick(true)
   assert.equal(sent.length,2);assert.equal(sent[1].body,body);assert.equal(sent[1].providerRecoveryAttempted,true)

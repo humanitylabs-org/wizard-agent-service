@@ -521,6 +521,7 @@ export class DurableRunQueue {
       SELECT current.public_run_id, current.session_id, current.status,
         current.waiting_reason, current.body, current.idempotency_key,
         json_object('safe_error', json_extract(current.payload_json, '$.safe_error'),
+          'wizard_reconnect', current.payload_json -> '$.wizard_reconnect',
           'error', current.payload_json -> '$.error',
           'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
           'runtime', current.payload_json -> '$.runtime',

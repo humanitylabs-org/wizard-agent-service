@@ -13,7 +13,7 @@ const wait=async(fn,timeout=20000)=>{const deadline=Date.now()+timeout;while(Dat
 try{
  const initial=await (await page.request.get(origin+'/__preview/receipt')).json();assert.equal(initial.signedIn,false);assert.equal(initial.admissions.length,0);assert.equal(initial.modelRuns.length,0);
  await page.goto(origin+'/wizard-os-home/?session=chat-recent&shell=phone');await page.locator('.ch-compose textarea:visible').waitFor();await wait(()=>page.evaluate(()=>!!window.WizLive?.session?.('chat-recent')?.model));
- assert.match(await page.locator('.ch-thread:visible').innerText(),/Opus/);await snap();
+ await wait(async()=>/Opus/.test(await page.locator('.ch-thread:visible').innerText()));await snap();
  const words='STAGING one clear path: reply on Claude Opus after sign-in.';
  await page.locator('.ch-compose textarea:visible').fill(words);await page.getByRole('button',{name:'Send',exact:true}).click();
  await wait(()=>page.evaluate(()=>window.WizLive?.session?.('chat-recent')?.status==='failed'));
