@@ -84,17 +84,22 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
       && JSON.stringify(original.trustedPaths) === JSON.stringify(record.trustedPaths)
       && record.idempotencyKey.startsWith('wizard-saved-retry-') ? original : null
   }
+  const automaticSource = record => {
+    if (!record?.providerRecoveryAttempted || !record.retrySourceId
+      || record.idempotencyKey !== `wizard-saved-retry-${record.retrySourceId}`) return null
+    // Retain live's immutable payload/continuation/trusted-path authority checks.
+    const source = retryAuthority(record)
+    return source?.sessionId === record.sessionId && source.runtime === record.runtime
+      && (source.agent_id ?? 'hermes') === (record.agent_id ?? 'hermes') ? source : null
+  }
   const generation = (record, requireValid = true) => {
     const seen = new Set(), sessionId = record?.sessionId
     while (record && record.sessionId === sessionId && !seen.has(record.publicRunId)) {
       seen.add(record.publicRunId)
       // Provider recovery is another service-owned descendant, not a new owner
       // request. Only follow the durable automatic retry edge and its exact key.
-      if (record.providerRecoveryAttempted && record.retrySourceId
-        && record.idempotencyKey === `wizard-saved-retry-${record.retrySourceId}`) {
-        record = queue.get(record.retrySourceId)
-        continue
-      }
+      const source = automaticSource(record)
+      if (source) { record = source; continue }
       if (record.continuation?.kind !== HEAVY_KIND) return record.publicRunId
       const parent = heavy.get(record.continuation.job_id)
       if (!parent || (parent.agent_id ?? 'hermes') !== 'hermes' || parent.sessionId !== sessionId
@@ -193,8 +198,10 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     },
     async validate(record) {
       const job = heavy.get(record.continuation?.job_id)
+      const authority = retryAuthority(record)
       if (!job || (job.agent_id ?? 'hermes') !== (record.agent_id ?? 'hermes') || record.runtime !== 'direct' || job.sessionId !== record.sessionId || !terminal.has(job.state)
-        || retryAuthority(record)?.idempotencyKey !== `wizard-heavy-${job.job_id}` || !await current(job)) throw fail('heavy request superseded', 410)
+        || authority?.idempotencyKey !== `wizard-heavy-${job.job_id}`
+        || authority.continuation?.job_id !== job.job_id || !await current(job)) throw fail('heavy request superseded', 410)
       // Origin must have finished; do not release a mutation owner by declaring it external.
       const origin = queue.get(job.origin)
       if (!origin || !terminal.has(origin.status)) throw fail('origin still owns session', 503)

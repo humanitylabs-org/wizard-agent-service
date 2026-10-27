@@ -114,6 +114,9 @@ it('two heavy jobs from one turn both report back after an automatic provider re
   f.workerStates.set(second.job_id, 'failed')
   await f.integration.queue.tick()
   expect(f.integration.queue.get(second.job_id).resume).toMatch(/^wizardq_/)
+  await expect(f.integration.validate(f.runs.get(retried.publicRunId))).resolves.toBeUndefined()
+  await f.runs.tick()
+  expect(f.runs.get(retried.publicRunId).status).toBe('running')
 })
 
 it('superseded terminal results leave a durable short notice for the next turn', async () => {
