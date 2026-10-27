@@ -67,7 +67,7 @@ for(const mutation of ['content','timestamp','active-original','missing-lineage'
  if(mutation==='different-uid')db.exec("UPDATE messages SET message_uid='new-request' WHERE id=2")
  assert.equal(continuationCurrent(path,token),false)
 }))
-test('typed completion plus matching tool dispatch admits a machine follow-through after ledger cleanup',()=>fixture(async(ctx)=>{
+test('typed completion plus matching tool dispatch admits a machine follow-through after ledger cleanup',()=>fixture(async(ctx: any)=>{
  const {db,path,message,sec}=ctx
  message('tool',JSON.stringify({status:'dispatched',mode:'background',delegation_id:'deleg_review',count:1}),sec-1800)
  const row=complete(ctx)
@@ -75,7 +75,7 @@ test('typed completion plus matching tool dispatch admits a machine follow-throu
  db.exec('DELETE FROM async_delegations')
  const token=capture(path)
  assert.equal(continuationCurrent(path,token),true)
- await withServer(path,async(server)=>{
+ await withServer(path,async(server: any)=>{
   await new Promise(resolve=>setTimeout(resolve,5200)) // normal five-second watcher tick, not manual Continue
   assert.equal(server.launches,1)
   assert.equal(server.bodies[0].headers['idempotency-key'],'wizard-helper-receipt-deleg_review')
