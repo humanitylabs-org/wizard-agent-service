@@ -1,6 +1,6 @@
 // Interactive synthetic-only recovery rig: real Service + real Troubleshooter, fake providers.
 import { createServer, request as httpRequest } from 'node:http'
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve, join, extname, sep } from 'node:path'
 import { createHermesFixture } from '../server/fixture.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -51,6 +51,10 @@ function proxy(req, res, origin) {
   up.on('error', () => { res.writeHead(502); res.end('Staging dependency unavailable') }); req.pipe(up)
 }
 const sendJson = (res, body) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)) }
+// Synthetic Tailscale local API: keeps unrelated network warnings out of the scenario.
+const socket = join(state, 'absent.sock'); rmSync(socket, { force: true })
+const tailnet = createServer((_req, res) => sendJson(res, { BackendState: 'Running', Self: { DNSName: 'staging-wizard.', TailscaleIPs: ['127.0.0.1'] } }))
+await new Promise(done => tailnet.listen(socket, done))
 const front = createServer((req, res) => {
   const u = new URL(req.url, 'http://preview'); res.setHeader('Cache-Control', 'no-store')
   if (u.pathname === '/') { res.writeHead(302, { Location: '/wizard-os-home/?session=chat-recent&shell=phone' }); return res.end() }
@@ -90,5 +94,5 @@ const front = createServer((req, res) => {
   res.end(readFileSync(file))
 })
 console.log(`Synthetic interactive preview: http://127.0.0.1:${(await listen(front, '127.0.0.1', Number(process.env.PORT || 0))).port}/wizard-os-home/?session=chat-recent&shell=phone`)
-async function stop() { for (const server of [front, app]) { server.closeAllConnections(); await new Promise(done => server.close(done)) }; await fixture.closeFixture(); process.exit(0) }
+async function stop() { for (const server of [front, app, tailnet]) { server.closeAllConnections(); await new Promise(done => server.close(done)) }; await fixture.closeFixture(); process.exit(0) }
 process.once('SIGINT', stop); process.once('SIGTERM', stop)
