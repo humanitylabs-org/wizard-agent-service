@@ -5,9 +5,10 @@ import { existsSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
+import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds, providerSignInReady = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -18,7 +19,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         if (!response.ok) throw Object.assign(new Error('routed admission unavailable'),{status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
         return payload
       }
-      const queue = new DurableRunQueue({agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
+      const queue = new DurableRunQueue({providerAccessRecovery,providerAccessWindowSeconds,providerSignInReady,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
         // An external CLI turn remains protected by Hermes' 409 admission. Only
         // this agent's queue is reconciled here, never another agent's state.db.
         activeSessionIds:async()=>[],canDispatch:async()=>true,
@@ -33,7 +34,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           }
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
-        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(payload.status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },
+        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },
         // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.
         steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),
       })
@@ -51,6 +52,27 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
     async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
+      if (method === 'GET' && /^\/api\/sessions\/[^/]+(?:\/messages)?$/.test(parsed.pathname)) {
+        const upstream = await registry.fetchAgent(agent,path,init)
+        if (!upstream.ok) {
+          if (upstream.status !== 404 || parsed.pathname.endsWith('/messages')) return upstream
+          const {queue} = await get(agent), saved = queue.savedRetry(decodeURIComponent(parsed.pathname.split('/')[3]))
+          if (!saved) return upstream
+          return json(200, { id: saved.sessionId, wizard_retry_input: queuedInputTextOf(saved.body), wizard_retry_run_id: saved.publicRunId, status: saved.status, queue_reason: saved.waitingReason })
+        }
+        const {queue} = await get(agent)
+        const record = queue.latestForSession(decodeURIComponent(parsed.pathname.split('/')[3]))
+        const raw = Buffer.from(await upstream.arrayBuffer())
+        let result = raw
+        if (parsed.pathname.endsWith('/messages') && parsed.searchParams.get('view') === 'wizard') result = projectProviderSignInHistory(raw, record, parsed.searchParams)
+        else if (!parsed.pathname.endsWith('/messages') && record?.payload?.wizard_provider_auth) {
+          const payload = JSON.parse(raw.toString('utf8')), row = payload.session || payload
+          row.wizard_retry_input = queuedInputTextOf(record.body)
+          result = Buffer.from(JSON.stringify(payload))
+        }
+        const headers = new Headers(upstream.headers); headers.delete('content-length')
+        return new Response(result,{status:upstream.status,headers})
+      }
       if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname)) return registry.fetchAgent(agent,path,init)
       const {queue,direct}=await get(agent)
       if(parsed.pathname==='/v1/runs'&&method==='POST') {
@@ -99,8 +121,8 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
               if(!upstream.ok||!upstream.body)throw new Error('routed event stream unavailable')
               // Carry split UTF-8/identifier frames across transport chunks.
               const reader=upstream.body.getReader(),decoder=new TextDecoder();let pending=''
-              while(!cancelled){const {value,done}=await reader.read();pending+=decoder.decode(value||new Uint8Array(),{stream:!done});const cut=done?pending.length:pending.lastIndexOf('\n\n')+2;if(cut>1){controller.enqueue(encoder.encode(pending.slice(0,cut).replaceAll(record.upstreamRunId,record.publicRunId)));pending=pending.slice(cut)}if(done)break}
-              if(pending&&!cancelled)controller.enqueue(encoder.encode(pending.replaceAll(record.upstreamRunId,record.publicRunId)))
+              while(!cancelled){const {value,done}=await reader.read();pending+=decoder.decode(value||new Uint8Array(),{stream:!done});const cut=done?pending.length:pending.lastIndexOf('\n\n')+2;if(cut>1){controller.enqueue(encoder.encode(pending.slice(0,cut).split(/(?<=\n\n)/).map(projectProviderSignInEvent).join('').replaceAll(record.upstreamRunId,record.publicRunId)));pending=pending.slice(cut)}if(done)break}
+              if(pending&&!cancelled)controller.enqueue(encoder.encode(projectProviderSignInEvent(pending).replaceAll(record.upstreamRunId,record.publicRunId)))
               if(cancelled)await reader.cancel()
             }catch(error){if(!cancelled)controller.error(error)}finally{init.signal?.removeEventListener('abort',abort);if(!cancelled)try{controller.close()}catch{}}
           },
