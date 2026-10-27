@@ -7,7 +7,7 @@ import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8 }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -28,9 +28,12 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           // Never turn a pinned model into a provider switch, including recovered admissions.
           const { provider: _displayProvider, ...input } = JSON.parse(record.body)
           const payload=await call('/v1/runs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey},body:JSON.stringify(input)})
+          if(record.continuation?.kind==='watch'&&record.continuation.preserve_archived===true) {
+            await call(`/api/sessions/${encodeURIComponent(record.sessionId)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:true})})
+          }
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
-        lookup:async record=>({payload:await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)}),
+        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(payload.status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },
         // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.
         steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),
       })
@@ -45,6 +48,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
   const ready = Promise.allSettled(registry.list().filter(agent => agent.id !== 'hermes' && existsSync(join(registry.agentsDir, agent.id, 'wizard-run-queue.sqlite3'))).map(get))
   return {
     ready,
+    async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
       if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname)) return registry.fetchAgent(agent,path,init)
@@ -58,9 +62,11 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           body.model = session?.model || agent.model?.model
         }
         const requestHash=init.wizardRequestHash||createHash('sha256').update(init.body).digest('hex')
+        const continuation=headers.get('X-Wizard-Schedule-Kind')==='watch'
+          ? {kind:'watch',preserve_archived:headers.get('X-Wizard-Watcher-Preserve')==='1',agent_id:agent.id} : null
         try {
           const replay = queue.replay('direct', body.session_id, key, requestHash)
-          const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id})
+          const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id,continuation})
           const response=json(202,queue.publicPayload(record)); if(replay)response.headers.set('Idempotency-Replayed','true');return response
         } catch(error) { if(Number.isInteger(error.status))return json(error.status,{error:error.code||'run_admission_failed'});throw error }
       }

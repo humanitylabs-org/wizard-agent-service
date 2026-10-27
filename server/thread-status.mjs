@@ -9,16 +9,22 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isSilentResult, isScheduleInput } from './scheduler.mjs'
+export { SUPERVISOR_SPELL } from './supervisor.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'
 import { normalizeAppId, metadataAppId } from './thread-app-provenance.mjs'
+import { normalizeSpaceId, SPACE_INSTRUCTIONS } from './thread-spaces.mjs'
 
 export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
 const OPEN_MARKER = /\[WIZARD_STATUS_V1\][\s\S]*$/u
 
-export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (only when the work cannot move until the user does one specific thing: decide, approve, reply, install, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi), done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check), check (only when the user\'s own judgment is the missing piece: whether a new feature or design is what they meant, whether they like it (look, feel, wording, taste), or a real-device behaviour you could not verify yourself), fyi (an answer, report, or update with no action). ask is one plain sentence under 90 characters: for needs_you, it is the exact action the user takes, starting with the verb and naming the thing (\"Reply merge to ship thread titles to every install\", \"Pick desks layout A or B\"), never a vague \"Review this\" or \"Let me know\", and the reply itself ends with that same ask in plain words; for check, name what to judge ("Say if the 11 groups feel right"), never "Test that X works"; for done and fyi, state the outcome. ' + SUBJECT_RULE + ' ' + TITLE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers. A background handoff is still agent-owned work, never a done/FYI result. Before saying work is running, verify the actual worker and its continuation/delivery handle. If a terminal tool says completion notifications are unsupported, stay in the owning turn and wait for its result or arrange and verify a durable continuation; an untracked background process does not finish the request. Return to the owner with a self-contained verified outcome or one concrete owner-only gate, not a promise to resume.'
+// Keep finish-report formatting before status instructions in both runtime prompts: the status
+// marker still governs the final line, and short/conversational replies remain free-form.
+export const FINISH_REPORT_INSTRUCTIONS = 'When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.'
+
+export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (only when the work cannot move until the user does one specific thing: decide, approve, reply, install, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi), done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check), check (only when the user\'s own judgment is the missing piece: whether a new feature or design is what they meant, whether they like it (look, feel, wording, taste), or a real-device behaviour you could not verify yourself; and only once the change is already running where the user will try it: live on the server they use, or for a phone or desktop app update, confirmed installed on their device. While a build, publish or self-update is still on its way, use fyi, keep checking, and send check only after it has landed), fyi (an answer, report, or update with no action). ask is what the Ready list shows, read cold by someone who has not opened the thread: one or two short plain sentences, at most 140 characters. For needs_you, first say what is waiting in everyday words, then the exact thing to do (\"Phone update for everyone is ready. Reply ship to send it\", \"Two desk layouts to choose from. Pick A or B\"); if the action is a reply word, the sentence says what that word does. For check, say what changed and what to judge (\"New chat groups are live. Say if the 11 groups feel right\"), never \"Test that X works\". For done and fyi, state the outcome in plain words. Never put internal words in ask: no PR, issue or version numbers, branch, flag, script, job, file or app IDs, and no team jargon such as lane, gate, waive, receipt, cutover, soak, parity or unblock; never a vague \"Review this\" or \"Let me know\". The reply itself ends with the same ask in plain words. ' + SUBJECT_RULE + ' ' + TITLE_INSTRUCTIONS + ' ' + SPACE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers. A background handoff is still agent-owned work, never a done/FYI result. Before saying work is running, verify the actual worker and its continuation/delivery handle. If a terminal tool says completion notifications are unsupported, stay in the owning turn and wait for its result or arrange and verify a durable continuation; an untracked background process does not finish the request. Return to the owner with a self-contained verified outcome or one concrete owner-only gate, not a promise to resume.'
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -35,7 +41,7 @@ export function normalizeStatus(value) {
   const subject = clip(value.subject ?? value.project, 40)
   const title = normalizeTitle(value.title)
   const appId = normalizeAppId(value.app_id)
-  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}) }
+  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}) }
 }
 
 // The last status marker in a reply, or null.
@@ -43,8 +49,10 @@ export function parseStatus(text) {
   if (typeof text !== 'string' || !text.includes('[WIZARD_STATUS_V1]')) return null
   let found = null
   for (const match of text.matchAll(MARKER)) {
-    try { found = normalizeStatus(JSON.parse(match[1])) ?? found } catch { /* malformed: ignore */ }
+    found = null
+    try { found = normalizeStatus(JSON.parse(match[1])) } catch { /* malformed: ignore */ }
   }
+  if (text.replace(MARKER, '').match(OPEN_MARKER)) return null
   return found
 }
 

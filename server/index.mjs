@@ -122,6 +122,7 @@ server = createWizardServer({
   runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   schedulerStatePath: process.env.WIZARD_SCHEDULER_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'schedules.sqlite3'),
+  supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
@@ -132,13 +133,7 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   agentHeavy: process.env.WIZARD_AGENT_HEAVY || 'off',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
-  heavyWorker: {
-    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
-    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
-    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
-    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
-    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
-  },
+
   requireAccess,
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
@@ -199,6 +194,12 @@ server = createWizardServer({
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
   // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
+  skinsStateDir: process.env.WIZARD_SKINS_STATE_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'skins'),
+  skins: {
+    ...(process.env.WIZARD_SKINS_RELAYS ? { relays: process.env.WIZARD_SKINS_RELAYS.split(/[\s,]+/).filter(Boolean) } : {}),
+    ...(process.env.WIZARD_SKINS_BLOSSOM ? { blossom: process.env.WIZARD_SKINS_BLOSSOM } : {}),
+    ...(process.env.WIZARD_SKINS_CURATOR ? { curator: process.env.WIZARD_SKINS_CURATOR } : {}),
+  },
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',

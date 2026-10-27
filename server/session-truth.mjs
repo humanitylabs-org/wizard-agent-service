@@ -1,4 +1,6 @@
 import { existsSync } from 'node:fs'
+import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-write.mjs'
+import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
@@ -13,6 +15,7 @@ const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hi
 export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
 export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
+  AGENT_TO_AGENT_PREFIX,
   SCHEDULE_INPUT,
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
@@ -92,31 +95,131 @@ function lockedRoute(modelConfig) {
   } catch { return null }
 }
 
-// Search only caller-approved session IDs in this runtime, with the same visibility rules
-// as the list truth reader. Never discover agents or open their stores here.
-export function searchHermesSessionText(path, sessionIds, query) {
-  const ids = boundedIds(sessionIds), hits = new Map();
-  const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
-  if (!ids.length || !words.length) return hits;
-  const db = openReadOnly(path); if (!db) return hits;
+// The trigram index is complete only when it exists and no FTS rebuild is mid-way
+// (Hermes records rebuild progress in state_meta while backfilling).
+function wordIndexReady(db) {
   try {
-    const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x=>x.name));
-    const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
-    // Let SQLite drop non-matching messages before they become JS strings (the costly part):
-    // instr(lower()) folds ASCII only, so it prefilters only ASCII words; the JS check below
-    // stays the authority.
-    const ascii = words.filter(w => /^[\x00-\x7f]+$/.test(w));
-    const prefilter = ascii.map(() => ' AND instr(lower(content), ?) > 0').join('');
-    const sql = `SELECT session_id, role, content, ${optional('display_kind')}, ${optional('finish_reason')} FROM messages WHERE session_id IN (${ids.map(()=>'?').join(',')}) AND role IN ('user','assistant') AND content IS NOT NULL${prefilter} ORDER BY timestamp DESC`;
-    for (const row of db.prepare(sql).iterate(...ids, ...ascii)) {
-      if (hits.has(row.session_id)) continue;
-      const visible = row.role === 'user' ? visibleUserRequest(row.content,row.display_kind) : visibleAssistantReply(row.content,row.display_kind,row.finish_reason);
-      if (visible && words.every(w=>row.content.toLowerCase().includes(w))) hits.set(row.session_id,row.content);
-    }
-  } catch { /* old stores retain title/request search */ } finally { db.close(); }
-  return hits;
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts'").get()) return false
+    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+  } catch { return false }
+}
+function trigramIndexReady(db) {
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
+    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+  } catch { return false }
 }
 
+// Search only caller-approved session IDs in this runtime, with the same visibility rules
+// as the list truth reader. Never discover agents or open their stores here.
+export const indexedSearchWords = query => {
+  const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean)
+  return words.length && words.every(w => /^[\x00-\x7f]+$/.test(w)) && words.some(w => w.length >= 3) ? words : []
+}
+export function createHermesTextSearcher(path) {
+  const db = openReadOnly(path)
+  let rootsKey = '', candidates, wordCandidates, columns, insert
+  const reads = new Map(), heads = new Map(), bodies = new Map()
+  let bodyBytes=0, dataVersion=-1
+  const remember = row => {
+    const bytes=typeof row.content==='string' ? row.content.length*2 : 0
+    if(bytes>4*1024*1024) return
+    bodies.set(row.id,{row,bytes}); bodyBytes+=bytes
+    while(bodyBytes>32*1024*1024) { const [id,v]=bodies.entries().next().value; bodies.delete(id); bodyBytes-=v.bytes }
+  }
+  if (db) {
+    db.exec('PRAGMA mmap_size=2147483648; PRAGMA cache_size=-200000; CREATE TEMP TABLE wizard_roots(session_id TEXT PRIMARY KEY) WITHOUT ROWID')
+    columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x => x.name))
+    insert = db.prepare('INSERT INTO temp.wizard_roots VALUES (?)')
+  }
+  return {
+    close() { db?.close() },
+    search(sessionIds, query) {
+      const hits = new Map(), words = indexedSearchWords(query)
+      Object.assign(hits, {mode:'titles', partial:false, timings:{fts_ms:0,read_ms:0,candidates:0,sessions:0}})
+      if (!db || !words.length || !(wordIndexReady(db) || trigramIndexReady(db))) return hits
+      const ids = boundedIds(sessionIds, Infinity)
+      if (!ids.length) return hits
+      const key = JSON.stringify(ids)
+      if (key !== rootsKey) {
+        db.exec('BEGIN; DELETE FROM temp.wizard_roots')
+        try { for (const id of ids) insert.run(id); db.exec('COMMIT'); rootsKey=key }
+        catch (error) { db.exec('ROLLBACK'); throw error }
+      }
+      const version=db.prepare('PRAGMA data_version').get().data_version
+      if(version!==dataVersion) { bodies.clear(); bodyBytes=0; dataVersion=version }
+      const start = performance.now()
+      let rows, partial
+      if (wordIndexReady(db)) {
+        // Hermes' word index first: one small posting list per word (20-80 ms cold) instead of three trigram lists,
+        // where common trigrams like "str" in "nostr" cost 1-3 s cold (James, 25 Oct 2026: still 5 s on the phone).
+        // Words match from their start ("nos" finds "nostr"); the JS check below stays the authority.
+        wordCandidates ||= db.prepare('SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rowid DESC LIMIT 8000')
+        const tokens=words.flatMap(w=>w.split(/[^a-z0-9]+/)).filter(t=>t.length>=3)
+        const ftsIds=tokens.length ? wordCandidates.all(`content : (${tokens.map(t=>`"${t}"*`).join(' AND ')})`).map(r=>r.id) : []
+        const roots=new Set(ids), sessions=new Set(); rows=[]; partial=ftsIds.length>=8000
+        // Newest first, 200 at a time, until 60 threads have a visible match: tool output dominates the word index
+        // and each row is a random read, so the old reads of all 8,000 rows cost seconds.
+        let at=0
+        for(; at<ftsIds.length && sessions.size<60; at+=200) {
+          const chunk=ftsIds.slice(at,at+200)
+          if(!heads.has(chunk.length)) heads.set(chunk.length,db.prepare(`SELECT id,session_id,role FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
+          for(const r of heads.get(chunk.length).all(...chunk)) if(roots.has(r.session_id) && (r.role==='user'||r.role==='assistant')) { rows.push(r); sessions.add(r.session_id) }
+        }
+        if(at<ftsIds.length) partial=true
+        rows.sort((a,b)=>a.session_id<b.session_id?-1:a.session_id>b.session_id?1:b.id-a.id)
+      } else {
+        // Newest 8,000 matching messages only: each is a random lookup in a 30 GB store, and a common 3-letter word
+        // ("nos": 30k rows) blew the deadline. Older matches still come from titles; the response says partial.
+        candidates ||= db.prepare(`WITH c AS MATERIALIZED (
+          SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 8000
+        ) SELECT m.session_id AS session_id, m.id AS id, (SELECT count(*) FROM c) AS candidate_count
+          FROM c JOIN messages m ON m.id=c.id JOIN temp.wizard_roots r ON r.session_id=m.session_id
+          WHERE m.role IN ('user','assistant')
+          UNION ALL SELECT NULL,NULL,count(*) FROM c ORDER BY session_id,id DESC`)
+        const result = candidates.all(words.filter(w=>w.length>=3).map(w=>`"${w.replace(/"/g,'""')}"`).join(' AND '))
+        rows=result.filter(r=>r.session_id!==null); partial=result.some(r=>r.candidate_count>=8000)
+      }
+      const fts_ms = performance.now()-start, readStart=performance.now(), grouped=new Map()
+      for (const row of rows) { if(!grouped.has(row.session_id)) grouped.set(row.session_id,[]); grouped.get(row.session_id).push(row.id) }
+      // Snippets for the 60 threads with the newest matching message: reading text is the slow part (a common
+      // word matched 467 threads and took 5 s). The rest still count as partial, and titles cover them.
+      const ranked=[...grouped].sort((a,b)=>b[1][0]-a[1][0]), skipped=ranked.length>60
+      grouped.clear(); for(const [id,values] of ranked.slice(0,60)) grouped.set(id,values)
+      for (let round=0; round<2; round++) {
+        const wanted=[]
+        for (const [id, values] of grouped) if(!hits.has(id)) wanted.push(...values.slice(round*3,round*3+3))
+        const found=new Map(), missing=[]
+        for(const id of wanted) { const cached=bodies.get(id); if(cached) found.set(id,cached.row); else missing.push(id) }
+        for(let at=0; at<missing.length; at+=500) {
+          const chunk=missing.slice(at,at+500)
+          if(!reads.has(chunk.length)) reads.set(chunk.length,db.prepare(`SELECT id,session_id,role,content,${columns.has('display_kind')?'display_kind':'NULL AS display_kind'},${columns.has('finish_reason')?'finish_reason':'NULL AS finish_reason'} FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
+          for(const row of reads.get(chunk.length).all(...chunk)) { found.set(row.id,row); remember(row) }
+        }
+        for(const [id, values] of grouped) {
+          if(hits.has(id)) continue
+          for(const mid of values.slice(round*3,round*3+3)) {
+            const row=found.get(mid); if(!row || row.session_id!==id || typeof row.content!=='string') continue
+            const text=visibleMemoryText(row.content)
+            const visible=row.role==='user'?visibleUserRequest(text,row.display_kind):visibleAssistantReply(text,row.display_kind,row.finish_reason)
+            const low=text.toLowerCase()
+            if(!visible || !words.every(w=>low.includes(w))) continue
+            const at=low.indexOf(words[0]), from=Math.max(0,at-60), to=Math.min(text.length,from+200)
+            hits.set(id,(from?'…':'')+text.slice(from,to)+(to<text.length?'…':'')); break
+          }
+        }
+      }
+      Object.assign(hits,{mode:'body',partial:partial || skipped || [...grouped].some(([id,values])=>!hits.has(id)&&values.length>6),timings:{fts_ms,read_ms:performance.now()-readStart,candidates:rows.length,sessions:hits.size}})
+      return hits
+    }
+  }
+}
+export function searchHermesSessionText(path, sessionIds, query) {
+  const searcher=createHermesTextSearcher(path)
+  try { return searcher.search(sessionIds,query) } finally { searcher.close() }
+}
 export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
   const truth = new Map()
@@ -167,6 +270,8 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       ORDER BY timestamp DESC${tieOrder}
     `)
     const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user'
+      AND timestamp <= ? ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
     const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
@@ -194,6 +299,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
+        if (row.role === 'assistant' && isAgentToAgentRequest(triggeringUser.get(id, timestamp)?.content)) continue
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
         const provenanceAssistant = visibleProvenanceReply(row)

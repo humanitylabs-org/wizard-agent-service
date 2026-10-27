@@ -169,6 +169,22 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertIn('mv -T -f "$tmp/.env" /opt/data/.env', script)
         self.assertNotIn(".new", script)   # no predictable names an agent could plant
 
+    def test_supervisor_assets_sync_only_after_stop_in_exact_owned_namespaces(self):
+        agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
+        managed = self.tmp / "agents" / "daily" / "managed"
+        for rel in ('plugins/wizard-supervisor-tools', 'skills/reporter', 'skills/supervisor'):
+            (managed / rel).mkdir(parents=True, exist_ok=True)
+            (managed / rel / 'fixture').write_text('synthetic')
+        self.driver.apply(agent)
+        script = next(args for args, _ in self.calls if args[0] == 'run')[-1]
+        self.assertIn('test ! -L /opt/data/plugins', script)
+        self.assertIn('test ! -L /opt/data/skills', script)
+        self.assertIn('cp -R /managed/plugins/wizard-supervisor-tools', script)
+        self.assertIn('mv -T "$tmp/reporter" /opt/data/skills/reporter', script)
+        self.assertNotIn('cp -R /managed/plugins /opt/data', script)
+        order = [args[0] if args[0] != 'compose' else args[5] for args, _ in self.calls if args[0] in ('compose', 'run')]
+        self.assertEqual(order[:4], ['build', 'stop', 'run', 'up'])
+
     def test_sync_timeout_removes_the_named_helper(self):
         agent = agent_folder(self.tmp / "agents", "daily", {"uplink": "10.250.0.16/28", "sandbox": "10.251.0.16/28"})
         removed = []

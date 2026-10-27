@@ -45,6 +45,12 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     const ask = String(v.ask || '').replace(/\s+/g, ' ').trim().slice(0, 140); if (!ask) return null;
     return { state: v.state, ask, subject: String(v.subject || '').replace(/\s+/g, ' ').trim().slice(0, 40) };
   }
+  function followUpOf(v) {
+    if (!v || typeof v !== 'object' || v.active !== true || !Number.isSafeInteger(v.count) || v.count < 1) return null;
+    const names = Array.isArray(v.names) ? v.names.map(name => String(name).replace(/\s+/g, ' ').trim().slice(0, 160)).filter(Boolean).slice(0, 3) : [];
+    const nextRun = optIso(v.nextRun);
+    return { active: true, count: v.count, names, ...(nextRun ? { nextRun } : {}) };
+  }
   function normalizeFull(item) {
     const id = item.id || item.session_id; if (!id) return null;
     const raw = String(item.status || item.run_status || '');
@@ -85,6 +91,8 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       helperStatus: item.wizard_helper_status && typeof item.wizard_helper_status === 'object' ? item.wizard_helper_status : null,
       // What the finished thread asks of James (the agent's hidden status line): needs_you / check / done / fyi.
       attention: attentionOf(item.wizard_attention),
+      // A durable quiet one-shot checker bound to this thread. The prompt never reaches the list.
+      followUp: followUpOf(item.wizard_follow_up),
       // Thread titles (Agent Service thread-titles.mjs): every rename with its time, so the thread shows
       // "Renamed from …" right after the reply that renamed it. The list shows only the current title.
       renames: Array.isArray(item.wizard_title_renames) ? item.wizard_title_renames.filter(r => r && typeof r.from === 'string' && isFinite(r.at)).slice(-6).map(r => ({ from: r.from.slice(0, 120), to: String(r.to || '').slice(0, 120), at: Number(r.at), by: r.by === 'you' ? 'you' : 'agent' })) : [],
@@ -102,7 +110,7 @@ export function listRow(item, q = '') {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','attention']) if (!row[key]) delete row[key];
+  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','attention','followUp']) if (!row[key]) delete row[key];
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;
@@ -111,6 +119,7 @@ export function listRow(item, q = '') {
 
 }
 export function listPayload(payload, q = '') {
+  if (payload.mode === 'body' || payload.mode === 'titles' || payload.fields === 'slim') { const {window_projected,...visible}=payload; return { ...visible, view:'list', list_version:1 }; }
   for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q)).filter(Boolean);
   const { window_projected, ...visible } = payload;
   return { ...visible, view: 'list', list_version: 1 };

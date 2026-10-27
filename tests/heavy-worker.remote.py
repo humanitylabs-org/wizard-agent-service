@@ -71,6 +71,38 @@ class WorkerTests(unittest.TestCase):
         time.sleep(0.2)
         self.temp.cleanup()
 
+    def test_forum_host_is_preserved_in_spec_and_receipt(self):
+        job = 'heavy_' + uuid.uuid4().hex
+        self.ids.append(job)
+        spec = {'cwd': str(self.base), 'argv': [sys.executable, '-c', "print('forum receipt')"],
+                'timeout_seconds': 10, 'host': 'forum'}
+        self.rpc('submit', job, spec)
+        result = self.wait(job, ('completed',))
+        self.assertEqual(result['receipt']['host'], 'forum')
+        self.assertEqual(result['receipt']['exit_code'], 0)
+        import hashlib
+        self.assertEqual(result['receipt']['log_sha256'],
+                         hashlib.sha256(Path(result['receipt']['log_path']).read_bytes()).hexdigest())
+        self.assertEqual(self.raw_rpc({'action': 'submit', 'job_id': 'heavy_' + uuid.uuid4().hex,
+                                     'spec': {**spec, 'host': 'other'}}).returncode, 1)
+
+    def test_configured_worker_host_receipt_without_host_in_spec(self):
+        for host in ('forum', 'thales'):
+            with unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_HOST': host}):
+                # Each configured host has its own dispatcher/spool, as in production.
+                self.root = self.base / host / 'spool'
+                job, spec = self.submit("print('configured host')")
+                result = self.wait(job, ('completed',))
+                self.assertEqual(result['receipt']['host'], host)
+                import hashlib
+                self.assertEqual(result['receipt']['spec_sha256'],
+                                 hashlib.sha256(json.dumps(spec, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
+                self.ids.remove(job)
+        with unittest.mock.patch.dict(os.environ, {'WIZARD_HEAVY_HOST': ''}):
+            self.root = self.base / 'legacy' / 'spool'
+            job, _ = self.submit("print('legacy host')")
+            self.assertEqual(self.wait(job, ('completed',))['receipt']['host'], 'thales')
+
     def test_busy_queue_duplicate_and_receipt(self):
         a, spec_a = self.submit("import time; from pathlib import Path; Path('once').open('a').write('a'); time.sleep(2); print('first done')")
         self.wait(a, ('running',))
@@ -295,6 +327,22 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn('ACQUIRED-MARK', log)
 
 class ConfigurationTests(unittest.TestCase):
+    def test_host_supervisor_recovers_all_existing_spools_with_the_same_locks(self):
+        module = importlib.util.spec_from_file_location('worker_supervisor', SCRIPT)
+        worker = importlib.util.module_from_spec(module); module.loader.exec_module(worker)
+        with tempfile.TemporaryDirectory(prefix='heavy-supervisor-') as temp:
+            root = Path(temp) / 'spool'; lock = Path(temp) / 'worker.lock'
+            lanes = (root, worker.light_root(root), worker.agent_spool(root),
+                     worker.light_root(worker.agent_spool(root)))
+            for lane in lanes:
+                with closing(worker.connect(lane)):
+                    pass
+            with unittest.mock.patch.object(worker, 'spawn_dispatcher') as spawn:
+                worker.ensure_dispatchers(root, lock)
+                self.assertEqual(spawn.call_args_list, [
+                    unittest.mock.call(root, lock), unittest.mock.call(lanes[1], worker.light_lock(root)),
+                    unittest.mock.call(lanes[2], lock), unittest.mock.call(lanes[3], worker.light_lock(root))])
+
     def test_missing_configuration_refuses_before_creating_storage(self):
         with tempfile.TemporaryDirectory(prefix='heavy-config-') as temp:
             root = Path(temp) / 'spool'

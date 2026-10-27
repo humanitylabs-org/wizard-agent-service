@@ -30,9 +30,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
+import hermes_lock
 
 SCHEMA = 1
-IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
+IMAGE = hermes_lock.load()['runtime_image']
 OUTSIDE_TOOLS = 'web search browser x_search vision video image_gen video_gen tts delegation connections homeassistant spotify'.split()
 TOOLS = 'git gh ssh node npm python3 uv sqlite3 curl jq rg bw op systemctl docker'.split()
 # Directory names, at a home root (also applied to named profile roots).
@@ -903,7 +904,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                   'privacy': 'standard', 'appearance': {'glyph': 'spark', 'hue': 265},
                   'model': {'provider': model.get('provider', 'openai-codex'), 'model': model.get('default', ''),
                             'allowed_models': [model.get('default', '')], 'fallback': False},
-                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'none'},
+                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'read', 'shared_with_agents': True},
                   'runtime': {'kind': 'container', 'app_id': 'agent-' + agent_id, 'api': 'http://agent-' + agent_id + ':8642', 'port': plan['port']},
                   'created_at': int(time.time())}
         journal['state'] = 'starting'

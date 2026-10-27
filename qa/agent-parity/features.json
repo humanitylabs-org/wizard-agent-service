@@ -36,12 +36,94 @@
   ],
   "features": [
     {
-      "id": "chats-spaces",
-      "description": "Owner-created thread collections persist independently of agent runtime kind",
+      "id": "supervisor-reporter",
+      "description": "Every runtime receives the Supervisor spell and six Hermes session-injected tools; standard agents can report through their authenticated transport. Scheduled replies share Reporter validation.",
       "layer": "server",
-      "how_to_test": "PUT a named Space with canonical thread ids via owner preferences, restart, read exact membership back, then delete the collection without touching sessions. UI selection and new-chat routing are covered by wizard-ux qa-chats-focus.cjs.",
-      "source_refs": ["server/ui-preferences.mjs"],
-      "reference_tests": ["tests/ui-preferences.test.ts"],
+      "how_to_test": "Admit an ordinary run per kind; inspect shared spell, install asset bundle into disposable homes, call report through main loopback or per-agent credential/socket, check service-derived identity and queued review. Verify private/siloed refusal separately before ledger reads.",
+      "source_refs": [
+        "server/supervisor.mjs",
+        "server/reporter.mjs",
+        "server/supervisor-assets.mjs",
+        "hermes-plugin/wizard-supervisor-tools"
+      ],
+      "reference_tests": [
+        "tests/supervisor.test.ts",
+        "tests/reporter.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "supervisor-reporter",
+      "privacy_seal_exemption": "Private and siloed agents refuse all Supervisor tools without sharing. Covered by tests/supervisor.test.ts and per-routed-kind refusal assertions; no standard runtime kind is exempt.",
+      "policy_exemptions": []
+    },
+    {
+      "id": "owner-thread-agent-write-guard",
+      "description": "Reject self-identified agent-to-agent run/chat/steer writes into existing owner threads before runtime side effects; preserve ordinary sends.",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, POST agent-to-agent prefix and NOT-a-James-message inputs through run, steer, chat and chat/stream. Require HTTP 409 agent_to_agent_thread_write and no upstream writes, then accept a normal owner run and a Supervisor update that quotes the marker below its first line, and list sessions.",
+      "source_refs": [
+        "server/owner-thread-write.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-thread-write.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "owner-thread-agent-write-guard",
+      "policy_exemptions": []
+    },
+    {
+      "id": "finish-report-instructions",
+      "description": "All agent kinds receive the shared finish-report rule immediately before the final status instructions, preserving short-reply and conversational exceptions.",
+      "layer": "server",
+      "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
+      "source_refs": [
+        "server/thread-status.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "finish-report-instructions",
+      "policy_exemptions": []
+    },
+    {
+      "id": "android-shell-recording-custody",
+      "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/shell-recording-routes.test.mjs. The real parkReply function runs for main, host-profile, container and restricted routes with asynchronous shell and synchronous full-app recorders; it preserves session, agent, typed draft and audio, and acknowledges only after durable held custody. Meeting cancellation also awaits native bytes before acknowledgement. This is synthetic source-executed evidence, not live provider or physical-phone proof. Companion UX PR: humanitylabs-org/wizard-ux#504.",
+      "source_refs": [
+        "wizard-ux/web/app.js",
+        "wizard-ux/web/core/device-recording.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/shell-recording-routes.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "chats-spaces",
+      "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
+      "layer": "server",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "source_refs": [
+        "server/ui-preferences.mjs",
+        "server/spaces-tools.mjs",
+        "server/thread-spaces.mjs"
+      ],
+      "reference_tests": [
+        "tests/ui-preferences.test.ts",
+        "tests/thread-spaces.test.ts",
+        "tests/thread-spaces-http.test.ts",
+        "tests/spaces-tools.test.ts",
+        "tests/spaces-search-status.test.ts",
+        "tests/managed-harness-upgrade.test.ts",
+        "qa/agent-parity/server-checks.mjs",
+        "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"
+      ],
       "fixture": "chats-spaces",
       "policy_exemptions": []
     },
@@ -175,12 +257,16 @@
       "id": "tool-progress",
       "description": "Read the SSE run stream",
       "layer": "server",
-      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing.",
+      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing. For model-locked turns (Hermes chat/stream), GET /v1/runs/<id>/events must stream the bridge's tool and text events, queued and direct, without an upstream /events read.",
       "source_refs": [
-        "server/agents-http.mjs"
+        "server/agents-http.mjs",
+        "server/locked-run-bridge.mjs",
+        "server/run-event-log.mjs"
       ],
       "reference_tests": [
-        "tests/agents.test.ts"
+        "tests/agents.test.ts",
+        "tests/locked-run-events.test.ts",
+        "tests/run-event-log.node.mjs"
       ],
       "fixture": "tool-progress",
       "policy_exemptions": []
@@ -257,6 +343,26 @@
         "qa/agent-parity/browser.mjs"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "thread-follow-up-watchers",
+      "description": "Create, project, list and explicitly stop a same-thread one-shot watcher over the runtime's own gateway without crossing agent boundaries",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, call wizard_follow_up on /wizard/mcp with that runtime's own gateway key and transport (restricted: its per-agent socket; never owner proof), create a watcher for its current thread, refuse a thread a routed agent does not own, read back only that watcher in the owning thread list, explicitly stop it, and verify the list is empty.",
+      "source_refs": [
+        "server/follow-ups.mjs",
+        "server/scheduler.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "hermes-plugin/wizard-os/__init__.py"
+      ],
+      "reference_tests": [
+        "tests/scheduler.test.ts",
+        "tests/agents.test.ts",
+        "tests/wizard-os-follow-up-plugin.node.mjs"
+      ],
+      "fixture": "thread-follow-up-watchers",
       "policy_exemptions": []
     },
     {
@@ -356,6 +462,23 @@
         "tests/pending-steer-replay.test.ts"
       ],
       "fixture": "pending-steer-replay",
+      "policy_exemptions": []
+    },
+    {
+      "id": "ready-ask-contract",
+      "description": "Deliver the cold-readable, situation-first Ready ask contract to every runtime kind",
+      "layer": "server",
+      "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
+      "source_refs": [
+        "server/thread-status.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status.test.ts",
+        "qa/agent-parity/checks.mjs"
+      ],
+      "fixture": "ready-ask-contract",
       "policy_exemptions": []
     },
     {
@@ -462,7 +585,7 @@
       "id": "read-receipts",
       "description": "Mark one thread seen or unread",
       "layer": "server",
-      "how_to_test": "Mark one thread seen, then unread; assert both markers stay scoped to its exact agent/session and survive restart.",
+      "how_to_test": "Mark one thread seen, then unread, alongside a retired-agent record; assert only the valid exact agent/session merges and both markers survive restart on every kind. An all-retired batch is a 200 no-op. HTTP regressions also cover private non-owner and ambiguous legacy records being dropped without blocking visible marks.",
       "source_refs": [
         "server/thread-seen.mjs"
       ],
@@ -471,6 +594,54 @@
         "tests/thread-unread.test.ts"
       ],
       "fixture": "read-receipts",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-slim-index",
+      "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
+      "layer": "server",
+      "how_to_test": "Request fields=slim on archive-50, page the pinned cursor, verify bounded wire fields/build and complete archive membership, and prove routed/private rows never enter the main index on all four kinds.",
+      "source_refs": [
+        "server/session-list-window.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-list-http.node.mjs"
+      ],
+      "fixture": "session-slim-index",
+      "policy_exemptions": []
+    },
+    {
+      "id": "archive-age",
+      "description": "The owner's Auto-archive age (ui-preferences archiveAfterDays: 1-30 days or 0 = never) decides which aged threads the archive-50 window moves out of the list, on every runtime kind",
+      "layer": "server",
+      "how_to_test": "Seed 20-day-old threads per kind (some explicitly archived, some only aged), PUT archiveAfterDays 7, 30 and 0 through /wizard/v1/ui-preferences and read /api/sessions?window=archive-50 after each: 7 archives both, 30 and 0 archive only the explicit ones and keep every aged thread in the list.",
+      "source_refs": [
+        "server/session-list-window.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs",
+        "server/ui-preferences.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-list-window.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "archive-age",
+      "policy_exemptions": []
+    },
+    {
+      "id": "session-body-search",
+      "description": "Body-only indexed search returns bounded visible snippets and explicit titles-only availability",
+      "layer": "server",
+      "how_to_test": "Request mode=body per kind with a local trigram store; verify id/agent/snippet wire shape, visibility, recall/private exclusion, short-query zero work, timings and titles-only behavior when the local index is unavailable.",
+      "source_refs": [
+        "server/session-truth.mjs",
+        "server/session-text-search-worker.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-text-search-worker.node.mjs"
+      ],
+      "fixture": "session-body-search",
       "policy_exemptions": []
     },
     {
@@ -769,6 +940,20 @@
         "tests/proxy-queue.test.ts"
       ],
       "fixture": "model-lock",
+      "policy_exemptions": []
+    },
+    {
+      "id": "claude-pool-default",
+      "description": "A legacy Claude Code default starts new main chats on the ready Claude pool's same model; routed agents and explicit picks keep their own route",
+      "layer": "ux",
+      "how_to_test": "With the Claude app reporting a ready non-legacy account and the Hermes default on claude-subscription-directsdk-experimental, verify a new main chat resolves to anthropic with the same model, while new chats and threads of host-profile, container and restricted agents keep each agent's own route, an explicit legacy pick is kept, and boxes with no ready pool account stay on the legacy default.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-models.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/claude-default-pool.test.mjs"
+      ],
+      "fixture": null,
       "policy_exemptions": []
     },
     {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -17,15 +18,110 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'supervisor-reporter': async s => {
+    const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
+    assert.equal(tools.length, 6)
+    assert.ok(tools.every(t => !('session_id' in t.parameters.properties) && !('agent_id' in t.parameters.properties)))
+    for (const skill of ['reporter', 'supervisor']) assert.ok(readFileSync(join(s.agentHome, `skills/${skill}/SKILL.md`), 'utf8').includes(`name: ${skill}`))
+    await admit(s, { input: 'Report this to supervisor and continue' })
+    assert.ok(sent(s).instructions.includes(SUPERVISOR_SPELL))
+    const args = { session_id: 'wizard_parity', client_report_id: 'fixture-report', title: 'Keep it plain', what_happened: 'The report used internal words.', feedback_verbatim: 'Say it plainly.', evidence: [{ type: 'thread', ref: 'wizard_parity' }], proposed_home: 'Reporter skill' }
+    const refused = await s.supervisor('report', args, { Authorization: 'Bearer wrong' })
+    assert.ok([401,403].includes(refused.status))
+    const spoof = await s.supervisor('report', {...args, agent_id: 'other-agent'})
+    assert.equal(spoof.status, 400)
+    const r = await s.supervisor('report', args)
+    assert.equal(r.status, 200, JSON.stringify(await r.clone().json()))
+    const value = await r.json()
+    assert.equal(value.report.agent_id, s.id)
+    assert.equal(value.report.thread_id, 'wizard_parity')
+    assert.match(value.report.run_id, /^wizardq_/)
+    assert.equal(value.report.depth, 0)
+    const again = await s.supervisor('report', args)
+    assert.equal((await again.json()).suppressed, true)
+    const unrelated = await s.supervisor('report', {...args, session_id: 'not-an-active-thread'})
+    assert.equal(unrelated.status, 409)
+    const workerLessons = await s.supervisor('lessons', {session_id: 'wizard_parity', query: ''})
+    assert.equal(workerLessons.status, 403) // sending feedback does not grant a cross-agent reader
+    if (s.kind !== 'main') {
+      for (const [privacy, shared] of [['private', false], ['standard', false]]) {
+        s.setSupervisorSeal(privacy, shared)
+        const sealed = await s.supervisor('report', {...args, client_report_id: 'sealed'})
+        assert.equal(sealed.status, 403)
+        assert.match((await sealed.json()).error, /privacy-seal exemption/)
+        const lessons = await s.supervisor('lessons', {session_id: 'wizard_parity', query: ''})
+        assert.equal(lessons.status, 403)
+      }
+    }
+  },
+  'owner-thread-agent-write-guard': async s => {
+    const before = s.seen.filter(r => r.method === 'POST').length
+    for (const input of ['  [Agent-to-agent test] ping', '[Agent-to-agent follow-up] ping', 'Clearance request, NOT a James message']) {
+      for (const path of ['/v1/runs', '/v1/runs/guard-test/steer', '/api/sessions/wizard_parity/chat', '/api/sessions/wizard_parity/chat/stream']) {
+        const response = await s.request(path, post({ session_id: 'wizard_parity', input, message: input }))
+        assert.equal(response.status, 409, path)
+        assert.equal((await response.json()).error.code, 'agent_to_agent_thread_write')
+      }
+    }
+    const noContentType = await s.request('/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_parity', input: '[Agent-to-agent test] ping' }) })
+    assert.equal(noContentType.status, 409, 'a non-JSON content-type cannot bypass admission')
+    assert.equal(s.seen.filter(r => r.method === 'POST').length, before, 'rejected writes never reach Hermes')
+    await admit(s, { input: 'Normal owner request remains accepted' })
+    // A report that only quotes the marker below its first line (a Supervisor update) is admitted on every kind.
+    await admit(s, { input: '[supervisor update]\n{"what_happened":"resolved the \'NOT a James message\' finding"}' })
+    assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
+  },
+  'finish-report-instructions': async s => {
+    await admit(s, { input: 'Synthetic task-finish prompt delivery check' })
+    const instructions = sent(s).instructions
+    assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
+    assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
+    assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+  },
   'chats-spaces': async s => {
-    const space = { id: 'parity-space', name: 'Synthetic Space', threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
+    const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
+    const space = { id: 'parity-space', name: 'Synthetic Space', ...(s.id === 'hermes' ? {} : { agent: s.id }), threads: ['wizard_parity'], createdAt: '2026-10-24T00:00:00.000Z' }
     const put = spaces => s.raw('/wizard/v1/ui-preferences', { ...post({ spaces }), method: 'PUT' })
-    assert.equal((await put([space])).status, 200)
+    const tool = async (name, args = {}, error = '') => {
+      const r = await s.agentMcp('tools/call', { name, arguments: args })
+      assert.equal(r.status, 200, 'agent gateway authentication/transport')
+      const reply = (await r.json()).result
+      if (error) { assert.equal(reply.isError, true); assert.equal(reply.content[0].text, error); return }
+      assert.notEqual(reply.isError, true, JSON.stringify(reply))
+      return JSON.parse(reply.content[0].text)
+    }
+    assert.equal((await put([space, foreign])).status, 200)
+    const listed = await s.agentMcp('tools/list')
+    assert.equal(listed.status, 200)
+    const names = (await listed.json()).result.tools.map(t => t.name)
+    for (const name of ['list', 'search_threads', 'create', 'add', 'remove', 'delete']) assert.ok(names.includes(`spaces_${name}`))
+    assert.deepEqual((await tool('spaces_list')).spaces, [{ id: space.id, name: space.name, count: 1 }])
+    const row = s.sessions.get('wizard_parity'); row.hidden = false; row.title = 'Synthetic metadata title'
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000, content: 'CONTENT_CANARY\n[WIZARD_STATUS_V1]{"state":"done","ask":"Synthetic","subject":"ParitySubjectOnly"}[/WIZARD_STATUS_V1]' })
+    const found = await tool('spaces_search_threads', { query: 'ParitySubjectOnly' })
+    assert.deepEqual(found.threads.map(t => t.id), ['wizard_parity'])
+    assert.equal(found.threads[0].subject, 'ParitySubjectOnly')
+    assert.ok(!JSON.stringify(found).includes('CONTENT_CANARY'))
+    const created = (await tool('spaces_create', { name: 'Gateway Space' })).space
+    assert.equal((await tool('spaces_create', { name: 'Gateway Space' })).space.id, created.id)
+    for (const name of ['spaces_add', 'spaces_remove', 'spaces_delete']) {
+      const args = name === 'spaces_delete' ? {} : { thread_ids: ['wizard_parity'] }
+      await tool(name, { space_id: foreign.id, ...args }, 'not_found')
+      await tool(name, { space_id: 'missing-space', ...args }, 'not_found')
+    }
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
+    for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
+    const run = await admit(s, { input: 'Synthetic Space fill' })
+    assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
+    assert.ok(!sent(s).instructions.includes('FOREIGN_SPACE_CANARY'))
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output: `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Filed', space: created.id })}[/WIZARD_STATUS_V1]` })
+    assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'status-line Space filing')
     await s.restart()
-    const prefs = await (await s.raw('/wizard/v1/ui-preferences')).json()
-    assert.deepEqual(prefs.spaces, [space])
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'durable agent-scoped membership')
+    await tool('spaces_delete', { space_id: created.id })
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [space, foreign])
     assert.equal((await put([])).status, 200)
-    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [])
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
   'nonimage-files': async s => {
@@ -69,8 +165,17 @@ export const serverChecks = {
   },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
-    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': record } }), method: 'PUT' })
+    const retiredKey = 'agent/retired/direct:retired-thread'
+    const r = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: {
+      [retiredKey]: { ...record, agent_id: 'retired', session_id: 'retired-thread' },
+      'direct:wizard_parity': record,
+    } }), method: 'PUT' })
     assert.equal(r.status, 200)
+    assert.equal((await r.json()).state.threads[retiredKey], undefined)
+    const noop = await s.raw('/wizard/thread-seen', { ...post({ threads: { [retiredKey]: {
+      agent_id: 'retired', session_id: 'retired-thread', seenAt: '2026-10-25T00:00:00Z',
+    } } }), method: 'PUT' })
+    assert.equal(noop.status, 200)
     const unreadAt = now + 1
     const unread = await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, unreadAt } } }), method: 'PUT' })
     assert.equal(unread.status, 200)
@@ -79,6 +184,45 @@ export const serverChecks = {
     const records = Object.values(state.state.threads)
     assert.equal(records.length, 1)
     assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now); assert.equal(records[0].unreadAt, unreadAt)
+  },
+  'session-slim-index': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<165;i++) s.sessions.set(`wizard_slim_${i}`,{id:`wizard_slim_${i}`,source:'wizard-mobile',title:`Slim archive ${i}`,created_at:now-20*86400-i,archived:true,hidden:false,messages:[{role:'user',content:'Slim visible preview',timestamp:now-20*86400-i}]});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',title:'Private title sentinel',hidden:true,created_at:now,messages:[{role:'user',content:'Private hidden preview',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500'); assert.equal(r.status,200);
+    const page=await r.json(); assert.equal(page.fields,'slim'); assert(page.build); assert.equal(page.archive_total,165); assert.equal(page.data.length,50);
+    assert(!JSON.stringify(page).includes('Private title sentinel')); assert(page.data.every(row=>row.agent===s.id&&row.preview.length<=160&&!('latest_message'in row)&&!('request'in row)));
+    const tail=await (await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500&cursor='+page.archive_cursor)).json();
+    assert.equal(tail.data.length,115); assert.equal(tail.archive_cursor,null); assert.equal(tail.build,page.build);
+    if(s.kind!=='main') { const main=await (await s.raw('/wizard/hermes/api/sessions?view=list&window=archive-50&fields=slim')).json(); assert(!main.data.some(row=>row.id.startsWith('wizard_slim_')),'main index never unions a routed runtime'); }
+  },
+  'archive-age': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<12;i++) s.sessions.set(`wizard_age_${i}`,{id:`wizard_age_${i}`,source:'wizard-mobile',title:`Aged ${i}`,created_at:now-20*86400-i,archived:i<4,hidden:false,messages:[{role:'user',content:'Aged preview',timestamp:now-20*86400-i}]});
+    if(s.kind==='main') await s.restart();
+    const list=async days=>{
+      const put=await s.raw('/wizard/v1/ui-preferences',{...post({archiveAfterDays:days}),method:'PUT'}); assert.equal(put.status,200);
+      const r=await s.request('/api/sessions?view=list&window=archive-50&limit=100'); assert.equal(r.status,200); const page=await r.json();
+      return {total:page.archive_total, listed:new Set(page.data.map(row=>row.id))};
+    };
+    const week=await list(7); assert.equal(week.total,12,'one week archives explicit and aged threads');
+    for(const days of [30,0]) {
+      const r=await list(days); assert.equal(r.total,4,`archiveAfterDays ${days} archives only explicit Done threads`);
+      for(let i=4;i<12;i++) assert(r.listed.has(`wizard_age_${i}`),`aged thread ${i} stays listed with archiveAfterDays ${days}`);
+    }
+    await list(7);
+  },
+  'session-body-search': async s => {
+    const row=s.sessions.get('wizard_parity'),now=Date.now()/1000; row.hidden=false;
+    row.messages.push({role:'user',timestamp:now,content:'Visible paritybodytoken\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data]\nprivaterecalltoken\n</memory-context>'});
+    s.sessions.set('wizard_hidden_private',{id:'wizard_hidden_private',source:'wizard-mobile',hidden:true,created_at:now,messages:[{role:'user',content:'privatescopetoken',timestamp:now}]});
+    if(s.kind==='main') await s.restart();
+    const r=await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body'); assert.equal(r.status,200);
+    const body=await r.json(); assert.equal(body.mode,'body'); assert.equal(body.search_total,1); assert.deepEqual(Object.keys(body.data[0]).sort(),['agent','id','snippet']); assert.equal(body.data[0].agent,s.id); assert(!body.data[0].snippet.includes('privaterecalltoken')); assert(body.timings.fts_ms>=0);
+    for(const token of ['privatescopetoken','privaterecalltoken']) { const privateResult=await (await s.request('/api/sessions?view=list&q='+token+'&mode=body')).json(); assert.equal(privateResult.search_total,0); }
+    const short=await (await s.request('/api/sessions?view=list&q=no&mode=body')).json(); assert.equal(short.mode,'titles'); assert.equal(short.timings.fts_ms,0);
+    s.dropSearchIndex(); const unavailable=await (await s.request('/api/sessions?view=list&q=paritybodytoken&mode=body')).json(); assert.equal(unavailable.mode,'titles'); assert.equal(unavailable.search_total,0);
   },
   'session-search': async s => {
     s.sessions.get('wizard_parity').messages.push({ role: 'user', timestamp: Date.now() / 1000, content: 'parityuniquetoken' })

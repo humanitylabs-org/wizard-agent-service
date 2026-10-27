@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
+import { STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 export const checks = {
   ...serverChecks,
@@ -102,6 +103,38 @@ export const checks = {
       assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.archived, archived)
     }
   },
+  'thread-follow-up-watchers': async s => {
+    const visible = await s.request('/api/sessions/wizard_parity', { ...post({ hidden: false }), method: 'PATCH' })
+    assert.equal(visible.status, 200)
+    const seeded = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic watcher seed' }))
+    assert.equal(seeded.status, 202)
+    // The runtime's own gateway credential on its own transport (restricted: its socket). No owner proof.
+    let id = 0
+    const call = async (args) => {
+      const r = await s.gatewayRpc({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name: 'wizard_follow_up', arguments: { session_id: 'wizard_parity', ...args } } })
+      assert.equal(r.status, 200)
+      const result = (await r.json()).result
+      return { error: result.isError === true, value: result.isError ? result.content[0].text : JSON.parse(result.content[0].text) }
+    }
+    const created = await call({ action: 'create', name: 'Parity dependency', instructions: 'Check the synthetic dependency.', every_minutes: 7 })
+    assert.equal(created.error, false, String(created.value))
+    const watcher = created.value; assert.equal(watcher.kind, 'watch'); assert.equal(watcher.thread, 'wizard_parity')
+    assert.equal(watcher.agent, s.kind === 'main' ? 'main' : s.id)
+    if (s.kind !== 'main') {
+      const foreign = await call({ action: 'create', session_id: 'wizard_not_this_agents', name: 'Foreign', instructions: 'x' })
+      assert.equal(foreign.error, true, 'a routed agent may watch only a thread it owns')
+    }
+    const listed = await call({ action: 'list' }); assert.equal(listed.error, false)
+    assert.deepEqual(listed.value.follow_ups.map(item => item.id), [watcher.id])
+    const sessions = await (await s.request('/api/sessions')).json()
+    const row = (sessions.data || sessions.sessions).find(item => item.id === 'wizard_parity')
+    assert.deepEqual({ active: row.wizard_follow_up.active, count: row.wizard_follow_up.count, names: row.wizard_follow_up.names },
+      { active: true, count: 1, names: ['Parity dependency'] })
+    assert.equal(typeof row.wizard_follow_up.nextRun, 'string')
+    const stopped = await call({ action: 'stop', watcher_id: watcher.id }); assert.equal(stopped.error, false)
+    assert.deepEqual(stopped.value, { stopped: 1 })
+    assert.deepEqual((await call({ action: 'list' })).value.follow_ups, [])
+  },
   'session-rename': async s => {
     const r = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Synthetic renamed thread' }), method: 'PATCH' }); assert.equal(r.status, 200)
     assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.title, 'Synthetic renamed thread')
@@ -111,6 +144,31 @@ export const checks = {
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('Background only:'))
     assert.ok(sent.instructions.includes('Visible on screen: synthetic label'))
+  },
+  'ready-ask-contract': async s => {
+    const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Two desk layouts are ready for the owner to choose.' }))
+    assert.equal(r.status, 202)
+    const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1)
+    assert.ok(sent.body.instructions.includes(STATUS_INSTRUCTIONS), 'the complete shared status contract reaches the runtime')
+    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR', 'The reply itself ends with the same ask in plain words.']) {
+      assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
+    }
+    assert.ok(!sent.body.instructions.includes('under 90 characters'))
+    assert.equal(sent.path, s.kind === 'host-profile' ? '/p/parity-profile/v1/runs' : '/v1/runs')
+
+    // Synthetic reply: verify projection, not a claim that a live model followed the prompt.
+    const ask = 'Two desk layouts to choose from. Pick A or B'
+    const run = [...s.runs.values()].at(-1)
+    Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: `${ask}\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'needs_you', ask })}[/WIZARD_STATUS_V1]` })
+    assert.equal((await s.request(`/v1/runs/${(await r.json()).run_id}`)).status, 200)
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000 + 1, content: `${ask}\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'needs_you', ask })}[/WIZARD_STATUS_V1]` })
+    const list = await s.request('/api/sessions?view=list'); assert.equal(list.status, 200)
+    const item = (await list.json()).data.find(x => x.id === row.id)
+    assert.equal(item.attention.state, 'needs_you'); assert.equal(item.attention.ask, ask)
+    const history = await s.request('/api/sessions/wizard_parity/messages?view=wizard'); assert.equal(history.status, 200)
+    const visible = JSON.stringify(await history.json())
+    assert.ok(visible.includes(ask)); assert.ok(!visible.includes('[WIZARD_STATUS_V1]'))
   },
   'media-contract': async s => {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic media request' })); assert.equal(r.status, 202)
@@ -127,7 +185,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind)
+  const s = await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)
