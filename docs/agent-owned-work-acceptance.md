@@ -9,7 +9,7 @@
 
 ## Contract
 
-A request made inactive by compaction still supersedes an older owner gate. Machine rows never become owner requests. A genuine `needs_you` or `check` after the latest real request still wins. Recovered helper results stay agent-owned until answered, using the existing follow-through watcher for continuation admission.
+A request made inactive by compaction still supersedes an older owner gate. Machine rows never become owner requests. A genuine `needs_you` or `check` after the latest real request still wins. Recovered helper results stay agent-owned until answered, using the existing follow-through watcher for continuation admission. If the delegation ledger was already cleaned, a typed machine completion plus its matching structured tool dispatch can provide a new witness; the dispatch timestamp supplies the conservative two-hour deadline, so delayed completion delivery cannot renew authority. A plain user-pasted completion marker, missing or changed dispatch, or stale dispatch still fails closed.
 
 Supervisor parents remain in Working while an open review has an unreported build, including a builder whose initial dispatch run ended to wait for its own helper. Waits expire after twelve hours from build creation, with legacy rows using the builder session start. Reporting, closing the review, or a builder final answer subsequently integrated into the parent's final answer releases the wait. A premature parent `done` does not settle an unfinished builder. Ledger transitions invalidate both the list snapshot and the individual parent row.
 

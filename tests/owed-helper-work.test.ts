@@ -50,6 +50,23 @@ test('a thread whose helper results arrive after compaction stays in Working unt
   assert.notEqual((await list()).status,'running')
 }))
 
+test('a typed delivered helper result can resume after ledger cleanup without renewing its dispatch deadline',()=>fixture(async({db,path,say})=>{
+  say('user','Finish the checks',sec-300,0)
+  const dispatch=say('tool',JSON.stringify({status:'dispatched',mode:'background',delegation_id:'deleg_owed',count:5}),sec-200)
+  const completion=say('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_owed]\nAll saved checks passed',sec-10,1,'async_delegation_complete')
+  const pending=findPendingFollowThroughs(path,{now})[0]
+  const token=captureContinuation(path,pending)
+  assert.ok(token);assert.equal(token!.completedAt,sec-200)
+  assert.equal(continuationCurrent(path,token,now),true)
+  // A fresh completion cannot renew the original dispatch's authority.
+  assert.equal(continuationCurrent(path,token,(sec-200+7201)*1000),false)
+  db.prepare("UPDATE messages SET display_kind=NULL WHERE id=?").run(completion.lastInsertRowid)
+  assert.equal(captureContinuation(path,pending),null);assert.equal(continuationCurrent(path,token,now),false)
+  db.prepare("UPDATE messages SET display_kind='async_delegation_complete' WHERE id=?").run(completion.lastInsertRowid)
+  db.prepare("UPDATE messages SET content='{}' WHERE id=?").run(dispatch.lastInsertRowid)
+  assert.equal(captureContinuation(path,pending),null);assert.equal(continuationCurrent(path,token,now),false)
+}))
+
 for (const gate of ['needs_you','check']) test(`a genuine ${gate} written after the latest compacted request still holds`,()=>fixture(async({db,path,say,list})=>{
   say('user','Ship the fix',sec-200,0);say('assistant',status(gate),sec-100)
   for(const machine of ['[Wizard follow-through] Findings','[supervisor update]\nBuild ended','[Wizard schedule] Run later','[CONTEXT COMPACTION — REFERENCE ONLY]']) say('user',machine,sec-50,0)

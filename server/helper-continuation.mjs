@@ -37,6 +37,25 @@ function completionEvidence(db, sessionId, messageId, delegationId) {
     || (delegationId && completionDelegationId(row.content) !== delegationId)) return null
   return { id: Number(messageId), at: Number(row.timestamp), fingerprint: fingerprint(row.content) }
 }
+// A ledger may already have been cleaned before the watcher can capture authority.
+// Recover only from TWO machine witnesses: typed completion + structured tool dispatch
+// in this same thread. Use dispatch time as the conservative deadline, never delivery
+// time, so a late completion cannot renew an old request's two-hour authority.
+function dispatchEvidence(db, sessionId, delegationId, completion) {
+  if (!completion || !delegationId) return null
+  const message = db.prepare('SELECT display_kind FROM messages WHERE session_id=? AND id=?').get(sessionId, completion.id)
+  if (message?.display_kind !== 'async_delegation_complete') return null
+  const rows = db.prepare(`SELECT id,content,timestamp FROM messages WHERE session_id=? AND role='tool'
+    AND timestamp<=? AND content LIKE ? ORDER BY id DESC LIMIT 513`).all(sessionId,completion.at,`%${delegationId}%`)
+  for (const row of rows.slice(0,512)) {
+    let result; try { result = JSON.parse(row.content) } catch { continue }
+    if (result?.delegation_id !== delegationId || result.status !== 'dispatched' || result.mode !== 'background') continue
+    const at = Number(row.timestamp)
+    if (!Number.isFinite(at) || at <= 0 || at > completion.at) continue
+    return { id: Number(row.id), at, fingerprint: fingerprint(row.content) }
+  }
+  return null
+}
 function receiptEvidence(row) {
   if (!['completed','failed','interrupted'].includes(row.state)) return null
   const sessionId = row.origin_session_id || row.parent_session_id || row.origin_ui_session_id || ''
@@ -56,14 +75,12 @@ export function captureContinuation(path, pending) {
     const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='async_delegations'").get()
     const row = pending.delegationId && exists ? db.prepare('SELECT * FROM async_delegations WHERE delegation_id=?').get(pending.delegationId) : null
     const receipt = row ? receiptEvidence(row) : null
-    // Delivery time is not completion time. A newly captured orphan message has
-    // no original age/request boundary; only a previously persisted service token
-    // may carry that authority across ledger cleanup.
-    if (pending.delegationId && (!receipt || receipt.sessionId !== pending.sessionId)) return null
     const completion = completionEvidence(db,pending.sessionId,pending.messageId,pending.delegationId)
+    const dispatch = !row ? dispatchEvidence(db,pending.sessionId,pending.delegationId,completion) : null
+    if (pending.delegationId && (!receipt || receipt.sessionId !== pending.sessionId) && !dispatch) return null
     return { agent_id: 'hermes', session_id: pending.sessionId, sessionId: pending.sessionId, delegationId: pending.delegationId || '', messageId: pending.messageId || 0,
-      completedAt: receipt ? receipt.completedAt : completion?.at ?? pending.at, request: watermark,
-      ...(receipt ? { receipt } : {}), ...(completion ? { completion } : {}) }
+      completedAt: receipt ? receipt.completedAt : dispatch?.at ?? completion?.at ?? pending.at, request: watermark,
+      ...(receipt ? { receipt } : {}), ...(dispatch ? { dispatch } : {}), ...(completion ? { completion } : {}) }
   } catch { return null } finally { db?.close() }
 }
 export function helperAnswerAfter(db, sessionId, completedAt, delegationId) {
@@ -101,7 +118,10 @@ export function continuationCurrent(path, token, now = Date.now(), { allowActive
         // original origin/time/result identity survives normal ledger cleanup;
         // a later delivery timestamp never renews age or request authority.
         const receipt = token.receipt
-        if (!receipt || receipt.delegationId !== token.delegationId || receipt.sessionId !== token.sessionId
+        if (token.dispatch) {
+          if (!token.completion || token.dispatch.at !== at
+            || JSON.stringify(dispatchEvidence(db,token.sessionId,token.delegationId,token.completion)) !== JSON.stringify(token.dispatch)) return false
+        } else if (!receipt || receipt.delegationId !== token.delegationId || receipt.sessionId !== token.sessionId
           || receipt.completedAt !== at || !/^[a-f0-9]{64}$/.test(receipt.resultFingerprint || '')) return false
       }
       if (receiptConsumed(db, token.sessionId, token.delegationId, at)) return false
