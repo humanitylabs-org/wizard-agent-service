@@ -237,6 +237,12 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
         recordServing(current)
       } catch (e) { error = error || e?.code || 'settings_unavailable' }
     }
+    // A phone removed from the tailnet (Tailscale's admin) can't reach Wizard any more. Once no phone is left, forget
+    // that one was seen: Setup says connected again only after a phone opens Wizard again, the same proof as the
+    // first time (an offline phone is still on the tailnet and still counts).
+    if (current?.backend_state === 'Running' && Array.isArray(current.peers) && !current.peers.some(isPhone) && settings().setup.phone_seen_at) {
+      try { markSetup('phone_seen_at', '') } catch (e) { error = error || e?.code || 'settings_unavailable' }
+    }
     return view(current, error)
   }
 
