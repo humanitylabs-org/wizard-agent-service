@@ -60,8 +60,15 @@
       "description": "Reject self-identified agent-to-agent run/chat/steer writes into existing owner threads before runtime side effects; preserve ordinary sends.",
       "layer": "server",
       "how_to_test": "For every runtime kind, POST agent-to-agent prefix and NOT-a-James-message inputs through run, steer, chat and chat/stream. Require HTTP 409 agent_to_agent_thread_write and no upstream writes, then accept a normal owner run and a Supervisor update that quotes the marker below its first line, and list sessions.",
-      "source_refs": ["server/owner-thread-write.mjs", "server/agents-http.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/owner-thread-write.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "source_refs": [
+        "server/owner-thread-write.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-thread-write.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
       "fixture": "owner-thread-agent-write-guard",
       "policy_exemptions": []
     },
@@ -70,8 +77,15 @@
       "description": "All agent kinds receive the shared finish-report rule immediately before the final status instructions, preserving short-reply and conversational exceptions.",
       "layer": "server",
       "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
-      "source_refs": ["server/thread-status.mjs", "server/service.mjs", "server/agents-http.mjs"],
-      "reference_tests": ["tests/thread-status.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "source_refs": [
+        "server/thread-status.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
       "fixture": "finish-report-instructions",
       "policy_exemptions": []
     },
@@ -80,8 +94,13 @@
       "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
       "layer": "ux",
       "how_to_test": "In wizard-ux run node --test tests/shell-recording-routes.test.mjs. The real parkReply function runs for main, host-profile, container and restricted routes with asynchronous shell and synchronous full-app recorders; it preserves session, agent, typed draft and audio, and acknowledges only after durable held custody. Meeting cancellation also awaits native bytes before acknowledgement. This is synthetic source-executed evidence, not live provider or physical-phone proof. Companion UX PR: humanitylabs-org/wizard-ux#504.",
-      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/core/device-recording.js"],
-      "reference_tests": ["wizard-ux/tests/shell-recording-routes.test.mjs"],
+      "source_refs": [
+        "wizard-ux/web/app.js",
+        "wizard-ux/web/core/device-recording.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/shell-recording-routes.test.mjs"
+      ],
       "fixture": null,
       "policy_exemptions": []
     },
@@ -90,8 +109,21 @@
       "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
       "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
-      "source_refs": ["server/ui-preferences.mjs", "server/spaces-tools.mjs", "server/thread-spaces.mjs"],
-      "reference_tests": ["tests/ui-preferences.test.ts", "tests/thread-spaces.test.ts", "tests/thread-spaces-http.test.ts", "tests/spaces-tools.test.ts", "tests/spaces-search-status.test.ts", "tests/managed-harness-upgrade.test.ts", "qa/agent-parity/server-checks.mjs", "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"],
+      "source_refs": [
+        "server/ui-preferences.mjs",
+        "server/spaces-tools.mjs",
+        "server/thread-spaces.mjs"
+      ],
+      "reference_tests": [
+        "tests/ui-preferences.test.ts",
+        "tests/thread-spaces.test.ts",
+        "tests/thread-spaces-http.test.ts",
+        "tests/spaces-tools.test.ts",
+        "tests/spaces-search-status.test.ts",
+        "tests/managed-harness-upgrade.test.ts",
+        "qa/agent-parity/server-checks.mjs",
+        "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"
+      ],
       "fixture": "chats-spaces",
       "policy_exemptions": []
     },
@@ -225,12 +257,16 @@
       "id": "tool-progress",
       "description": "Read the SSE run stream",
       "layer": "server",
-      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing.",
+      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing. For model-locked turns (Hermes chat/stream), GET /v1/runs/<id>/events must stream the bridge's tool and text events, queued and direct, without an upstream /events read.",
       "source_refs": [
-        "server/agents-http.mjs"
+        "server/agents-http.mjs",
+        "server/locked-run-bridge.mjs",
+        "server/run-event-log.mjs"
       ],
       "reference_tests": [
-        "tests/agents.test.ts"
+        "tests/agents.test.ts",
+        "tests/locked-run-events.test.ts",
+        "tests/run-event-log.node.mjs"
       ],
       "fixture": "tool-progress",
       "policy_exemptions": []
@@ -433,8 +469,15 @@
       "description": "Deliver the cold-readable, situation-first Ready ask contract to every runtime kind",
       "layer": "server",
       "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
-      "source_refs": ["server/thread-status.mjs", "server/service.mjs", "server/agents-http.mjs"],
-      "reference_tests": ["tests/thread-status.test.ts", "qa/agent-parity/checks.mjs"],
+      "source_refs": [
+        "server/thread-status.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-status.test.ts",
+        "qa/agent-parity/checks.mjs"
+      ],
       "fixture": "ready-ask-contract",
       "policy_exemptions": []
     },
@@ -558,9 +601,32 @@
       "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
       "layer": "server",
       "how_to_test": "Request fields=slim on archive-50, page the pinned cursor, verify bounded wire fields/build and complete archive membership, and prove routed/private rows never enter the main index on all four kinds.",
-      "source_refs": ["server/session-list-window.mjs", "server/agents-http.mjs"],
-      "reference_tests": ["tests/session-list-http.node.mjs"],
+      "source_refs": [
+        "server/session-list-window.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-list-http.node.mjs"
+      ],
       "fixture": "session-slim-index",
+      "policy_exemptions": []
+    },
+    {
+      "id": "archive-age",
+      "description": "The owner's Auto-archive age (ui-preferences archiveAfterDays: 1-30 days or 0 = never) decides which aged threads the archive-50 window moves out of the list, on every runtime kind",
+      "layer": "server",
+      "how_to_test": "Seed 20-day-old threads per kind (some explicitly archived, some only aged), PUT archiveAfterDays 7, 30 and 0 through /wizard/v1/ui-preferences and read /api/sessions?window=archive-50 after each: 7 archives both, 30 and 0 archive only the explicit ones and keep every aged thread in the list.",
+      "source_refs": [
+        "server/session-list-window.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs",
+        "server/ui-preferences.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-list-window.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "archive-age",
       "policy_exemptions": []
     },
     {
@@ -568,8 +634,13 @@
       "description": "Body-only indexed search returns bounded visible snippets and explicit titles-only availability",
       "layer": "server",
       "how_to_test": "Request mode=body per kind with a local trigram store; verify id/agent/snippet wire shape, visibility, recall/private exclusion, short-query zero work, timings and titles-only behavior when the local index is unavailable.",
-      "source_refs": ["server/session-truth.mjs", "server/session-text-search-worker.mjs"],
-      "reference_tests": ["tests/session-text-search-worker.node.mjs"],
+      "source_refs": [
+        "server/session-truth.mjs",
+        "server/session-text-search-worker.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-text-search-worker.node.mjs"
+      ],
       "fixture": "session-body-search",
       "policy_exemptions": []
     },

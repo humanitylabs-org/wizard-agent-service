@@ -2722,6 +2722,7 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
     agentExists: id => Boolean(agents?.read(id)),
@@ -3625,7 +3626,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows()
+  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -4142,6 +4143,21 @@ function buildWizardServer(options, lifetime) {
       const controller = new AbortController()
       request.once('aborted', () => controller.abort())
       response.once('close', () => { if (!response.writableEnded) controller.abort() })
+      const eventTransforms = () => [
+        replaceLiteral(record.upstreamRunId, record.publicRunId),
+        ...(record.idempotencyKey.startsWith('schedule:') ? [scheduledRunEvents()] : []),
+        secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
+      ]
+      // Model-locked turns run inside a chat/stream the bridge reads; Hermes never registers them
+      // for /v1/runs/<id>/events, so serve the bridge's copy instead of a guaranteed 404.
+      if (lockedBridge.events.has(record.upstreamRunId)) {
+        const raw = request.headers['last-event-id']
+        const lastSeq = raw !== undefined && /^\d+$/.test(String(raw).trim()) ? Number(raw) : -1
+        await pipeline(Readable.from(lockedBridge.events.frames(record.upstreamRunId, lastSeq, controller.signal)), ...eventTransforms(), response)
+          .catch(error => { if (!controller.signal.aborted) throw error })
+        return
+      }
+      if (lockedBridge.isLockedRun(record.upstreamRunId)) { response.end(); return }
       const upstream = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(record.upstreamRunId)}/events`, { headers, redirect: 'manual', signal: controller.signal })
       if (!upstream.ok || !upstream.body) {
         await upstream.body?.cancel().catch(() => undefined)
@@ -5859,6 +5875,19 @@ function buildWizardServer(options, lifetime) {
           const stream = `event: message.delta\ndata: ${JSON.stringify({ delta: output })}\n\nevent: run.${status}\ndata: ${data}\n\n`
           response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' })
           response.end(stream)
+          return
+        }
+        // Direct (unqueued) model-locked run: Hermes cannot serve its events; the bridge holds them.
+        const lockedEventRunId = !operator && request.method === 'GET' ? upstreamPath.match(/^\/v1\/runs\/([^/]+)\/events$/)?.[1] : ''
+        if (lockedEventRunId && (lockedBridge.events.has(lockedEventRunId) || lockedBridge.isLockedRun(lockedEventRunId))) {
+          response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' })
+          const controller = new AbortController()
+          response.once('close', () => { if (!response.writableEnded) controller.abort() })
+          const raw = request.headers['last-event-id']
+          const lastSeq = raw !== undefined && /^\d+$/.test(String(raw).trim()) ? Number(raw) : -1
+          await pipeline(Readable.from(lockedBridge.events.frames(lockedEventRunId, lastSeq, controller.signal)),
+            secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots]), response)
+            .catch(error => { if (!controller.signal.aborted) response.destroy(error) })
           return
         }
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')

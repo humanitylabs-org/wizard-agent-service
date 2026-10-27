@@ -84,6 +84,12 @@ class AccountsTest(unittest.TestCase):
         plain = row(label='Work'); plain['access_token'] = 'opaque'
         self.assertNotIn('emailHash', m.provider_accounts('claude', lambda _: [plain], self.fetch)['accounts'][0])
 
+    def test_listing_declares_it_reports_email_hashes(self):
+        # Connection apps fall back to comparing masked emails only for plugins that predate emailHash; this marker
+        # tells them a row without a hash is not the same account, even when the masks match.
+        out = m.provider_accounts('claude', lambda _: [], self.fetch)
+        self.assertEqual(out['identity'], {'emailHash': 'sha256-16'})
+
     def test_email_like_label_is_never_hashed_as_the_account(self):
         # A label is owner-typed text, not proof of the account: an opaque token labelled with someone's
         # address must not get that address's hash (the app would merge two unrelated accounts).
