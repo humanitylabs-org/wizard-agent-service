@@ -24,7 +24,7 @@ async function rig(t, opts = {}) {
     if (/\/v1\/runs\/run-\d+$/.test(path)) return Response.json({ run_id: path.split('/').pop(), session_id: messages.at(-1).session_id, status: 'completed', output: opts.leak ? key : messages.map(x => x.input).join(' | ') })
     return Response.json({ error: 'unexpected' }, { status: 500 })
   }
-  const runtime = { incognitoStart: async () => ({ origin: 'http://127.0.0.1:23456', key }), incognitoStop: async (agent, data) => { stopped.push(data.session_id) }, incognitoLease: async () => ({ ok: true }) }
+  const runtime = { incognitoStart: async () => ({ origin: 'http://127.0.0.1:23456', key, history_search: opts.history || 'available' }), incognitoStop: async (agent, data) => { stopped.push(data.session_id) }, incognitoLease: async () => ({ ok: true }) }
   const registry = { read: id => id === agent.id ? { ...agent, ...opts.agent } : null,
     pin: (...a) => durable.push(a), noteRun: (...a) => durable.push(a), observeSessions: (...a) => durable.push(a) }
   const manager = createIncognito({ registry, runtime, fetchImpl, now: () => now, leaseMs: 1000, maxMs: 3000,
@@ -41,6 +41,14 @@ async function rig(t, opts = {}) {
   const start = async () => { const r = await request('', 'POST', {}); assert.equal(r.status, 201, await r.clone().text()); return (await r.json()).session_id }
   return { request, start, calls, messages, stopped, durable, manager, setNow: n => { now = n } }
 }
+test('history-search metadata is explicit and the source fallback configuration is not replaced', async t => {
+  for (const history of ['available', 'unavailable']) {
+    const s = await rig(t, { history, agent: { model: { ...agent.model, fallback: 'source-configured' } } });
+    const response = await s.request('', 'POST', {}); assert.equal(response.status, 201);
+    const value = await response.json(); assert.equal(value.history_search, history);
+    assert.equal(Object.hasOwn(value, 'key'), false); assert.equal(Object.hasOwn(value, 'origin'), false);
+  }
+})
 test('owner-only private mode; no query/header/agent-credential switch', async t => {
   const s = await rig(t)
   assert.equal((await s.request('', 'POST', {}, false)).status, 403)
@@ -67,7 +75,7 @@ test('multi-turn target reuse, separate run stream, no persistent registry hooks
     const stream = await s.request('/' + id + '/v1/runs/' + run + '/events'); assert.match(await stream.text(), /synthetic-stream/)
   }
   assert.equal(s.messages.length, 2)
-  assert.ok(s.messages.every(x => x.session_id === id && /Tools are intentionally disabled/.test(x.instructions)))
+  assert.ok(s.messages.every(x => x.session_id === id && /Memory, fact and skill writes inside this RAM home are allowed/.test(x.instructions) && /wait for an explicit yes/.test(x.instructions)))
   assert.deepEqual(s.durable, [])
   for (const body of [{ input: 'x', tools: ['memory'] }, { input: 'x', provider: 'openai' }, { input: 'x', wizard_file_ids: ['fake'] }]) assert.equal((await s.request('/' + id + '/v1/runs', 'POST', body)).status, 400)
   assert.equal((await s.request('/' + id + '/api/sessions')).status, 404)

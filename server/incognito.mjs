@@ -6,7 +6,7 @@ import { principalOf } from './principals.mjs'
 
 const SESSION = /^incog_[a-f0-9]{32}$/u
 const ROUTE = /^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})\/incognito(?:\/(incog_[a-f0-9]{32})(\/.*)?)?$/u
-export const INCOGNITO_INSTRUCTIONS = 'This is an incognito chat. Nothing from it is kept after it ends. Before changing anything outside this chat (notes, calendar, files, messages, app data, scheduled jobs) ask the owner and wait for a yes. This is an Incognito conversation. Answer the owner using your existing identity and read-only prompt context. This chat is temporary: no history, memory edits, reminders, app writes, files, or other lasting effects are available. Never claim to have saved anything. Tools are intentionally disabled. Use Markdown when useful.'
+export const INCOGNITO_INSTRUCTIONS = 'This is an Incognito conversation. Your home, memories, facts, skills and history are a disposable RAM copy: read them, search past chats and use your normal tools. Memory, fact and skill writes inside this RAM home are allowed and vanish when it ends. Never write transcripts, summaries, titles or history from this session to the Wizard service or any durable store. Cron, schedules, kanban, delegation, heavy jobs and cross-platform send_message are unavailable. Before EVERY external write or action (including Wizard Notes, Calendar, Files and Messenger sends), explain exactly what will change, ask James for permission, and wait for an explicit yes in this conversation. A request to perform the action is not that confirmation. Read-only app access is allowed. Never change the normal private home. Never reference this conversation outside it. Use Markdown when useful.'
 const failure = (status, code) => new AgentError(status, code, 'incognito')
 
 export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyContext, upstreamHost = '', now = Date.now, leaseMs = 90_000, maxMs = 2 * 60 * 60_000 }) {
@@ -65,7 +65,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
       const value = await proxyContext.readJson(request)
       if (Object.keys(value).length) throw failure(400, 'invalid_request')
       if (closing || pendingAgents.has(agentId) || [...sessions.values()].some(s => s.agent.id === agentId)) throw failure(409, 'incognito_already_open')
-      if (agent.model?.provider !== 'tinfoil' || agent.model?.fallback && agent.model.fallback !== 'none') throw failure(409, 'confidential_provider_required')
+      if (agent.model?.provider !== 'tinfoil') throw failure(409, 'confidential_provider_required')
       pendingAgents.add(agentId)
       const entry = { id: `incog_${randomBytes(16).toString('hex')}`, agent, expires: now() + leaseMs, deadline: now() + maxMs, abort: new AbortController(), streams: new Set(), runs: new Set(), busy: false }
       try {
@@ -80,7 +80,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
         await created.body?.cancel()
         if (closing || request.aborted || response.destroyed) { await destroy(entry); return true }
         sessions.set(entry.id, entry)
-        proxyContext.sendJson(response, 201, { session_id: entry.id, incognito: true, lease_seconds: Math.floor(leaseMs / 1000) })
+        proxyContext.sendJson(response, 201, { session_id: entry.id, incognito: true, history_search: target.history_search === 'available' ? 'available' : 'unavailable', lease_seconds: Math.floor(leaseMs / 1000) })
       } catch (error) {
         await destroy(entry)
         // Never send helper exceptions or arbitrary Docker/model messages back to the browser or logs.
@@ -111,6 +111,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
       const value = await proxyContext.readJson(request)
       if (Object.keys(value).some(k => !['input'].includes(k)) || typeof value.input !== 'string' || !value.input.trim() || value.input.length > 64_000) throw failure(400, 'incognito_text_only')
       entry.deadline = now() + maxMs // Owner message activity, not a background browser heartbeat.
+      entry.expires = Math.min(now() + leaseMs, entry.deadline)
       body = Buffer.from(JSON.stringify({ session_id: id, input: value.input }))
     } else if (request.method === 'GET' && suffix === `/api/sessions/${id}/messages`) {
       // Own session history only. No call to the normal registry's catalog/projection.

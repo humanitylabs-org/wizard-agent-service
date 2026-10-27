@@ -25,6 +25,12 @@ const upstream = createServer(async (req, res) => {
     messages.push({ role: 'assistant', content: output, timestamp: Date.now()/1000 })
     runs.set(run_id, { run_id, session_id: body.session_id, status: 'completed', output }); return send(202, { run_id, session_id: body.session_id, status: 'running' })
   }
+  const events = /^\/v1\/runs\/([^/]+)\/events$/.exec(path)
+  if (events && runs.has(events[1])) {
+    const run = runs.get(events[1]); res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' })
+    for (const value of [{ event: 'tool.started', tool: 'synthetic_read' }, { event: 'tool.completed', tool: 'synthetic_read' }, { event: 'message.delta', delta: run.output }, { event: 'run.completed' }]) res.write('data: ' + JSON.stringify({ ...value, run_id: run.run_id, session_id: run.session_id }) + '\n\n')
+    return res.end()
+  }
   if (path.startsWith('/v1/runs/')) return send(runs.has(path.split('/').pop()) ? 200 : 404, runs.get(path.split('/').pop()) || {})
   const m = /^\/api\/sessions\/([^/]+)(\/messages)?$/.exec(path)
   if (m && m[1] === ordinary.id) return send(200, m[2] ? { data: ordinary.messages, has_more: false } : { session: ordinary })

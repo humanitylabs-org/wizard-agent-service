@@ -1,67 +1,54 @@
-"""RAM-only, fail-closed stock Hermes siblings. No durable session registry."""
-import base64
+"""Disposable stock Hermes homes. Content travels only over bounded anonymous pipes."""
 import json
 import os
 import re
 import secrets
-import stat
+import subprocess
 import threading
 import time
 import urllib.request
 
 LABEL = 'wizard.incognito=1'
-SEEDS = ('AGENTS.md', 'SOUL.md', 'memories/MEMORY.md', 'memories/USER.md')
-FILE_LIMIT = 128 * 1024
+# Preserve the existing bounded seed budget; oversized history alone is optional.
 TOTAL_LIMIT = 384 * 1024
 PYTHON = '/opt/hermes/.venv/bin/python'
 
-
-def read_seed(home):
-    """Open every path component without following links; never enumerate a home."""
-    root = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-    result = {}
-    try:
-        for part in os.path.abspath(home).split('/')[1:]:
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
-            os.close(root)
-            root = nxt
-        total = 0
-        for name in SEEDS:
-            fd = os.dup(root)
-            try:
-                parts = name.split('/')
-                for part in parts[:-1]:
-                    nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                    os.close(fd)
-                    fd = nxt
-                leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-                with os.fdopen(leaf, 'rb') as source:
-                    info = os.fstat(source.fileno())
-                    if not stat.S_ISREG(info.st_mode) or info.st_size > FILE_LIMIT:
-                        raise ValueError('unsafe_seed')
-                    data = source.read(FILE_LIMIT + 1)
-                total += len(data)
-                if len(data) > FILE_LIMIT or total > TOTAL_LIMIT:
-                    raise ValueError('seed_too_large')
-                result[name] = base64.b64encode(data).decode('ascii')
-            except FileNotFoundError:
-                pass
-            finally:
-                os.close(fd)
-    finally:
-        os.close(root)
-    return result
-
-
-# Same bounded reader runs read-only in the normal container only when its uid
-# prevents the helper from reading the source. Its stdout goes directly to memory.
-import inspect
-SEED_SCRIPT = ('import os,stat,base64,json\nSEEDS=' + repr(SEEDS) +
-               '\nFILE_LIMIT=' + str(FILE_LIMIT) + '\nTOTAL_LIMIT=' + str(TOTAL_LIMIT) + '\n' +
-               inspect.getsource(read_seed) + '\nprint(json.dumps(read_seed("/opt/data")))')
-
+# Runs INSIDE the source container. No source writes, no host archive, no links.
+# state.db is transferred separately using SQLite's backup API (including its WAL).
+EXPORT = r'''import os,stat,subprocess
+root='/opt/data'
+skip={'logs','sessions','cache','caches','.cache','cron','response_store.db','state.db','state.db-wal','state.db-shm','.ready','.lease','.incognito-meta.json'}
+names=[]
+for base,dirs,files in os.walk(root,followlinks=False):
+ dirs[:]=[d for d in dirs if d not in skip and not os.path.islink(os.path.join(base,d))]
+ for name in files:
+  path=os.path.join(base,name)
+  if name in skip or name.startswith('response_store.db-') or name.endswith(('.log','.pyc')) or '__pycache__' in path.split('/'): continue
+  if stat.S_ISREG(os.lstat(path).st_mode): names.append(os.path.relpath(path,root))
+p=subprocess.Popen(['tar','-c','-C',root,'--null','--verbatim-files-from','-T','-'],stdin=subprocess.PIPE)
+p.communicate(b''.join(n.encode()+b'\0' for n in names))
+raise SystemExit(p.returncode)
+'''
+SNAPSHOT = r'''import os,sqlite3,sys
+p='/opt/data/state.db'
+if not os.path.exists(p): raise SystemExit(0)
+src=sqlite3.connect('file:'+p+'?mode=ro',uri=True,timeout=5)
+dst=sqlite3.connect(':memory:')
+def progress(status,remaining,total):
+ if total*src.execute('PRAGMA page_size').fetchone()[0] > LIMIT: raise OverflowError()
+try:
+ src.backup(dst,pages=256,progress=progress)
+ data=dst.serialize()
+ if len(data)<=LIMIT: sys.stdout.buffer.write(data)
+except OverflowError: pass
+finally: dst.close();src.close()
+'''
+RESTORE = "import sys;f=open('/opt/data/state.db','wb');n=0\nwhile True:\n b=sys.stdin.buffer.read(65536)\n if not b:break\n f.write(b);n+=len(b)\nf.close()\nif not n:__import__('os').unlink('/opt/data/state.db')"
 BOOT = '''import os,time,runpy,sys,threading
 while not os.path.exists('/opt/data/.ready'): time.sleep(.1)
+# Secret values are read only from tmpfs, never Docker environment metadata.
+import json
+os.environ.update(json.load(open('/opt/data/.incognito-environment.json')))
 def expire():
  while True:
   try: age=time.time()-os.stat('/opt/data/.lease').st_mtime
@@ -74,38 +61,111 @@ sys.path.insert(0,'/opt/hermes')
 sys.argv=['hermes','gateway','run']
 runpy.run_module('hermes_cli.main',run_name='__main__')
 '''
-INSTALL = '''import os,json,base64,sys
-p=json.load(sys.stdin)
-os.umask(0o077)
-for name,data in p['files'].items():
- path='/opt/data/'+name
- os.makedirs(os.path.dirname(path),mode=0o700,exist_ok=True)
- with open(path,'xb') as f: f.write(base64.b64decode(data,validate=True))
-with open('/opt/data/.lease','x'): pass
-with open('/opt/data/.ready','x'): pass
+# All secrets arrive through stdin, then stay in the disposable home. Never argv/env/logs.
+INSTALL = r'''import os,json,sys,pathlib,yaml
+p=json.load(sys.stdin); home=pathlib.Path('/opt/data');os.umask(0o077)
+c=yaml.safe_load((home/'config.yaml').read_text()) or {}
+c.setdefault('agent',{})['disabled_toolsets']=list(dict.fromkeys(c.get('agent',{}).get('disabled_toolsets',[])+['cronjob','kanban','delegation','send_message','wizard-schedule','wizard-heavy']))
+c.setdefault('cron',{})['allow_agent_scheduling']=False
+# No platform listeners, restores or cross-platform sends from copied bot credentials.
+# Explicit disabled markers override legacy gateway.json and token-based auto-admission.
+sys.path.insert(0,'/opt/hermes')
+from gateway.config import Platform
+names={x.value for x in Platform} | set(c.get('platforms',{})) | set(c.get('gateway',{}).get('platforms',{}))
+for name in names:
+ enabled=name=='api_server'
+ c.setdefault('platforms',{}).setdefault(name,{})['enabled']=enabled
+ c.setdefault('gateway',{}).setdefault('platforms',{}).setdefault(name,{})['enabled']=enabled
+ if isinstance(c['gateway'].get(name),dict): c['gateway'][name]['enabled']=enabled
+c.setdefault('gateway',{}).setdefault('api_server',{})['max_concurrent_runs']=1
+plugins=c.setdefault('plugins',{});enabled=plugins.setdefault('enabled',[])
+if 'wizard-incognito-policy' not in enabled: enabled.append('wizard-incognito-policy')
+# Keep provider, fallbacks, MCP, toolsets, memory backend, skills and plugins untouched.
+(home/'config.yaml').write_text(yaml.safe_dump(c,sort_keys=False))
+from dotenv import dotenv_values
+os.environ.update(p['environment'])
+values={**p['environment'],**dict(dotenv_values(home/'.env'))}
+values.update(HOME='/opt/data',HERMES_HOME='/opt/data',HERMES_WORKDIR='/opt/data',XDG_CACHE_HOME='/opt/data/.cache',API_SERVER_ENABLED='true',API_SERVER_HOST='0.0.0.0',API_SERVER_PORT='8642',API_SERVER_KEY=p['key'])
+# Gateway env overrides must not re-enable a copied messaging platform.
+for name in names:
+ if name!='api_server': values[name.upper().replace('-','_')+'_ENABLED']='false'
+(home/'.incognito-environment.json').write_text(json.dumps({k:str(v) for k,v in values.items() if v is not None}))
+(home/'.env').write_text(''.join(k+'='+json.dumps(str(v))+'\n' for k,v in values.items() if v is not None))
+folder=home/'plugins/wizard-incognito-policy';folder.mkdir(parents=True,exist_ok=True)
+(folder/'plugin.yaml').write_text('name: wizard-incognito-policy\nversion: 1.0.0\ndescription: Block durable orchestration in temporary chats\n')
+(folder/'__init__.py').write_text(p['policy'])
+meta={'history_search':'available' if (home/'state.db').exists() else 'unavailable'}
+(home/'.incognito-meta.json').write_text(json.dumps(meta))
+(home/'.lease').touch();(home/'.ready').touch()
+print(json.dumps(meta))
 '''
+POLICY = '''def block(tool_name, args=None, **kw):
+ name=tool_name.split('__')[-1]
+ if name.startswith(('wizard_schedule','kanban','wizard_heavy','delegate','send_message')) or name in ('cron','cronjob','supervisor_report','supervisor_ask','supervisor_answer','supervisor_build','supervisor_close','session_history_write','session_history_append'):
+  return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
+ # MCP wrappers can multiplex names; inspect their requested action as well.
+ for key in ('name','tool','tool_name'):
+  nested=(args or {}).get(key)
+  if isinstance(nested,str) and nested!=tool_name:
+   if block(nested,{}): return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
+ return None
+def register(ctx):
+ ctx.register_hook('pre_tool_call',block)
+'''
+VERIFY = "import sys;sys.path.insert(0,'/opt/hermes');from hermes_cli.plugins import discover_plugins,get_pre_tool_call_directive;discover_plugins();assert get_pre_tool_call_directive('wizard_schedule',{})[0]=='block';assert get_pre_tool_call_directive('memory',{})[0] is None"
+
+
+def _docker_command(args):
+ # Match the runtime helper's Docker group fallback. Never invoke a shell with content.
+ import shlex
+ if os.access('/var/run/docker.sock',os.W_OK): return ['docker',*args]
+ return ['sg','docker','-c',shlex.join(['docker',*args])]
+
+
+def stream_copy(source, destination, limit):
+ """Relay binary content without capture, logging, a host file, or a secret env."""
+ a=b=None;count=0
+ try:
+  a=subprocess.Popen(_docker_command(source),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+  b=subprocess.Popen(_docker_command(destination),stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+  deadline=time.monotonic()+90
+  import select
+  while True:
+   if time.monotonic()>deadline: raise TimeoutError()
+   if not select.select([a.stdout],[],[],1)[0]: continue
+   data=os.read(a.stdout.fileno(),65536)
+   if not data: break
+   count+=len(data)
+   if count>limit: raise ValueError('incognito_seed_too_large')
+   b.stdin.write(data);b.stdin.flush()
+  b.stdin.close()
+  if a.wait(timeout=10) or b.wait(timeout=10): raise ValueError('incognito_seed_failed')
+  return count
+ finally:
+  for proc in (a,b):
+   if proc and proc.poll() is None: proc.kill();proc.wait()
 
 
 class IncognitoManager:
     def __init__(self, driver, *, docker, failure, image, proxy_image, container_for,
-                 clock=time.monotonic, background=True, ready=None):
+                 clock=time.monotonic, background=True, ready=None, transfer=None):
         self.driver, self.agents = driver, driver.agents
         self.docker, self.failure = docker, failure
         self.image, self.proxy_image = image, proxy_image
         self.container_for, self.clock = container_for, clock
         self.ready = ready or self._ready
+        self.transfer = transfer or stream_copy
         self.lock = threading.RLock()
         self.sessions = {}
         self.closed = False
         self.wake = threading.Event()
-        self.sweep(startup=True)  # Recovery must finish before serving requests.
+        self.sweep(startup=True)
         self.thread = None
         if background:
             self.thread = threading.Thread(target=self._loop, name='incognito-reaper', daemon=True)
             self.thread.start()
 
     def _docker(self, args, *, input_text=None, required=True):
-        # Never let the general docker wrapper log captured seed/errors.
         result = self.docker(args, input_text=input_text, timeout=90, check=False)
         if required and result.returncode:
             raise self.failure('incognito_runtime_failed', 502)
@@ -116,137 +176,95 @@ class IncognitoManager:
         return self._docker([*command, '--filter', 'label=' + LABEL]).stdout.split()
 
     def _remove(self, state):
-        for args in (["rm", "-f", state['name']], ["rm", "-f", state['proxy']],
-                     ["network", "rm", state['net']], ["network", "rm", state['egress']]):
-            try:
-                self._docker(args, required=False)
-            except Exception:
-                pass  # Label-based sweeps retry every resource independently.
+        # Shared source networks/sidecars are never labeled, stopped or removed.
+        try: self._docker(['rm','-f',state['name']],required=False)
+        except Exception: pass  # Label sweeps retry orphan cleanup; never expose Docker diagnostics.
 
     def sweep(self, startup=False):
         with self.lock:
             now = self.clock()
             for key, state in list(self.sessions.items()):
                 if now >= state['lease'] or now >= state['deadline']:
-                    self._remove(state)
-                    del self.sessions[key]
-            # Discover IDs together with names, so active resources are excluded
-            # without trusting session IDs, names supplied by callers or files.
-            active = {s[k] for s in self.sessions.values() for k in ('name', 'proxy', 'net', 'egress')}
+                    self._remove(state); del self.sessions[key]
+            active = {s['name'] for s in self.sessions.values()}
             for kind in ('container', 'network'):
                 for ident in self._discover(kind):
-                    fmt = '{{.Name}}'
-                    args = ['inspect', '--format', fmt, ident] if kind == 'container' else ['network', 'inspect', '--format', fmt, ident]
+                    args = ['inspect', '--format', '{{.Name}}', ident] if kind == 'container' else ['network', 'inspect', '--format', '{{.Name}}', ident]
                     name = self._docker(args).stdout.strip().lstrip('/')
                     if startup or name not in active:
-                        self._docker(['rm', '-f', ident] if kind == 'container' else ['network', 'rm', ident], required=startup)
+                        self._docker(['rm','-f',ident] if kind=='container' else ['network','rm',ident],required=startup)
 
     def _loop(self):
         while not self.wake.wait(10):
-            try:
-                self.sweep()
-            except Exception:
-                pass  # Retry on the next sweep; never log provider/seed output.
-
-    def _seed(self, agent):
-        try:
-            return read_seed(self.agents.home(agent['id']))
-        except PermissionError:
-            cid = self.container_for(self.driver.project(agent['id']),
-                                     'agent' if (agent.get('runtime') or {}).get('isolation') == 'restricted'
-                                     else agent['runtime']['app_id'])
-            result = self._docker(['exec', '-u', ('10000:10000' if (agent.get('runtime') or {}).get('isolation') == 'restricted' else 'hermes'), cid, PYTHON, '-c', SEED_SCRIPT])
-            if len(result.stdout) > 2 * TOTAL_LIMIT:
-                raise self.failure('incognito_seed_invalid', 409)
-            seeds = json.loads(result.stdout)
-            if not isinstance(seeds, dict) or set(seeds) - set(SEEDS):
-                raise self.failure('incognito_seed_invalid', 409)
-            total = 0
-            for data in seeds.values():
-                size = len(base64.b64decode(data, validate=True))
-                total += size
-                if size > FILE_LIMIT or total > TOTAL_LIMIT:
-                    raise self.failure('incognito_seed_invalid', 409)
-            return seeds
-        except (OSError, ValueError):
-            raise self.failure('incognito_seed_invalid', 409) from None
+            try: self.sweep()
+            except Exception: pass
 
     def start(self, agent, session_id):
         self._validate(session_id)
         with self.lock:
-            if self.closed:
-                raise self.failure('incognito_unavailable', 503)
-            if agent.get('privacy') != 'private':
-                raise self.failure('incognito_private_only', 409)
-            model = agent.get('model') or {}
-            if model.get('provider') != 'tinfoil' or not isinstance(model.get('model'), str) or not model['model']:
-                raise self.failure('incognito_tinfoil_required', 409)
-            if agent.get('imported') or not hasattr(self.driver, 'project'):
-                raise self.failure('incognito_unsupported_runtime', 409)
-            if any(k[0] == agent['id'] for k in self.sessions):
-                raise self.failure('incognito_already_active', 409)
-            provider_key = self.agents.tinfoil_key()
-            if not provider_key or '\n' in provider_key or '\r' in provider_key:
-                raise self.failure('provider_not_configured', 503)
-            seeds = self._seed(agent)
-            prefix = 'wizard-incognito-' + secrets.token_hex(12)
-            state = dict(name=prefix, proxy=prefix+'-proxy', net=prefix+'-net', egress=prefix+'-egress')
-            api_key = secrets.token_hex(32)
+            if self.closed: raise self.failure('incognito_unavailable',503)
+            if agent.get('privacy')!='private': raise self.failure('incognito_private_only',409)
+            if (agent.get('model') or {}).get('provider')!='tinfoil': raise self.failure('incognito_tinfoil_required',409)
+            if agent.get('imported') or not hasattr(self.driver,'project'): raise self.failure('incognito_unsupported_runtime',409)
+            if any(k[0]==agent['id'] for k in self.sessions): raise self.failure('incognito_already_active',409)
+            service='agent' if (agent.get('runtime') or {}).get('isolation')=='restricted' else agent['runtime']['app_id']
+            source=self.container_for(self.driver.project(agent['id']),service)
+            # Docker metadata only. Env values are held in memory, never in args or diagnostics.
+            meta=json.loads(self._docker(['inspect',source]).stdout)[0]
+            networks=list(meta['NetworkSettings']['Networks'])
+            if not networks or meta['HostConfig'].get('NetworkMode') in ('host','none'):
+                raise self.failure('incognito_unsupported_runtime',409)
+            environment=dict(v.split('=',1) for v in meta['Config'].get('Env',[]) if '=' in v)
+            uid=meta['Config'].get('User') or environment.get('HERMES_UID','10000')+':'+environment.get('HERMES_GID','10000')
+            if not re.fullmatch(r'[0-9]+(?::[0-9]+)?',uid) or uid.split(':')[0]=='0':
+                raise self.failure('incognito_unsupported_runtime',409)
+            state={'name':'wizard-incognito-'+secrets.token_hex(12)}
+            key=secrets.token_hex(32)
             try:
-                for name, internal in ((state['net'], True), (state['egress'], False)):
-                    self._docker(['network', 'create', '--label', LABEL, *(['--internal'] if internal else []), name])
-                common = ['--label', LABEL, '--restart', 'no', '--read-only', '--log-driver', 'none',
-                          '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256', '--memory', '1g', '--memory-swap', '1g', '--ulimit', 'core=0:0']
-                self._docker(['create', '--name', state['proxy'], *common, '--network', state['egress'],
-                              '--tmpfs', '/tmp:rw,nosuid,nodev,noswap,size=64m', '--tmpfs', '/root/.cache:rw,nosuid,nodev,noswap,size=64m',
-                              self.proxy_image, '--bind', '0.0.0.0', '--port', '3301', '--allowed-host', state['proxy']])
-                self._docker(['network', 'connect', state['net'], state['proxy']])
-                self._docker(['start', state['proxy']])
-                self._docker(['run', '-d', '--name', state['name'], *common, '--network', state['net'],
-                              '--user', '10000:10000', '--tmpfs', '/opt/data:rw,nosuid,nodev,noswap,size=512m,uid=10000,gid=10000,mode=0700',
-                              '--tmpfs', '/tmp:rw,nosuid,nodev,noswap,size=128m,mode=1777', '-p', '127.0.0.1::8642',
-                              '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-e', 'HERMES_WORKDIR=/opt/data',
-                              '-e', 'XDG_CACHE_HOME=/opt/data/.cache', '-e', 'PYTHONDONTWRITEBYTECODE=1',
-                              '--workdir', '/opt/data', '--entrypoint', PYTHON, self.image, '-c', BOOT])
-                config = {'model': {'provider': 'custom', 'default': model['model'],
-                                   'base_url': 'http://' + state['proxy'] + ':3301/v1', 'api_key': provider_key},
-                          'fallback_model': None, 'fallback_providers': [], 'toolsets': {'api_server': []},
-                          'platform_toolsets': {'api_server': []}, 'mcp_servers': {},
-                          'plugins': {'enabled': [], 'auto_update': False}, 'memory': {'provider': 'none'},
-                          'cron': {'allow_agent_scheduling': False},
-                          'gateway': {'platforms': {'api_server': {'enabled': True}}, 'api_server': {'max_concurrent_runs': 1}},
-                          'terminal': {'cwd': '/opt/data'},
-                          'agent': {'max_iterations': 10, 'disabled_toolsets': [
-                              'all', 'terminal', 'file', 'code_execution', 'web', 'search', 'browser',
-                              'x_search', 'vision', 'video', 'image_gen', 'video_gen', 'tts',
-                              'delegation', 'connections', 'homeassistant', 'spotify', 'memory',
-                              'skills', 'skill_manager', 'cronjob', 'todo', 'clarify', 'session_search',
-                              'send_message', 'execute_code', 'mcp']}}
-                env = 'API_SERVER_ENABLED=true\nAPI_SERVER_HOST=0.0.0.0\nAPI_SERVER_PORT=8642\nAPI_SERVER_KEY='+api_key+'\nTINFOIL_API_KEY='+provider_key+'\n'
-                files = {**seeds, 'config.yaml': base64.b64encode(json.dumps(config).encode()).decode(),
-                         '.env': base64.b64encode(env.encode()).decode()}
-                self._docker(['exec', '-i', state['name'], PYTHON, '-c', INSTALL], input_text=json.dumps({'files': files}))
-                # Assert the stock resolver honors the no-tools boundary before admitting owner text.
-                verify = ("import sys;sys.path.insert(0,'/opt/hermes');"
-                          "from hermes_cli.config import load_config;"
-                          "from hermes_cli.tools_config import _get_platform_tools;"
-                          "from model_tools import get_tool_definitions;"
-                          "c=load_config();t=sorted(_get_platform_tools(c,'api_server'));"
-                          "d=get_tool_definitions(enabled_toolsets=t,disabled_toolsets=c['agent']['disabled_toolsets'],quiet_mode=True);"
-                          "sys.exit(0 if not t and not d else 42)")
-                self._docker(['exec', state['name'], PYTHON, '-c', verify])
-                port = self._docker(['port', state['name'], '8642/tcp']).stdout.strip()
-                if not re.fullmatch(r'127\.0\.0\.1:[0-9]{1,5}', port) or not 1 <= int(port.split(':')[1]) <= 65535:
-                    raise self.failure('incognito_port_invalid', 502)
-                origin = 'http://' + port
-                self.ready(origin, api_key)
-                now = self.clock()
-                state.update(lease=now+90, deadline=now+7200)
-                self.sessions[(agent['id'], session_id)] = state
-                return {'ok': True, 'origin': origin, 'key': api_key}
+                args=['create','--name',state['name'],'--label',LABEL,'--restart','no','--read-only','--log-driver','none',
+                      '--cap-drop','ALL','--security-opt','no-new-privileges:true','--pids-limit','256',
+                      '--memory','1g','--memory-swap','1g','--ulimit','core=0:0','--network',networks[0],
+                      '--user',uid,'--tmpfs',f'/opt/data:rw,nosuid,nodev,noswap,size=512m,uid={uid.split(":")[0]},gid={uid.split(":")[-1]},mode=0700',
+                      '--tmpfs','/tmp:rw,nosuid,nodev,noswap,size=128m,mode=1777',
+                      '--tmpfs','/var/log:rw,nosuid,nodev,noswap,size=16m,mode=1777',
+                      '-p','127.0.0.1::8642','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
+                      '-e','HERMES_WORKDIR=/opt/data','-e','PYTHONDONTWRITEBYTECODE=1','--workdir','/opt/data']
+                for host in meta['HostConfig'].get('ExtraHosts') or []: args+=['--add-host',host]
+                for dns in meta['HostConfig'].get('Dns') or []: args+=['--dns',dns]
+                for domain in meta['HostConfig'].get('DnsSearch') or []: args+=['--dns-search',domain]
+                for option in meta['HostConfig'].get('SecurityOpt') or []:
+                    if not option.startswith('no-new-privileges'): args+=['--security-opt',option]
+                for mount in meta.get('Mounts',[]):
+                    dest=mount['Destination']
+                    if dest=='/opt/data' or (mount.get('Type')=='tmpfs' and dest in ('/tmp','/var/log')): continue
+                    if mount.get('Type')=='tmpfs':
+                        # New RAM, never another container's tmpfs or a persistent substitute.
+                        args+=['--tmpfs',dest+':rw,nosuid,nodev,noswap,size=64m,mode=1777'];continue
+                    # Preserve scoped app gateway/socket mounts, not source data or host authority.
+                    if not dest.startswith('/run/') or ',' in mount['Source'] or ',' in dest:
+                        raise self.failure('incognito_unsupported_mount',409)
+                    args+=['--mount',f'type=bind,src={mount["Source"]},dst={dest}'+(',readonly' if not mount.get('RW') else '')]
+                args+=['--entrypoint',PYTHON,meta['Image'],'-c',BOOT]
+                self._docker(args)
+                for net in networks[1:]: self._docker(['network','connect',net,state['name']])
+                self._docker(['start',state['name']])
+                total=self.transfer(['exec',source,PYTHON,'-c',EXPORT],['exec','-i',state['name'],'tar','-x','--no-same-owner','-C','/opt/data'],TOTAL_LIMIT)
+                self.transfer(['exec',source,PYTHON,'-c','LIMIT='+str(TOTAL_LIMIT-total)+'\n'+SNAPSHOT],
+                              ['exec','-i',state['name'],PYTHON,'-c',RESTORE],TOTAL_LIMIT-total)
+                installed=self._docker(['exec','-i',state['name'],PYTHON,'-c',INSTALL],input_text=json.dumps({'key':key,'environment':environment,'policy':POLICY}))
+                metadata=json.loads(installed.stdout)
+                self._docker(['exec',state['name'],PYTHON,'-c',VERIFY])
+                port=self._docker(['port',state['name'],'8642/tcp']).stdout.strip()
+                if not re.fullmatch(r'127\.0\.0\.1:[0-9]{1,5}',port) or not 1<=int(port.split(':')[1])<=65535:
+                    raise self.failure('incognito_port_invalid',502)
+                origin='http://'+port
+                self.ready(origin,key)
+                now=self.clock();state.update(lease=now+90,deadline=now+7200)
+                self.sessions[(agent['id'],session_id)]=state
+                return {'ok':True,'origin':origin,'key':key,**metadata}
             except BaseException:
                 self._remove(state)
-                raise
+                raise self.failure('incognito_runtime_failed',502) from None
 
     def _validate(self, sid):
         if not isinstance(sid, str) or not re.fullmatch(r'incog_[0-9a-f]{32}', sid):
