@@ -208,13 +208,27 @@ export function recordResponseStyleSwitch(raw, before, after) {
 /** Call once at production startup, before stores are created. Never randomize a read or an upgrade. */
 export function initializeResponseStyle(path, { existingInstall = true, choose = () => randomInt(2) } = {}) {
   if (!path) return
-  return updateSettings(path, raw => {
-    if (['summary', 'concise'].includes(raw.response_style)) return
-    const existing = existingInstall || existsSync(path)
-    const style = existing ? 'summary' : choose() === 0 ? 'summary' : 'concise'
-    raw.response_style = style
-    raw.response_style_experiment = { assigned: style, source: existing ? 'existing_install' : 'new_install', switches: { summary: 0, concise: 0 } }
-  })
+  const existing = existingInstall || existsSync(path)
+  if (existsSync(path)) {
+    // Startup has always tolerated damaged settings. Do not turn an optional migration
+    // into an outage, rewrite invalid bytes, or rewrite an already assigned/read-only file.
+    const current = readSettings(path)
+    if (current.source === 'invalid') return current.settings
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8'))
+      if (['summary', 'concise'].includes(raw?.response_style)) return current.settings
+    } catch { return current.settings }
+  }
+  try {
+    return updateSettings(path, raw => {
+      const style = existing ? 'summary' : choose() === 0 ? 'summary' : 'concise'
+      raw.response_style = style
+      raw.response_style_experiment = { assigned: style, source: existing ? 'existing_install' : 'new_install', switches: { summary: 0, concise: 0 } }
+    })
+  } catch (error) {
+    if (existing) return readSettings(path).settings
+    throw error // A new install must persist its assignment before serving any requests.
+  }
 }
 
 function readJsonFile(path, limit = 2 * 1024 * 1024) {

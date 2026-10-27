@@ -22,6 +22,19 @@ it('new installs get either persisted assignment, upgrades keep Summary, reads n
   expect(JSON.parse(readFileSync(path, 'utf8')).future).toBe('kept')
   expect(normalizeSettings({ response_style: 'bad' }).response_style).toBe('summary')
 })
+it('response style migration keeps damaged-settings startup fallback and never rewrites an assigned file', () => {
+  for (const bytes of ['{invalid', 'x'.repeat(256 * 1024 + 1), '[]', 'null']) {
+    const path = fresh()
+    writeFileSync(path, bytes)
+    expect(initializeResponseStyle(path, { choose: () => { throw Error('rerolled') } })?.response_style).toBe('summary')
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+    expect(readSettings(path).settings.response_style).toBe('summary')
+  }
+  const path = fresh(), bytes = '{"response_style":"concise"}'
+  writeFileSync(path, bytes)
+  expect(initializeResponseStyle(path)?.response_style).toBe('concise')
+  expect(readFileSync(path, 'utf8')).toBe(bytes)
+})
 it('response style is an owner setting', async () => {
   const path = fresh(), proof = 'synthetic-owner-proof-'.repeat(3)
   initializeResponseStyle(path)
