@@ -99,15 +99,21 @@ meta={'history_search':'available' if (home/'state.db').exists() else 'unavailab
 (home/'.lease').touch();(home/'.ready').touch()
 print(json.dumps(meta))
 '''
-POLICY = '''def block(tool_name, args=None, **kw):
+POLICY = '''import re
+def block(tool_name, args=None, **kw):
  name=tool_name.split('__')[-1]
- if name.startswith(('wizard_schedule','kanban','wizard_heavy','delegate','send_message')) or name in ('cron','cronjob','supervisor_report','supervisor_ask','supervisor_answer','supervisor_build','supervisor_close','session_history_write','session_history_append'):
+ persistent = r'(?:^|_)(?:wizard_schedule|kanban|wizard_heavy|delegate|send_message)(?:_|$)'
+ exact = r'(?:^|_)(?:cron|cronjob|supervisor_report|supervisor_ask|supervisor_answer|supervisor_build|supervisor_close|session_history_write|session_history_append)$'
+ if re.search(persistent,name) or re.search(exact,name):
   return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
  # MCP wrappers can multiplex names; inspect their requested action as well.
  for key in ('name','tool','tool_name'):
   nested=(args or {}).get(key)
   if isinstance(nested,str) and nested!=tool_name:
    if block(nested,{}): return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
+ for call in (args or {}).get('calls',[]) if isinstance((args or {}).get('calls',[]),list) else []:
+  if isinstance(call,dict) and block(str(call.get('name','')),call.get('arguments') if isinstance(call.get('arguments'),dict) else {}):
+   return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
  return None
 def register(ctx):
  ctx.register_hook('pre_tool_call',block)

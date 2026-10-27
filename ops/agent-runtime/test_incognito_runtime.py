@@ -68,9 +68,10 @@ class Tests(unittest.TestCase):
   ns={};exec(POLICY,ns)
   for tool in ['memory','skill_manage','fact_store','mcp__wizard__notes_update','mcp__wizard__messenger_send','session_search','supervisor_lessons']:
    self.assertIsNone(ns['block'](tool,{}),tool)
-  for tool in ['cronjob','wizard_schedule','wizard_schedule_list','kanban_add','delegate_task','wizard_heavy_submit','send_message','mcp__wizard__wizard_schedule']:
+  for tool in ['cronjob','wizard_schedule','wizard_schedule_list','kanban_add','delegate_task','wizard_heavy_submit','send_message','mcp__wizard__wizard_schedule','mcp_wizard_wizard_schedule_cancel','mcp_wizard_supervisor_report','mcp_wizard_session_history_write']:
    self.assertEqual(ns['block'](tool,{})['action'],'block',tool)
   self.assertEqual(ns['block']('tool_call',{'name':'wizard_heavy_submit'})['action'],'block')
+  self.assertEqual(ns['block']('tool_call',{'calls':[{'name':'mcp_wizard_wizard_schedule','arguments':{}}]})['action'],'block')
  def test_export_copies_entire_synthetic_home_except_durable_transcripts_caches_and_links(self):
   with tempfile.TemporaryDirectory() as d,tempfile.TemporaryDirectory() as out:
    root=Path(d)
