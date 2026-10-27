@@ -88,6 +88,13 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     const seen = new Set(), sessionId = record?.sessionId
     while (record && record.sessionId === sessionId && !seen.has(record.publicRunId)) {
       seen.add(record.publicRunId)
+      // Provider recovery is another service-owned descendant, not a new owner
+      // request. Only follow the durable automatic retry edge and its exact key.
+      if (record.providerRecoveryAttempted && record.retrySourceId
+        && record.idempotencyKey === `wizard-saved-retry-${record.retrySourceId}`) {
+        record = queue.get(record.retrySourceId)
+        continue
+      }
       if (record.continuation?.kind !== HEAVY_KIND) return record.publicRunId
       const parent = heavy.get(record.continuation.job_id)
       if (!parent || (parent.agent_id ?? 'hermes') !== 'hermes' || parent.sessionId !== sessionId
