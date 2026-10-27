@@ -1081,6 +1081,22 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "stop-on-send",
+      "description": "Stop shows the moment a message is sent; before the run exists it withdraws the pending send (no run admitted), after that it stops the exact run from the receipt",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/stop-before-run.test.mjs. The real outbox runs against a local HTTP boundary: Stop during upload, server transcription or offline waiting creates zero /v1/runs calls and keeps the recording; Stop while the run POST is in flight resolves with the receipt's run id; a steer in flight that is rejected after Stop never becomes a new turn. The real LIVE.cancelSend block runs for main, host-profile, container and restricted threads and withdraws only that thread's sends and stops only its own run (including a reply queued to steer the live run, and a slow phone take arriving after the tap hold). This is synthetic source-executed evidence; fenced browser QA on a scratch shell is reported separately. Companion UX PR: humanitylabs-org/wizard-ux#649.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/stop-before-run.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }
