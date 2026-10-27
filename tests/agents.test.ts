@@ -393,6 +393,7 @@ describe('agents registry and API', () => {
     expect(run.status).toBe(202)
     const sent = priv.seen.find(r => r.path === '/v1/runs')
     expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    expect(sent?.body.instructions).toContain('Put each MEDIA line right after the sentence that talks about it; it shows there as a tappable picture.')
     const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
     expect(status.status).toBe(200)
   })
