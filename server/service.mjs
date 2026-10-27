@@ -25,7 +25,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -43,6 +43,8 @@ import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
+import { projectOwnedOpenWork } from './owned-open-work.mjs'
+import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
@@ -151,6 +153,8 @@ The originating Wizard run owns the requested outcome through verified completio
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
 ${SUPERVISOR_SPELL}
+
+${OWNED_OPEN_WORK_INSTRUCTIONS}
 
 ${FINISH_REPORT_INSTRUCTIONS}
 
@@ -2449,6 +2453,8 @@ export function createWizardServer(options = {}) {
   const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
+  const ownedStatePath = ownedWorkStatePathOf(options)
+  if (ownedStatePath && (options.hermesStatePath || options.ownedOpenWorkReader)) paths.push(ownedStatePath)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
   const dirs = paths.map(path => dirname(resolve(String(path))))
   if (home) dirs.push(resolve(home))
@@ -3371,7 +3377,12 @@ function buildWizardServer(options, lifetime) {
     return record.completion
   }
 
+  let ownedOpenWork = null
   const requireHelperContinuation = async (continuation) => {
+    if (continuation?.kind === OWNED_WORK_KIND) {
+      if (!ownedOpenWork) throw Object.assign(new Error('Owned follow-up unavailable'), { status: 410 })
+      return ownedOpenWork.requireCurrent(continuation)
+    }
     if (hermesStatePath) return requireCurrentContinuation(hermesStatePath, continuation)
     return requireHttpContinuation((path) => hermesJson(path), continuation, FOLLOW_THROUGH_PREFIX)
   }
@@ -3837,6 +3848,7 @@ function buildWizardServer(options, lifetime) {
         if (!session || typeof session.id !== 'string') return session
         const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
         if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
+        session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         spaceFiling.apply('hermes', session.id, session.wizard_attention)
@@ -4300,6 +4312,18 @@ function buildWizardServer(options, lifetime) {
     })()
     helperAdmissions.set(key, admission)
     try { return await admission } finally { helperAdmissions.delete(key) }
+  }
+
+  // Same private admission/queue/locked-model route as delegation follow-through.
+  // The existing ownership switch also disables this watcher on staging copies.
+  const ownedWorkStatePath = ownedWorkStatePathOf(options)
+  if (options.followThrough !== false && options.ownedOpenWork !== false && ownedWorkStatePath && (hermesStatePath || options.ownedOpenWorkReader)) {
+    ownedOpenWork = createOwnedWorkFollowThrough({ statePath: ownedWorkStatePath, sessionDbPath: hermesStatePath,
+      ...(options.ownedOpenWorkReader ? { read: options.ownedOpenWorkReader } : {}),
+      ...(options.ownedOpenWorkFinder ? { find: options.ownedOpenWorkFinder } : {}),
+      admit: admitHelperContinuation, busy: helperSessionActive,
+      log: line => console.log(`[owned-open-work] ${line}`) })
+    lifetime.own(() => ownedOpenWork.close(), () => ownedOpenWork.stop())
   }
 
   // ---- Resumable uploads and shares (uploads.mjs; wizard-os spec/AGENT_SERVICE_API.md "Uploads"/"Shares").
@@ -6377,6 +6401,17 @@ function buildWizardServer(options, lifetime) {
   })
   server.scheduler = scheduler
   server.supervisor = supervisor
+  if (ownedOpenWork) {
+    server.ownedOpenWork = ownedOpenWork // testable private controller, never an HTTP authority
+    const tick = () => { if (!lifetime.closing) void lifetime.track(ownedOpenWork.tick()) }
+    let timer
+    server.once('listening', () => {
+      timer = setInterval(tick, options.ownedOpenWorkIntervalMs ?? 5_000)
+      timer.unref?.()
+      tick()
+    })
+    lifetime.own(() => clearInterval(timer), () => clearInterval(timer))
+  }
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''
