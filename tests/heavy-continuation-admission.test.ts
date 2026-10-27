@@ -14,7 +14,7 @@ const req = { headers: { authorization: `Bearer ${token}` } }
 const spec = { cwd: heavyRoot, argv: ['uname', '-a'], timeout_seconds: 10, lane: 'light' }
 const path = '/wizard/internal/heavy/submit'
 
-async function fixture() {
+async function fixture(providerAccessRecovery = false) {
   const root = mkdtempSync(join(tmpdir(), 'heavy-followup-'))
   let integration: any
   const statuses = new Map<string, string>()
@@ -22,7 +22,7 @@ async function fixture() {
   let duringHistory = async () => {}, duringRuntime = async () => {}
   let runs: any
   const open = () => {
-    runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0,
+    runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0, providerAccessRecovery,
       launch: async (r: any) => {
         if (r.continuation?.kind === 'external-heavy') await integration.validate(r)
         statuses.set(r.publicRunId, 'running')
@@ -58,6 +58,25 @@ async function fixture() {
     setHistoryHook: (fn: () => Promise<void>) => { duringHistory = fn },
     setRuntimeHook: (fn: () => Promise<void>) => { duringRuntime = fn } }
 }
+
+it('A heavy build-completion delivery resumes after a sign-in outage without losing its original authority', async () => {
+  const f = await fixture(true)
+  const job = await f.submit('build-completion')
+  await f.finish(f.origin.publicRunId); await f.integration.queue.tick()
+  const source = f.runs.get(f.integration.queue.get(job.job_id).resume)
+  const failed = f.runs._update(source.publicRunId, { status: 'failed', payload: { status: 'failed', error: { type: 'provider_preflight_failed' } } })
+  f.runs._waitForProvider(failed)
+  const health = await f.admit('health-confirmation', null, 'health-thread')
+  await f.finish(health.publicRunId); await f.runs.tick(true)
+  const retry = f.runs.byIdempotencyKey('direct', `wizard-saved-retry-${source.publicRunId}`)
+  expect(retry.status).toBe('running')
+  expect(retry.body).toBe(source.body)
+  expect(retry.continuation).toEqual(source.continuation)
+  await f.integration.validate(retry)
+  await expect(f.integration.validate({ ...retry, body: JSON.stringify({ session_id: 's', input: 'tampered' }) })).rejects.toMatchObject({ status: 410 })
+  f.integration.stopSession('s')
+  await expect(f.integration.validate(retry)).rejects.toMatchObject({ status: 410 })
+})
 
 it.each([false, true])('admits a follow-up from the running continuation behind a newer sibling; restart=%s', async restart => {
   const f = await fixture()
