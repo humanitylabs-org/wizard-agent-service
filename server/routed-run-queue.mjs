@@ -51,7 +51,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
     async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
-      const detail = method === 'GET' && parsed.searchParams.get('view') === 'detail' && parsed.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+      const detail = method === 'GET' && (init.wizardDetail === true || parsed.searchParams.get('view') === 'detail') && parsed.pathname.match(/^\/api\/sessions\/([^/]+)$/)
       if (!(parsed.pathname==='/v1/runs'&&method==='POST') && !/^\/v1\/runs\/wizardq_[0-9a-f]{32}(?:\/|$)/.test(parsed.pathname) && !detail) return registry.fetchAgent(agent,path,init)
       const {queue,direct}=await get(agent)
       if (detail) {
