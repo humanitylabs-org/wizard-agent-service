@@ -1965,6 +1965,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const projectText = (value, userImageReferences = false) => {
     const artifacts = []
+    const positioned = new Set()
     const fences = []
     value = value.replace(/```[^\n]*\n[\s\S]*?```/g, block => `\u0000photo-fence-${fences.push(block) - 1}\u0000`)
     const durableImageHashes = new Set()
@@ -1982,6 +1983,13 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
       if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
+      if (!userImageReferences) {
+        if (positioned.has(artifact.id)) return ''
+        positioned.add(artifact.id)
+        // Existing clients strip this envelope and show its image at the bottom.
+        // New clients keep its position; no raw path or new permission crosses the wire.
+        return `\n\n<helm_attachments>${JSON.stringify({ items: [artifact], inline: artifact.kind === 'image' })}</helm_attachments>\n\n`
+      }
       return ''
     }
     let text = value.replace(AGENT_MEDIA_LINE, register)
@@ -2001,8 +2009,9 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
     if (userImageReferences) text = text.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     text = text.replace(/\n{3,}/g, '\n\n').trim()
     text = text.replace(/\u0000photo-fence-(\d+)\u0000/g, (_, i) => fences[Number(i)])
-    if (!artifacts.length) return text
-    const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
+    const remaining = artifacts.filter(item => !positioned.has(item.id))
+    if (!remaining.length) return text
+    const envelope = `<helm_attachments>${JSON.stringify({ items: remaining })}</helm_attachments>`
     return text ? `${text}\n\n${envelope}` : envelope
   }
   const visit = (value, assistant = false) => {

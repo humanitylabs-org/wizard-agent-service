@@ -15,7 +15,7 @@ const admit = async (s, body) => {
   assert.equal(r.status, 202)
   return r.json()
 }
-const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
+const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
   'provider-signin-recovery': async s => {
@@ -163,10 +163,14 @@ export const serverChecks = {
     assert.ok(JSON.stringify(await history(s)).includes('WIZARD_FILE_CHIPS_V1'))
   },
   'assistant-media': async s => {
-    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nMEDIA:${s.media.text}` })
+    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nImage explanation continues here.\nMEDIA:${s.media.text}` })
     const row = (await history(s)).find(m => m.id === 'media-reply')
     const items = envelope(row.content)
     assert.equal(items.length, 2, 'both image and document must be usable')
+    assert.equal(new Set(items.map(item => item.id)).size, 2, 'attachments are not duplicated')
+    const positioned = [...row.content.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)]
+    assert.equal(JSON.parse(positioned[0][1]).inline, true)
+    assert.ok(positioned[0].index < row.content.indexOf('Image explanation continues here.'), 'image keeps MEDIA line position on every runtime')
     assert.ok(!row.content.includes('unavailable')); assert.ok(!row.content.includes(s.agentHome)); assert.ok(!row.content.includes('/opt/data'))
     for (const [i, expected] of [png, Buffer.from('PARITY_SYNTHETIC_DOCUMENT\n')].entries()) {
       const r = await s.raw(`/wizard/attachments/${items[i].id}`)
