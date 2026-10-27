@@ -33,20 +33,21 @@ export function providerSignInEvents() {
   })
 }
 
-export function providerSignInNotice(value) {
+export function providerSignInNotice(value, selectedModel = '') {
   if (typeof value !== 'string') return null
   const text = value.trim().replace(/^⚠️ Provider authentication failed: /u, '')
   const provider = text === ANTHROPIC_MISSING ? 'Claude'
     : CODEX_MISSING.test(text) || CODEX_REFRESH.test(text) ? 'ChatGPT' : null
   if (!provider) return null
-  const target = provider === 'Claude' ? 'Opus' : provider
+  const target = provider === 'Claude' && /opus/i.test(selectedModel) ? 'Opus' : provider
   const message = `${provider}'s sign-in has expired, so this message wasn't sent to ${target}. Tap Fix it to sign in again, then tap Retry to resend the same message.`
   return { provider, message, output: `${message}\n\n[Fix it](/troubleshoot/)`, href: '/troubleshoot/' }
 }
 
 export function signInNoticeOf(payload) {
-  return providerSignInNotice(payload?.output) || providerSignInNotice(payload?.final_response)
-    || providerSignInNotice(typeof payload?.error === 'string' ? payload.error : payload?.error?.message)
+  const model = payload?.runtime?.model || payload?.model || ''
+  return providerSignInNotice(payload?.output, model) || providerSignInNotice(payload?.final_response, model)
+    || providerSignInNotice(typeof payload?.error === 'string' ? payload.error : payload?.error?.message, model)
 }
 
 export function normalizeProviderPreflightFailure(payload) {

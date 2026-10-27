@@ -11,7 +11,7 @@ const validFile = join(state, 'signed-in'), signedIn = () => existsSync(validFil
 const fixture = createHermesFixture({ expectedKey: 'synthetic-only-key', empty: true })
 const upstream = `http://127.0.0.1:${(await listen(fixture)).port}`
 const at = new Date().toISOString(), session = { id: 'chat-recent', title: 'STAGING · Claude sign-in recovery', source: 'wizard-mobile', model: 'claude-opus-5-5', provider: 'anthropic', updated_at: at, wizard_last_user_at: at }
-fixture.fixture.sessions.push(session); fixture.fixture.messages.set(session.id, [])
+fixture.fixture.sessions.push(session); fixture.fixture.messages.set(session.id, [{ id: 'staging-intro', role: 'assistant', content: 'STAGING · This is a simulated Claude Opus chat. Type a message below to try the sign-in failure and recovery. No real account is used.', created_at: at }])
 const runs = new Map(), admissions = [], modelRuns = []
 const failureText = "No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY."
 const reply = 'STAGING · Claude Opus (simulated): Your sign-in is working again. I received your original message and can reply now.'
@@ -26,7 +26,7 @@ const app = createWizardServer({ upstreamOrigin: upstream, helmOrigin: upstream,
     if ((path === '/v1/runs' || path === '/api/sessions/chat-recent/chat/stream') && init.method === 'POST') {
       const body = JSON.parse(init.body); if (!body.input) body.input = body.message
       const id = `synthetic-${admissions.length + 1}`
-      admissions.push({ id, ...body, signedIn: signedIn() })
+      admissions.push({ id, session_id: session.id, input: body.input, provider: body.provider, model: body.model, signedIn: signedIn() })
       if (body.provider !== 'anthropic' || body.model !== 'claude-opus-5-5') return jsonResponse({ error: 'This staging thread only supports Claude Opus.' }, 422)
       const list = fixture.fixture.messages.get(session.id)
       if (!list.some(m => m.role === 'user' && JSON.stringify(m.content) === JSON.stringify(body.input))) list.push({ id: `user-${id}`, role: 'user', content: body.input, created_at: new Date().toISOString() })
@@ -81,6 +81,9 @@ const front = createServer((req, res) => {
     return proxy(req, res, troubleOrigin)
   }
   if (u.pathname.startsWith('/wizard/')) {
+    // Devices in this throwaway scenario must not adopt another tester's desk.
+    if (u.pathname.startsWith('/wizard/v1/workspaces')) { res.writeHead(404); return res.end('{"error":"staging_has_no_shared_workspaces"}') }
+    if (u.pathname === '/wizard/v1/schedules') return sendJson(res, { schedules: [] })
     if (u.pathname === '/wizard/v1/apps') return sendJson(res, { apps: [{ id: 'wizard-claude', name: 'Claude', url: '/wizard-claude/', source: 'apps.json', view: { mode: 'original', url: '/wizard-claude/' } }] })
     return proxy(req, res, appOrigin)
   }
