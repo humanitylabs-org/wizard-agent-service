@@ -53,8 +53,10 @@ export function normalizeProviderPreflightFailure(payload) {
   const notice = signInNoticeOf(payload)
   if (notice && !(payload.status === 'completed' && payload.usage && ['input_tokens', 'output_tokens', 'total_tokens'].some(key => Number(payload.usage[key]) > 0))) return { ...payload, status: 'failed', last_event: 'run.failed', completed: false,
     output: notice.output, ...(Object.hasOwn(payload, 'final_response') ? { final_response: notice.output } : {}),
-    safe_error: notice.message,
-    error: { type: 'provider_sign_in_expired', message: notice.message },
+    // The assistant history/output owns the explanation and Fix it link. A
+    // safe_error also paints “Reply not sent” beside the existing Retry panel.
+    safe_error: '',
+    error: { type: 'provider_sign_in_expired', message: 'Provider sign-in expired.' },
     wizard_provider_auth: { provider: notice.provider, href: notice.href },
   }
   // Other zero-token preflight failures (including quota) are not sign-outs.

@@ -40,6 +40,22 @@ it('shows a sign-in expired notice with a Fix it link instead of hermes auth adv
   expect(q.latestForSession('wizard_signin')!.body).toBe(body)
 })
 
+it('shows the sign-in explanation exactly once, without a duplicate Reply not sent card', async () => {
+  const q = new DurableRunQueue({ statePath: join(await temp(), 'queue.db'), pollIntervalMs: 0,
+    activeSessionIds: async () => [], launch: async () => ({ upstreamRunId: 'upstream', payload: failure() }), lookup: async () => ({ payload: failure() }) })
+  cleanups.push(() => q.close())
+  const { record } = await q.admit(request)
+  const result = q.publicPayload(record)
+  const history = JSON.parse(projectProviderSignInHistory(Buffer.from('{"data":[]}'), record).toString())
+  const explanation = "Claude's sign-in on your Wizard has expired"
+  expect(history.data.map((row: any) => row.content).join('\n').split(explanation)).toHaveLength(2)
+  expect(history.data[0]).toMatchObject({ role: 'assistant' })
+  expect(result.safe_error).toBe('')
+  expect(result.error.message).not.toContain(explanation)
+  expect(q.latestProjections()[0].safeError).toBe('')
+  expect(record!.body).toBe(body)
+})
+
 it.each(['completed', 'failed'])('repairs old %s receipts without replaying their original request', async status => {
   let launches = 0
   const q = new DurableRunQueue({ statePath: join(await temp(), 'queue.db'), pollIntervalMs: 0,
