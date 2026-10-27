@@ -65,7 +65,10 @@ unchanged.
 
 ## Options
 
-Default-on for Hermes when `hermesStatePath` is explicitly provided. Portable
+The installed entry point keeps automatic owned-work nudges off unless
+`WIZARD_OWNED_OPEN_WORK=on`; the prompt rule still applies. The controller itself
+is available for Hermes when `hermesStatePath` is explicitly provided and
+`ownedOpenWork` is not false. Portable
 HTTP-only installations do not expose complete tool-result evidence, so this
 policy deliberately does not infer dispatch or start corrective runs there.
 `ownedOpenWork: false` disables it, and the existing `followThrough: false`
