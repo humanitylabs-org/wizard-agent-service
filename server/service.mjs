@@ -2716,6 +2716,7 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
     agentExists: id => Boolean(agents?.read(id)),
@@ -3615,7 +3616,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows()
+  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {

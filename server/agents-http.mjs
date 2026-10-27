@@ -742,7 +742,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
       if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
-        if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows())
+        if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows({ archiveDays: () => ctx.archiveAfterDays?.() ?? 7 }))
         if (!agentListSnapshots.has(ctx)) agentListSnapshots.set(ctx,new Map())
         const statePath=ctx.agentStatePath?.(agent) ?? join(registry.agentsDir,agent.id,'home','state.db')
         const snapshots=agentListSnapshots.get(ctx)
