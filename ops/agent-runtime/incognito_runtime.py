@@ -13,6 +13,20 @@ LABEL = 'wizard.incognito=1'
 TOTAL_LIMIT = 192 * 1024 * 1024
 PYTHON = '/opt/hermes/.venv/bin/python'
 
+# Docker 26 rejects the mount-level 'noswap' option. The supported container-wide
+# boundary is MemorySwap == Memory, enforced by cgroup v2 memory.swap.max=0.
+# Never transfer a seed if the kernel boundary or any RAM mount is unverifiable.
+VERIFY_RAM = r'''from pathlib import Path
+assert Path('/sys/fs/cgroup/memory.swap.max').read_text().strip() == '0', 'incognito_swap_not_disabled'
+mounts={}
+for line in Path('/proc/self/mountinfo').read_text().splitlines():
+ left,right=line.split(' - ',1); fields=left.split(); mounts[fields[4]]=(fields[5].split(','),right.split()[0])
+for dest in ['/opt/data','/tmp','/var/log']:
+ options,kind=mounts.get(dest,([],''))
+ assert kind=='tmpfs' and {'rw','nosuid','nodev'} <= set(options), 'incognito_ram_mount_missing'
+'''
+
+
 # Runs INSIDE the source container. No source writes, no host archive, no links.
 # state.db is transferred separately using SQLite's backup API (including its WAL).
 EXPORT = r'''import os,stat,subprocess
@@ -230,9 +244,9 @@ class IncognitoManager:
                 args=['create','--name',state['name'],'--label',LABEL,'--restart','no','--read-only','--log-driver','none',
                       '--cap-drop','ALL','--security-opt','no-new-privileges:true','--pids-limit','256',
                       '--memory','1g','--memory-swap','1g','--ulimit','core=0:0','--network',networks[0],
-                      '--user',uid,'--tmpfs',f'/opt/data:rw,nosuid,nodev,noswap,size=512m,uid={uid.split(":")[0]},gid={uid.split(":")[-1]},mode=0700',
-                      '--tmpfs','/tmp:rw,nosuid,nodev,noswap,size=128m,mode=1777',
-                      '--tmpfs','/var/log:rw,nosuid,nodev,noswap,size=16m,mode=1777',
+                      '--user',uid,'--tmpfs',f'/opt/data:rw,nosuid,nodev,size=512m,uid={uid.split(":")[0]},gid={uid.split(":")[-1]},mode=0700',
+                      '--tmpfs','/tmp:rw,nosuid,nodev,size=128m,mode=1777',
+                      '--tmpfs','/var/log:rw,nosuid,nodev,size=16m,mode=1777',
                       '-p','127.0.0.1::8642','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
                       '-e','HERMES_WORKDIR=/opt/data','-e','PYTHONDONTWRITEBYTECODE=1','--workdir','/opt/data']
                 for host in meta['HostConfig'].get('ExtraHosts') or []: args+=['--add-host',host]
@@ -245,7 +259,7 @@ class IncognitoManager:
                     if dest=='/opt/data' or (mount.get('Type')=='tmpfs' and dest in ('/tmp','/var/log')): continue
                     if mount.get('Type')=='tmpfs':
                         # New RAM, never another container's tmpfs or a persistent substitute.
-                        args+=['--tmpfs',dest+':rw,nosuid,nodev,noswap,size=64m,mode=1777'];continue
+                        args+=['--tmpfs',dest+':rw,nosuid,nodev,size=64m,mode=1777'];continue
                     # Preserve scoped app gateway/socket mounts, not source data or host authority.
                     if not dest.startswith('/run/') or ',' in mount['Source'] or ',' in dest:
                         raise self.failure('incognito_unsupported_mount',409)
@@ -254,6 +268,7 @@ class IncognitoManager:
                 self._docker(args)
                 for net in networks[1:]: self._docker(['network','connect',net,state['name']])
                 self._docker(['start',state['name']])
+                self._docker(['exec',state['name'],PYTHON,'-c',VERIFY_RAM])
                 total=self.transfer(['exec',source,PYTHON,'-c',EXPORT],['exec','-i',state['name'],'tar','-x','--no-same-owner','-C','/opt/data'],TOTAL_LIMIT)
                 self.transfer(['exec',source,PYTHON,'-c','LIMIT='+str(TOTAL_LIMIT-total)+'\n'+SNAPSHOT],
                               ['exec','-i',state['name'],PYTHON,'-c',RESTORE],TOTAL_LIMIT-total)

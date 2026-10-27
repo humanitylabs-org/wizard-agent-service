@@ -72,7 +72,7 @@ import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isSch
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
-import { createIncognito } from './incognito.mjs'
+import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
@@ -4747,7 +4747,7 @@ function buildWizardServer(options, lifetime) {
           return
         }
       }
-      if (url.pathname.includes('/incognito')) {
+      if (isIncognitoPath(url.pathname)) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (await incognito.handle(url, request, response)) return
       }

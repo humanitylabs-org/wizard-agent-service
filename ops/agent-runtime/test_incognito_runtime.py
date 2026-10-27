@@ -4,12 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from incognito_runtime import IncognitoManager,EXPORT,SNAPSHOT,INSTALL,POLICY,BOOT,TOTAL_LIMIT,stream_copy
+from incognito_runtime import IncognitoManager,EXPORT,SNAPSHOT,INSTALL,POLICY,BOOT,TOTAL_LIMIT,stream_copy,VERIFY_RAM
 class Failure(Exception):
  def __init__(self,code,status):self.code=code;self.status=status;super().__init__(code)
 class Rig:
  def __init__(self):
-  self.calls=[];self.transfers=[];self.time=0;self.names=[];self.source=metadata();self.install={};self.fail=False
+  self.calls=[];self.transfers=[];self.time=0;self.names=[];self.source=metadata();self.install={};self.fail=False;self.ram_fail=False
   self.driver=SimpleNamespace(agents=object(),project=lambda id:'agent-'+id)
  def docker(self,args,input_text=None,**kw):
   self.calls.append((args,input_text));out=''
@@ -22,7 +22,7 @@ class Rig:
   elif args[0]=='create':self.names.append(args[args.index('--name')+1])
   elif args[:2]==['exec','-i'] and args[-1]==INSTALL:
    self.install=json.loads(input_text);out='{"history_search":"available"}'
-  return SimpleNamespace(returncode=1 if self.fail and args[0]=='start' else 0,stdout=out,stderr='secret-error-must-not-leak')
+  return SimpleNamespace(returncode=1 if (self.fail and args[0]=='start') or (self.ram_fail and args[-1]==VERIFY_RAM) else 0,stdout=out,stderr='secret-error-must-not-leak')
  def transfer(self,a,b,limit):self.transfers.append((a,b,limit));return 10240
  def manager(self):return IncognitoManager(self.driver,docker=self.docker,failure=Failure,image='ignored-default',proxy_image='ignored-proxy',container_for=lambda *_:'synthetic-source',background=False,ready=lambda *_:None,transfer=self.transfer,clock=lambda:self.time)
 def metadata():
@@ -46,7 +46,20 @@ class Tests(unittest.TestCase):
   for flag in ['--read-only','--cap-drop','--security-opt','--ulimit']:self.assertIn(flag,a)
   self.assertEqual(a[a.index('--log-driver')+1],'none');self.assertIn('core=0:0',a)
   self.assertEqual(a[a.index('--memory')+1],a[a.index('--memory-swap')+1])
-  self.assertTrue(all('noswap' in a[i+1] for i,x in enumerate(a) if x=='--tmpfs'));m.close()
+  self.assertTrue(all({'rw','nosuid','nodev'} <= set(a[i+1].split(':',1)[1].split(',')) for i,x in enumerate(a) if x=='--tmpfs'))
+  self.assertTrue(any(a[-1]==VERIFY_RAM for a,_ in r.calls));m.close()
+ def test_unverifiable_swap_boundary_fails_before_seed_and_removes_target(self):
+  r=Rig();r.ram_fail=True;m=r.manager()
+  with self.assertRaises(Failure):m.start(AGENT,SID)
+  self.assertFalse(r.transfers);self.assertFalse(r.names);self.assertFalse(m.sessions);m.close()
+ def test_kernel_ram_verifier_rejects_nonzero_swap_and_durable_mounts(self):
+  mounts=''.join('1 0 0:1 / '+p+' rw,nosuid,nodev - tmpfs tmpfs rw\n' for p in ['/opt/data','/tmp','/var/log'])
+  for swap,info,ok in [('0',mounts,True),('max',mounts,False),('1',mounts,False),('0',mounts.replace('- tmpfs','- ext4'),False),('0','',False)]:
+   with patch('pathlib.Path') as path:
+    path.side_effect=lambda p:SimpleNamespace(read_text=lambda:swap if p.endswith('memory.swap.max') else info)
+    if ok:exec(VERIFY_RAM,{})
+    else:
+     with self.assertRaises(AssertionError):exec(VERIFY_RAM,{})
  def test_shared_network_and_live_agent_never_removed(self):
   r=Rig();m=r.manager();m.start(AGENT,SID);m.stop('synthetic',SID)
   removed=[a for a,_ in r.calls if a[0]=='rm'];self.assertEqual(len(removed),1);self.assertTrue(removed[0][-1].startswith('wizard-incognito-'))

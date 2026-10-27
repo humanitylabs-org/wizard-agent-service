@@ -49,5 +49,9 @@ const addr = await listen(service, '127.0.0.1', Number(process.env.QA_PORT || 19
 const response = await fetch(base + '/wizard/v1/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: 'Private', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }) })
 if (response.status !== 201) throw new Error('synthetic_agent_create_failed')
 const file = join(root, 'agents', 'private', 'agent.json'), agent = JSON.parse(readFileSync(file)); agent.runtime.port = ua.port; writeFileSync(file, JSON.stringify(agent))
+// This rig tests Chats, not first-launch Setup. Complete the real synthetic setup
+// state before opening either shell so a delayed first-run frame cannot steal focus.
+const seen = await fetch(base + '/wizard/v1/setup/seen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+if (seen.status !== 200) throw new Error('synthetic_setup_seen_failed')
 console.log(JSON.stringify({ ready: true, mode: 'synthetic-browser-fixture-only', base, root }))
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { await new Promise(r => service.close(r)); await new Promise(r => upstream.close(r)); rmSync(root, { recursive: true, force: true }); process.exit(0) })

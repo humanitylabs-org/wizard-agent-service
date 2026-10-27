@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { Transform } from 'node:stream'
-import { createIncognito } from '../server/incognito.mjs'
+import { createIncognito, isIncognitoPath } from '../server/incognito.mjs'
 import { createPrincipalResolver } from '../server/principals.mjs'
 import { isAllowedProxyRequest } from '../server/service.mjs'
 const proof = 'owner-proof-synthetic-'.repeat(3)
@@ -41,6 +41,15 @@ async function rig(t, opts = {}) {
   const start = async () => { const r = await request('', 'POST', {}); assert.equal(r.status, 201, await r.clone().text()); return (await r.json()).session_id }
   return { request, start, calls, messages, stopped, durable, manager, setNow: n => { now = n } }
 }
+test('Incognito route admission never intercepts its shared static module', async t => {
+  const s = await rig(t)
+  for (const path of ['/wizard-os-home/core/incognito-chat.js', '/wizard-ux/core/incognito-chat.js', '/wizard/v1/agents/synthetic/incognito-not-an-api']) {
+    assert.equal(isIncognitoPath(path), false)
+    assert.equal(await s.manager.handle(new URL(path, 'http://fixture'), {}, {}), false)
+  }
+  assert.equal(isIncognitoPath('/wizard/v1/agents/synthetic/incognito'), true)
+  assert.equal(isIncognitoPath('/wizard/v1/agents/synthetic/incognito/bad-session'), true, 'malformed API paths still fail closed in the handler')
+})
 test('history-search metadata is explicit and the source fallback configuration is not replaced', async t => {
   for (const history of ['available', 'unavailable']) {
     const s = await rig(t, { history, agent: { model: { ...agent.model, fallback: 'source-configured' } } });

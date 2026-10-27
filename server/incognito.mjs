@@ -5,6 +5,7 @@ import { AgentError } from './agents.mjs'
 import { principalOf } from './principals.mjs'
 
 const SESSION = /^incog_[a-f0-9]{32}$/u
+export const isIncognitoPath = pathname => /^\/wizard\/v1\/agents\/[^/]+\/incognito(?:\/|$)/u.test(pathname)
 const ROUTE = /^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})\/incognito(?:\/(incog_[a-f0-9]{32})(\/.*)?)?$/u
 export const INCOGNITO_INSTRUCTIONS = 'This is an Incognito conversation. Your home, memories, facts, skills and history are a disposable RAM copy: read them, search past chats and use your normal tools. Memory, fact and skill writes inside this RAM home are allowed and vanish when it ends. Never write transcripts, summaries, titles or history from this session to the Wizard service or any durable store. Cron, schedules, kanban, delegation, heavy jobs and cross-platform send_message are unavailable. Before EVERY external write or action (including Wizard Notes, Calendar, Files and Messenger sends), explain exactly what will change, ask James for permission, and wait for an explicit yes in this conversation. A request to perform the action is not that confirmation. Read-only app access is allowed. Never change the normal private home. Never reference this conversation outside it. Use Markdown when useful.'
 const failure = (status, code) => new AgentError(status, code, 'incognito')
@@ -44,7 +45,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
     runInstructions: INCOGNITO_INSTRUCTIONS,
   })
   async function handle(url, request, response) {
-    if (!url.pathname.includes('/incognito')) return false
+    if (!isIncognitoPath(url.pathname)) return false
     const match = ROUTE.exec(url.pathname)
     if (!match) { proxyContext.sendJson(response, 404, { error: 'not_found' }); return true }
     if (principalOf(request).kind !== 'owner') throw failure(403, 'owner_required')

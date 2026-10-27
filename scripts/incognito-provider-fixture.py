@@ -26,8 +26,24 @@ class Handler(BaseHTTPRequestHandler):
    calls.append({'id':'call_'+uuid.uuid4().hex,'type':'function','function':{'name':name,'arguments':json.dumps(args)}})
   memory=next((n for n in functions if n=='memory'),None)
   tool=next((n for n in functions if 'synthetic_echo' in n),None)
+  # Stock Hermes can keep MCP behind tool_search/tool_call instead of promoting
+  # it into the OpenAI tools array. Resolve only the actual search result.
+  for message in current:
+   if message.get('role')!='tool':continue
+   try: discovered=json.loads(message.get('content',''))
+   except (TypeError,ValueError):continue
+   if isinstance(discovered,dict):tool=tool or next((n for n in discovered.get('tools',{}) if 'synthetic_echo' in n),None)
+  invoked=set(called)
+  for message in current:
+   for call in message.get('tool_calls',[]):
+    if call.get('function',{}).get('name')!='tool_call':continue
+    try: invoked.update(c.get('name') for c in json.loads(call['function']['arguments']).get('calls',[]))
+    except (TypeError,ValueError):pass
   if 'SAVE_MEMORY' in prompt and memory and memory not in called:invoke(memory,{'action':'add','target':'memory','content':markers[-1] if markers else 'missing-marker'})
-  if 'CALL_SYNTHETIC' in prompt and tool and tool not in called:invoke(tool,{'marker':markers[0] if markers else 'missing-marker'})
+  if 'CALL_SYNTHETIC' in prompt and tool and tool not in invoked:
+   args={'marker':markers[0] if markers else 'missing-marker'}
+   if tool in functions:invoke(tool,args)
+   elif 'tool_call' in functions:invoke('tool_call',{'calls':[{'name':tool,'arguments':args}]})
   if 'CALL_SYNTHETIC' in prompt and not tool and 'tool_search' in functions and 'tool_search' not in called:
    schema=functions['tool_search'].get('parameters',{}).get('properties',{})
    invoke('tool_search',{'queries':['synthetic_echo']} if 'queries' in schema else {'query':'synthetic_echo'})

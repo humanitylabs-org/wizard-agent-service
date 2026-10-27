@@ -6,7 +6,7 @@ import hashlib,json,os,secrets,signal,sqlite3,subprocess,sys,tempfile,time,urlli
 from pathlib import Path
 from types import SimpleNamespace
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'ops/agent-runtime'))
-from incognito_runtime import IncognitoManager,PYTHON,BOOT,VERIFY
+from incognito_runtime import IncognitoManager,PYTHON,BOOT,VERIFY,VERIFY_RAM
 from agent_runtime import RuntimeFailure,docker
 OUT=Path(os.environ.get('INCOGNITO_EVIDENCE','qa/incognito-stock'));OUT.mkdir(parents=True,exist_ok=True)
 report={'synthetic_only':True,'protocol_fixture':True,'real_provider_verified':False,'complete':False}
@@ -15,9 +15,12 @@ prefix='incognito-proof-'+secrets.token_hex(8);source=prefix+'-source';fixture=p
 manager=None;helper=None;service_proc=None;service_log=None;service_root=None;markers=['INC-'+secrets.token_hex(20),'INC-'+secrets.token_hex(20)];clock=[time.monotonic()]
 def stop_signal(*_):raise SystemExit(143)
 signal.signal(signal.SIGTERM,stop_signal)
-def cmd(args,stdin=None,required=True):
+def cmd(args,stdin=None,required=True,diagnose=False):
  result=docker(args,input_text=stdin,check=False,timeout=90)
- if required and result.returncode:raise RuntimeError('synthetic_docker_operation_failed')
+ if required and result.returncode:
+  # Opt-in only for synthetic setup before any canary or credentials exist.
+  if diagnose: print('synthetic_docker_setup_stderr: '+result.stderr[:4000],file=sys.stderr,flush=True)
+  raise RuntimeError('synthetic_docker_operation_failed')
  return result.stdout
 def snapshot():return {str(p.relative_to(normal)):hashlib.sha256(p.read_bytes()).hexdigest() for p in normal.rglob('*') if p.is_file()}
 def leftovers():return manager._discover('container')+manager._discover('network')
@@ -47,11 +50,11 @@ try:
  (normal/'skills/synthetic').mkdir(parents=True);(normal/'skills/synthetic/SKILL.md').write_text('---\nname: synthetic\ndescription: Synthetic skill seed\n---\nSynthetic only.\n')
  with sqlite3.connect(normal/'state.db') as db:db.execute('create table synthetic_normal_history(value text)');db.execute("insert into synthetic_normal_history values ('normal-synthetic-history')")
  before=snapshot()
- cmd(['network','create',network])
- common=['--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges:true','--memory','1g','--memory-swap','1g','--ulimit','core=0:0','--network',network,'--user','10000:10000','--tmpfs','/tmp:rw,nosuid,nodev,noswap,size=64m,mode=1777']
- cmd(['run','-d','--name',source,*common,'--mount',f'type=bind,src={normal},dst=/opt/data,readonly','--entrypoint',PYTHON,image,'-c','import time;time.sleep(7200)'])
+ cmd(['network','create','--label','wizard.incognito.rig='+prefix,network])
+ common=['--label','wizard.incognito.rig='+prefix,'--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges:true','--memory','1g','--memory-swap','1g','--ulimit','core=0:0','--network',network,'--user','10000:10000','--tmpfs','/tmp:rw,nosuid,nodev,size=64m,mode=1777']
+ cmd(['run','-d','--name',source,*common,'--mount',f'type=bind,src={normal},dst=/opt/data,readonly','--entrypoint',PYTHON,image,'-c','import time;time.sleep(7200)'],diagnose=True)
  wait="import os,time,runpy\nwhile not os.path.exists('/opt/data/provider.py'):time.sleep(.1)\nrunpy.run_path('/opt/data/provider.py',run_name='__main__')"
- cmd(['run','-d','--name',fixture,*common,'--tmpfs','/opt/data:rw,nosuid,nodev,noswap,size=32m,uid=10000,gid=10000,mode=0700','--entrypoint',PYTHON,image,'-c',wait])
+ cmd(['run','-d','--name',fixture,*common,'--tmpfs','/opt/data:rw,nosuid,nodev,size=32m,uid=10000,gid=10000,mode=0700','--entrypoint',PYTHON,image,'-c',wait],diagnose=True)
  cmd(['exec','-i',fixture,PYTHON,'-c',"import sys;open('/opt/data/provider.py','w').write(sys.stdin.read())"],(ROOT/'scripts/incognito-provider-fixture.py').read_text())
  driver=SimpleNamespace(agents=object(),project=lambda _:prefix)
  manager=IncognitoManager(driver,docker=docker,failure=RuntimeFailure,image=image,proxy_image='',container_for=lambda *_:source,clock=lambda:clock[0],background=False)
@@ -59,13 +62,14 @@ try:
  sid='incog_'+secrets.token_hex(16);state=manager.start(agent,sid);target=manager.sessions[('synthetic',sid)]['name']
  meta=json.loads(cmd(['inspect',target]))[0];cfg=meta['HostConfig']
  assert cfg['ReadonlyRootfs'] and cfg['LogConfig']['Type']=='none' and not meta.get('LogPath')
- assert all('noswap' in cfg['Tmpfs'][x].split(',') for x in ['/opt/data','/tmp','/var/log'])
+ assert all({'rw','nosuid','nodev'} <= set(cfg['Tmpfs'][x].split(',')) for x in ['/opt/data','/tmp','/var/log'])
+ cmd(['exec',target,PYTHON,'-c',VERIFY_RAM])
  assert cfg['MemorySwap']==cfg['Memory'] and cfg['Memory']>0
  assert any(x['Name']=='core' and x['Hard']==0 and x['Soft']==0 for x in cfg['Ulimits'])
  assert not [m for m in meta['Mounts'] if m['Type'] in ('bind','volume')]
  assert meta['Image']==json.loads(cmd(['inspect',source]))[0]['Image']
  assert state['history_search']=='available'
- report['stock_boundary']={'read_only_root':True,'unswappable_tmpfs':True,'no_durable_mounts':True,'core_dumps_disabled':True,'docker_log_driver':'none','same_source_image':True,'same_network_routes':True,'sqlite_backup_available':True}
+ report['stock_boundary']={'read_only_root':True,'unswappable_tmpfs':True,'swap_enforcement':'cgroup-v2-memory.swap.max=0','no_durable_mounts':True,'core_dumps_disabled':True,'docker_log_driver':'none','same_source_image':True,'same_network_routes':True,'sqlite_backup_available':True}
  def api(path,method='GET',value=None):
   body=None if value is None else json.dumps(value).encode();req=urllib.request.Request(state['origin']+path,data=body,method=method,headers={'Authorization':'Bearer '+state['key'],'Content-Type':'application/json'})
   with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=20) as response:return json.load(response)
@@ -81,6 +85,10 @@ try:
   assert result.get('status')=='completed','stock_synthetic_tool_run_did_not_complete'
   replies.append(result)
  assert 'otter' in json.dumps(replies[0]).lower(),'stock_memory_context_missing'
+ if 'mcp-success '+markers[0] not in json.dumps(replies[0]):
+  diagnostic=json.dumps(replies[0])
+  for marker in markers:diagnostic=diagnostic.replace(marker,'[REDACTED_SYNTHETIC_CANARY]')
+  print('synthetic_redacted_first_run: '+diagnostic,flush=True)
  assert 'mcp-success '+markers[0] in json.dumps(replies[0]),'stock_mcp_tool_result_missing'
  check=r'''import json,sys,pathlib,sqlite3
 p=json.load(sys.stdin);h=pathlib.Path('/opt/data');a,b=p
