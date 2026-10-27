@@ -41,8 +41,9 @@ try {
   const fix = page.getByRole('link', { name: 'Fix it', exact: true })
   await expect(fix).toHaveCount(1, { timeout: 30000 }); await expect(fix).toBeVisible()
   const notice = "Claude's sign-in has expired, so this message wasn't sent to Opus."
+  await expect(page.locator('[data-chretry]')).toBeVisible({ timeout: 30000 })
+  await expect(page.locator('.ch-msgs')).toContainText(notice, { timeout: 30000 })
   expect((await page.locator('body').innerText()).split(notice)).toHaveLength(2)
-  await expect(page.locator('[data-chretry]')).toBeVisible()
   await expect(page.locator('.appr').filter({ hasText: 'Reply not sent' })).toHaveCount(0)
   expect((await receipt()).modelRuns).toEqual([])
   expect((await receipt()).admissions).toHaveLength(1)
