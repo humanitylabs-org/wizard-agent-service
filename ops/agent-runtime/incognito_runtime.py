@@ -9,8 +9,8 @@ import time
 import urllib.request
 
 LABEL = 'wizard.incognito=1'
-# Preserve the existing bounded seed budget; oversized history alone is optional.
-TOTAL_LIMIT = 384 * 1024
+# A full working home fits in the 512 MiB RAM home; oversized history alone is skipped.
+TOTAL_LIMIT = 192 * 1024 * 1024
 PYTHON = '/opt/hermes/.venv/bin/python'
 
 # Runs INSIDE the source container. No source writes, no host archive, no links.
