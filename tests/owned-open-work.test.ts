@@ -20,7 +20,7 @@ function directory() { const path = mkdtempSync(join(tmpdir(), 'owned-open-')); 
 function transcript() {
   const root = directory(), path = join(root, 'state.db'), db = new DatabaseSync(path)
   cleanup.push(() => db.close())
-  db.exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,display_kind TEXT,tool_calls TEXT,tool_call_id TEXT);
+  db.exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,compacted INT DEFAULT 0,display_kind TEXT,tool_calls TEXT,tool_call_id TEXT);
     CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,title_source TEXT,started_at REAL,source TEXT,model TEXT,ended_at REAL,end_reason TEXT,message_count INTEGER DEFAULT 0,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER DEFAULT 0,archived INTEGER DEFAULT 0,hidden INTEGER DEFAULT 0);`)
   const add = (role: string, content: string, extra: any = {}) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp,display_kind,tool_calls,tool_call_id) VALUES(?,?,?,?,?,?,?)')
@@ -62,7 +62,7 @@ describe('owner corrections', () => {
     f.add('tool', JSON.stringify({ id: 'schedule_actual', name: 'Owner check', nextRun: '22:00' }), { tool_call_id: 't1' })
     f.add('assistant', 'Scheduled'); f.add('user', 'Anything else?')
     f.add('assistant', reply('Archimedes: started the follow-up schedule_actual, scheduled for 22:00'))
-    f.db.exec('UPDATE messages SET active=0 WHERE id<=3') // compaction cannot erase real handle credit
+    f.db.exec('UPDATE messages SET active=0,compacted=1 WHERE id<=3') // compaction cannot erase real handle credit
     const e = readOwnedOpenWork(f.path, 'wizard_owned')!
     expect(e.ownedCount).toBe(1); expect(e.handleCount).toBe(1)
     expect(guardOwnedOpenWork(e.status, e)).toBe(e.status)
@@ -77,7 +77,7 @@ describe('owner corrections', () => {
     // These were the live boundary changes: reporter rewrite then scheduled wakeup.
     f.add('user', '[reporter] Rewrite'); f.add('assistant', reply())
     f.add('user', '[Wizard schedule] Follow up'); f.add('assistant', reply())
-    f.db.exec("UPDATE messages SET active=0 WHERE content LIKE '[Wizard follow-through]%'")
+    f.db.exec("UPDATE messages SET active=0,compacted=1 WHERE content LIKE '[Wizard follow-through]%'")
     expect(readOwnedOpenWork(f.path, 'wizard_owned')!.continuation).toBe(true)
     const restarted = createOwnedWorkFollowThrough(options); cleanup.push(() => restarted.close())
     await restarted.tick(); expect(admit).toHaveBeenCalledTimes(1)
@@ -160,6 +160,19 @@ describe('owned open work starts without the owner asking', () => {
 })
 
 describe('owned work evidence', () => {
+  it('rewound rows grant neither owner-chain authority nor handle credit', () => {
+    const f = transcript(); f.add('user', 'Current request')
+    f.add('user', 'Deleted request')
+    f.add('assistant', '', { tool_calls: [call('wizard_schedule')] })
+    f.add('tool', '{"id":"deleted_schedule"}', { tool_call_id: 't1' })
+    f.db.exec('UPDATE messages SET active=0 WHERE id BETWEEN 2 AND 4')
+    f.add('assistant', reply())
+    const current = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(current.userId).toBe(1); expect(current.chainId).toBe('1'); expect(current.handleCount).toBe(0)
+    f.db.exec('UPDATE messages SET compacted=1 WHERE id BETWEEN 2 AND 4')
+    const retained = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(retained.userId).toBe(2); expect(retained.handleCount).toBe(1)
+  })
   it.each(['mine', 'me', 'I', "I’ll", 'Archimedes', 'agent', '(owner: Archimedes)', 'want me to', 'shall I', 'if you want me to queue', 'I can queue'])('recognizes %s', owner => {
     expect(ownedOpenItems(reply(`${owner}: run checks`))).toHaveLength(1)
   })
@@ -328,6 +341,32 @@ describe('owned-work service wiring', () => {
 })
 
 describe('owned open work scan stays cheap on large transcripts', () => {
+  it('owned-work scan never skips sessions past the page limit', async () => {
+    const { scanOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
+    const f = transcript(), now = Date.now()
+    const add = f.db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)')
+    f.db.exec('BEGIN')
+    for (let i = 0; i < 425; i++) {
+      const id = `wizard_page_${i}`
+      add.run(id, 'user', 'Approved request', now/1000)
+      add.run(id, 'assistant', reply(), now/1000)
+      // Repeated matches must not consume authority for another session.
+      if (i % 3 === 0) add.run(id, 'assistant', reply(), now/1000)
+    }
+    f.db.exec('COMMIT')
+    const top = Number(f.db.prepare('SELECT MAX(id) n FROM messages').get()!.n)
+    let afterId = 0
+    const seen = new Set<string>()
+    for (let tick = 0; tick < 10 && afterId < top; tick++) {
+      const page = scanOwnedOpenWork(f.path, { now, afterId })
+      expect(page.lastId).toBeGreaterThan(afterId)
+      for (const e of page.evidence) seen.add(e.sessionId)
+      afterId = page.lastId!
+    }
+    expect(afterId).toBe(top)
+    expect([...seen].sort()).toEqual(Array.from({length:425}, (_, i) => `wizard_page_${i}`).sort())
+    expect(scanOwnedOpenWork(f.path, { now, afterId }).evidence).toEqual([])
+  })
   it('scans only rows after the previous high-water id', async () => {
     const { scanOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
     const { mkdtempSync } = await import('node:fs')

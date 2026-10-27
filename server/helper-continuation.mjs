@@ -6,14 +6,14 @@ import { parseStatus } from './thread-status.mjs'
 
 // Keep the continuation watermark and owner-gate readers on one machine-input boundary.
 export { isHumanRequest } from './delegation-receipts.mjs'
-import { isHumanRequest, internalHelperMessage } from './delegation-receipts.mjs'
+import { isHumanRequest, internalHelperMessage, retainedMessagesWhere } from './delegation-receipts.mjs'
 export const INTERNAL_HELPER_MESSAGE = { test: internalHelperMessage }
 
 // IDs, not timestamps alone: a newly inserted backdated/same-timestamp request also invalidates work.
 export function requestWatermark(db, sessionId) {
   const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
   const rows = db.prepare(`SELECT id,role,content,timestamp ${cols.has('display_kind') ? ',display_kind' : ''}
-    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user'
+    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user' AND ${retainedMessagesWhere(cols)}
     ORDER BY id DESC LIMIT 513`).all(sessionId)
   const row = rows.find(isHumanRequest)
   if (!row && rows.length > 512) return null // incomplete history is not authority to resume

@@ -3,7 +3,7 @@ import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-wri
 import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest } from './delegation-receipts.mjs'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
 import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
@@ -273,13 +273,14 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // Separate active/inactive seeks preserve the (session,active,timestamp) index.
     // An OR here sorts/materializes obsolete bodies before the early-stop iterator.
     const inactiveRequests = db.prepare(`SELECT content,display_kind,timestamp FROM messages
-      WHERE session_id=? AND active=0 AND role='user' AND timestamp>?
+      WHERE session_id=? AND active=0 AND ${messageColumns.has('compacted') ? 'compacted=1' : '0'} AND role='user' AND timestamp>?
       ORDER BY timestamp DESC${tieOrder}`)
     const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
     // Select the newest timestamp before reading its body; inactive machine inputs
     // still determine whether this assistant reply was an automated continuation.
-    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user'
-      AND timestamp=(SELECT MAX(timestamp) FROM messages WHERE session_id=? AND role='user' AND timestamp<=?)
+    const retained = retainedMessagesWhere(messageColumns)
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND ${retained}
+      AND timestamp=(SELECT MAX(timestamp) FROM messages WHERE session_id=? AND role='user' AND ${retained} AND timestamp<=?)
       ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null

@@ -9,7 +9,7 @@ import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { parseStatus } from './thread-status.mjs'
 import { dispatchHandles, countDispatchHandles, ownedOpenItems, guardOwnedOpenWork, claimsExistingHandle, nonHoldingFollowUpIds } from './owned-open-work.mjs'
-import { isHumanRequest } from './delegation-receipts.mjs'
+import { isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 
 export const OWNED_WORK_KIND = 'owned-open-work'
 export const ownedWorkStatePathOf = options => options.followThrough === false || options.ownedOpenWork === false ? ''
@@ -29,24 +29,25 @@ export function readOwnedOpenWork(path, sessionId) {
     db.exec('BEGIN')
     const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
     if (!['id', 'session_id', 'role', 'content', 'tool_calls', 'tool_call_id', 'timestamp'].every(key => cols.has(key))) return null
+    const retained = `AND ${retainedMessagesWhere(cols)}`
     const active = cols.has('active') ? 'AND COALESCE(active,1)=1' : ''
     const latest = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role IN ('user','assistant') ${active} ORDER BY id DESC LIMIT 100`).all(sessionId)
       .find(row => !hidden.has(row.display_kind) && String(row.content ?? '').trim())
     if (!latest || latest.role !== 'assistant' || latest.tool_calls && latest.tool_calls !== '[]' && latest.tool_calls !== 'null') return null
     // Machine wakeups, reporter rewrites and compaction must not renew nudge authority.
     // Keep retained rows: compaction changes context, not the owner request chain.
-    const users = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
+    const users = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${retained} ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
     const user = users.find(row => !/^\s*\[(?:reporter|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT)/u.test(String(row.content ?? '')))
     const owner = users.find(row => isHumanRequest(row) && !String(row.content ?? '').startsWith('[reporter]'))
       ?? (users.length < 513 ? users.at(-1) : null)
     if (!user || !owner) return null
     const continuation = users.some(row => row.id >= owner.id && String(row.content ?? '').startsWith(OWNED_WORK_PREFIX))
     const items = ownedOpenItems(latest.content)
-    const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
+    const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${retained} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
     if (rows.length > MAX_ROWS) return null // incomplete tool evidence is not zero handles
     const claimed = items.filter(claimsExistingHandle).length
     // Earlier turns of this thread (bounded): real handles that a restated item may point to.
-    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
+    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ${retained} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
     const handles = dispatchHandles(rows)
     const handleCount = handles.length + Math.min(Math.max(0, claimed - handles.length), prior)
     return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), chainId: String(owner.message_uid || owner.id), messageId: String(latest.message_uid || latest.id),
@@ -64,6 +65,7 @@ export const readNonHoldingFollowUps = (path, sessionId) => new Set(readOwnedOpe
 // over the whole table is a full scan. Callers pass the previous high-water id; the
 // first scan starts a bounded window behind the newest row (ids are monotonic).
 export const OWNED_SCAN_WINDOW = 20_000
+/** @param {string} path @param {{now?: number, afterId?: number|null}} [options] */
 export function scanOwnedOpenWork(path, { now = Date.now(), afterId = null } = {}) {
   if (!path) return { evidence: [], lastId: afterId }
   let db
@@ -71,12 +73,16 @@ export function scanOwnedOpenWork(path, { now = Date.now(), afterId = null } = {
     db = new DatabaseSync(path, { readOnly: true })
     const top = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get()?.id ?? 0)
     const from = afterId == null ? Math.max(0, top - OWNED_SCAN_WINDOW) : Math.min(afterId, top)
-    const sessions = db.prepare(`SELECT DISTINCT session_id FROM messages WHERE id>? AND id<=? AND role='assistant'
-      AND timestamp>=? AND instr(lower(content),'still open:')>0 LIMIT 201`).all(from, top, now/1000 - MAX_AGE)
+    // Page matching rows in primary-key order, with one unprocessed sentinel.
+    // DISTINCT hides the boundary id; jumping to top loses every later session.
+    const rows = db.prepare(`SELECT id, session_id FROM messages WHERE id>? AND id<=? AND role='assistant'
+      AND timestamp>=? AND instr(lower(content),'still open:')>0 ORDER BY id LIMIT 201`).all(from, top, now/1000 - MAX_AGE)
+    const page = rows.slice(0, 200)
+    const lastId = rows.length > 200 ? Number(page.at(-1).id) : top
     db.close(); db = null
-    const evidence = sessions.filter(row => /^(?:wizard_|wizard-assistant-)/u.test(row.session_id))
-      .map(row => readOwnedOpenWork(path, row.session_id)).filter(Boolean)
-    return { evidence, lastId: top }
+    const sessions = new Set(page.map(row => row.session_id).filter(id => /^(?:wizard_|wizard-assistant-)/u.test(id)))
+    const evidence = [...sessions].map(id => readOwnedOpenWork(path, id)).filter(Boolean)
+    return { evidence, lastId }
   } catch { return { evidence: [], lastId: afterId } } finally { db?.close() }
 }
 export function findOwnedOpenWork(path, now = Date.now()) {
