@@ -4,6 +4,17 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scene, kinds, post } from '../qa/agent-parity/fixture.mjs'
+import { guardHeavyStatus } from '../server/thread-status.mjs'
+
+it('completion guard has no age expiry, preserves metadata and leaves owner questions alone', () => {
+  const job = { agent_id: 'hermes', sessionId: 's', state: 'failed', resume: '', created_at: Date.now() - 7 * 86_400_000 }
+  const status = { state: 'done', ask: '', subject: 'Tests', title: 'Tests · Results', app_id: 'wizard-quest' }
+  expect(guardHeavyStatus(status, { sessionId: 's', jobs: [job] })).toEqual({ ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' })
+  const question = { ...status, state: 'needs_you', ask: 'Choose the next step' }
+  expect(guardHeavyStatus(question, { sessionId: 's', jobs: [job] })).toBe(question)
+  expect(guardHeavyStatus(status, { sessionId: 's', jobs: [{ ...job, resume: 'superseded', notice_delivered_at: Date.now() }] })).toBe(status)
+  expect(guardHeavyStatus(status, { sessionId: 's', jobs: [{ ...job, completion_delivered_at: Date.now(), continuation_invalidated: true }] })).toBe(status)
+})
 
 it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %s', async kind => {
   const root = mkdtempSync(join(tmpdir(), 'heavy-status-')), heavyStatePath = join(root, 'heavy.db')
@@ -47,5 +58,14 @@ it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %
     expect(sent.body.instructions).toContain('failed')
     const saved = JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string)
     expect(saved.notice_delivered_at).toBeGreaterThan(0)
+    // A later terminal result must not be acknowledged by mere queue admission.
+    save({ state: 'failed', resume: 'superseded' })
+    const queuedResponse = await s.request('/v1/runs', post({ session_id: id, input: 'Another owner request' }))
+    const queued = await queuedResponse.json()
+    expect(queued.status).toBe('queued')
+    expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeUndefined()
+    for (const run of s.runs.values()) { run.status = 'completed'; run.output = 'Finished' }
+    await s.request('/v1/runs/' + queued.run_id)
+    expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeGreaterThan(0)
   } finally { db.close(); await s.close(); rmSync(root, { recursive: true, force: true }) }
 }, 30_000)
