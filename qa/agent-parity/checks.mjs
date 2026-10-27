@@ -109,8 +109,8 @@ export const checks = {
     const responses = await Promise.all([retry(), retry()])
     for (const response of responses) assert.equal(response.status, 202, await response.clone().text())
     const [a, b] = await Promise.all(responses.map(r => r.json())); assert.equal(a.run_id, b.run_id)
-    const writes = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs'))
-    assert.equal(writes.length, 2); assert.equal(writes.at(-1).body.input, 'One synthetic send')
+    const writes = s.seen.filter(r => r.method === 'POST' && (r.path.endsWith('/v1/runs') || r.path.endsWith('/chat/stream')))
+    assert.equal(writes.length, 2); assert.equal(writes.at(-1).body.input || writes.at(-1).body.message, 'One synthetic send')
     assert.equal(writes.at(-1).body.wizard_retry_run_id, undefined)
   },
   'session-archive': async s => {
