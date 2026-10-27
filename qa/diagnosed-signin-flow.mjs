@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/srv/work/provider-signin-browser/node_modules/playwright/index.mjs');
-const origin = process.env.PREVIEW_ORIGIN || 'https://wizard.tailc0f369.ts.net:9455';
-const evidence = process.env.QA_EVIDENCE || '/srv/work/signin-v2-evidence';fs.mkdirSync(evidence,{recursive:true});
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const origin = process.env.PREVIEW_ORIGIN;
+if (!origin) throw Error('PREVIEW_ORIGIN must point to an explicitly authorized synthetic staging instance');
+const evidence = process.env.QA_EVIDENCE || path.resolve('evidence/diagnosed-signin');fs.mkdirSync(evidence,{recursive:true});
 const skin=process.env.QA_SKIN||'nebula';const offset=Number(process.env.QA_OFFSET||0);
 const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:393,height:852},deviceScaleFactor:1,isMobile:true,hasTouch:true,ignoreHTTPSErrors:true,userAgent:'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/128.0 Mobile Safari/537.36'});const page=await ctx.newPage();
 const errors=[],responses=[];page.on('pageerror',e=>errors.push(e.message));page.on('response',r=>{if(r.status()>=400&&!r.url().includes('/favicon'))responses.push([r.status(),r.url()])});
