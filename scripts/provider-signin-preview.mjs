@@ -16,12 +16,21 @@ const upstream = `http://127.0.0.1:${(await listen(fixture)).port}`
 const failure = { run_id: 'synthetic-auth-failure', session_id: 'chat-recent', status: 'completed', completed: true,
   output: "No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.",
   usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } }
+const sampleAt = new Date(Date.now() - 5000).toISOString()
+const sampleSession = { id: 'chat-recent', title: 'Sign-in recovery example', source: 'wizard-mobile', model: 'claude-opus-5-5', provider: 'anthropic', updated_at: sampleAt, wizard_last_user_at: sampleAt }
+const sampleHistory = { messages: [{ id: 'synthetic-owner-request', role: 'user', content: 'Help me plan a quiet weekend.', created_at: sampleAt }], has_more: false }
 const app = createWizardServer({ upstreamOrigin: upstream, helmOrigin: upstream, hermesKey: 'synthetic-only-key', requireAccess: false,
   settingsPath: join(scratch, 'settings.json'), wizardOsHome: osHome, hermesStatePath: join(scratch, 'absent.db'),
   runQueueStatePath: join(scratch, 'runs.db'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
   requireJoinedDelegationCapability: false, skinsStateDir: join(scratch, 'skins'), skins: { relays: [], blossom: 'https://127.0.0.1/offline' },
-  fetchImpl: async (url, init) => new URL(url).pathname.startsWith('/v1/runs')
-    ? new Response(JSON.stringify(failure), { status: init?.method === 'POST' ? 202 : 200, headers: { 'Content-Type': 'application/json' } }) : fetch(url, init),
+  fetchImpl: async (url, init) => {
+    const path = new URL(url).pathname
+    const payload = path.startsWith('/v1/runs') ? failure
+      : path === '/api/sessions/chat-recent/messages' ? sampleHistory
+      : path === '/api/sessions/chat-recent' ? sampleSession
+      : path === '/api/sessions' ? { sessions: [sampleSession] } : null
+    return payload ? new Response(JSON.stringify(payload), { status: path === '/v1/runs' && init?.method === 'POST' ? 202 : 200, headers: { 'Content-Type': 'application/json' } }) : fetch(url, init)
+  },
 })
 const appOrigin = `http://127.0.0.1:${(await listen(app)).port}`
 const admission = await (await fetch(appOrigin + '/wizard/hermes/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'synthetic-only-notice' },
