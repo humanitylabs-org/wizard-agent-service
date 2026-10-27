@@ -36,5 +36,6 @@ test('a newer owner request prevents automatic resend of an old diagnosed failur
   const root=mkdtempSync(join(tmpdir(),'diagnosed-'));t.after(()=>rmSync(root,{recursive:true,force:true}));let ready=false;const sent=[]
   const q=new DurableRunQueue({statePath:join(root,'q.db'),pollIntervalMs:0,providerSignInReady:async()=>ready,launch:async r=>{sent.push(r);return{upstreamRunId:r.publicRunId,payload:failure}},lookup:async()=>({payload:failure})});t.after(()=>q.close())
   for(const input of ['old','new']) {const body=JSON.stringify({input,model:'claude-opus-4-8',provider:'claude'});await q.admit({runtime:'direct',sessionId:'same',idempotencyKey:input,requestHash:queueRequestHash('direct',body),body})}
+  await q.tick(true); // observe the newest diagnosed sign-in as unavailable before its recovery
   ready=true;await q.tick(true);await q.tick(true);assert.equal(sent.length,3);assert.equal(JSON.parse(sent[2].body).input,'new')
 })
