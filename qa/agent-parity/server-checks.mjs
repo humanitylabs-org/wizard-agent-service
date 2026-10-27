@@ -18,6 +18,29 @@ const admit = async (s, body) => {
 const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
 
 export const serverChecks = {
+  'provider-signin-recovery': async s => {
+    const input = 'Synthetic saved owner words: keep this exact message.'
+    const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'completed', output: "No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.", usage: { total_tokens: 0 } })
+    const read = () => s.request('/v1/runs/' + first.run_id)
+    const failed = await (await read()).json()
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.wizard_reconnect.provider, 'claude')
+    await read() // observe the unavailable state after the failure, in this exact agent's queue
+    const before = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    s.signin.ready = true
+    for (let i = 0; i < 4; i++) await read()
+    const sends = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    assert.equal(sends.length, before + 1, `${s.kind}: one automatic child after sign-in`)
+    const retried = sends.at(-1).body
+    assert.ok(JSON.stringify(retried.input ?? retried.message).includes(input))
+    assert.equal(retried.model, 'fixture-model')
+    if (s.kind !== 'main') assert.equal(retried.require_model_lock, true)
+    if (s.kind !== 'main') assert.equal(retried.provider, undefined, 'display account id never overrides routed transport')
+    for (let i = 0; i < 4; i++) await read()
+    assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length)
+  },
   'supervisor-reporter': async s => {
     const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
     assert.equal(tools.length, 6)
