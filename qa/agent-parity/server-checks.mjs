@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { checkOpusDirect } from './opus-direct-check.mjs'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
@@ -18,6 +19,7 @@ const admit = async (s, body) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'opus-direct-answer-route': checkOpusDirect,
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })

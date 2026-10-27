@@ -24,6 +24,8 @@ import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
+import { OpusDirect } from './opus-direct.mjs'
+import { refusesDirect } from './thread-routes.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
@@ -2709,6 +2711,8 @@ function buildWizardServer(options, lifetime) {
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    answerRouteContext: (agent, session) => opusDirect.context(agent.id, session),
+    projectAnswerRoute: async (result, agent, path, params) => /\/messages$/.test(path) ? opusDirect.projectHistory(result,agent.id,path,params) : opusDirect.project(result,agent.id,path,params),
     acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
@@ -2967,6 +2971,28 @@ function buildWizardServer(options, lifetime) {
     codexUsageUrl: options.codexUsageUrl,
   })
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
+  const answerStateDir = options.runQueueStatePath ? dirname(options.runQueueStatePath) : options.threadDispositionStatePath ? dirname(options.threadDispositionStatePath) : ''
+  const opusDirect = new OpusDirect({ appsJsonPath, fetchImpl,
+    onChange: () => queueMicrotask(() => listCache.touch()),
+    grantsFile: options.grantsFile ?? process.env.WIZARD_GRANTS_FILE,
+    routerGrant: options.routerGrant ?? process.env.WIZARD_ROUTER_GRANT,
+    routerGrantFile: options.routerGrantFile ?? process.env.WIZARD_ROUTER_GRANT_FILE,
+    routePath: options.threadRouteStatePath || (answerStateDir ? join(answerStateDir,'thread-routes.json') : ''),
+    turnsPath: options.directTurnsStatePath || (answerStateDir ? join(answerStateDir,'direct-turns.sqlite3') : ''),
+    history: async (agentId, sessionId, query = {}) => {
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages?order=${query.order || 'latest'}&limit=500&offset=${query.offset || 0}&include_compacted=true`
+      const payload = agentId === MAIN_AGENT_ID ? await hermesJson(path) : await (async () => {
+        const r = await agents.fetchAgent(agents.read(agentId), path, { headers: { Authorization: `Bearer ${agents.apiKey(agentId)}` }, redirect:'error', signal:AbortSignal.timeout(10000) })
+        if (!r.ok) throw Error('History unavailable')
+        return r.json()
+      })()
+      const projected = JSON.parse(projectWizardMessageHistory(Buffer.from(JSON.stringify(payload))).toString('utf8'))
+      const rows = withoutAgentToAgentTurns(projected.data || projected.messages || []).filter(m => !m.hidden && m.display_kind !== 'hidden')
+      Object.defineProperty(rows,'has_more',{value:payload.has_more ?? (payload.data || payload.messages || []).length === 500})
+      return rows
+    },
+  })
+  lifetime.own(() => opusDirect.close())
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
   const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
@@ -3493,7 +3519,10 @@ function buildWizardServer(options, lifetime) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
+      } else {
+        const directContext = await opusDirect.context(MAIN_AGENT_ID,record.sessionId)
+        queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, id => [runTitleNote(id),directContext].filter(Boolean).join('\n\n'))
+      }
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -3663,7 +3692,7 @@ function buildWizardServer(options, lifetime) {
     }
     return canonicalSessionInFlight
   }
-  const loadCanonicalSessions = async () => {
+  const loadCanonicalSessionsRaw = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
       // A new assistant reply refreshes the listing, but a busy Hermes can take seconds to answer
@@ -3683,6 +3712,7 @@ function buildWizardServer(options, lifetime) {
     }
     return refreshCanonicalSessions()
   }
+  const loadCanonicalSessions = async () => opusDirect.listRows(await loadCanonicalSessionsRaw(),MAIN_AGENT_ID)
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
   const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
@@ -4021,8 +4051,11 @@ function buildWizardServer(options, lifetime) {
           }
     return result
   }
-  const projectSessionList = async (result, operator, canonicalPage, firstPage) =>
-    decorateSessionList(await projectSessionListCore(result, operator, canonicalPage, firstPage), operator)
+  const projectSessionList = async (result, operator, canonicalPage, firstPage) => {
+    if (!operator) result = opusDirect.project(result,MAIN_AGENT_ID,'/api/sessions')
+    result = decorateSessionList(await projectSessionListCore(result, operator, canonicalPage, firstPage), operator)
+    return operator ? result : opusDirect.project(result,MAIN_AGENT_ID,'/api/sessions')
+  }
 
   // ---- Shared Chats list cache (session-list-cache.mjs). One projected list for every client,
   // re-projecting only threads that can be changing. WIZARD_LIST_CACHE=off restores the full
@@ -4075,6 +4108,7 @@ function buildWizardServer(options, lifetime) {
       try { for (const id of readActiveHumanSessionIds(hermesStatePath)) hot.add(id) } catch { for (const id of recent) hot.add(id) }
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
+      for (const id of opusDirect.sessionIds(MAIN_AGENT_ID)) hot.add(id)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
@@ -4795,6 +4829,32 @@ function buildWizardServer(options, lifetime) {
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      const answerRouteMatch = url.pathname.match(/^\/wizard\/v1\/threads\/([^/]+)\/route$/u)
+      if (answerRouteMatch) {
+        if (principal.kind !== 'owner' || requireAccess && !await accessVerified(request,accessVerifier)) { sendJson(response,403,{error:'owner_required'}); return }
+        if (!['GET','PUT'].includes(request.method)) { sendJson(response,405,{error:'method_not_allowed'}); return }
+        const session = decodeURIComponent(answerRouteMatch[1])
+        if (session.startsWith(OPERATOR_SESSION_PREFIX)) { sendJson(response,409,{error:{code:'thread_route.private_agent'}}); return }
+        const explicit = url.searchParams.get('agent_id') || url.searchParams.get('agent') || ''
+        let agent = { id: MAIN_AGENT_ID }
+        if (agents) {
+          const pins = agents.pinnedAgents?.(session) || []
+          const ids = explicit ? [explicit] : pins.length ? pins : (await Promise.all(agents.list().map(async a => await agentCtx.sessionExists(a.id,session) ? a.id : ''))).filter(Boolean)
+          if (ids.length > 1) { sendJson(response,409,{error:{code:'ambiguous_thread'}}); return }
+          agent = agents.read(ids[0] || MAIN_AGENT_ID)
+          if (!agent || !await agentCtx.sessionExists(agent.id,session)) { sendJson(response,404,{error:'not_found'}); return }
+        } else {
+          try { await hermesJson(`/api/sessions/${encodeURIComponent(session)}`,{},true) } catch (e) { if(e.status===404) { sendJson(response,404,{error:'not_found'}); return } throw e }
+        }
+        if (refusesDirect(agent)) { sendJson(response,409,{error:{code:'thread_route.private_agent',message:'Private and confidential threads cannot use an ordinary subscription.'}}); return }
+        if (request.method === 'PUT') {
+          const value = parseJsonBody(await readBoundedBody(request))
+          if (opusDirect.active(agent.id,session)) { sendJson(response,409,{error:{code:'session_busy'}}); return }
+          if (!['hermes','opus-direct'].includes(value.route)) { sendJson(response,400,{error:{code:'thread_route.invalid'}}); return }
+          opusDirect.routes.set(agent.id,session,value.route)
+        }
+        sendJson(response,200,await opusDirect.info(agent,session)); return
+      }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
       if (agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && /^(?:\/wizard\/(?:helper-continue|background-results|threads\/|voice\/recovery-receipt|attention(?:\/|$)|attachments\/))/u.test(url.pathname)) {
@@ -5879,12 +5939,31 @@ function buildWizardServer(options, lifetime) {
         const operator = proxyPrefix === OPERATOR_PROXY_PREFIX
         if (requireAccess && !(!operator && internalCall(request)) && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         let upstreamPath = url.pathname.slice(proxyPrefix.length) || '/'
+        if (!operator && /^\/v1\/runs\/direct[:%]/.test(upstreamPath)) {
+          const runId = decodeURIComponent(upstreamPath.split('/')[3]), run = opusDirect.get(runId)
+          if (principal.kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
+          if (run && refusesDirect(agents?.read(run.agent_id))) { sendJson(response,409,{error:{code:'thread_route.private_agent'}}); return }
+          if (await opusDirect.handleRun(decodeURIComponent(upstreamPath),request,response,sendJson)) return
+        }
         if (request.method === 'DELETE' && principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
         // Agent routing: a request naming another agent, or a thread pinned to one, never reaches this Hermes.
         let agentResolution = null
         if (agentCtx) {
           agentResolution = await resolveProxyAgent(agentCtx, { method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams, request, operator })
           if (principalOf(request).kind === 'agent' && (operator || agentResolution.agentId !== principalOf(request).agentId)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+          if (!operator && agentResolution.bodyRead) {
+            const input = parseJsonBody(agentResolution.body)
+            const session = agentResolution.sessionId
+            if (session && opusDirect.selected(agentResolution.agentId,session) && isTurnWritePath(upstreamPath)) {
+              const agent = agents.read(agentResolution.agentId)
+              if (refusesDirect(agent)) { sendJson(response,409,{error:{code:'thread_route.private_agent'}}); return }
+              if (principal.kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
+              if (upstreamPath !== '/v1/runs') { sendJson(response,409,{error:{code:'thread_route.use_runs',message:'Use the normal run send/stream path.'}}); return }
+              const run = await opusDirect.admit(agent,session,input,request.headers['idempotency-key'] || '')
+              agents.noteRun(run.run_id,agent.id,session)
+              sendJson(response,202,opusDirect.publicRun(run)); return
+            }
+          }
           if (agentResolution.agentId !== MAIN_AGENT_ID) {
             if (request.method === 'POST' && upstreamPath === '/v1/runs' && agentResolution.body) {
               const input = parseJsonBody(agentResolution.body)
@@ -5985,6 +6064,14 @@ function buildWizardServer(options, lifetime) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
+        if (!operator && !agentResolution && body && request.method === 'POST' && upstreamPath === '/v1/runs') {
+          const input = parseJsonBody(body)
+          if (opusDirect.selected(MAIN_AGENT_ID,input.session_id)) {
+            if (principal.kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
+            const run = await opusDirect.admit({id:MAIN_AGENT_ID},input.session_id,input,request.headers['idempotency-key'] || '')
+            sendJson(response,202,opusDirect.publicRun(run)); return
+          }
+        }
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
           if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
           const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)
@@ -6076,7 +6163,10 @@ function buildWizardServer(options, lifetime) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote)
+        if (body) {
+          const directContext = !operator && upstreamPath === '/v1/runs' ? await opusDirect.context(MAIN_AGENT_ID,parseJsonBody(body).session_id) : ''
+          body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, id => [runTitleNote(id),directContext].filter(Boolean).join('\n\n'))
+        }
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
@@ -6133,6 +6223,7 @@ function buildWizardServer(options, lifetime) {
           return
         }
         let result = Buffer.from(await upstream.arrayBuffer())
+        if (upstream.ok && !operator && request.method === 'GET' && upstreamPath === '/api/sessions') result = opusDirect.project(result,MAIN_AGENT_ID,upstreamPath,url.searchParams)
         if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
         if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
           const ack = JSON.parse(result.toString('utf8'))
@@ -6325,6 +6416,7 @@ function buildWizardServer(options, lifetime) {
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
+        if (upstream.ok && !operator && request.method === 'GET' && /^\/api\/sessions(?:\/[^/]+(?:\/messages)?)?$/.test(upstreamPath)) result = /\/messages$/.test(upstreamPath) ? await opusDirect.projectHistory(result,MAIN_AGENT_ID,upstreamPath,url.searchParams) : opusDirect.project(result,MAIN_AGENT_ID,upstreamPath,url.searchParams)
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file
         // marker. Keep history/listing readable without exposing that location.

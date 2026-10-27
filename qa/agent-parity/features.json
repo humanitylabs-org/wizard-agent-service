@@ -36,6 +36,16 @@
   ],
   "features": [
     {
+      "id": "opus-direct-answer-route",
+      "description": "Owner-selected per-thread direct Opus answers without a Hermes run; private and restricted routes refuse.",
+      "layer": "server",
+      "fixture": "opus-direct-answer-route",
+      "how_to_test": "For each runtime kind exercise route GET/PUT, restart, fake SSE router, zero Hermes sends, provenance history, switch-back context and visible router failure. Restricted kinds execute the 409 thread_route.private_agent refusal policy instead of sending content.",
+      "source_refs": ["server/opus-direct.mjs", "server/thread-routes.mjs", "server/service.mjs"],
+      "reference_tests": ["tests/opus-direct.node.mjs", "qa/agent-parity/opus-direct-check.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "provider-signin-recovery",
       "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route.",
       "layer": "server",

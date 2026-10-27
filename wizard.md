@@ -16,6 +16,13 @@ runtime:
 system: true
 provides:
 - agent-service
+requires:
+  models:
+    opus-direct:
+      label: Opus direct replies
+      tier: frontier
+      tested_on: claude-opus-5-5
+      swap: never
 uses:
 - hermes-agent
 - transcriber

@@ -652,7 +652,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     claim(sessionId)
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
-    const followUp = ctx.followUpNote?.(sessionId) || ''
+    const directContext = await ctx.answerRouteContext?.(agent,sessionId) || ''
+    const followUp = [ctx.followUpNote?.(sessionId) || '', directContext].filter(Boolean).join('\n\n')
     value = { ...value, instructions: agentRunInstructions(ctx.responseStyle?.()) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
@@ -704,6 +705,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     return
   }
   let result = Buffer.from(await upstream.arrayBuffer())
+  if (upstream.ok && method === 'GET' && upstreamPath === '/api/sessions' && ctx.projectAnswerRoute) result = await ctx.projectAnswerRoute(result,agent,upstreamPath,searchParams)
   if (secrets.some((secret) => result.includes(Buffer.from(secret)))) { sendJson(response, 502, { error: 'unsafe_upstream_response', check: 'agent.response' }); return }
   if (upstream.ok && contentType.includes('application/json')) {
     const info = registry.threadAgent(agent)
@@ -820,6 +822,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     // A finished run's output carries the same MEDIA lines the history will; project it identically.
     else if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent)
   }
+  if (upstream.ok && method === 'GET' && ctx.projectAnswerRoute) result = await ctx.projectAnswerRoute(result,agent,upstreamPath,searchParams)
   response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
   response.end(result)
 }

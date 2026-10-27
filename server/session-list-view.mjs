@@ -100,6 +100,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       // The thread's model route (chat-models.js shows and changes it).
       model: typeof item.model === 'string' ? item.model : '', provider: typeof item.provider === 'string' ? item.provider : '',
       modelLockAt: Number(item.wizard_model_lock_updated_at) || 0,
+      ...(item.answer_route === 'opus-direct' ? { answer_route: 'opus-direct' } : {}),
       // The last thing asked (Retry on a failed thread sends it again: controller.ts retryServerFailedSession).
       request: userText,
       // Agents MVP: the agent this thread is pinned to (server metadata). '' = the main agent.
