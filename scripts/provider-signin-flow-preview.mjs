@@ -17,23 +17,26 @@ const failureText = "No Anthropic credentials found. Run 'hermes auth add anthro
 const reply = 'STAGING · Claude Opus (simulated): Your sign-in is working again. I received your original message and can reply now.'
 const jsonResponse = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 const app = createWizardServer({ upstreamOrigin: upstream, helmOrigin: upstream, hermesKey: 'synthetic-only-key', requireAccess: false,
-  settingsPath: join(state, 'settings.json'), wizardOsHome: osHome, hermesStatePath: join(state, 'absent.db'),
-  runQueueStatePath: join(state, 'runs.db'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
+  settingsPath: join(state, 'settings.json'), appsJsonPath: join(state, 'apps.json'), wizardOsHome: osHome, hermesStatePath: join(state, 'absent.db'),
+  runQueueStatePath: join(state, 'runs.db'), runQueuePollIntervalMs: 150, activeSessionReader: async () => [], dispatchHealthReader: () => true,
   requireJoinedDelegationCapability: false, skinsStateDir: join(state, 'skins'), skins: { relays: [], blossom: 'https://127.0.0.1/offline' },
   fetchImpl: async (url, init = {}) => {
     if (new URL(url).origin !== upstream) throw Error('Synthetic rig refused non-fixture upstream')
     const path = new URL(url).pathname
-    if (path === '/v1/runs' && init.method === 'POST') {
-      const body = JSON.parse(init.body), id = `synthetic-${admissions.length + 1}`
+    if ((path === '/v1/runs' || path === '/api/sessions/chat-recent/chat/stream') && init.method === 'POST') {
+      const body = JSON.parse(init.body); if (!body.input) body.input = body.message
+      const id = `synthetic-${admissions.length + 1}`
       admissions.push({ id, ...body, signedIn: signedIn() })
       if (body.provider !== 'anthropic' || body.model !== 'claude-opus-5-5') return jsonResponse({ error: 'This staging thread only supports Claude Opus.' }, 422)
       const list = fixture.fixture.messages.get(session.id)
       if (!list.some(m => m.role === 'user' && JSON.stringify(m.content) === JSON.stringify(body.input))) list.push({ id: `user-${id}`, role: 'user', content: body.input, created_at: new Date().toISOString() })
       const run = { run_id: id, session_id: session.id, status: 'completed', completed: true, output: signedIn() ? reply : failureText,
-        usage: { input_tokens: signedIn() ? 1 : 0, output_tokens: signedIn() ? 1 : 0, total_tokens: signedIn() ? 2 : 0 } }
+        usage: { input_tokens: signedIn() ? 1 : 0, output_tokens: signedIn() ? 1 : 0, total_tokens: signedIn() ? 2 : 0 }, runtime: { model: body.model, provider: body.provider, model_lock: 'confirmed' } }
       runs.set(id, run)
       if (signedIn()) { modelRuns.push({ run_id: id, provider: body.provider, model: body.model, synthetic: true }); list.push({ id: `assistant-${id}`, role: 'assistant', content: reply, model: body.model, created_at: new Date().toISOString() }) }
-      session.updated_at = new Date().toISOString(); return jsonResponse(run, 202)
+      session.updated_at = new Date().toISOString()
+      if (path.endsWith('/chat/stream')) return new Response(`event: run.started\ndata: ${JSON.stringify({ run_id: id, runtime: { model: body.model, provider: body.provider, model_lock: 'accepted' } })}\n\nevent: run.completed\ndata: ${JSON.stringify(run)}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } })
+      return jsonResponse(run, 202)
     }
     const match = path.match(/^\/v1\/runs\/([^/]+)(\/events)?$/)
     if (match && runs.has(match[1])) {
