@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { createWizardServer } from '../server/service.mjs'
+import { createWizardServer, runInstructions } from '../server/service.mjs'
 import { initializeResponseStyle, normalizeSettings, readSettings } from '../server/wizard-os-settings.mjs'
 const dirs: string[] = []
 const fresh = () => { const dir = mkdtempSync(join(tmpdir(), 'style-')); dirs.push(dir); return join(dir, 'settings.json') }
@@ -34,6 +34,16 @@ it('response style migration keeps damaged-settings startup fallback and never r
   writeFileSync(path, bytes)
   expect(initializeResponseStyle(path)?.response_style).toBe('concise')
   expect(readFileSync(path, 'utf8')).toBe(bytes)
+})
+it('Concise keeps the live owned-work follow-through rule without forcing Summary labels', () => {
+  for (const join of [true, false]) {
+    const instructions = runInstructions({ join, response_style: 'concise' })
+    expect(instructions).not.toContain('Under **Still open:**')
+    expect(instructions).toContain('For any unfinished work you own, name its live handle and when it lands')
+    expect(instructions).toContain('Dispatch agent-owned follow-ups within existing authority in this same turn')
+    expect(instructions).toContain('Only owner decisions, money, external sends, or wider authority may be asked of the owner')
+  }
+  expect(runInstructions({ join: true, response_style: 'summary' })).toContain('Under **Still open:**')
 })
 it('response style is an owner setting', async () => {
   const path = fresh(), proof = 'synthetic-owner-proof-'.repeat(3)

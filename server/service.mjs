@@ -276,9 +276,11 @@ function operatorBody(method, pathname, body) {
 // Without joined delegation, helpers finish after the run ends and Wizard brings their results back
 // as a follow-up turn; the agent should say what is running and stop, not wait or poll.
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
+/** @param {{ join: boolean, response_style?: 'summary' | 'concise' }} [contract] */
 export function runInstructions(contract = { join: true }) {
   let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
   if (contract.response_style === 'concise') instructions = instructions
+    .replace('Under **Still open:**, every bullet you own must name', 'For any unfinished work you own, name')
     .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
     .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
   return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
