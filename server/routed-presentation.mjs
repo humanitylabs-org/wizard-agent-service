@@ -2,7 +2,7 @@
 import { join } from 'node:path'
 import { ThreadTitleStore, titleToApply, titleContextLine } from './thread-titles.mjs'
 
-export function createRoutedPresentation({ registry, subjects, spaces }) {
+export function createRoutedPresentation({ registry, subjects, spaces, heavyStatus = (_agent, _id, status) => status, heavyNotices = () => '' }) {
   const stores = new Map(), currentSubjects = new Map()
   const store = agent => {
     if (!stores.has(agent.id)) stores.set(agent.id, new ThreadTitleStore(join(registry.agentsDir, agent.id, 'wizard-thread-titles.json')))
@@ -11,6 +11,8 @@ export function createRoutedPresentation({ registry, subjects, spaces }) {
   const pair = (agent, id) => JSON.stringify([agent.id, id])
   return {
     async project(agent, row, attention, assistantAt, headers) {
+      const guarded = heavyStatus(agent.id, row.id, attention)
+      if (guarded !== attention) { attention = guarded; row = { ...row, status: 'running', wizard_waiting_on: 'heavy' } }
       const titles = store(agent)
       spaces?.apply(agent.id, row.id, attention)
       const applied = subjects.apply(row.id, attention, agent.id)
@@ -36,7 +38,7 @@ export function createRoutedPresentation({ registry, subjects, spaces }) {
     },
     fileStatus(agent, id, attention) { return spaces?.apply(agent.id, id, attention) },
     async runNote(agent, id, headers) {
-      const spaceNote = spaces?.runNote(agent.id) || ''
+      const spaceNote = [spaces?.runNote(agent.id), heavyNotices(agent.id, id)].filter(Boolean).join('\n')
       // Read only this exact selected pair. No main/profile fallback or cross-agent search.
       const response = await registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(id)}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
       if (!response.ok) { await response.body?.cancel(); return [subjects.runNote(), spaceNote].filter(Boolean).join('\n') }

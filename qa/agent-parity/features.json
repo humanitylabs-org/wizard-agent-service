@@ -499,12 +499,13 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags.",
+      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered.",
       "source_refs": [
         "server/thread-status.mjs"
       ],
       "reference_tests": [
-        "tests/thread-status-backfill-list.test.ts"
+        "tests/thread-status-backfill-list.test.ts",
+        "tests/heavy-status.test.ts"
       ],
       "fixture": "status-list-state",
       "policy_exemptions": []

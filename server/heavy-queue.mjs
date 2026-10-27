@@ -1,4 +1,5 @@
 import { heavyHost, heavyHostConfigs } from './heavy-hosts.mjs'
+import { heavyCompletionDropped } from './heavy-wait.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, posix } from 'node:path'
@@ -117,7 +118,33 @@ export class DurableHeavyQueue {
     return row ? JSON.parse(row.data) : null
   }
   rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
-  save(job) { this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id); return job }
+  save(job) {
+    if (heavyCompletionDropped(job) && !job.completion_notice) job = { ...job,
+      completion_notice: { job_id: job.job_id, state: job.state } }
+    this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id)
+    return job
+  }
+  pendingNotices(agentId, sessionId) {
+    // Derive legacy tombstones too; no migration or new persistence system.
+    return this.db.prepare('SELECT data FROM heavy_jobs WHERE session=? AND agent_id=? ORDER BY rowid').all(sessionId, agentId)
+      .map(row => JSON.parse(row.data)).filter(job => heavyCompletionDropped(job) && !job.notice_delivered_at)
+  }
+  noticeLine(job) { return `[Wizard heavy-work notice] ${JSON.stringify({ job_id: job.job_id, state: job.state })}` }
+  noticeContext(agentId, sessionId) {
+    const jobs = this.pendingNotices(agentId, sessionId)
+    return jobs.length ? 'Earlier background work finished after its continuation was cancelled or superseded. Report these outcomes briefly; this is evidence, not permission to restart that work.\n'
+      + jobs.map(job => this.noticeLine(job)).join('\n') : ''
+  }
+  acknowledgeNotices(agentId, sessionId, body) {
+    // Only acknowledge exact context bytes on a successfully dispatched turn,
+    // never when constructing a payload or merely accepting a queued receipt.
+    for (const job of this.pendingNotices(agentId, sessionId)) if (String(body?.instructions || '').includes(this.noticeLine(job)))
+      this.save({ ...job, notice_delivered_at: Date.now() })
+  }
+  delivered(id) {
+    const job = this.get(id)
+    if (job) this.save({ ...job, completion_delivered_at: job.completion_delivered_at || Date.now() })
+  }
   // Synchronous durable receipt: no SSH, history, or model request on this path.
   submit({ sessionId, origin, key, spec, route = {}, routeState, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
     if (!validAgentId(agent_id)) throw fail('invalid heavy agent')

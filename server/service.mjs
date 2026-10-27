@@ -25,7 +25,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -43,12 +43,15 @@ import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
+import { projectOwnedOpenWork } from './owned-open-work.mjs'
+import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
+import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -151,6 +154,8 @@ The originating Wizard run owns the requested outcome through verified completio
 Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
 
 ${SUPERVISOR_SPELL}
+
+${OWNED_OPEN_WORK_INSTRUCTIONS}
 
 ${FINISH_REPORT_INSTRUCTIONS}
 
@@ -272,9 +277,11 @@ function operatorBody(method, pathname, body) {
 // Without joined delegation, helpers finish after the run ends and Wizard brings their results back
 // as a follow-up turn; the agent should say what is running and stop, not wait or poll.
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
+/** @param {{ join: boolean, response_style?: 'summary' | 'concise' }} [contract] */
 export function runInstructions(contract = { join: true }) {
   let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
   if (contract.response_style === 'concise') instructions = instructions
+    .replace('Under **Still open:**, every bullet you own must name', 'For any unfinished work you own, name')
     .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
     .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
   return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
@@ -640,7 +647,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending || truth?.supervisorPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -2462,6 +2469,8 @@ export function createWizardServer(options = {}) {
   const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
+  const ownedStatePath = ownedWorkStatePathOf(options)
+  if (ownedStatePath && (options.hermesStatePath || options.ownedOpenWorkReader)) paths.push(ownedStatePath)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
   const dirs = paths.map(path => dirname(resolve(String(path))))
   if (home) dirs.push(resolve(home))
@@ -2670,7 +2679,17 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
+  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
+    agentId, sessionId, jobs, isDelivered: job => {
+      if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
+      const run = agents?.runThread(agentId, job.resume)
+      return run?.session_id === sessionId && run?.heavy_origin === job.origin
+    },
+  })
+  const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
+  const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
+    heavyStatus, heavyNotices }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -2682,10 +2701,15 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+    decorateDispatch: (agentId, sessionId, body) => {
+      const note = heavyNotices(agentId, sessionId)
+      return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
+    }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
@@ -3373,7 +3397,12 @@ function buildWizardServer(options, lifetime) {
     return record.completion
   }
 
+  let ownedOpenWork = null
   const requireHelperContinuation = async (continuation) => {
+    if (continuation?.kind === OWNED_WORK_KIND) {
+      if (!ownedOpenWork) throw Object.assign(new Error('Owned follow-up unavailable'), { status: 410 })
+      return ownedOpenWork.requireCurrent(continuation)
+    }
     if (hermesStatePath) return requireCurrentContinuation(hermesStatePath, continuation)
     return requireHttpContinuation((path) => hermesJson(path), continuation, FOLLOW_THROUGH_PREFIX)
   }
@@ -3489,6 +3518,8 @@ function buildWizardServer(options, lifetime) {
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
       const upstreamRunId = typeof payload.run_id === 'string' ? payload.run_id : typeof payload.id === 'string' ? payload.id : ''
       if (!upstreamRunId || !new RegExp(`^${ID}$`).test(upstreamRunId)) throw Object.assign(new Error('Hermes queued admission identity was invalid'), { status: 502 })
+      acknowledgeHeavyNotices('hermes', record.sessionId, parseJsonBody(queuedBody))
+      if (record.continuation?.kind === HEAVY_KIND && ['running', 'completed'].includes(payload.status)) heavyWork?.queue.delivered(record.continuation.job_id)
       if (record.trustedPaths.length) {
         runTrustedPaths.set(upstreamRunId, record.trustedPaths)
         runTrustedPaths.set(record.publicRunId, record.trustedPaths)
@@ -3793,7 +3824,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -3832,8 +3863,12 @@ function buildWizardServer(options, lifetime) {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
+      const heavyJobs = heavyWork?.queue.rows()
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
+        const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
+        if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
+        session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         spaceFiling.apply('hermes', session.id, session.wizard_attention)
@@ -3953,6 +3988,9 @@ function buildWizardServer(options, lifetime) {
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
           }
+          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds)) {
+            const t = sessionTruth.get(id); if (t) t.supervisorPending = true
+          }
           result = filterSessionList(
             result,
             operator,
@@ -4021,7 +4059,7 @@ function buildWizardServer(options, lifetime) {
       if (hermes === null) return null
       // The session listing is refreshed in the background after it expires; a snapshot built from
       // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
-      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}` } catch { return null }
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}|${readSupervisorWaitRevision(options.supervisorStatePath)}` } catch { return null }
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {
@@ -4039,8 +4077,9 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
+      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
@@ -4297,6 +4336,18 @@ function buildWizardServer(options, lifetime) {
     })()
     helperAdmissions.set(key, admission)
     try { return await admission } finally { helperAdmissions.delete(key) }
+  }
+
+  // Same private admission/queue/locked-model route as delegation follow-through.
+  // The existing ownership switch also disables this watcher on staging copies.
+  const ownedWorkStatePath = ownedWorkStatePathOf(options)
+  if (options.followThrough !== false && options.ownedOpenWork !== false && ownedWorkStatePath && (hermesStatePath || options.ownedOpenWorkReader)) {
+    ownedOpenWork = createOwnedWorkFollowThrough({ statePath: ownedWorkStatePath, sessionDbPath: hermesStatePath,
+      ...(options.ownedOpenWorkReader ? { read: options.ownedOpenWorkReader } : {}),
+      ...(options.ownedOpenWorkFinder ? { find: options.ownedOpenWorkFinder } : {}),
+      admit: admitHelperContinuation, busy: helperSessionActive,
+      log: line => console.log(`[owned-open-work] ${line}`) })
+    lifetime.own(() => ownedOpenWork.close(), () => ownedOpenWork.stop())
   }
 
   // ---- Resumable uploads and shares (uploads.mjs; wizard-os spec/AGENT_SERVICE_API.md "Uploads"/"Shares").
@@ -6384,6 +6435,17 @@ function buildWizardServer(options, lifetime) {
   })
   server.scheduler = scheduler
   server.supervisor = supervisor
+  if (ownedOpenWork) {
+    server.ownedOpenWork = ownedOpenWork // testable private controller, never an HTTP authority
+    const tick = () => { if (!lifetime.closing) void lifetime.track(ownedOpenWork.tick()) }
+    let timer
+    server.once('listening', () => {
+      timer = setInterval(tick, options.ownedOpenWorkIntervalMs ?? 5_000)
+      timer.unref?.()
+      tick()
+    })
+    lifetime.own(() => clearInterval(timer), () => clearInterval(timer))
+  }
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''
