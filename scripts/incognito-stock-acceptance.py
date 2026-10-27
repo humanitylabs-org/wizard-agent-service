@@ -9,8 +9,9 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'ops/agent-r
 from incognito_runtime import IncognitoManager,PYTHON,BOOT,VERIFY,VERIFY_RAM
 from agent_runtime import RuntimeFailure,docker
 OUT=Path(os.environ.get('INCOGNITO_EVIDENCE','qa/incognito-stock'));OUT.mkdir(parents=True,exist_ok=True)
-report={'synthetic_only':True,'protocol_fixture':True,'real_provider_verified':False,'complete':False}
+report:dict[str,object]={'synthetic_only':True,'protocol_fixture':True,'real_provider_verified':False,'complete':False}
 normal=Path(tempfile.mkdtemp(prefix='incognito-stock-synthetic-'));normal.chmod(0o755)
+node=os.environ.get('INCOGNITO_NODE') or shutil.which('node')
 prefix='incognito-proof-'+secrets.token_hex(8);source=prefix+'-source';fixture=prefix+'-fixture';network=prefix+'-net'
 manager=None;helper=None;service_proc=None;service_log=None;service_root=None;markers=['INC-'+secrets.token_hex(20),'INC-'+secrets.token_hex(20)];clock=[time.monotonic()]
 def stop_signal(*_):raise SystemExit(143)
@@ -39,6 +40,12 @@ for line in sys.stdin:
  except Exception:raise SystemExit(1)
 '''
 try:
+ # The real Service imports node:sqlite. Refuse unsupported Node before any rig starts.
+ if not node:raise RuntimeError('synthetic_service_node_missing')
+ preflight=subprocess.run([node,'--input-type=module','-e',
+  "import { DatabaseSync } from 'node:sqlite';console.log(process.versions.node)"],capture_output=True,text=True,timeout=15)
+ if preflight.returncode:raise RuntimeError('synthetic_service_requires_node_sqlite_use_staged_node22')
+ report['service_node_version']=preflight.stdout.strip()
  lock=json.loads((ROOT/'ops/agent-runtime/hermes-lock.json').read_text());image=lock['runtime_image']
  import yaml
  config={'model':{'provider':'custom','default':'synthetic-incognito','base_url':'http://'+fixture+':18888/v1','api_key':'synthetic-fixture-only','api_mode':'chat_completions'},'fallback_providers':[],
@@ -55,7 +62,7 @@ try:
  cmd(['run','-d','--name',source,*common,'--mount',f'type=bind,src={normal},dst=/opt/data,readonly','--entrypoint',PYTHON,image,'-c','import time;time.sleep(7200)'],diagnose=True)
  wait="import os,time,runpy\nwhile not os.path.exists('/opt/data/provider.py'):time.sleep(.1)\nrunpy.run_path('/opt/data/provider.py',run_name='__main__')"
  cmd(['run','-d','--name',fixture,*common,'--tmpfs','/opt/data:rw,nosuid,nodev,size=32m,uid=10000,gid=10000,mode=0700','--entrypoint',PYTHON,image,'-c',wait],diagnose=True)
- cmd(['exec','-i',fixture,PYTHON,'-c',"import sys;open('/opt/data/provider.py','w').write(sys.stdin.read())"],(ROOT/'scripts/incognito-provider-fixture.py').read_text())
+ cmd(['exec','-i',fixture,PYTHON,'-c',"import sys,os;from pathlib import Path;p=Path('/opt/data/provider.part');p.write_text(sys.stdin.read());os.replace(p,'/opt/data/provider.py')"],(ROOT/'scripts/incognito-provider-fixture.py').read_text())
  driver=SimpleNamespace(agents=object(),project=lambda _:prefix)
  manager=IncognitoManager(driver,docker=docker,failure=RuntimeFailure,image=image,proxy_image='',container_for=lambda *_:source,clock=lambda:clock[0],background=False)
  agent={'id':'synthetic','privacy':'private','model':{'provider':'tinfoil','model':'synthetic-incognito'},'runtime':{'kind':'container','app_id':'synthetic-source'}}
@@ -119,22 +126,40 @@ print(json.dumps({'tool_called':(h/'.mcp-called').read_text()==a,'memory_saved':
  helper=ThreadingHTTPServer(('127.0.0.1',0),handler);helper_thread=threading.Thread(target=helper.serve_forever,daemon=True);helper_thread.start()
  service_root=Path(tempfile.mkdtemp(prefix='incognito-stock-service-'))
  service_log=(OUT/'stock-service.log').open('wb')
- service_env={**os.environ,'QA_FIXTURE_ROOT':str(service_root),'QA_HELPER_ORIGIN':'http://127.0.0.1:'+str(helper.server_port),'QA_PORT':'19744'}
- service_base='http://127.0.0.1:19744/wizard/v1/agents/synthetic/incognito'
+ service_env={**os.environ,'QA_FIXTURE_ROOT':str(service_root),'QA_HELPER_ORIGIN':'http://127.0.0.1:'+str(helper.server_port),'QA_PORT':'0'}
+ service_base=''
  def owner(path='',method='GET',value=None):
   data=None if value is None else json.dumps(value).encode()
   request=urllib.request.Request(service_base+path,data=data,method=method,headers={'Content-Type':'application/json'})
   with urllib.request.urlopen(request,timeout=90) as response:return json.load(response)
  def start_service():
-  proc=subprocess.Popen(['node','tests/fixtures/incognito-stock-service.mjs'],cwd=ROOT,env=service_env,stdout=service_log,stderr=subprocess.STDOUT)
+  global service_base
+  assert service_log is not None and node is not None
+  service_log.flush();offset=service_log.tell()
+  proc=subprocess.Popen([node,'tests/fixtures/incognito-stock-service.mjs'],cwd=ROOT,env=service_env,stdout=service_log,stderr=subprocess.STDOUT)
+  def diagnostic():
+   # This process is exclusively synthetic. Never fetch container stdout/stderr.
+   with (OUT/'stock-service.log').open('rb') as log:log.seek(offset);text=log.read(16384).decode(errors='replace')
+   for marker in markers:text=text.replace(marker,'[REDACTED_SYNTHETIC_CANARY]')
+   print('synthetic_service_proc_output: '+text,file=sys.stderr,flush=True)
   for _ in range(200):
-   if proc.poll() is not None:raise RuntimeError('synthetic_service_start_failed')
-   try:
-    with urllib.request.urlopen('http://127.0.0.1:19744/wizard/v1/agents',timeout=1) as response:
-     if any(a['id']=='synthetic' for a in json.load(response).get('agents',[])):return proc
-   except OSError:pass
+   if proc.poll() is not None:
+    diagnostic();raise RuntimeError('synthetic_service_start_failed')
+   # Read only the current child handshake, never stale log lines or a fixed port.
+   with (OUT/'stock-service.log').open('rb') as log:log.seek(offset);lines=log.read(16384).decode(errors='replace').splitlines()
+   for line in lines:
+    if not line.startswith('{'):continue
+    try:ready=json.loads(line)
+    except ValueError:continue
+    if ready.get('ready') is True and ready.get('synthetic_only') is True and isinstance(ready.get('port'),int) and 0<ready['port']<65536:
+     origin='http://127.0.0.1:'+str(ready['port'])
+     try:
+      with urllib.request.urlopen(origin+'/wizard/v1/agents',timeout=1) as response:
+       if any(a['id']=='synthetic' for a in json.load(response).get('agents',[])):
+        service_base=origin+'/wizard/v1/agents/synthetic/incognito';return proc
+     except OSError:pass
    time.sleep(.1)
-  proc.terminate();proc.wait(timeout=15);raise RuntimeError('synthetic_service_start_timeout')
+  proc.terminate();proc.wait(timeout=15);diagnostic();raise RuntimeError('synthetic_service_start_timeout')
  service_proc=start_service();temporary=owner('','POST',{})['session_id']
  admitted=owner('/'+temporary+'/v1/runs','POST',{'input':'Read the memory animal. '+markers[0]+' '+markers[1]})
  for _ in range(120):
@@ -160,6 +185,7 @@ print(json.dumps({'tool_called':(h/'.mcp-called').read_text()==a,'memory_saved':
  report['complete']=True
 except Exception as exc:
  report['error_type']=type(exc).__name__
+ if isinstance(exc,RuntimeFailure) and hasattr(exc,'detail'):report['runtime_failure_detail']=getattr(exc,'detail')
  # Bounded phase identifiers only; never serialize arbitrary HTTP/provider/tool exception text.
  raise
 finally:

@@ -1,5 +1,6 @@
 """Disposable stock Hermes homes. Content travels only over bounded anonymous pipes."""
 import json
+import logging
 import os
 import re
 import secrets
@@ -59,7 +60,11 @@ finally: dst.close();src.close()
 '''
 RESTORE = "import sys;f=open('/opt/data/state.db','wb');n=0\nwhile True:\n b=sys.stdin.buffer.read(65536)\n if not b:break\n f.write(b);n+=len(b)\nf.close()\nif not n:__import__('os').unlink('/opt/data/state.db')"
 BOOT = '''import os,time,runpy,sys,threading
-while not os.path.exists('/opt/data/.ready'): time.sleep(.1)
+# A helper crash during seed/verification must not leave an unleased RAM home.
+startup_deadline=time.monotonic()+300
+while not os.path.exists('/opt/data/.ready'):
+ if time.monotonic()>=startup_deadline: os._exit(0)
+ time.sleep(.1)
 # Secret values are read only from tmpfs, never Docker environment metadata.
 import json
 os.environ.update(json.load(open('/opt/data/.incognito-environment.json')))
@@ -110,7 +115,7 @@ folder=home/'plugins/wizard-incognito-policy';folder.mkdir(parents=True,exist_ok
 (folder/'__init__.py').write_text(p['policy'])
 meta={'history_search':'available' if (home/'state.db').exists() else 'unavailable'}
 (home/'.incognito-meta.json').write_text(json.dumps(meta))
-(home/'.lease').touch();(home/'.ready').touch()
+# Installation is not launch admission: policy verification must finish first.
 print(json.dumps(meta))
 '''
 POLICY = '''import re
@@ -240,6 +245,7 @@ class IncognitoManager:
                 raise self.failure('incognito_unsupported_runtime',409)
             state={'name':'wizard-incognito-'+secrets.token_hex(12)}
             key=secrets.token_hex(32)
+            step = 'create'
             try:
                 args=['create','--name',state['name'],'--label',LABEL,'--restart','no','--read-only','--log-driver','none',
                       '--cap-drop','ALL','--security-opt','no-new-privileges:true','--pids-limit','256',
@@ -266,26 +272,50 @@ class IncognitoManager:
                     args+=['--mount',f'type=bind,src={mount["Source"]},dst={dest}'+(',readonly' if not mount.get('RW') else '')]
                 args+=['--entrypoint',PYTHON,meta['Image'],'-c',BOOT]
                 self._docker(args)
+                step = 'network_connect'
                 for net in networks[1:]: self._docker(['network','connect',net,state['name']])
+                step = 'container_start'
                 self._docker(['start',state['name']])
+                step = 'verify_ram'
                 self._docker(['exec',state['name'],PYTHON,'-c',VERIFY_RAM])
+                step = 'seed_home'
                 total=self.transfer(['exec',source,PYTHON,'-c',EXPORT],['exec','-i',state['name'],'tar','-x','--no-same-owner','-C','/opt/data'],TOTAL_LIMIT)
+                step = 'seed_history'
                 self.transfer(['exec',source,PYTHON,'-c','LIMIT='+str(TOTAL_LIMIT-total)+'\n'+SNAPSHOT],
                               ['exec','-i',state['name'],PYTHON,'-c',RESTORE],TOTAL_LIMIT-total)
+                step = 'install'
                 installed=self._docker(['exec','-i',state['name'],PYTHON,'-c',INSTALL],input_text=json.dumps({'key':key,'environment':environment,'policy':POLICY}))
                 metadata=json.loads(installed.stdout)
+                step = 'verify_policy'
                 self._docker(['exec',state['name'],PYTHON,'-c',VERIFY])
+                step = 'resolve_port'
                 port=self._docker(['port',state['name'],'8642/tcp']).stdout.strip()
                 if not re.fullmatch(r'127\.0\.0\.1:[0-9]{1,5}',port) or not 1<=int(port.split(':')[1])<=65535:
                     raise self.failure('incognito_port_invalid',502)
                 origin='http://'+port
+                # Do not spend the 90-second gateway lease on policy imports.
+                # BOOT is released only after all installation checks complete.
+                step = 'boot_release'
+                self._docker(['exec',state['name'],PYTHON,'-c',
+                              "from pathlib import Path;p=Path('/opt/data');(p/'.lease').touch();(p/'.ready').touch()"])
+                step = 'api_ready'
                 self.ready(origin,key)
+                step = 'lease_admit'
+                self._docker(['exec',state['name'],PYTHON,'-c',
+                              "import os;os.utime('/opt/data/.lease',None)"])
                 now=self.clock();state.update(lease=now+90,deadline=now+7200)
                 self.sessions[(agent['id'],session_id)]=state
                 return {'ok':True,'origin':origin,'key':key,**metadata}
-            except BaseException:
+            except BaseException as exc:
+                # Fixed phase + bounded class only. Never exception text, argv,
+                # container output, environment, seed, URL or session identifiers.
+                kind = re.sub(r'[^A-Za-z0-9_]', '', type(exc).__name__)[:64] or 'Exception'
+                detail = {'step': step, 'exception_class': kind}
+                logging.getLogger(__name__).warning('incognito_start_failed step=%s exception_class=%s', step, kind)
                 self._remove(state)
-                raise self.failure('incognito_runtime_failed',502) from None
+                error = self.failure('incognito_runtime_failed',502)
+                error.detail = detail
+                raise error from None
 
     def _validate(self, sid):
         if not isinstance(sid, str) or not re.fullmatch(r'incog_[0-9a-f]{32}', sid):

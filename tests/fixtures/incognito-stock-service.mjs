@@ -19,7 +19,7 @@ const runtime = { apply: async () => ({ ok: true }), start: async () => ({ ok: t
 const service = createWizardServer({ upstreamOrigin: `http://127.0.0.1:${ua.port}`, hermesKey: 'synthetic-main-key', requireAccess: false,
   agentBridge: false, followThrough: false, joinedDelegation: 'off', hermesHome: join(root, 'main-home'), wizardOsHome: root,
   appsJsonPath: join(root, 'apps.json'), settingsPath: join(root, 'settings.json'), threadSeenStatePath: join(root, 'seen.json'), agentRuntime: runtime, agentBasePort: 47650 })
-const address = await listen(service, '127.0.0.1', Number(process.env.QA_PORT || 19744))
+const address = await listen(service, '127.0.0.1', Number(process.env.QA_PORT || 0))
 const base = `http://127.0.0.1:${address.port}`, file = join(root, 'agents/synthetic/agent.json')
 if (!existsSync(file)) {
   const response = await fetch(base + '/wizard/v1/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: 'Synthetic', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }) })
@@ -27,7 +27,7 @@ if (!existsSync(file)) {
 }
 const agent = JSON.parse(readFileSync(file)); agent.runtime.port = ua.port; writeFileSync(file, JSON.stringify(agent))
 // Deliberately no content, credentials or transient session identifiers in the process log.
-console.log(JSON.stringify({ ready: true, synthetic_only: true }))
+console.log(JSON.stringify({ ready: true, synthetic_only: true, port: address.port }))
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
   await new Promise(resolve => service.close(resolve)); await service.drained
   await new Promise(resolve => upstream.close(resolve)); process.exit(0)

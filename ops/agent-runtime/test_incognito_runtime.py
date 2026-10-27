@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from incognito_runtime import IncognitoManager,EXPORT,SNAPSHOT,INSTALL,POLICY,BOOT,TOTAL_LIMIT,stream_copy,VERIFY_RAM
+from incognito_runtime import IncognitoManager,EXPORT,SNAPSHOT,INSTALL,POLICY,BOOT,TOTAL_LIMIT,stream_copy,VERIFY_RAM,VERIFY
 class Failure(Exception):
  def __init__(self,code,status):self.code=code;self.status=status;super().__init__(code)
 class Rig:
@@ -69,6 +69,57 @@ class Tests(unittest.TestCase):
   r.fail=True
   with self.assertRaises(Failure) as err:m.start(AGENT,SID)
   self.assertEqual(str(err.exception),'incognito_runtime_failed');m.close()
+ def test_start_diagnostic_is_bounded_phase_and_class_never_exception_or_container_text(self):
+  cases=[('container_start',None),('seed_home','transfer'),('api_ready','ready')]
+  for step,source in cases:
+   with self.subTest(step=step):
+    r=Rig();m=r.manager()
+    def fail(*args):raise ValueError('synthetic-secret-in-exception')
+    if source=='transfer':m.transfer=fail
+    elif source=='ready':m.ready=fail
+    else:r.fail=True
+    with self.assertLogs('incognito_runtime',level='WARNING') as log:
+     with self.assertRaises(Failure) as err:m.start(AGENT,SID)
+    self.assertEqual(err.exception.detail,{'step':step,'exception_class':'Failure' if source is None else 'ValueError'})
+    self.assertEqual(err.exception.code,'incognito_runtime_failed')
+    text=str(err.exception)+json.dumps(err.exception.detail)+' '.join(log.output)
+    for secret in ['synthetic-secret','secret-error-must-not-leak','synthetic-secret-in-exception']:
+     self.assertNotIn(secret,text)
+    self.assertFalse(r.names);self.assertFalse(m.sessions);m.close()
+ def test_gateway_lease_starts_after_slow_policy_verification_and_refreshes_at_admission(self):
+  r=Rig();m=r.manager();original=r.docker;verified=[False];released=[False]
+  def docker(args,**kw):
+   if args[-1]==VERIFY:
+    # A cold policy import can outlast the gateway's 90-second lease.
+    self.assertFalse(released[0]);r.time+=95;verified[0]=True
+   if args[0]=='exec' and "(p/'.ready').touch()" in args[-1]:
+    self.assertTrue(verified[0]);self.assertIn("(p/'.lease').touch()",args[-1]);released[0]=True
+   return original(args,**kw)
+  m.docker=docker
+  def ready(*_):self.assertTrue(released[0]);r.time+=59
+  m.ready=ready;m.start(AGENT,SID)
+  self.assertEqual(m.sessions[('synthetic',SID)]['lease'],r.time+90)
+  self.assertIn("os.utime('/opt/data/.lease',None)",r.calls[-1][0][-1]);m.close()
+ def test_unreleased_boot_expires_if_helper_dies_during_seed_or_policy_verification(self):
+  # Execute the real pre-admission BOOT loop against a synthetic clock only.
+  t=[0]
+  class Expired(BaseException):pass
+  def expired(code):self.assertEqual(code,0);raise Expired()
+  fake_os=SimpleNamespace(path=SimpleNamespace(exists=lambda _:False),_exit=expired)
+  fake_time=SimpleNamespace(monotonic=lambda:t[0],sleep=lambda _:t.__setitem__(0,t[0]+100))
+  with patch.dict(sys.modules,{'os':fake_os,'time':fake_time}):
+   with self.assertRaises(Expired):exec(BOOT.split('# Secret values')[0],{})
+  self.assertEqual(t[0],300)
+ def test_failed_policy_verification_never_releases_gateway(self):
+  r=Rig();m=r.manager();original=r.docker
+  def docker(args,**kw):
+   if args[-1]==VERIFY:raise TimeoutError('synthetic-secret')
+   return original(args,**kw)
+  m.docker=docker
+  with self.assertRaises(Failure) as err:m.start(AGENT,SID)
+  self.assertEqual(err.exception.detail,{'step':'verify_policy','exception_class':'TimeoutError'})
+  self.assertFalse(any(a[0]=='exec' and "(p/'.ready').touch()" in a[-1] for a,_ in r.calls))
+  self.assertFalse(r.names);m.close()
  def test_private_and_mount_scope_fail_closed(self):
   for field,value in [('privacy','standard'),('imported',True)]:
    r=Rig();m=r.manager()
@@ -112,6 +163,7 @@ class Tests(unittest.TestCase):
    result=subprocess.check_output([sys.executable,'-c',script],input=json.dumps({'key':'synthetic-new','environment':{},'policy':POLICY}).encode())
    cfg=yaml.safe_load((root/'config.yaml').read_text());self.assertEqual(cfg['toolsets'],['all']);self.assertIn('synthetic',cfg['mcp_servers']);self.assertEqual(cfg['model']['fallbacks'],['local'])
    self.assertIn('synthetic',cfg['plugins']['enabled']);self.assertIn('wizard-incognito-policy',cfg['plugins']['enabled']);self.assertEqual(json.loads(result)['history_search'],'unavailable')
+   self.assertFalse((root/'.ready').exists());self.assertFalse((root/'.lease').exists())
  def test_stream_copy_is_bounded_binary_pipe_not_archive_file(self):
   with patch('incognito_runtime._docker_command',lambda a:a):
    result=stream_copy([sys.executable,'-c',"import sys;sys.stdout.buffer.write(b'x'*4096)"],[sys.executable,'-c','import sys;assert len(sys.stdin.buffer.read())==4096'],8192)
@@ -148,6 +200,42 @@ class Tests(unittest.TestCase):
    finally:server.shutdown();m.close();server.server_close();thread.join(timeout=2)
  def test_real_compose_driver_http_routes(self):self._http_routes()
  def test_real_runtipi_driver_http_routes(self):self._http_routes(True)
+ def _stock_service_start(self,folder,process,opener=None):
+  import ast,contextlib
+  source=Path(__file__).resolve().parents[2]/'scripts/incognito-stock-acceptance.py'
+  node=next(n for n in ast.walk(ast.parse(source.read_text())) if isinstance(n,ast.FunctionDef) and n.name=='start_service')
+  log=(folder/'stock-service.log').open('wb')
+  self.addCleanup(log.close)
+  ns={'service_log':log,'node':'synthetic-node','ROOT':folder,'OUT':folder,'service_env':{},'service_base':'',
+      'subprocess':SimpleNamespace(STDOUT=subprocess.STDOUT,Popen=lambda *a,**kw:process(kw['stdout'])),'markers':['INC-'+'a'*40],
+      'sys':sys,'json':json,'time':SimpleNamespace(sleep=lambda _:None),
+      'urllib':SimpleNamespace(request=SimpleNamespace(urlopen=opener))}
+  exec(compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),str(source),'exec'),ns)
+  return ns
+ def test_synthetic_service_early_exit_has_bounded_redacted_output(self):
+  from contextlib import redirect_stderr
+  with tempfile.TemporaryDirectory() as d:
+   def process(log):
+    log.write(('Error: EADDRINUSE '+('INC-'+'a'*40)+'\n'+'x'*20000).encode());log.flush()
+    return SimpleNamespace(poll=lambda:1)
+   ns=self._stock_service_start(Path(d),process);output=io.StringIO()
+   with redirect_stderr(output):
+    with self.assertRaisesRegex(RuntimeError,'synthetic_service_start_failed'):ns['start_service']()
+   text=output.getvalue();self.assertIn('EADDRINUSE',text);self.assertIn('[REDACTED_SYNTHETIC_CANARY]',text)
+   self.assertNotIn('INC-'+'a'*40,text);self.assertLess(len(text),16500)
+ def test_synthetic_service_readiness_ignores_stale_handshake_and_uses_child_ephemeral_port(self):
+  from contextlib import nullcontext
+  with tempfile.TemporaryDirectory() as d:
+   def process(log):
+    log.write(b'{"ready":true,"synthetic_only":true,"port":32871}\n');log.flush()
+    return SimpleNamespace(poll=lambda:None)
+   urls=[]
+   def opener(url,**kw):urls.append(url);return nullcontext(io.BytesIO(b'{"agents":[{"id":"synthetic"}]}'))
+   ns=self._stock_service_start(Path(d),process,opener)
+   ns['service_log'].write(b'{"ready":true,"synthetic_only":true,"port":19744}\n');ns['service_log'].flush()
+   ns['start_service']()
+   self.assertEqual(urls,['http://127.0.0.1:32871/wizard/v1/agents'])
+   self.assertEqual(ns['service_base'],'http://127.0.0.1:32871/wizard/v1/agents/synthetic/incognito')
  def test_protocol_fixture_never_invents_memory_or_tool_results(self):
   import ast
   path=Path(__file__).resolve().parents[2]/'scripts/incognito-provider-fixture.py'
