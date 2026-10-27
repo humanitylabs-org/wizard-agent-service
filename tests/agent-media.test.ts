@@ -31,6 +31,7 @@ beforeAll(async () => {
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
         { id: 'positioned', role: 'assistant', content: `First layout.\nMEDIA:${source}\nSecond layout.\nMEDIA:${secondSource}\nChoose either.\nMEDIA:${source}\nMEDIA:${apkSource}`, timestamp: 10 },
+        { id: 'file-first', role: 'assistant', content: `Download first.\nMEDIA:${apkSource}\nThen screenshot.\nMEDIA:${source}`, timestamp: 12 },
         { id: 'literal', role: 'assistant', content: `Example only:\n\`\`\`text\nMEDIA:/example/screenshot.png\n\`\`\``, timestamp: 11 },
         { id: 'assistant-apk', role: 'assistant', content: `Latest build.\n\nMEDIA:${apkSource}\n\nInstall it over the old copy.`, timestamp: 8 },
         { id: 'assistant-missing', role: 'assistant', content: `Here it is.\n\nMEDIA:${join(sourceRoot, 'gone.pdf')}`, timestamp: 9 },
@@ -88,6 +89,9 @@ describe('agent image delivery', () => {
     expect(JSON.parse(blocks[2][1])).toMatchObject({ items: [{ kind: 'file' }] })
     const legacyItems = blocks.flatMap(block => JSON.parse(block[1]).items)
     expect(new Set(legacyItems.map(item => item.id)).size).toBe(3)
+    const fileFirst = payload.data.find((message: { id: string }) => message.id === 'file-first').content as string
+    const ordered = [...fileFirst.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].map(block => JSON.parse(block[1]))
+    expect(ordered.map(envelope => [envelope.items[0].kind, envelope.inline])).toEqual([['file', false], ['image', true]])
     expect(content).not.toContain(sourceRoot)
     const literal = payload.data.find((message: { id: string }) => message.id === 'literal').content
     expect(literal).not.toContain('<helm_attachments>')
