@@ -129,7 +129,7 @@ describe('Chats list over HTTP', () => {
     for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
   })
   async function boot(apps: object[], failure: object) {
-    const sessions = [{ id: 'wizard_nolan', source: 'api_server', title: 'Plan my week', message_count: 2, hidden: false, archived: false, updated_at: new Date().toISOString() }]
+    const sessions = [{ id: 'wizard_nolan', source: 'api_server', title: 'Plan my week', status: 'failed', message_count: 2, hidden: false, archived: false, updated_at: new Date().toISOString() }]
     let status = 'running'
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')

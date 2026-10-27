@@ -608,6 +608,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
                 if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
               }
             }
+            // Upstream status may already say failed. A diagnosis still belongs to this latest run.
+            if (latestDirect?.status === 'failed' && latestDirect.reconnect && projected.status === 'failed') {
+              projected.wizard_reconnect = latestDirect.reconnect
+              projected.wizard_safe_error = ''
+            }
             // A failure the owner explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
