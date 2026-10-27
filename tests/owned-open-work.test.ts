@@ -3,10 +3,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ownedOpenItems, countDispatchHandles, guardOwnedOpenWork, projectOwnedOpenWork } from '../server/owned-open-work.mjs'
+import { ownedOpenItems, countDispatchHandles, dispatchHandles, nonHoldingFollowUpIds, guardOwnedOpenWork, projectOwnedOpenWork } from '../server/owned-open-work.mjs'
 import { createOwnedWorkFollowThrough, readOwnedOpenWork, findOwnedOpenWork, requireOwnedWorkContinuation, OWNED_WORK_PREFIX } from '../server/owned-open-work-follow-through.mjs'
 import { createWizardServer, listen, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
-import { OWNED_OPEN_WORK_INSTRUCTIONS } from '../server/thread-status.mjs'
+import { OWNED_OPEN_WORK_INSTRUCTIONS, guardHeavyStatus, parseStatus } from '../server/thread-status.mjs'
+import { readHermesSessionTruth } from '../server/session-truth.mjs'
+import { readHelperStatuses } from '../server/helper-status.mjs'
 
 const cleanup: Array<() => unknown> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -35,6 +37,56 @@ const call = (name: string, args: any = {}, id = 't1') => ({ id, function: { nam
 const events = (name: string, args: any = {}, result: any = { id: 'live_1', status: 'queued' }) => [
   { role: 'assistant', tool_calls: JSON.stringify([call(name, args)]) }, { role: 'tool', tool_call_id: 't1', content: JSON.stringify(result) },
 ]
+
+describe('owner corrections', () => {
+  it('clear question about follow-up is accepted', () => {
+    for (const item of ['Archimedes: Want me to start the soak? Reply yes', 'Should I run a follow-up check?', 'Shall I start the next pass?']) {
+      expect(ownedOpenItems(reply(item))).toEqual([])
+    }
+    for (const item of ['Archimedes: mine to finish', 'Archimedes: say the word', 'Archimedes: if you want']) expect(ownedOpenItems(reply(item))).toHaveLength(1)
+  })
+  it('owner-labelled item is not owned', () => {
+    for (const label of ['You', 'James', 'Owner']) expect(ownedOpenItems(reply(`${label}: the check covers Archimedes only for now. Whether other agents get it is your call.`))).toEqual([])
+  })
+  it('schedule via tool_call wrapper is credited', () => {
+    const result = { id: '3cd71960-44b0-4f83-a6ce-a4e17746f307', name: 'Owned work check', nextRun: '2026-10-27T22:00:00+07:00' }
+    for (const name of ['mcp__tool_call', 'tool_call', 'functions.tool_call']) expect(countDispatchHandles(events(name, { calls: [{ name: 'wizard_schedule', arguments: { when: '22:00' } }] }, result))).toBe(1)
+    expect(countDispatchHandles(events('mcp__wizard_schedule', {}, result))).toBe(1)
+    expect(countDispatchHandles(events('mcp__wizard_schedule_cancel', {}, result))).toBe(0)
+    expect(countDispatchHandles(events('mcp__tool_call', { calls: [{ name: 'wizard_schedule' }, { name: 'wizard_schedule' }] }, result))).toBe(0)
+    expect(countDispatchHandles(events('mcp__tool_call', { calls: [{ name: 'wizard_schedule' }] }, { ...result, error: 'no' }))).toBe(0)
+  })
+  it('earlier-run schedule handle is credited', () => {
+    const f = transcript(); f.add('user', 'Schedule the follow-up')
+    f.add('assistant', '', { tool_calls: [call('mcp__tool_call', { calls: [{ name: 'wizard_schedule', arguments: { when: '22:00' } }] })] })
+    f.add('tool', JSON.stringify({ id: 'schedule_actual', name: 'Owner check', nextRun: '22:00' }), { tool_call_id: 't1' })
+    f.add('assistant', 'Scheduled'); f.add('user', 'Anything else?')
+    f.add('assistant', reply('Archimedes: started the follow-up schedule_actual, scheduled for 22:00'))
+    f.db.exec('UPDATE messages SET active=0 WHERE id<=3') // compaction cannot erase real handle credit
+    const e = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(e.ownedCount).toBe(1); expect(e.handleCount).toBe(1)
+    expect(guardOwnedOpenWork(e.status, e)).toBe(e.status)
+  })
+  it('follow-through reply is never re-nudged', async () => {
+    const f = transcript(); f.add('user', 'Fix it'); f.add('assistant', reply())
+    const admit = vi.fn(async () => ({})), statePath = join(f.root, 'claims.db')
+    const options: any = { sessionDbPath: f.path, statePath, admit, validate: () => {}, find: async () => [readOwnedOpenWork(f.path, 'wizard_owned')] }
+    const worker = createOwnedWorkFollowThrough(options); cleanup.push(() => worker.close())
+    await worker.tick(); expect(admit).toHaveBeenCalledTimes(1)
+    f.add('user', OWNED_WORK_PREFIX); f.add('assistant', reply())
+    // These were the live boundary changes: reporter rewrite then scheduled wakeup.
+    f.add('user', '[reporter] Rewrite'); f.add('assistant', reply())
+    f.add('user', '[Wizard schedule] Follow up'); f.add('assistant', reply())
+    f.db.exec("UPDATE messages SET active=0 WHERE content LIKE '[Wizard follow-through]%'")
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')!.continuation).toBe(true)
+    const restarted = createOwnedWorkFollowThrough(options); cleanup.push(() => restarted.close())
+    await restarted.tick(); expect(admit).toHaveBeenCalledTimes(1)
+    expect(restarted.evidenceFor('wizard_owned')!.continuation).toBe(true)
+    // A genuine new owner request is a new chain, with its own one correction.
+    f.add('user', 'Different request'); f.add('assistant', reply())
+    await restarted.tick(); expect(admit).toHaveBeenCalledTimes(2)
+  })
+})
 
 describe('owned open work starts without the owner asking', () => {
   it('done + owned item without a handle stays working and starts exactly one continuation', async () => {

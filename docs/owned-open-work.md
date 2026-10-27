@@ -1,7 +1,10 @@
 # Hermes owned open work
 
-A finish report must not hand the owner's attention back to them just to get
-permission to start work the agent already owns. Hermes gets the additional
+Each owned follow-up must plainly be started (a real handle and when it lands),
+or a clear question asking the owner whether to start it. “Want me to start X?
+Reply yes” is resolved as an owner decision; “say the word”, “if you want”, and
+“mine to finish” without dispatch are not. A leading You/James/Owner label wins
+over mentions of Archimedes later in the item. Hermes gets the additional
 `OWNED_OPEN_WORK_INSTRUCTIONS`; the routed-agent prompt is unchanged.
 
 ## Evidence and enforcement
@@ -12,7 +15,12 @@ permission to start work the agent already owns. Hermes gets the additional
   Owner decisions (`needs_you`, `check`) and other agents are untouched.
 - `server/owned-open-work-follow-through.mjs` reads the explicitly mounted Hermes
   `state.db`, read-only. It pairs assistant `tool_calls` with tool results by
-  `tool_call_id`, only after the triggering user row through the final reply.
+  `tool_call_id`. Direct and deferred calls normalize `mcp__` prefixes; a single
+  deferred call may return bare `{id, name, nextRun}` JSON (the name is the schedule
+  title, not the tool). Multi-call wrappers require positional result envelopes.
+  Calls after the triggering input pay for new items. Real retained earlier-turn
+  handles in the same thread can pay for explicitly restated started/scheduled
+  items; compaction does not revoke evidence. Reporter rewrites are not new runs.
   Unknown schemas or incomplete evidence are not treated as zero handles.
   Stream events omit results/arguments, are bounded and disappear on restart;
   the run queue alone misses native/locked runs. The persisted transcript is the
@@ -23,8 +31,11 @@ permission to start work the agent already owns. Hermes gets the additional
   `[Wizard follow-through]` and the existing Wizard history projection labels
   it `role: system`, `display_kind: run_context`, from `Wizard follow-through`,
   never an owner-authored message.
-- A separate service SQLite file records a unique claim for **both** the
-  triggering run/user identity and reply identity before admission. Stable
+- A separate service SQLite file records a unique claim for the owner request
+  chain as well as the triggering run/user and reply identity before admission.
+  Retained human boundaries survive compaction; scheduled wakeups and reporter
+  rewrites cannot authorize another correction in that chain. A genuine new
+  owner request starts a new chain. Stable
   idempotency keys and service-only continuation metadata carry the identity
   through the normal queue. Admission and eventual dispatch revalidate the
   exact reply, request boundary, age and session lease. A newer owner turn or
