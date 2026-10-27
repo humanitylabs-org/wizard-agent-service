@@ -1229,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--agents-dir", required=True, type=Path)
     ap.add_argument("--token-file", type=Path)
     ap.add_argument("--port", type=int, default=7795)
+    ap.add_argument("--incognito-owner", help="scope orphan cleanup to this helper instance label")
     ap.add_argument("--driver", choices=["runtipi", "compose"], default="runtipi")
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
@@ -1257,7 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
     incognito = IncognitoManager(driver, docker=docker, failure=RuntimeFailure, image=DEFAULT_IMAGE,
-        proxy_image=DEFAULT_PROXY_IMAGE, container_for=container_for)
+        proxy_image=DEFAULT_PROXY_IMAGE, container_for=container_for, owner=args.incognito_owner)
     handler = make_handler(token, agents, driver, args.main_container, restricted_driver, incognito)
     server = None
     def terminate(signum, frame):

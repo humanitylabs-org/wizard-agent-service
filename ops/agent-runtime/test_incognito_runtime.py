@@ -24,12 +24,27 @@ class Rig:
    self.install=json.loads(input_text);out='{"history_search":"available"}'
   return SimpleNamespace(returncode=1 if (self.fail and args[0]=='start') or (self.ram_fail and args[-1]==VERIFY_RAM) else 0,stdout=out,stderr='secret-error-must-not-leak')
  def transfer(self,a,b,limit):self.transfers.append((a,b,limit));return 10240
- def manager(self):return IncognitoManager(self.driver,docker=self.docker,failure=Failure,image='ignored-default',proxy_image='ignored-proxy',container_for=lambda *_:'synthetic-source',background=False,ready=lambda *_:None,transfer=self.transfer,clock=lambda:self.time)
+ def manager(self,**kwargs):return IncognitoManager(self.driver,docker=self.docker,failure=Failure,image='ignored-default',proxy_image='ignored-proxy',container_for=lambda *_:'synthetic-source',background=False,ready=lambda *_:None,transfer=self.transfer,clock=lambda:self.time,**kwargs)
 def metadata():
  return {'Image':'sha256:synthetic-exact-image','Config':{'User':'1000:1000','Env':['TINFOIL_API_KEY=synthetic-secret','HTTPS_PROXY=http://synthetic-egress:3128','HERMES_UID=1000']},'HostConfig':{'NetworkMode':'synthetic-uplink'},'NetworkSettings':{'Networks':{'synthetic-uplink':{},'synthetic-sandbox':{}}},'Mounts':[{'Destination':'/opt/data','Source':'/synthetic/home','RW':True},{'Destination':'/run/agent-gateway','Source':'/synthetic/gateway','RW':True}]}
 AGENT={'schema':1,'id':'synthetic','privacy':'private','model':{'provider':'tinfoil','model':'synthetic-model'},'runtime':{'kind':'container','port':18001,'app_id':'agent-synthetic'}}
 SID='incog_'+'a'*32
 class Tests(unittest.TestCase):
+ def test_staging_owner_label_scopes_startup_and_periodic_sweeps(self):
+  r=Rig();m=r.manager(owner='incognito-preview');m.start(AGENT,SID);m.sweep()
+  create=next(a for a,_ in r.calls if a[0]=='create')
+  self.assertIn('wizard.incognito.owner=incognito-preview',create)
+  discoveries=[a for a,_ in r.calls if a[:2] in (['ps','-aq'],['network','ls'])]
+  self.assertGreaterEqual(len(discoveries),4)
+  for args in discoveries:
+   self.assertIn('label=wizard.incognito=1',args)
+   self.assertIn('label=wizard.incognito.owner=incognito-preview',args)
+  m.close()
+ def test_invalid_staging_owner_fails_before_docker(self):
+  r=Rig()
+  with self.assertRaises(ValueError):r.manager(owner='bad owner')
+  self.assertFalse(r.calls)
+
  def test_full_home_stream_preserves_routes_image_and_socket_grants(self):
   r=Rig();m=r.manager();result=m.start(AGENT,SID)
   args=next(a for a,_ in r.calls if a[0]=='create')
@@ -41,6 +56,20 @@ class Tests(unittest.TestCase):
   self.assertEqual(r.transfers[0][0][1],'synthetic-source');self.assertEqual(r.transfers[0][1][-4:],['tar','-x','--no-same-owner','-C','/opt/data'][-4:])
   self.assertEqual(r.transfers[1][2],TOTAL_LIMIT-10240)
   self.assertTrue(any(a[:3]==['network','connect','synthetic-sandbox'] for a,_ in r.calls));m.close()
+ def test_stock_root_dispatch_uses_declared_nonroot_account_and_readonly_wizard_tools(self):
+  r=Rig();r.source['Config']['User']='root'
+  r.source['Config']['Env']+=['HERMES_UID=1000','HERMES_GID=1000']
+  r.source['Mounts'].append({'Type':'bind','Destination':'/wizard','Source':'/synthetic/tools','RW':False})
+  m=r.manager();m.start(AGENT,SID);a=next(a for a,_ in r.calls if a[0]=='create')
+  self.assertEqual(a[a.index('--user')+1],'1000:1000')
+  self.assertIn('type=bind,src=/synthetic/tools,dst=/wizard,readonly',a);m.close()
+ def test_root_without_declared_nonroot_account_and_writable_wizard_fail_closed(self):
+  for uid,gid,rw in [('0','0',False),('root','1000',False),('1000','1000',True)]:
+   r=Rig();r.source['Config']['User']='root';r.source['Config']['Env'] += ['HERMES_UID='+uid,'HERMES_GID='+gid]
+   r.source['Mounts'].append({'Type':'bind','Destination':'/wizard','Source':'/synthetic/tools','RW':rw})
+   m=r.manager()
+   with self.assertRaises(Failure):m.start(AGENT,SID)
+   self.assertFalse(r.transfers);m.close()
  def test_no_swap_log_core_or_writable_root(self):
   r=Rig();m=r.manager();m.start(AGENT,SID);a=next(a for a,_ in r.calls if a[0]=='create')
   for flag in ['--read-only','--cap-drop','--security-opt','--ulimit']:self.assertIn(flag,a)

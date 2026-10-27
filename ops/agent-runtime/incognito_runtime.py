@@ -180,8 +180,11 @@ def stream_copy(source, destination, limit):
 
 class IncognitoManager:
     def __init__(self, driver, *, docker, failure, image, proxy_image, container_for,
-                 clock=time.monotonic, background=True, ready=None, transfer=None):
+                 clock=time.monotonic, background=True, ready=None, transfer=None, owner=None):
         self.driver, self.agents = driver, driver.agents
+        if owner is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", owner):
+            raise ValueError("invalid_incognito_owner")
+        self.owner = owner
         self.docker, self.failure = docker, failure
         self.image, self.proxy_image = image, proxy_image
         self.container_for, self.clock = container_for, clock
@@ -205,7 +208,10 @@ class IncognitoManager:
 
     def _discover(self, kind):
         command = ['ps', '-aq'] if kind == 'container' else ['network', 'ls', '-q']
-        return self._docker([*command, '--filter', 'label=' + LABEL]).stdout.split()
+        filters = ['--filter', 'label=' + LABEL]
+        if self.owner:
+            filters += ['--filter', 'label=wizard.incognito.owner=' + self.owner]
+        return self._docker([*command, *filters]).stdout.split()
 
     def _remove(self, state):
         # Shared source networks/sidecars are never labeled, stopped or removed.
@@ -248,6 +254,10 @@ class IncognitoManager:
                 raise self.failure('incognito_unsupported_runtime',409)
             environment=dict(v.split('=',1) for v in meta['Config'].get('Env',[]) if '=' in v)
             uid=meta['Config'].get('User') or environment.get('HERMES_UID','10000')+':'+environment.get('HERMES_GID','10000')
+            # Stock dispatch starts as root, then drops to its declared numeric account.
+            # Our direct Python entrypoint must start as that account, never root.
+            if uid in ('root', '0', '0:0') and environment.get('HERMES_UID') and environment.get('HERMES_GID'):
+                uid=environment['HERMES_UID']+':'+environment['HERMES_GID']
             if not re.fullmatch(r'[0-9]+(?::[0-9]+)?',uid) or uid.split(':')[0]=='0':
                 raise self.failure('incognito_unsupported_runtime',409)
             state={'name':'wizard-incognito-'+secrets.token_hex(12)}
@@ -262,6 +272,7 @@ class IncognitoManager:
                       '--tmpfs','/var/log:rw,nosuid,nodev,size=16m,mode=1777',
                       '-p','127.0.0.1::8642','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
                       '-e','HERMES_WORKDIR=/opt/data','-e','PYTHONDONTWRITEBYTECODE=1','--workdir','/opt/data']
+                if self.owner: args += ['--label', 'wizard.incognito.owner=' + self.owner]
                 for host in meta['HostConfig'].get('ExtraHosts') or []: args+=['--add-host',host]
                 for dns in meta['HostConfig'].get('Dns') or []: args+=['--dns',dns]
                 for domain in meta['HostConfig'].get('DnsSearch') or []: args+=['--dns-search',domain]
@@ -274,7 +285,8 @@ class IncognitoManager:
                         # New RAM, never another container's tmpfs or a persistent substitute.
                         args+=['--tmpfs',dest+':rw,nosuid,nodev,size=64m,mode=1777'];continue
                     # Preserve scoped app gateway/socket mounts, not source data or host authority.
-                    if not dest.startswith('/run/') or ',' in mount['Source'] or ',' in dest:
+                    scoped = dest.startswith('/run/') or (dest == '/wizard' and mount.get('Type') == 'bind' and mount.get('RW') is False)
+                    if not scoped or ',' in mount['Source'] or ',' in dest:
                         raise self.failure('incognito_unsupported_mount',409)
                     args+=['--mount',f'type=bind,src={mount["Source"]},dst={dest}'+(',readonly' if not mount.get('RW') else '')]
                 args+=['--entrypoint',PYTHON,meta['Image'],'-c',BOOT]
