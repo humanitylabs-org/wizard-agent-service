@@ -34,6 +34,7 @@ import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
+import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
@@ -4141,6 +4142,7 @@ function buildWizardServer(options, lifetime) {
       await pipeline(
         Readable.fromWeb(upstream.body),
         replaceLiteral(record.upstreamRunId, record.publicRunId),
+        providerSignInEvents(),
         ...(record.idempotencyKey.startsWith('schedule:') ? [scheduledRunEvents()] : []),
         secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
         response,
@@ -6122,7 +6124,7 @@ function buildWizardServer(options, lifetime) {
             const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
-            detailed.wizard_retry_input = truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            detailed.wizard_retry_input = (runQueue?.latestForSession(row.id)?.payload?.wizard_provider_auth ? queuedInputTextOf(runQueue.latestForSession(row.id).body) : '') || truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
         }
@@ -6152,6 +6154,7 @@ function buildWizardServer(options, lifetime) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
+            result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original
