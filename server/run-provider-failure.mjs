@@ -39,7 +39,8 @@ export function providerSignInNotice(value) {
   const provider = text === ANTHROPIC_MISSING ? 'Claude'
     : CODEX_MISSING.test(text) || CODEX_REFRESH.test(text) ? 'ChatGPT' : null
   if (!provider) return null
-  const message = `${provider}'s sign-in on your Wizard has expired, so I can't reply right now. Tap Fix it to sign in again, then tap Retry to resend your message.`
+  const target = provider === 'Claude' ? 'Opus' : provider
+  const message = `${provider}'s sign-in has expired, so this message wasn't sent to ${target}. Tap Fix it to sign in again, then tap Retry to resend the same message.`
   return { provider, message, output: `${message}\n\n[Fix it](/troubleshoot/)`, href: '/troubleshoot/' }
 }
 

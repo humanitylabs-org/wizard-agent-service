@@ -27,7 +27,7 @@ it('shows a sign-in expired notice with a Fix it link instead of hermes auth adv
   const first = await q.admit(request)
   const result = q.publicPayload(first.record)
   expect(result).toMatchObject({ status: 'failed', completed: false, error: { type: 'provider_sign_in_expired' } })
-  expect(result.output).toContain("Claude's sign-in on your Wizard has expired")
+  expect(result.output).toContain("Claude's sign-in has expired")
   expect(result.output).toContain('[Fix it](/troubleshoot/)')
   expect(JSON.stringify(result)).not.toContain('hermes auth')
   expect(first.record!.body).toBe(body)
@@ -47,7 +47,7 @@ it('shows the sign-in explanation exactly once, without a duplicate Reply not se
   const { record } = await q.admit(request)
   const result = q.publicPayload(record)
   const history = JSON.parse(projectProviderSignInHistory(Buffer.from('{"data":[]}'), record).toString())
-  const explanation = "Claude's sign-in on your Wizard has expired"
+  const explanation = "Claude's sign-in has expired"
   expect(history.data.map((row: any) => row.content).join('\n').split(explanation)).toHaveLength(2)
   expect(history.data[0]).toMatchObject({ role: 'assistant' })
   expect(result.safe_error).toBe('')
