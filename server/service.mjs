@@ -3518,6 +3518,10 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
+      providerSignInReady: options.providerSignInReady ?? (async provider => {
+        const usage = await aiUsageReader.read()
+        return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
+      }),
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
@@ -4935,6 +4939,15 @@ function buildWizardServer(options, lifetime) {
           if (forget) { sendJson(response, 200, workspaceStore.forget(body?.desk)); return }
           const r = workspaceStore.put(body || {}); sendJson(response, r.status, r.body)
         } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
+        return
+      }
+      if (url.pathname === '/wizard/v1/provider-recovery') {
+        if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const source = runQueue?.get(url.searchParams.get('run_id'))
+        if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
+        const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
+        sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {

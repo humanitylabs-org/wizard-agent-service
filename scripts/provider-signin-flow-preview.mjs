@@ -18,6 +18,7 @@ const reply = 'STAGING · Claude Opus (simulated): Your sign-in is working again
 const jsonResponse = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 const app = createWizardServer({ upstreamOrigin: upstream, helmOrigin: upstream, hermesKey: 'synthetic-only-key', requireAccess: false,
   settingsPath: join(state, 'settings.json'), appsJsonPath: join(state, 'apps.json'), wizardOsHome: osHome, hermesStatePath: join(state, 'absent.db'),
+  providerSignInReady: async provider => provider === 'claude' && signedIn(),
   runQueueStatePath: join(state, 'runs.db'), runQueuePollIntervalMs: 150, activeSessionReader: async () => [], dispatchHealthReader: () => true,
   requireJoinedDelegationCapability: false, skinsStateDir: join(state, 'skins'), skins: { relays: [], blossom: 'https://127.0.0.1/offline' },
   fetchImpl: async (url, init = {}) => {
@@ -70,11 +71,11 @@ const front = createServer((req, res) => {
   }
   if (u.pathname === '/wizard-claude/' && req.method === 'GET') {
     res.setHeader('Content-Type', 'text/html')
-    return res.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>STAGING · Claude Connect</title><style>body{margin:0;padding:24px;font:16px system-ui;background:var(--wz-base,#0b0d12);color:var(--wz-text,#e8eaf0)}button{font:inherit;min-height:48px;border:0;border-radius:12px;padding:12px 24px;background:var(--wz-accent,#e8eaf0);color:var(--wz-base,#0b0d12)}p{line-height:1.5}</style><h1>Claude · Connect</h1><p>STAGING · Simulated sign-in. No account, password or real login is used.</p><p id="status">${signedIn() ? 'Signed in (simulated). Return to your chat and tap Retry.' : 'Claude’s sign-in has expired.'}</p><button id="signin">Sign in</button><script src="/wizard-claude/staging.js"></script><script src="/wizard-os-home/core/app-client.js"></script>`)
+    return res.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>STAGING · Claude Connect</title><style>body{margin:0;padding:24px;font:16px system-ui;background:var(--wz-base,#0b0d12);color:var(--wz-text,#e8eaf0)}button{font:inherit;min-height:48px;border:0;border-radius:12px;padding:12px 24px;background:var(--wz-accent,#e8eaf0);color:var(--wz-base,#0b0d12)}p{line-height:1.5}</style><h1>Claude · Connect</h1><p>STAGING · Simulated sign-in. No account, password or real login is used.</p><p id="status">${signedIn() ? 'Signed in (simulated). Return to Fix Wizard. Your waiting message sends on its own.' : 'Claude’s sign-in has expired.'}</p><button id="signin">Sign in</button><script src="/wizard-claude/staging.js"></script><script src="/wizard-os-home/core/app-client.js"></script>`)
   }
   if (u.pathname === '/wizard-claude/staging.js') {
     res.setHeader('Content-Type', 'application/javascript')
-    return res.end(`document.getElementById('signin').onclick=async function(){this.disabled=true;const r=await fetch('/wizard-claude/api/staging-signin',{method:'POST'});if(!r.ok)throw Error('Staging sign-in failed');document.getElementById('status').textContent='Signed in (simulated). Return to your chat and tap Retry.';this.textContent='Signed in';};`)
+    return res.end(`document.getElementById('signin').onclick=async function(){this.disabled=true;const r=await fetch('/wizard-claude/api/staging-signin',{method:'POST'});if(!r.ok)throw Error('Staging sign-in failed');document.getElementById('status').textContent='Signed in (simulated). Return to Fix Wizard. Your waiting message sends on its own.';this.textContent='Signed in';};`)
   }
   if (u.pathname.startsWith('/troubleshoot/')) {
     if (req.method === 'POST' && !['/troubleshoot/api/repair', '/troubleshoot/api/engine', '/troubleshoot/api/repair/stop'].includes(u.pathname)) { res.writeHead(405); return res.end('Not part of this synthetic scenario') }

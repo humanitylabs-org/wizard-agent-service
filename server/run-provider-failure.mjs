@@ -40,8 +40,8 @@ export function providerSignInNotice(value, selectedModel = '') {
     : CODEX_MISSING.test(text) || CODEX_REFRESH.test(text) ? 'ChatGPT' : null
   if (!provider) return null
   const target = provider === 'Claude' && /opus/i.test(selectedModel) ? 'Opus' : provider
-  const message = `${provider}'s sign-in has expired, so this message wasn't sent to ${target}. Tap Fix it to sign in again, then tap Retry to resend the same message.`
-  return { provider, message, output: `${message}\n\n[Fix it](/troubleshoot/)`, href: '/troubleshoot/' }
+  const message = `This message is saved. Sign in to ${provider} and it will send to ${target} on its own.`
+  return { provider, message, output: '', href: `/troubleshoot/?provider=${provider.toLowerCase()}` }
 }
 
 export function signInNoticeOf(payload) {
@@ -60,6 +60,7 @@ export function normalizeProviderPreflightFailure(payload) {
     safe_error: '',
     error: { type: 'provider_sign_in_expired', message: 'Provider sign-in expired.' },
     wizard_provider_auth: { provider: notice.provider, href: notice.href },
+    wizard_reconnect: { kind: 'provider_signed_out', provider: notice.provider.toLowerCase(), app_id: notice.provider === 'Claude' ? 'wizard-claude' : 'wizard-chatgpt' },
   }
   // Other zero-token preflight failures (including quota) are not sign-outs.
   if (payload.status !== 'completed' || typeof payload.output !== 'string'
@@ -79,22 +80,11 @@ export function projectProviderSignInHistory(result, record, params = new URLSea
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const key = ['data', 'messages', 'items'].find(key => Array.isArray(payload?.[key]))
   if (!key) return result
-  payload[key] = payload[key].map(row => {
+  payload[key] = payload[key].filter(row => !String(row?.id || '').startsWith('wizard-provider-auth:')).map(row => {
     if (!['assistant', 'system'].includes(row?.role ?? row?.author)) return row
     const notice = providerSignInNotice(row.content)
-    return notice ? { ...row, content: notice.output, display_content: notice.output, shareable: false } : row
-  })
-  const normalized = normalizeProviderPreflightFailure(record?.payload)
-  const auth = normalized?.wizard_provider_auth
-  const latest = !Number(params.get('offset') || 0) && (!payload.has_more || params.get('order') === 'latest')
-  if (auth && record?.status === 'failed' && latest && !payload[key].some(row => Number(row?.timestamp || 0) > Number(record.updatedAt || record.createdAt))) {
-    const rows = payload[key]
-    const id = `wizard-provider-auth:${record.publicRunId}`
-    const at = Number(record.updatedAt || record.createdAt)
-    const already = rows.some(row => row?.id === id || (row?.role === 'assistant' && row?.content === normalized.output))
-    if (!already && Number.isFinite(at)) rows.push({ id, session_id: record.sessionId,
-      role: 'assistant', content: normalized.output, timestamp: at, shareable: false })
-  }
+    return notice ? null : row
+  }).filter(Boolean)
   return Buffer.from(JSON.stringify(payload))
 }
 
