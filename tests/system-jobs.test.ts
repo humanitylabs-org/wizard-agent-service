@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -50,6 +50,23 @@ describe('host system jobs', () => {
     const jobs = store()
     expect(() => jobs.importHermes({})).toThrow(/timezone/)
     expect(jobs.importHermes({ timezone: 'UTC' }).results.map((r: any) => r.status)).toEqual(['rejected', 'rejected', 'rejected', 'would import disabled', 'rejected'])
+  })
+  it('preserves the Hermes script boundary, explicit interpreter and default script-directory cwd', () => {
+    const scripts = join(root, 'source/scripts'); mkdirSync(scripts, { recursive: true })
+    symlinkSync(root, join(scripts, 'escape'))
+    fixture([source({ id: 'traversal', script: '../../outside.py' }), source({ id: 'symlink', script: 'escape/missing.py' }), source({ id: 'absolute', script: join(root, 'outside.py') }), source({ id: 'valid', script: 'nested/check.py', interpreter: '/opt/venv/bin/python3' }), source({ id: 'cwd', script: 'check.py', workdir: root })])
+    const results = store().importHermes({ timezone: 'UTC' }).results
+    expect(results.map((r: any) => r.status)).toEqual(['rejected', 'rejected', 'rejected', 'would import disabled', 'would import disabled'])
+    expect(results[3].definition).toMatchObject({ cwd: join(scripts, 'nested'), command: ['/opt/venv/bin/python3', join(scripts, 'nested/check.py')] })
+    expect(results[4].definition.cwd).toBe(root)
+  })
+  it('disables authority on startup timer reconciliation failure and refuses stale callbacks', () => {
+    let broken = false
+    const jobs = store({ timers: { apply: () => { if (broken) throw Error('failed') } } }), j = jobs.create(input())
+    jobs.edit(j.id, { enabled: true }); clock += 300000; broken = true; jobs.reconcile()
+    expect(jobs.get(j.id).enabled).toBe(false)
+    expect(jobs.list()[0].timerError).toContain('enable it again')
+    expect(() => jobs.run(j.id, { scheduled: true })).toThrow(/Enable/)
   })
   it('enables per job and persists success without an agent turn', async () => {
     const jobs = store(), a = jobs.create(input()), b = jobs.create(input({ name: 'Other maintenance' }))
@@ -164,7 +181,7 @@ describe('host system jobs', () => {
     const timer = new SystemdJobTimers({ unitDir: join(root, 'units'), socketPath: join(root, 'socket'), control: () => Buffer.from('') })
     timer.apply({ id: 'parse-fixture', enabled: true, nextAt: clock })
     const result = spawnSync('systemd-analyze', ['verify', '--man=no', join(root, 'units/wizard-system-job-parse-fixture.service'), join(root, 'units/wizard-system-job-parse-fixture.timer')], { encoding: 'utf8', env: { ...process.env, SYSTEMD_LOG_LEVEL: 'err' } })
-    if (result.error?.['code'] === 'ENOENT') return // non-Linux contributors still run rendering checks above
+    if ((result.error as NodeJS.ErrnoException)?.code === 'ENOENT') return // non-Linux contributors still run rendering checks above
     expect({ status: result.status, error: result.stderr }).toEqual({ status: 0, error: '' })
   })
   it('receives timer triggers through owner-only local IPC and rejects disabled/early jobs', async () => {

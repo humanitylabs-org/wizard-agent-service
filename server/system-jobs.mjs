@@ -8,7 +8,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { CronExpressionParser } from 'cron-parser'
 import { acquireLease } from './store-migration.mjs'
-import { notificationFromOutput, isSilentResult } from './scheduler.mjs'
+import { notificationFromOutput, isSilentResult, resolveHermesScript } from './scheduler.mjs'
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status })
 const ID = /^[a-zA-Z0-9_-]{1,80}$/
@@ -132,7 +132,7 @@ export class SystemJobs {
     for (const job of this.list()) {
       const { lastRun, nextRun, ...stored } = job
       try { this.timers?.apply(stored) }
-      catch { this.save({ ...stored, timerError: 'The host timer could not be updated. Check the host timer service.' }) }
+      catch { this.save({ ...stored, enabled: false, timerError: 'The host timer could not be updated. Check the host timer service and enable it again.' }) }
     }
   }
   run(id, { scheduled = false } = {}) {
@@ -196,10 +196,10 @@ export class SystemJobs {
         if (row.monitor_script || row.context_from?.length || (row.repeat?.times && row.repeat.times !== 0)) throw fail('Review chained or finite-repeat work separately')
         const s = row.schedule
         const when = s?.kind === 'cron' ? { cron: s.expr } : s?.kind === 'interval' ? { every: s.minutes } : s?.kind === 'once' ? { once: s.run_at } : null
-        const script = isAbsolute(row.script) ? row.script : resolve(this.hermesHome, 'scripts', row.script)
+        const script = resolveHermesScript(row.script, this.hermesHome)
         if (row.interpreter && (!isAbsolute(row.interpreter) || /[\x00\r\n]/.test(row.interpreter))) throw fail('Review the interpreter')
         const command = /\.(sh|bash)$/i.test(script) ? ['/bin/bash', script] : [row.interpreter || 'python3', script]
-        const input = validate({ name: row.name || row.id, when, timezone, command, cwd: row.workdir || this.hermesHome }, this.now())
+        const input = validate({ name: row.name || row.id, when, timezone, command, cwd: row.workdir || dirname(script) }, this.now())
         return { ...base, status: dryRun ? 'would import disabled' : 'imported disabled', ...(dryRun ? { definition: input } : { id: this.create(input, source).id }) }
       } catch { return { ...base, status: 'rejected', reason: 'Unsupported definition; review the command, dependencies and schedule' } }
     })
@@ -237,7 +237,8 @@ export function systemJobsSocket(jobs, socketPath) {
   if (!isAbsolute(socketPath) || socketPath.length > 100) throw fail('Choose a short absolute host socket path')
   mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 }); chmodSync(dirname(socketPath), 0o700)
   const release = acquireLease(`${socketPath}.writer.sqlite`)
-  rmSync(socketPath, { force: true }) // only after acquiring both the registry and IPC writer leases
+  try { rmSync(socketPath, { force: true }) } catch (error) { release(); throw error }
+  // Cleanup is fenced by both registry and IPC leases; another writer's socket is never removed.
   const server = createServer((req, res) => {
     const id = req.url?.match(/^\/run\/([a-zA-Z0-9_-]{1,80})$/)?.[1]
     try {
@@ -247,6 +248,7 @@ export function systemJobsSocket(jobs, socketPath) {
     } catch (error) { res.writeHead(error.status || 500); res.end() }
   })
   server.once('close', release)
+  server.once('error', release)
   try { server.listen(socketPath, () => chmodSync(socketPath, 0o600)) }
   catch (error) { release(); throw error }
   return server

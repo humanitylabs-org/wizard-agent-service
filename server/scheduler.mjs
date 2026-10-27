@@ -664,28 +664,31 @@ function hermesImportConfig(home) {
 
 const shellQuote = value => `'${value.replace(/'/g, `'"'"'`)}'`
 const expandHome = value => value.startsWith('~/') ? join(homedir(), value.slice(2)) : value
-function hermesScriptPrelude(row, home, config) {
-  if (!row.script) return ''
-  const script = row.script
+// Shared by agent prelude migration and host-only job migration. Resolve missing
+// execution-host files through existing parents without losing the symlink boundary.
+function canonicalImportPath(path) {
+  const absolute = resolve(path)
+  if (existsSync(absolute)) return realpathSync(absolute)
+  const parent = dirname(absolute)
+  return parent === absolute ? absolute : join(canonicalImportPath(parent), basename(absolute))
+}
+export function resolveHermesScript(script, home) {
   if (typeof script !== 'string' || !script.trim() || script.length > 4096 || script.includes('\0')) throw fail('invalid script')
-  // Match Hermes' scripts-directory boundary, including existing symlink targets.
-  // Missing files may be on the execution host: importing never executes them.
-  const canonical = path => {
-    const absolute = resolve(path)
-    if (existsSync(absolute)) return realpathSync(absolute)
-    const parent = dirname(absolute)
-    return parent === absolute ? absolute : join(canonical(parent), basename(absolute))
-  }
-  const scripts = canonical(join(home, 'scripts'))
-  const path = canonical(resolve(scripts, expandHome(script)))
+  const scripts = canonicalImportPath(join(home, 'scripts'))
+  const path = canonicalImportPath(resolve(scripts, expandHome(script)))
   const within = relative(scripts, path)
   if (!within || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) throw fail('invalid script')
+  return path
+}
+function hermesScriptPrelude(row, home, config) {
+  if (!row.script) return ''
+  const path = resolveHermesScript(row.script, home)
   const shell = ['.sh', '.bash'].includes(extname(path).toLowerCase())
   let interpreter = shell ? 'bash' : 'python3'
   if (!shell && row.interpreter) {
     const python = expandHome(text(row.interpreter, 4096, 'interpreter'))
     const pythonName = /^python(?:[0-9]+(?:\.[0-9]+)*)?(?:\.exe)?$/i
-    if (!isAbsolute(python) || !pythonName.test(basename(python)) || !pythonName.test(basename(canonical(python)))) throw fail('invalid interpreter')
+    if (!isAbsolute(python) || !pythonName.test(basename(python)) || !pythonName.test(basename(canonicalImportPath(python)))) throw fail('invalid interpreter')
     interpreter = shellQuote(python)
   }
   const workdir = typeof row.workdir === 'string' && isAbsolute(row.workdir) && existsSync(row.workdir) && statSync(row.workdir).isDirectory() ? row.workdir : dirname(path)
