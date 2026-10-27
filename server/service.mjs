@@ -4724,6 +4724,10 @@ function buildWizardServer(options, lifetime) {
   // Without Cloudflare Access (a Wizard OS box or container) the same owner rule guards every control route.
   const boxOwner = (req) => localOwnerAccess(req, appOwners, trustedProxyIps)
     || (!appOwners.length && ownerLike(principalOf(req)) && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress) && !req.headers.forwarded && !req.headers['x-forwarded-for'] && !req.headers['x-forwarded-host'])
+  // The box-owner rule (Host fence + owner identity on every control route) is opt-in: a box that names its owner
+  // logins or serves a separate apps origin (Mac guest, fresh mode). Existing installs keep the previous none-mode
+  // behaviour until their installer has written that identity, so an upgrade never locks the owner out.
+  const ownerRule = options.ownerRule ?? (appOwners.length > 0 || Boolean(options.appsOrigin))
   const ownerAccess = options.appLifecycleAccess ?? (baseRequireAccess ? (req) => accessVerified(req, baseAccessVerifier) : boxOwner)
   const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
   const appRouteOptions = {
@@ -4775,12 +4779,12 @@ function buildWizardServer(options, lifetime) {
       }
       if (!requireAccess && !url.pathname.startsWith('/wizard/v1/setup') && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !isAgentIngress(request)
         && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: [...appRouteOptions.controlOrigins, ...(url.pathname === '/wizard/helper-continue' ? (options.helperContinueOrigins || []) : [])],
-          selfOrigin, appsOrigin: options.appsOrigin || '' })) {
+          selfOrigin, appsOrigin: options.appsOrigin || '', strictHost: ownerRule })) {
         sendJson(response, 403, { error: 'same_origin_required' }); return
       }
       // Token routes (the agent gateway, its context) and health check their own callers; everything else is the
       // owner's. Containers on the box (installed apps, other services) get no sessions/runs/files authority here.
-      if (!tailnetIngress && !requireAccess && !options.appLifecycleAccess && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !isAgentIngress(request) && !boxOwner(request)) {
+      if (ownerRule && !tailnetIngress && !requireAccess && !options.appLifecycleAccess && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !isAgentIngress(request) && !boxOwner(request)) {
         sendJson(response, 403, { error: 'access_required' }); return
       }
       if (url.pathname === '/wizard/v1/maintenance') {
@@ -5287,7 +5291,7 @@ function buildWizardServer(options, lifetime) {
         // An agent token grants only that agent's context; otherwise retain the Mac owner boundary.
         const tokenAgent = bridge.agentFor(request)
         if (gatewayOnly && !containerAgent(request)) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (!tokenAgent && !(requireAccess ? await accessVerified(request, accessVerifier) : boxOwner(request))) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!tokenAgent && !(requireAccess ? await accessVerified(request, accessVerifier) : (!ownerRule || boxOwner(request)))) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
         const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
         if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
