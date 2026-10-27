@@ -19,7 +19,7 @@ const temp = async () => { const dir = await mkdtemp(join(tmpdir(), 'provider-no
 const body = JSON.stringify({ session_id: 'wizard_signin', input: 'Keep this complete original request. '.repeat(40).trim(), provider: 'anthropic', model: 'claude-opus-5-5' })
 const request = { runtime: 'direct', sessionId: 'wizard_signin', idempotencyKey: 'saved', body, requestHash: queueRequestHash('direct', body) }
 
-it('shows a sign-in expired notice with a Fix it link instead of hermes auth advice', async () => {
+it('a diagnosed sign-in failure exposes the shared Sign in state, not an assistant Retry notice', async () => {
   let launches = 0
   const q = new DurableRunQueue({ statePath: join(await temp(), 'queue.db'), pollIntervalMs: 0,
     activeSessionIds: async () => [], launch: async () => { launches++; return { upstreamRunId: 'upstream', payload: failure() } }, lookup: async () => ({ payload: failure() }) })
@@ -27,13 +27,13 @@ it('shows a sign-in expired notice with a Fix it link instead of hermes auth adv
   const first = await q.admit(request)
   const result = q.publicPayload(first.record)
   expect(result).toMatchObject({ status: 'failed', completed: false, error: { type: 'provider_sign_in_expired' } })
-  expect(result.output).toContain("Claude's sign-in has expired")
-  expect(result.output).toContain('[Fix it](/troubleshoot/)')
+  expect(result.output).toBe('')
+  expect(result.wizard_reconnect).toMatchObject({provider:'claude'})
   expect(JSON.stringify(result)).not.toContain('hermes auth')
   expect(first.record!.body).toBe(body)
   const history = JSON.parse(projectProviderSignInHistory(Buffer.from('{"data":[]}'), first.record).toString())
-  expect(history.data).toHaveLength(1)
-  expect(history.data[0]).toMatchObject({ role: 'assistant', content: result.output, shareable: false })
+  expect(history.data).toHaveLength(0)
+  expect(result.wizard_provider_auth.provider).toBe('Claude')
   for (let i = 0; i < 3; i++) { await q.tick(true); await q.admit(request); await q.initialize() }
   expect(launches).toBe(1)
   expect(q.latestProjections()[0]).toMatchObject({ status: 'failed' })
@@ -48,8 +48,8 @@ it('shows the sign-in explanation exactly once, without a duplicate Reply not se
   const result = q.publicPayload(record)
   const history = JSON.parse(projectProviderSignInHistory(Buffer.from('{"data":[]}'), record).toString())
   const explanation = "Claude's sign-in has expired"
-  expect(history.data.map((row: any) => row.content).join('\n').split(explanation)).toHaveLength(2)
-  expect(history.data[0]).toMatchObject({ role: 'assistant' })
+  expect(history.data).toHaveLength(0)
+  expect(result.wizard_reconnect.provider).toBe('claude')
   expect(result.safe_error).toBe('')
   expect(result.error.message).not.toContain(explanation)
   expect(q.latestProjections()[0].safeError).toBe('')
@@ -65,7 +65,7 @@ it.each(['completed', 'failed'])('repairs old %s receipts without replaying thei
   q._update(first.record!.publicRunId, { status, payload: { ...failure(), status }, updatedAt: 123 })
   await q.initialize(); await q.initialize()
   expect(q.get(first.record!.publicRunId)).toMatchObject({ status: 'failed', updatedAt: 123, body })
-  expect(q.publicPayload(first.record!.publicRunId).output).toContain('[Fix it](/troubleshoot/)')
+  expect(q.publicPayload(first.record!.publicRunId).wizard_reconnect.provider).toBe('claude')
   expect(launches).toBe(1)
 })
 
@@ -79,14 +79,14 @@ it.each([
   'Codex refresh token was already consumed by another client (e.g. Codex CLI or VS Code extension). Run `codex` in your terminal to generate fresh tokens, then run `hermes auth add openai-codex --type oauth` to re-authenticate. Run `hermes model` to re-authenticate.',
 ])('names ChatGPT for controlled Codex auth text: %s', output => {
   const mapped = normalizeProviderPreflightFailure(failure(output))
-  expect(mapped.output).toContain("ChatGPT's sign-in")
-  expect(mapped.output).toContain('[Fix it](/troubleshoot/)')
+  expect(mapped.wizard_provider_auth.provider).toBe('ChatGPT')
+  expect(mapped.output).toBe('')
   expect(JSON.stringify(mapped)).not.toContain('hermes auth')
 })
 
 it('accepts the controlled warning prefix and final_response field', () => {
   expect(normalizeProviderPreflightFailure({ status: 'completed', final_response: `⚠️ Provider authentication failed: ${INCIDENT}` })).toMatchObject({
-    status: 'failed', wizard_provider_auth: { provider: 'Claude', href: '/troubleshoot/' } })
+    status: 'failed', wizard_provider_auth: { provider: 'Claude', href: '/troubleshoot/?provider=claude' } })
 })
 it.each(['A normal answer', `The error was: ${INCIDENT}`, `\`${INCIDENT}\``, 'HTTP 401', 'invalid_grant',
   'Codex token refresh failed with status 500.', 'Codex provider quota exhausted (429). Credentials are still valid;',
@@ -102,8 +102,8 @@ it('never rewrites owner/tool quotations; does not duplicate or paginate an old 
   const projected = projectProviderSignInHistory(input, record)
   const rows = JSON.parse(projected.toString()).data
   expect(rows.slice(0, 2)).toEqual(JSON.parse(input.toString()).data)
-  expect(rows[2].role).toBe('assistant')
-  expect(JSON.parse(projectProviderSignInHistory(projected, record).toString()).data).toHaveLength(3)
+  expect(rows).toHaveLength(2)
+  expect(JSON.parse(projectProviderSignInHistory(projected, record).toString()).data).toHaveLength(2)
   expect(JSON.parse(projectProviderSignInHistory(input, record, new URLSearchParams('offset=100&order=latest')).toString()).data).toHaveLength(2)
   expect(JSON.parse(projectProviderSignInHistory(Buffer.from('{"data":[{"role":"assistant","content":"fixed","timestamp":101}]}'), record).toString()).data).toHaveLength(1)
 })
@@ -117,7 +117,7 @@ it('maps fragmented UTF-8 network frames, preserving unrelated SSE bytes', async
   const output = Buffer.concat(chunks).toString()
   expect(output.startsWith(progress)).toBe(true)
   expect(output).toContain('event: run.failed')
-  expect(output).toContain('[Fix it](/troubleshoot/)')
+  expect(output).toContain('wizard_reconnect')
   expect(output).not.toContain('hermes auth')
 })
 
@@ -143,8 +143,7 @@ it('main HTTP chat history, failed receipt and full Retry input agree without a 
   const run = await (await fetch(origin + `/wizard/hermes/v1/runs/${admission.run_id}`)).json()
   expect(run.status).toBe('failed')
   const history = await (await fetch(origin + '/wizard/hermes/api/sessions/wizard_signin/messages?view=wizard&order=latest')).json()
-  expect(history.data[0]).toMatchObject({ role: 'assistant' })
-  expect(history.data[0].content).toContain('[Fix it](/troubleshoot/)')
+  expect(history.data).toHaveLength(0)
   const detail = await (await fetch(origin + '/wizard/hermes/api/sessions/wizard_signin?view=detail')).json()
   expect(detail.wizard_retry_input).toBe(JSON.parse(body).input)
 })
@@ -161,8 +160,7 @@ it('routed agents share normalization, assistant notice and complete saved Retry
   const run = await (await routed.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': 'saved' }, body })).json()
   expect(run.status).toBe('failed')
   const history = await (await routed.fetch(agent, '/api/sessions/wizard_signin/messages?view=wizard&order=latest')).json()
-  expect(history.data[0].role).toBe('assistant')
-  expect(history.data[0].content).toContain('[Fix it](/troubleshoot/)')
+  expect(history.data).toHaveLength(0)
   const detail = await (await routed.fetch(agent, '/api/sessions/wizard_signin?view=detail')).json()
   expect(detail.wizard_retry_input).toBe(JSON.parse(body).input)
 })

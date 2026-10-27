@@ -8,7 +8,7 @@ import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus }) {
+export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, providerAccessRecovery = false, providerAccessWindowSeconds, providerSignInReady = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -19,7 +19,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         if (!response.ok) throw Object.assign(new Error('routed admission unavailable'),{status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
         return payload
       }
-      const queue = new DurableRunQueue({agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
+      const queue = new DurableRunQueue({providerAccessRecovery,providerAccessWindowSeconds,providerSignInReady,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,
         // An external CLI turn remains protected by Hermes' 409 admission. Only
         // this agent's queue is reconciled here, never another agent's state.db.
         activeSessionIds:async()=>[],canDispatch:async()=>true,
@@ -54,7 +54,12 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
       if (method === 'GET' && /^\/api\/sessions\/[^/]+(?:\/messages)?$/.test(parsed.pathname)) {
         const upstream = await registry.fetchAgent(agent,path,init)
-        if (!upstream.ok) return upstream
+        if (!upstream.ok) {
+          if (upstream.status !== 404 || parsed.pathname.endsWith('/messages')) return upstream
+          const {queue} = await get(agent), saved = queue.savedRetry(decodeURIComponent(parsed.pathname.split('/')[3]))
+          if (!saved) return upstream
+          return json(200, { id: saved.sessionId, wizard_retry_input: queuedInputTextOf(saved.body), wizard_retry_run_id: saved.publicRunId, status: saved.status, queue_reason: saved.waitingReason })
+        }
         const {queue} = await get(agent)
         const record = queue.latestForSession(decodeURIComponent(parsed.pathname.split('/')[3]))
         const raw = Buffer.from(await upstream.arrayBuffer())
