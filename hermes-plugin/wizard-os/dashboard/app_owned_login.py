@@ -28,6 +28,9 @@ def claude_status(env=None, profile=None, config=None):
         config = load_config_readonly() or {}
     root = Path(root).resolve()
     try:
+        setting = (((config.get('plugins') or {}).get('entries') or {}).get(PROVIDER) or {}).get('settings', {}).get('claude_config_dir')
+        if isinstance(setting, str) and setting.strip() and Path(setting).expanduser().resolve() != root:
+            return answer
         owner = json.loads((root/'owner.json').read_text()).get('id')
         rows = json.loads((root/'accounts.json').read_text())
         if not isinstance(owner, str) or not re.fullmatch(r'[a-f0-9]{32}', owner) or not isinstance(rows, list):
