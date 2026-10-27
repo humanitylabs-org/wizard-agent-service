@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
+import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -364,24 +365,28 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // result is saved but the agent has not answered yet, the thread is still working for the owner: the
     // "I've delegated this" reply is progress, not something to act on. Capped at 6 h so a lost helper
     // cannot pin a thread in Working forever.
+    const followUps = new Map()
+    const isFollowUp = (id, handle) => {
+      if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(path, id))
+      return followUps.get(id).has(handle)
+    }
     try {
       const helperRows = db.prepare(`
-        SELECT origin_session_id AS id, COUNT(*) AS n
+        SELECT origin_session_id AS id, delegation_id
         FROM async_delegations
         WHERE state IN ('running', 'stalling', 'finalizing') AND dispatched_at > ?
           AND origin_session_id IN (${placeholders})
-        GROUP BY origin_session_id
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current && !ownerGate(db, String(row.id))) current.helpersRunning = Number(row.n) || 0
+        if (current && !isFollowUp(String(row.id), row.delegation_id) && !ownerGate(db, String(row.id))) current.helpersRunning = (current.helpersRunning || 0) + 1
       }
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
     // Read delivery receipts independently of the latest transcript row and execution state.
     for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
       const current = truth.get(receipt.sessionId)
-      if (current) current.helperResultUnanswered = true
+      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId)) current.helperResultUnanswered = true
     }
     try {
       const newestRow = db.prepare(`
@@ -394,7 +399,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
           && Number(row.timestamp) > nowSeconds - 6 * 3600 && !ownerGate(db, id)
-          && !(delegationId && receiptConsumed(db, id, delegationId))) current.helperResultUnanswered = true
+          && !(delegationId && (receiptConsumed(db, id, delegationId) || isFollowUp(id, delegationId)))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`

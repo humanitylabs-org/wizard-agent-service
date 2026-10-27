@@ -220,7 +220,7 @@ describe('owned work evidence', () => {
 // Real service session-list decoration + private admission + durable queue. No
 // model/provider, owner DB, external network, or deployed release is accessed.
 describe('owned-work service wiring', () => {
-  async function service(enabled = true) {
+  async function service(enabled = true, heavy = false) {
     const f = transcript(), sent: any[] = []
     let scan = false
     f.db.prepare('INSERT INTO sessions(id,title,source,started_at) VALUES(?,?,?,?)').run('wizard_owned', 'Synthetic checks', 'wizard-mobile', Date.now()/1000)
@@ -242,6 +242,8 @@ describe('owned-work service wiring', () => {
       hermesStatePath: f.path, runQueueStatePath: join(f.root, 'queue.db'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [],
       dispatchHealthReader: () => true, followThrough: enabled, followThroughFinder: async () => [], joinedDelegation: 'off',
       ownedOpenWorkFinder: async () => scan ? findOwnedOpenWork(f.path) : [], ownedOpenWorkIntervalMs: 3600_000,
+      ...(heavy ? { heavyStatePath: join(f.root, 'heavy.db'), heavyToken: 'fixture-heavy-token-'.repeat(3),
+        heavyTransport: async (p: any) => ({ job_id: p.job_id, state: 'queued' }) } : {}),
       archivedSessionReader: () => [], pendingFirstSendReader: () => [], wizardOsHome: join(f.root, 'os') })
     const address = await listen(server)
     cleanup.push(async () => { await new Promise<void>(r => server.close(() => r())); await server.drained })
@@ -273,6 +275,50 @@ describe('owned-work service wiring', () => {
     const after = await f.list()
     expect(after.wizard_attention.state).toBe('fyi')
     expect(after.wizard_attention.ask).toBe(status().ask)
+  })
+  it('started follow-up does not hold done', async () => {
+    const f = await service(false, true)
+    f.db.exec(`ALTER TABLE messages ADD COLUMN finish_reason TEXT DEFAULT 'stop'; ALTER TABLE sessions ADD COLUMN model_config TEXT;
+      CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY,origin_session_id TEXT,parent_session_id TEXT,origin_ui_session_id TEXT,state TEXT,dispatched_at REAL,completed_at REAL,task_json TEXT,delivery_state TEXT,result_json TEXT);`)
+    f.add('user', 'Fix the bug')
+    for (const [tool, id] of [['wizard_heavy_submit', 'heavy_followup'], ['delegate_task', 'deleg_followup'], ['wizard_schedule', 'schedule_followup']]) {
+      f.add('assistant', '', { tool_calls: [call(tool, {}, id)] }); f.add('tool', JSON.stringify({ job_id: id }), { tool_call_id: id })
+    }
+    const text = reply('Archimedes: started optional follow-up checks: heavy_followup and deleg_followup running now; schedule_followup scheduled for 22:00').replace('The fix works.', 'The fix is verified.')
+    f.add('assistant', text)
+    const e = readOwnedOpenWork(f.path, 'wizard_owned')!
+    const ids = new Set(e.followUpIds)
+    expect([...ids]).toEqual(['heavy_followup', 'deleg_followup', 'schedule_followup'])
+    const heavyJob = { job_id: 'heavy_followup', sessionId: 'wizard_owned', agent_id: 'hermes', state: 'running', resume: '', created_at: Date.now() }
+    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob], nonHoldingIds: ids })).toEqual(status())
+    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob, { ...heavyJob, job_id: 'required_build' }], nonHoldingIds: ids }).state).toBe('fyi')
+    // Routed agents still use the original false-done guard, even with exemptions supplied.
+    expect(guardHeavyStatus(status(), { agentId: 'philosopher', sessionId: 'wizard_owned', jobs: [{ ...heavyJob, agent_id: 'philosopher' }], nonHoldingIds: ids }).state).toBe('fyi')
+    const heavyDb = new DatabaseSync(join(f.root, 'heavy.db'))
+    heavyDb.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
+      .run(heavyJob.job_id, 'wizard_owned', 'wizardq_origin', 'fixture', 'hash', JSON.stringify(heavyJob), 'hermes'); heavyDb.close()
+    const t = Date.now()/1000
+    f.db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_followup', 'wizard_owned', null, '', 'running', t-1, null, '{"goals":["Optional check"]}', 'pending', '{}')
+    expect(readHelperStatuses(f.path, ['wizard_owned']).size).toBe(0)
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helpersRunning ?? 0).toBe(0)
+    const done = await f.list()
+    expect(done.status).not.toBe('running'); expect(done.wizard_attention.state).toBe('done')
+    expect(done.wizard_waiting_on).toBeUndefined(); expect(done.wizard_helper_status).toBeUndefined()
+    f.db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_required', 'wizard_owned', null, '', 'running', t-1, null, '{"goals":["Required result"]}', 'pending', '{}')
+    expect(readHelperStatuses(f.path, ['wizard_owned']).get('wizard_owned')?.pending).toBe(1)
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helpersRunning).toBe(1)
+    f.db.exec("DELETE FROM async_delegations WHERE delegation_id='deleg_required'")
+    // A terminal but undelivered optional helper must not turn the already fixed request back to Working.
+    f.db.prepare("UPDATE async_delegations SET state='completed',completed_at=?,result_json=?").run(t, '{"results":[{"task_index":0,"status":"completed","summary":"Optional result"}]}')
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helperResultUnanswered).not.toBe(true)
+    // No marker/background handoff is NOT completion, even if its prose calls work optional.
+    f.add('assistant', 'Optional follow-up heavy_followup is running now. Waiting for its required result.')
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')!.followUpIds).toEqual([])
+    const holding = await f.list(); expect(holding.status).toBe('running')
+    const handles = dispatchHandles(events('wizard_heavy_submit', {}, { job_id: 'heavy_followup' }))
+    expect(nonHoldingFollowUpIds(text, status('check'), handles)).toEqual([])
+    expect(nonHoldingFollowUpIds(text.replace('heavy_followup', 'heavy_followup_other'), status(), handles)).toEqual([])
+    expect(nonHoldingFollowUpIds(text, status('fyi'), handles)).toEqual(['heavy_followup'])
   })
   it('followThrough:false leaves shared Hermes sessions untouched', async () => {
     const f = await service(false); f.add('user', 'Fix'); f.add('assistant', reply())

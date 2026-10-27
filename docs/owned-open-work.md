@@ -46,6 +46,23 @@ over mentions of Archimedes later in the item. Hermes gets the additional
   fall back without claiming work is running. An uncertain admission is not
   automatically retried by this policy (the durable queue owns transport retry).
 
+## Follow-ups do not hold a verified finish
+
+Only Hermes receives this distinction. A done/FYI reply must explicitly report a
+verified/tested/fixed outcome before **Still open:**, identify optional follow-up
+items as follow-ups, state they are started, and name exact handles created in
+that reply's run. Only those matching handles are non-holding. A required helper
+or heavy result still holds, including mixed required/optional jobs; a handoff
+with no status, a check/owner gate, a prose-only or old handle, or an unverified
+outcome never gets this exemption. This is deliberately narrower than accepting
+earlier handles as credit for an explicitly restated schedule.
+
+The existing heavy-status guard, heavy list wait, helper status/result projection
+and supervisor-build wait all use those same identities. Work still executes and
+returns its own result; it simply cannot suppress the already verified fix's done
+alert. Required heavy-job false-done protection and routed-agent behavior remain
+unchanged.
+
 ## Options
 
 Default-on for Hermes when `hermesStatePath` is explicitly provided. Portable

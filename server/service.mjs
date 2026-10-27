@@ -44,7 +44,7 @@ import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
-import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
+import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
@@ -2680,7 +2680,10 @@ function buildWizardServer(options, lifetime) {
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
-    agentId, sessionId, jobs, isDelivered: job => {
+    agentId, sessionId, jobs,
+    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
+      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
+    isDelivered: job => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
       return run?.session_id === sessionId && run?.heavy_origin === job.origin
@@ -3983,7 +3986,14 @@ function buildWizardServer(options, lifetime) {
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
-              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(heavyJobRows(), listedSessionIds))) {
+              const followUps = new Map()
+              const holdingJobs = heavyJobRows().filter(job => {
+                const id = job.sessionId ?? job.session_id
+                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
+                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+                return !followUps.get(id).has(job.job_id ?? job.id)
+              })
+              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(holdingJobs, listedSessionIds))) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
