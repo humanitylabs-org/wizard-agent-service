@@ -150,6 +150,7 @@ export class DurableRunQueue {
     onPendingSteerReplay = () => {},
     providerAccessRecovery = false,
     providerAccessWindowSeconds = 6 * 3600,
+    providerFailureDismissed = () => false,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -175,6 +176,7 @@ export class DurableRunQueue {
     this.interruptRecoveryMaxAgeSeconds = Math.max(60, Number(interruptRecoveryMaxAgeSeconds) || 6 * 3600)
     this.steerDelivered = steerDelivered
     this.providerAccessRecovery = providerAccessRecovery === true
+    this.providerFailureDismissed = providerFailureDismissed
     this.providerAccessWindowSeconds = Math.max(1, Math.min(6 * 3600, Number(providerAccessWindowSeconds) || 6 * 3600))
     this.onPendingSteerReplay = onPendingSteerReplay
     this.leaselessSince = new Map()
@@ -277,7 +279,8 @@ export class DurableRunQueue {
       const payload = normalizeProviderPreflightFailure(record.payload)
       if (payload !== record.payload) this._update(record.publicRunId, { status: 'failed', payload, updatedAt: record.updatedAt })
     }
-    if (this.providerAccessRecovery) for (const record of this._rows("status = 'failed' AND runtime = 'direct' AND provider_wait_deadline = 0")) this._waitForProvider(record)
+    // Only failure-time admission creates provider_access intent. Enabling this
+    // feature must not resurrect old failures; persisted waits resume in tick().
     await this.tick(true)
     if (!this.closed && this.pollIntervalMs > 0 && !this.timer) {
       this.timer = setInterval(() => void this.tick().catch(() => undefined), this.pollIntervalMs)
@@ -634,10 +637,18 @@ export class DurableRunQueue {
       payload: { status: 'cancelled', superseded_by_retry: true }, terminalAt: nowSeconds() })
   }
 
+  dismissProviderAccess(sessionId) {
+    // Dismiss is session-scoped, including helper deliveries and queued rows
+    // whose public run id is not the displayed external failure reference.
+    for (const row of this.database.prepare("SELECT * FROM wizard_run_queue WHERE session_id=? AND status='queued' AND (waiting_reason='provider_access' OR (provider_recovery_attempted=1 AND retry_source_id<>''))").all(sessionId)) {
+      this._releaseProviderSource(this._record(row))
+    }
+  }
+
   _waitForProvider(record) {
     if (!this.providerAccessRecovery || record.runtime !== 'direct' || record.status !== 'failed'
         || record.payload?.error?.type !== 'provider_preflight_failed' || record.providerRecoveryAttempted
-        || this._ownerStopped(record)) return record
+        || this._ownerStopped(record) || this.providerFailureDismissed(record)) return record
     const value = parseJson(record.body, {})
     if (!value.input || (typeof value.input === 'string' && !value.input.trim()) || (Array.isArray(value.input) && !value.input.length)) return record
     if (!record.continuation && this.latestForSession(record.sessionId)?.publicRunId !== record.publicRunId) return record
@@ -662,7 +673,8 @@ export class DurableRunQueue {
   _resumeProviderAccess() {
     if (!this.providerAccessRecovery) return
     for (const source of this._rows("status='queued' AND waiting_reason='provider_access'")) {
-      if (this._ownerStopped(source) || (!source.continuation && this.latestForSession(source.sessionId)?.publicRunId !== source.publicRunId)) { this._releaseProviderSource(source); continue }
+      if (this._ownerStopped(source) || this.providerFailureDismissed(source)
+          || (!source.continuation && this.latestForSession(source.sessionId)?.publicRunId !== source.publicRunId)) { this._releaseProviderSource(source); continue }
       if (source.providerWaitDeadline <= nowSeconds()) {
         this._update(source.publicRunId, {status:'failed', waitingReason:'', retryAfter:0,
           payload:{...source.payload,status:'failed',safe_error:'The AI sign-in did not come back in time. Your message is saved. Tap Retry when you are signed in.'},terminalAt:nowSeconds()})
@@ -1004,6 +1016,13 @@ export class DurableRunQueue {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
     if (fresh.upstreamRunId) return this._refresh(fresh, true)
+    // Recovery admission and dispatch can be separated by capacity/health awaits.
+    // Recheck the original request so a Dismiss in that gap still wins.
+    if (fresh.providerRecoveryAttempted && fresh.retrySourceId
+        && this.providerFailureDismissed(this.get(fresh.retrySourceId) ?? fresh)) {
+      this._releaseProviderSource(fresh)
+      return this.get(fresh.publicRunId)
+    }
     let current = this._update(record.publicRunId, { status: 'launching', waitingReason: '' })
     try {
       const result = await this.launch(current)
