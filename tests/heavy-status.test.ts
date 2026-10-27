@@ -25,7 +25,11 @@ it('old finished heavy jobs never pull threads back into Working', async () => {
   const active = ['queued', 'running'].map(state => ({ job_id: `active_${state}`, sessionId: state, state, created_at, resume: '' }))
   const partial = { ...legacy[1], job_id: 'partial', completion_delivered_at: 123 }
   const delivered = { ...legacy[2], job_id: 'delivered', completion_delivered_at: 456, notice_delivered_at: 789 }
-  for (const job of [...legacy, ...active, partial, delivered]) db.prepare('INSERT INTO heavy_jobs VALUES(?,?,?,?,?,?)')
+  // Already tracked but not yet reported when the upgrade lands: must stay owed.
+  const trackedNotice = { job_id: 'tracked_notice', sessionId: 'tracked', state: 'failed', created_at, receipt: { finished_at },
+    resume: 'superseded', continuation_invalidated: true, completion_notice: { job_id: 'tracked_notice', state: 'failed' } }
+  const awaiting = { job_id: 'awaiting_continuation', sessionId: 'awaiting', state: 'completed', created_at, receipt: { finished_at }, resume: '' }
+  for (const job of [...legacy, ...active, partial, delivered, trackedNotice, awaiting]) db.prepare('INSERT INTO heavy_jobs VALUES(?,?,?,?,?,?)')
     .run(job.job_id, job.sessionId, 'origin', job.job_id, 'hash', JSON.stringify(job))
   db.close()
   let queue: any
@@ -46,6 +50,13 @@ it('old finished heavy jobs never pull threads back into Working', async () => {
     expect(queue.get('partial')).toMatchObject({ completion_delivered_at: 123, notice_delivered_at: created_at, delivery_backfill: 'legacy-migration' })
     expect(queue.get('delivered')).toMatchObject(delivered)
     expect(queue.get('delivered').delivery_backfill).toBeUndefined()
+    for (const id of ['tracked_notice', 'awaiting_continuation']) {
+      const kept = queue.get(id)
+      expect(kept.delivery_backfill).toBeUndefined()
+      expect(kept.completion_delivered_at).toBeUndefined()
+      expect(heavyResultOwed(kept)).toBe(true)
+    }
+    expect(queue.pendingNotices('hermes', 'tracked').map((job: any) => job.job_id)).toEqual(['tracked_notice'])
     for (const job of active) expect(queue.get(job.job_id)).toEqual({ ...job, agent_id: 'hermes', session_id: job.sessionId })
     const migrated = queue.rows().filter((job: any) => job.sessionId === 'legacy')
     await queue.tick() // Work still active at migration finishes afterward.
@@ -69,6 +80,8 @@ it('old finished heavy jobs never pull threads back into Working', async () => {
       expect(queue.pendingNotices('hermes', 'running').map((job: any) => job.job_id)).toEqual(['active_running'])
     }
     queue.delivered('active_queued')
+    queue.delivered('awaiting_continuation')
+    queue.acknowledgeNotices('hermes', 'tracked', { instructions: queue.noticeContext('hermes', 'tracked') })
     queue.acknowledgeNotices('hermes', 'running', { instructions: queue.noticeContext('hermes', 'running') })
     for (const job of queue.rows()) expect(heavyResultOwed(job)).toBe(false)
   } finally { await queue?.close(); rmSync(root, { recursive: true, force: true }) }

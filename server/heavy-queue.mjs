@@ -114,6 +114,10 @@ export class DurableHeavyQueue {
       for (const row of this.db.prepare('SELECT id,data FROM heavy_jobs').all()) {
         const job = JSON.parse(row.data)
         if (!terminal.has(job.state) || (job.completion_delivered_at && job.notice_delivered_at)) continue
+        // Rows written by the delivery-tracking release are not legacy: a
+        // dropped result already carrying its notice, or a finished job whose
+        // continuation has not been dispatched yet, is still owed to the owner.
+        if (job.completion_notice || (!job.resume && !job.cancel_requested && !job.continuation_invalidated)) continue
         const stamp = job.receipt?.finished_at ?? job.created_at
         update.run(JSON.stringify({ ...job,
           completion_delivered_at: job.completion_delivered_at || stamp,
