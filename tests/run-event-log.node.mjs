@@ -81,3 +81,28 @@ test('locked bridge records the live chat/stream frames under the native run id'
   assert.deepEqual(events.map(e => e.event), ['tool.started', 'tool.completed', 'message.delta', 'run.completed'])
   assert.equal(events[0].data.tool, 'terminal'); assert.equal(events[2].data.delta, 'Disk is fine.')
 })
+
+test('a terminal frame recorded while the reader is suspended at a yield is still delivered', async () => {
+  const log = new RunEventLog(); log.open('run_race')
+  log.record('run_race', 'tool.started', { tool_name: 'terminal' })
+  const iter = log.frames('run_race')
+  const first = await iter.next()
+  assert.match(first.value, /tool\.started/)
+  log.record('run_race', 'assistant.delta', { delta: 'last words' })
+  log.record('run_race', 'run.completed', {})
+  const rest = []
+  for (let step = await iter.next(); !step.done; step = await iter.next()) rest.push(step.value)
+  assert.deepEqual(rest.map(f => f.match(/^event: (.+)$/m)[1]), ['message.delta', 'run.completed'])
+})
+
+test('a detach while suspended still delivers frames recorded before it', async () => {
+  const log = new RunEventLog(); log.open('run_det')
+  log.record('run_det', 'tool.started', { tool_name: 'a' })
+  const iter = log.frames('run_det')
+  await iter.next()
+  log.record('run_det', 'tool.completed', { tool_name: 'a' })
+  log.detach('run_det')
+  const step = await iter.next()
+  assert.match(step.value, /tool\.completed/)
+  assert.equal((await iter.next()).done, true)
+})

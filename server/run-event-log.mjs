@@ -95,6 +95,8 @@ export class RunEventLog {
     while (!signal?.aborted) {
       const pending = run.events.filter(([seq]) => seq > cursor)
       for (const [seq, frame] of pending) { cursor = seq; yield frame }
+      // A frame (often the terminal one) may land while we were suspended at a yield: send it first.
+      if (run.events.length && run.events.at(-1)[0] > cursor) continue
       if (run.terminal || run.detached) return
       await new Promise(resolve => {
         const wake = () => { run.listeners.delete(wake); signal?.removeEventListener?.('abort', wake); resolve() }
