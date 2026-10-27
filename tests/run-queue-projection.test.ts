@@ -44,8 +44,9 @@ describe('Chats run queue hot projections', () => {
       .run(JSON.stringify({ error: 'HTTP 401', safe_error: 'Previous failure' }))
     expect(queue.latestProjections(['wizard_finished'])[0]).toMatchObject({
       preview: 'First line\nSecond line', status: 'failed',
-      safeError: 'ChatGPT is signed out. Open ChatGPT to reconnect, then tap Retry.',
-      reconnect: { kind: 'provider_signed_out', provider: 'chatgpt', app_id: 'wizard-chatgpt' },
+      // Main now renders the diagnosed sign-in through reconnect, not a duplicate safe-error bubble.
+      safeError: '',
+      reconnect: { kind: 'provider_signed_out', provider: 'chatgpt', app_id: 'wizard-chatgpt', run_id: 'finished' },
     })
   })
 
