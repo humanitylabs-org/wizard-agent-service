@@ -74,8 +74,11 @@ export class SystemJobs {
   constructor({ statePath, timers = null, notifier = null, now = Date.now, hermesHome = '', execute = executeSystemCommand }) {
     if (!isAbsolute(statePath)) throw fail('Explicit state path required')
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
-    const release = acquireLease(`${statePath}.writer.sqlite`)
+    const releaseRegistry = acquireLease(`${statePath}.writer.sqlite`)
+    let releaseTimers = () => {}
+    const release = () => { releaseTimers(); releaseRegistry() }
     try {
+      if (timers?.unitDir) releaseTimers = acquireLease(join(timers.unitDir, '.wizard-system-jobs.writer.sqlite'))
       this.db = new DatabaseSync(statePath)
       chmodSync(statePath, 0o600)
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -233,7 +236,8 @@ export function executeSystemCommand(job, signal) {
 export function systemJobsSocket(jobs, socketPath) {
   if (!isAbsolute(socketPath) || socketPath.length > 100) throw fail('Choose a short absolute host socket path')
   mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 }); chmodSync(dirname(socketPath), 0o700)
-  rmSync(socketPath, { force: true }) // only after the caller has acquired the writer lease
+  const release = acquireLease(`${socketPath}.writer.sqlite`)
+  rmSync(socketPath, { force: true }) // only after acquiring both the registry and IPC writer leases
   const server = createServer((req, res) => {
     const id = req.url?.match(/^\/run\/([a-zA-Z0-9_-]{1,80})$/)?.[1]
     try {
@@ -242,7 +246,9 @@ export function systemJobsSocket(jobs, socketPath) {
       jobs.run(id, { scheduled: true }); res.writeHead(202); res.end()
     } catch (error) { res.writeHead(error.status || 500); res.end() }
   })
-  server.listen(socketPath, () => chmodSync(socketPath, 0o600))
+  server.once('close', release)
+  try { server.listen(socketPath, () => chmodSync(socketPath, 0o600)) }
+  catch (error) { release(); throw error }
   return server
 }
 

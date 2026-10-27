@@ -90,7 +90,7 @@ describe('host system jobs', () => {
     const calls: any[] = []
     const bridge = { apps: () => [{ id: 'bell', prefix: 'bell', jobs: ['notifications'], status: 'running' }], callTool: async (...args: any[]) => { calls.push(args); return {} } }
     const jobs = store({ notifier: scheduleNotifier({ bridge, appsJsonPath: join(root, 'none') }) })
-    const j = jobs.create(input({ notify, command: [process.execPath, '-e', `process.stdout.write(${JSON.stringify(output)})`] }))
+    const j = jobs.create(input({ notify, command: [process.execPath, '-e', `process.stdout.write(${String(output).length > 16000 ? "'x'.repeat(20000)" : JSON.stringify(output)})`] }))
     jobs.edit(j.id, { enabled: true }); jobs.run(j.id); await settle(jobs); await jobs.flushAlerts()
     expect(calls).toHaveLength(count)
     if (count) expect(calls[0]).toEqual(['bell__notify', { title: 'Backup finished', message: 'Your files are protected.' }, 'hermes'])
@@ -154,6 +154,18 @@ describe('host system jobs', () => {
     timer.apply({ ...job, enabled: false })
     expect(controls.at(-1)).toEqual(['disable', '--now', 'wizard-system-job-fixture.timer'])
     expect(() => timer.apply({ ...job, id: '../arbitrary' })).toThrow()
+  })
+  it('refuses independent registries targeting the same host timer directory', () => {
+    const timers = new SystemdJobTimers({ unitDir: join(root, 'units'), socketPath: join(root, 'socket'), control: () => Buffer.from('') })
+    store({ timers })
+    expect(() => store({ statePath: join(root, 'other.sqlite'), timers })).toThrow(/exclusive writer ownership/)
+  })
+  it('validates generated units with the real systemd parser without installing or starting them', () => {
+    const timer = new SystemdJobTimers({ unitDir: join(root, 'units'), socketPath: join(root, 'socket'), control: () => Buffer.from('') })
+    timer.apply({ id: 'parse-fixture', enabled: true, nextAt: clock })
+    const result = spawnSync('systemd-analyze', ['verify', '--man=no', join(root, 'units/wizard-system-job-parse-fixture.service'), join(root, 'units/wizard-system-job-parse-fixture.timer')], { encoding: 'utf8', env: { ...process.env, SYSTEMD_LOG_LEVEL: 'err' } })
+    if (result.error?.['code'] === 'ENOENT') return // non-Linux contributors still run rendering checks above
+    expect({ status: result.status, error: result.stderr }).toEqual({ status: 0, error: '' })
   })
   it('receives timer triggers through owner-only local IPC and rejects disabled/early jobs', async () => {
     const jobs = store(), j = jobs.create(input()), path = join(root, 'host.sock')
