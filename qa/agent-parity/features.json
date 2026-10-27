@@ -267,7 +267,7 @@
       "id": "retry-input",
       "description": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session",
       "layer": "server",
-      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session.",
+      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session. Fail before any answer, clear runtime user history, restart, hydrate the durable saved reference and tap Retry twice; require exact saved words, one new receipt and one dispatch through each authorized runtime transport.",
       "source_refs": [
         "server/session-detail.mjs"
       ],
