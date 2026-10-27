@@ -2653,7 +2653,14 @@ function buildWizardServer(options, lifetime) {
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const providerSignInReady = options.providerSignInReady ?? (async provider => {
+    const usage = await aiUsageReader.read()
+    return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
+  })
+  const providerRecoveryOptions = { providerSignInReady,
+    providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
+    providerAccessWindowSeconds: options.providerAccessWindowSeconds }
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -3524,10 +3531,7 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
-      providerSignInReady: options.providerSignInReady ?? (async provider => {
-        const usage = await aiUsageReader.read()
-        return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
-      }),
+      ...providerRecoveryOptions,
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),

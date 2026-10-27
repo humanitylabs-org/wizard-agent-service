@@ -35,6 +35,7 @@
     }
   ],
   "features": [
+    {"id":"provider-signin-recovery","layer":"server","fixture":true,"how_to_test":"Fail a real HTTP admission with a controlled zero-token sign-in error, observe unavailable then ready, and assert one same-model source-preserving resend on main, host-profile, container and restricted queues."},
     {
       "id": "supervisor-reporter",
       "description": "Every runtime receives the Supervisor spell and six Hermes session-injected tools; standard agents can report through their authenticated transport. Scheduled replies share Reporter validation.",
