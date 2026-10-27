@@ -680,7 +680,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   let upstream
   try {
     upstream = await (ctx.fetchAgent || registry.fetchAgent)(agent, `${upstreamPath}${query.size ? `?${query}` : ''}`, {
-      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal, wizardRequestHash,
+      method, headers, body: hasBody ? JSON.stringify(value) : undefined, redirect: 'manual', signal: controller.signal, wizardRequestHash, wizardDetail: searchParams.get('view') === 'detail',
     })
   } catch (error) {
     if (error instanceof AgentError) throw error
