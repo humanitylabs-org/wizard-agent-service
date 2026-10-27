@@ -212,6 +212,10 @@ server = createWizardServer({
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
+  // Automatic owned-open-work nudges started extra replies in threads whose work was already running
+  // elsewhere (owner, 27 Oct 2026: "multiple replies in many threads instead of just one good reply").
+  // Off unless explicitly enabled; the prompt rule alone carries the contract.
+  ownedOpenWork: process.env.WIZARD_OWNED_OPEN_WORK === 'on',
   // Agents (spec/AGENTS.md): folders under <WIZARD_OS_HOME>/agents; containers via the host agent-runtime helper.
   ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
   ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),

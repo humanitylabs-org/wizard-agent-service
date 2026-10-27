@@ -405,3 +405,11 @@ describe('owned open work waits for a busy thread', () => {
     worker.close(); db.close()
   })
 })
+
+describe('one good reply per thread', () => {
+  it('automatic owned-work nudges stay off unless explicitly enabled', async () => {
+    const { readFileSync } = await import('node:fs')
+    const index = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8')
+    expect(index).toContain("ownedOpenWork: process.env.WIZARD_OWNED_OPEN_WORK === 'on'")
+  })
+})
