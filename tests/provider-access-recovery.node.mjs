@@ -31,6 +31,14 @@ test('Provider auth failure waits without blind resend; a successful run wakes s
  for(const source of [first,second]) {const children=state.sent.filter(r=>r.retrySourceId===source.publicRunId);assert.equal(children.length,1);assert(children[0].providerRecoveryAttempted);assert.equal(children[0].continuation,source.continuation);assert.deepEqual(children[0].trustedPaths,source.trustedPaths);assert.equal(JSON.parse(children[0].body).model,'original-model');assert.equal(q.get(source.publicRunId).status,'cancelled')}
  await q.tick(true);assert.equal(state.sent.length,6)
 })
+test('Recovered helper and owner messages keep source FIFO despite the normal interactive-first sort',async t=>{
+ const {q,admit,state}=fixture(t,{maxActive:4,reservedInteractive:2})
+ const helper=await admit('older helper delivery','wizard_older_helper','anthropic',{kind:'helper',type:'helper-follow-through',helper_id:'synthetic'})
+ const owner=await admit('newer owner request','wizard_newer_owner')
+ await admit('provider health confirmation');await q.tick(true)
+ assert.deepEqual(state.sent.filter(r=>r.retrySourceId).map(r=>r.retrySourceId),[helper.publicRunId,owner.publicRunId])
+})
+
 test('An acknowledged run that fails later at auth preflight waits, then notices provider success on status refresh',async t=>{
  const {q,admit}=fixture(t,{launch:async r=>({upstreamRunId:r.publicRunId,payload:{status:'running'}}),
    lookup:async r=>({payload:JSON.parse(r.body).input==='provider health confirmation'||r.retrySourceId?{status:'completed',output:'Synthetic answer'}:failed()})})
