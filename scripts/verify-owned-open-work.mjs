@@ -21,14 +21,18 @@ try {
   const attention = { state: 'done', ask: 'Synthetic fix verified.' }
   const reply = `**Synthetic fix works.**\n\n**Still open:**\n- Archimedes: run the follow-up checks\n[WIZARD_STATUS_V1]${JSON.stringify(attention)}[/WIZARD_STATUS_V1]`
   add('user', 'Synthetic request, not an owner message'); add('assistant', reply)
-  let admissions = 0, input = ''
+  let admissions = 0, input = '', busy = true
   worker = createOwnedWorkFollowThrough({ sessionDbPath: path, statePath: join(root, 'claims.db'),
-    admit: async (_session, text) => { admissions++; input = text } })
+    busy: async () => busy, admit: async (_session, text) => { admissions++; input = text } })
+  // First scan flags the thread (the owner's turn still holds it, so nothing is admitted yet).
+  await worker.tick()
+  assert.equal(admissions, 0)
   const before = projectOwnedOpenWork({ id: 'wizard_owned_smoke', status: 'completed', wizard_attention: attention },
     worker.evidenceFor('wizard_owned_smoke'))
   assert.equal(before.status, 'running')
   assert.equal(before.wizard_waiting_on, 'owned_work')
   assert.equal(before.wizard_attention.state, 'fyi')
+  busy = false
   await worker.tick(); await worker.tick()
   assert.equal(admissions, 1)
   assert.ok(input.startsWith(OWNED_WORK_PREFIX))
