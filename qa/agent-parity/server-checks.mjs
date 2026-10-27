@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -100,6 +100,19 @@ export const serverChecks = {
     assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
     assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
     assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+    for (const style of ['concise', 'summary']) {
+      const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
+      assert.equal(put.status, 200)
+      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, style)
+      // Use a fresh thread: the first synthetic run may still be active in its queue.
+      const session_id = `wizard_parity_${style}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
+      const prompt = sent(s).instructions
+      const selected = style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : FINISH_REPORT_INSTRUCTIONS
+      assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
+      assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
+    }
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }

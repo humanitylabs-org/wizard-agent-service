@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
+import { CONCISE_REPLY_INSTRUCTIONS, SUMMARY_REPLY_INSTRUCTIONS, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, latestVisibleSessionMessages, runInstructions } from '../server/service.mjs'
 import { AGENT_RUN_INSTRUCTIONS } from '../server/agents-http.mjs'
 
@@ -70,8 +70,18 @@ describe('thread status tag', () => {
 })
 
 describe('finish-report prompt', () => {
+  it('summary style replies restate what we are doing', () => {
+    expect(FINISH_REPORT_INSTRUCTIONS).toBe(SUMMARY_REPLY_INSTRUCTIONS)
+    expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('Briefly restate what we are doing')
+    expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('a reply that fits in three sentences never uses this format')
+    expect(runInstructions({ join: true })).toContain('briefly recover the original request')
+    const concise = runInstructions({ join: true, response_style: 'concise' })
+    expect(concise).toContain(CONCISE_REPLY_INSTRUCTIONS)
+    expect(concise).not.toContain(SUMMARY_REPLY_INSTRUCTIONS)
+    expect(concise).not.toContain('briefly recover the original request')
+  })
   it('asks for concise prose with no fixed report template', () => {
-    expect(FINISH_REPORT_INSTRUCTIONS).toBe('Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.')
+    expect(CONCISE_REPLY_INSTRUCTIONS).toBe('Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.')
   })
 
   for (const [kind, instructions] of [
