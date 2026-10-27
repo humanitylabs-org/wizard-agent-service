@@ -34,6 +34,7 @@ import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
+import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
@@ -611,6 +612,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
                 if (!projected.title) projected.title = (words || 'Voice message').replace(/\s+/gu, ' ').slice(0, 60)
                 if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
               }
+            }
+            // Upstream status may already say failed. A diagnosis still belongs to this latest run.
+            if (latestDirect?.status === 'failed' && latestDirect.reconnect && projected.status === 'failed') {
+              projected.wizard_reconnect = latestDirect.reconnect
+              projected.wizard_safe_error = ''
             }
             // A failure the owner explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
@@ -2652,7 +2658,14 @@ function buildWizardServer(options, lifetime) {
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, providerAccessRecovery: options.providerAccessRecovery === true, providerAccessWindowSeconds: options.providerAccessWindowSeconds, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const providerSignInReady = options.providerSignInReady ?? (async provider => {
+    const usage = await aiUsageReader.read()
+    return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
+  })
+  const providerRecoveryOptions = { providerSignInReady,
+    providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
+    providerAccessWindowSeconds: options.providerAccessWindowSeconds }
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -3522,8 +3535,7 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
-      providerAccessRecovery: options.providerAccessRecovery === true,
-      providerAccessWindowSeconds: options.providerAccessWindowSeconds,
+      ...providerRecoveryOptions,
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
@@ -4148,6 +4160,7 @@ function buildWizardServer(options, lifetime) {
       await pipeline(
         Readable.fromWeb(upstream.body),
         replaceLiteral(record.upstreamRunId, record.publicRunId),
+        providerSignInEvents(),
         ...(record.idempotencyKey.startsWith('schedule:') ? [scheduledRunEvents()] : []),
         secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
         response,
@@ -4940,6 +4953,15 @@ function buildWizardServer(options, lifetime) {
           if (forget) { sendJson(response, 200, workspaceStore.forget(body?.desk)); return }
           const r = workspaceStore.put(body || {}); sendJson(response, r.status, r.body)
         } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
+        return
+      }
+      if (url.pathname === '/wizard/v1/provider-recovery') {
+        if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const source = runQueue?.get(url.searchParams.get('run_id'))
+        if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
+        const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
+        sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences') {
@@ -6176,6 +6198,7 @@ function buildWizardServer(options, lifetime) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
+            result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original
