@@ -155,6 +155,8 @@ server = createWizardServer({
   appsOrigin: process.env.WIZARD_APPS_ORIGIN || '',
   appUpstreamHosts: list(process.env.WIZARD_APP_UPSTREAM_HOSTS),
   appOwnerLogins: list(process.env.WIZARD_APP_OWNER_LOGINS),
+  // Force the box-owner rule on (1) or off (0); unset: on once owner logins or an apps origin are configured.
+  ...(['0', '1'].includes(process.env.WIZARD_OWNER_RULE) ? { ownerRule: process.env.WIZARD_OWNER_RULE === '1' } : {}),
   appTrustedProxyIps: list(process.env.WIZARD_APP_TRUSTED_PROXY_IPS),
   appManagerHosts: list(process.env.WIZARD_APP_MANAGER_HOSTS),
   appReservedPorts: [port, Number(process.env.WIZARD_APPS_PORT || 0)].filter(Boolean),
