@@ -576,7 +576,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (direct.createdAt) projected.wizard_assigned_at = direct.createdAt
               if (!projected.preview && direct.preview) projected.preview = direct.preview
               if (direct.queuePosition) projected.queue_position = direct.queuePosition
-              if (direct.queueReason) projected.queue_reason = direct.queueReason
+              projected.queue_reason = direct.queueReason || ''
+              if (direct.queueReason === 'provider_access') {
+                delete projected.wizard_safe_error
+                delete projected.wizard_reconnect
+                if (!projected.wizard_request_preview) projected.wizard_request_preview = direct.preview
+              }
             } else if (truth?.active && external && TERMINAL_RUN_STATUSES.has(external.status)) {
               // A notification/recovery turn can resume this session outside the
               // original admission. Its live lease outranks that old terminal
@@ -3517,6 +3522,8 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
+      providerAccessRecovery: options.providerAccessRecovery === true,
+      providerAccessWindowSeconds: options.providerAccessWindowSeconds,
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
@@ -6136,6 +6143,11 @@ function buildWizardServer(options, lifetime) {
             if (saved) {
               detailed.wizard_retry_run_id = saved.publicRunId
               detailed.status = saved.status
+              detailed.queue_reason = saved.waitingReason
+              if (saved.waitingReason === 'provider_access') {
+                delete detailed.wizard_safe_error
+                delete detailed.wizard_reconnect
+              }
             }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }

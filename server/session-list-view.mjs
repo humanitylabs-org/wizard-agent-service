@@ -70,6 +70,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       title: String(item.title || item.name || 'Untitled chat'),
       source: item.source || '',
       status,
+      queueReason: item.queue_reason === 'provider_access' ? 'provider_access' : '',
       safeError: typeof item.wizard_safe_error === 'string' ? item.wizard_safe_error : '',
       // Provider sign-in expired: the connection app that fixes it (provider-reconnect.mjs).
       reconnect: reconnectRow(item.wizard_reconnect),
