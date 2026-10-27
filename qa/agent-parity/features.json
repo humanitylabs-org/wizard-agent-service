@@ -499,7 +499,7 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered.",
+      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
       "source_refs": [
         "server/thread-status.mjs"
       ],
