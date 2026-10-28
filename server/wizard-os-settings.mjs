@@ -6,6 +6,7 @@
 // GET /wizard/v1/bootstrap and never hardcode any of it.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { randomInt } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { appView } from './app-views.mjs'
 import { chatsView, CHATS_DEFAULT } from './chats-views.mjs'
@@ -83,6 +84,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
+    response_style: RESPONSE_STYLES.includes(value.response_style) ? value.response_style : 'summary',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
@@ -190,6 +192,48 @@ export function updateSettings(path, mutate) {
   return normalizeSettings(raw)
 }
 
+// Own: Wizard sends only Wizard OS facts and protocol, no reply-style rules.
+export const RESPONSE_STYLES = ['summary', 'concise', 'own']
+
+// Bounded, local-only experiment counters. No timestamps, identifiers, content or network sink.
+const counter = n => Number.isSafeInteger(n) && n >= 0 ? n : 0
+export function recordResponseStyleSwitch(raw, before, after) {
+  if (before === after) return
+  const prior = raw.response_style_experiment || {}
+  raw.response_style_experiment = {
+    assigned: ['summary', 'concise'].includes(prior.assigned) ? prior.assigned : before,
+    source: ['new_install', 'existing_install'].includes(prior.source) ? prior.source : 'existing_install',
+    switches: { summary: counter(prior.switches?.summary), concise: counter(prior.switches?.concise), ...(after === 'own' || Object.hasOwn(prior.switches ?? {}, 'own') ? { own: counter(prior.switches?.own) } : {}) },
+  }
+  raw.response_style_experiment.switches[after] = Math.min(Number.MAX_SAFE_INTEGER, raw.response_style_experiment.switches[after] + 1)
+}
+
+/** Call once at production startup, before stores are created. Never randomize a read or an upgrade. */
+export function initializeResponseStyle(path, { existingInstall = true, choose = () => randomInt(2) } = {}) {
+  if (!path) return
+  const existing = existingInstall || existsSync(path)
+  if (existsSync(path)) {
+    // Startup has always tolerated damaged settings. Do not turn an optional migration
+    // into an outage, rewrite invalid bytes, or rewrite an already assigned/read-only file.
+    const current = readSettings(path)
+    if (current.source === 'invalid') return current.settings
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8'))
+      if (RESPONSE_STYLES.includes(raw?.response_style)) return current.settings
+    } catch { return current.settings }
+  }
+  try {
+    return updateSettings(path, raw => {
+      const style = existing ? 'summary' : choose() === 0 ? 'summary' : 'concise'
+      raw.response_style = style
+      raw.response_style_experiment = { assigned: style, source: existing ? 'existing_install' : 'new_install', switches: { summary: 0, concise: 0 } }
+    })
+  } catch (error) {
+    if (existing) return readSettings(path).settings
+    throw error // A new install must persist its assignment before serving any requests.
+  }
+}
+
 function readJsonFile(path, limit = 2 * 1024 * 1024) {
   if (!path || !existsSync(path)) return null
   try {
@@ -199,6 +243,8 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 }
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
+const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
+const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
@@ -227,6 +273,10 @@ export function readApps({ appsJsonPath, launcherPath }) {
       ...(Object.hasOwn(app, 'voice_names') ? { voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
         typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [] } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
+      // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
+      ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
+      ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }

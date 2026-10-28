@@ -104,7 +104,7 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive the shared concise-reply rule immediately before the final status instructions.",
+      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions, or with Own only Wizard OS facts and the status protocol and no reply-style rule; changes apply on the next turn without restart.",
       "layer": "server",
       "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
@@ -333,12 +333,16 @@
       "id": "retry-input",
       "description": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session",
       "layer": "server",
-      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session.",
+      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session. Fail before any answer, clear runtime user history, restart, hydrate the durable saved reference and tap Retry twice; require exact saved words, one new receipt and one dispatch through each authorized runtime transport. Run tests/provider-access-dismiss-startup.node.mjs to prove dismissed provider-access waits never resend through main, host-profile, container or restricted queues, old failures stay failed when recovery is enabled, and already-authorized waits survive restart. The owner Dismiss HTTP action remains main-only; routed queues enforce their own agent-scoped dismissal fence.",
       "source_refs": [
-        "server/session-detail.mjs"
+        "server/session-detail.mjs",
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
       ],
       "reference_tests": [
-        "tests/session-truth-seek.test.ts"
+        "tests/session-truth-seek.test.ts",
+        "tests/provider-access-dismiss-startup.node.mjs",
+        "tests/provider-access-recovery.node.mjs"
       ],
       "fixture": "retry-input",
       "policy_exemptions": []
@@ -515,12 +519,13 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags.",
+      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
       "source_refs": [
         "server/thread-status.mjs"
       ],
       "reference_tests": [
-        "tests/thread-status-backfill-list.test.ts"
+        "tests/thread-status-backfill-list.test.ts",
+        "tests/heavy-status.test.ts"
       ],
       "fixture": "status-list-state",
       "policy_exemptions": []
@@ -584,10 +589,20 @@
       "policy_exemptions": []
     },
     {
+      "id": "inline-agent-images",
+      "description": "Agent screenshots appear inline where the reply mentions them",
+      "layer": "ux",
+      "how_to_test": "Render image MEDIA between explanation paragraphs; assert DOM order, no duplicate bottom image, same shared viewer and Back-to-thread. Targeted paired UX checks additionally cover two distinct images on two skins, copy/share and legacy clients.",
+      "source_refs": ["web/core/chat-kit.js", "web/core/chats.js"],
+      "reference_tests": ["wizard-ux/tests/inline-agent-screenshots.test.mjs", "wizard-ux/qa-inline-agent-screenshots.cjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "assistant-media",
-      "description": "Return MEDIA image and file tags from the agent own cache",
+      "description": "Return positioned MEDIA images and safe file tags from the agent own cache",
       "layer": "server",
-      "how_to_test": "Return MEDIA image and file tags from the agent own cache; verify renderable authenticated URLs, not raw paths or unavailable cards.",
+      "how_to_test": "Return MEDIA image and file tags from the agent own cache; verify source-position inline image envelopes, unchanged mixed-file order, unique IDs and renderable authenticated URLs, not raw paths or unavailable cards.",
       "source_refs": [
         "server/service.mjs"
       ],
@@ -1083,6 +1098,38 @@
       ],
       "reference_tests": [
         "wizard-ux/tests/desktop-window-refresh.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "stop-on-send",
+      "description": "Stop shows the moment a message is sent; before the run exists it withdraws the pending send (no run admitted), after that it stops the exact run from the receipt",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/stop-before-run.test.mjs. The real outbox runs against a local HTTP boundary: Stop during upload, server transcription or offline waiting creates zero /v1/runs calls and keeps the recording; Stop while the run POST is in flight resolves with the receipt's run id; a steer in flight that is rejected after Stop never becomes a new turn. The real LIVE.cancelSend block runs for main, host-profile, container and restricted threads and withdraws only that thread's sends and stops only its own run (including a reply queued to steer the live run, and a slow phone take arriving after the tap hold). This is synthetic source-executed evidence; fenced browser QA on a scratch shell is reported separately. Companion UX PR: humanitylabs-org/wizard-ux#649.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/stop-before-run.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "chat-pins-sync",
+      "description": "Pinned Chats threads are the same on every device of the owner for main and routed threads; a stale or simultaneous device never drops or revives another device's pin.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-pins.test.mjs: pins key on the rendered row id for main, host-profile, container and restricted threads; a pin on one client shows on another and an unpin syncs back; a client that has not pulled keeps the other's pin; GET,GET,PUT,PUT between two clients keeps both pins (read-back replay); offline taps stay queued. Synthetic source-executed evidence; live two-browser check recorded on humanitylabs-org/wizard-ux#670.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-pins.js",
+        "wizard-ux/web/live.js",
+        "server/ui-preferences.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-pins.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []

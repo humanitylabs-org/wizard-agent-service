@@ -71,7 +71,8 @@ export const checks = {
     const init = post({ session_id: 'wizard_parity', input: 'One synthetic send' }); init.headers['Idempotency-Key'] = 'parity-one-send'
     const a = await s.request('/v1/runs', init), b = await s.request('/v1/runs', init)
     assert.equal(a.status, 202); assert.equal(b.status, 202)
-    assert.equal((await a.json()).run_id, (await b.json()).run_id)
+    s.runId = (await a.json()).run_id
+    assert.equal(s.runId, (await b.json()).run_id)
     assert.equal(b.headers.get('idempotency-replayed'), 'true')
   },
   'steer': async s => {
@@ -104,6 +105,21 @@ export const checks = {
   'retry-input': async s => {
     const r = await s.request('/api/sessions/wizard_parity?view=detail'); assert.equal(r.status, 200)
     assert.equal((await r.json()).session.wizard_retry_input, 'One synthetic send')
+    // Real service + authorized profile/container/restricted transport; no runtime-history fallback.
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: '⚠️ Provider authentication failed: synthetic expired sign-in', usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } })
+    s.sessions.get('wizard_parity').messages = []
+    await s.restart()
+    const detail = await (await s.request('/api/sessions/wizard_parity?view=detail')).json()
+    const saved = detail.session || detail
+    assert.equal(saved.status, 'failed'); assert.equal(saved.wizard_retry_run_id, s.runId)
+    assert.equal(saved.wizard_retry_input, 'One synthetic send')
+    const retry = () => s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'not authoritative', wizard_retry_run_id: saved.wizard_retry_run_id, model: 'fixture-model', provider: 'anthropic', require_model_lock: true }))
+    const responses = await Promise.all([retry(), retry()])
+    for (const response of responses) assert.equal(response.status, 202, await response.clone().text())
+    const [a, b] = await Promise.all(responses.map(r => r.json())); assert.equal(a.run_id, b.run_id)
+    const writes = s.seen.filter(r => r.method === 'POST' && (r.path.endsWith('/v1/runs') || r.path.endsWith('/chat/stream')))
+    assert.equal(writes.length, 2); assert.equal(writes.at(-1).body.input || writes.at(-1).body.message, 'One synthetic send')
+    assert.equal(writes.at(-1).body.wizard_retry_run_id, undefined)
   },
   'session-archive': async s => {
     for (const archived of [true, false]) {

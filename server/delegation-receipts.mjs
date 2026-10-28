@@ -6,19 +6,26 @@ import { parseStatus } from './thread-status.mjs'
 export const RECEIPT_PREFIX = '[Wizard follow-through] Recovered helper receipt '
 export const receiptKey = id => `wizard-helper-receipt-${id}`
 export const completionDelegationId = text => typeof text === 'string' ? text.match(/^\[ASYNC DELEGATION BATCH COMPLETE\s*[—-]\s*(deleg_[A-Za-z0-9_-]+)\]/u)?.[1] : undefined
-const internal = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop)/u.test(text)
+export const internalHelperMessage = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop|Agent-to-agent|supervisor (?:update|build|review|question|closed)|Wizard schedule|Wizard heavy-work (?:completion|notice)|Owner requested recovery|James requested recovery|STILL IN PROGRESS)/u.test(text)
+export const isHumanRequest = row => row.role === 'user' && Boolean(String(row.content || '').trim())
+  && !internalHelperMessage(row.content || '')
+  && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind)
+  && !String(row.display_kind || '').startsWith('process_wakeup')
+  && !/^(?:Your previous turn indicated a tool call|You just executed tool calls but returned an empty response|Workline browser QA found a concrete regression)/u.test(String(row.content || '').trim())
+const internal = internalHelperMessage
 
 export function currentOwnerResult(db, sessionId) {
   const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
-  const active = columns.has('active') ? 'AND COALESCE(active, 1) = 1' : ''
+  // Compaction changes model context, not the owner's request/answer boundary.
+  // Retained inactive rows remain authoritative for gates and supersession.
   const kind = columns.has('display_kind') ? ', display_kind' : ''
   const rows = db.prepare(`SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
-    AND role IN ('user','assistant') ${active} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
+    AND role IN ('user','assistant') AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
   let assistant, userAt=0, inspected=0
   for (const row of rows) {
     inspected++
     if (internal(row.content) || ['async_delegation_complete','internal_notification','system','commentary','hidden'].includes(row.display_kind)) continue
-    if (row.role==='user' && !userAt) userAt=Number(row.timestamp)
+    if (row.role==='user' && isHumanRequest(row) && !userAt) userAt=Number(row.timestamp)
     if (row.role==='assistant' && !assistant && /\[\/WIZARD_STATUS_V1\]\s*$/u.test(row.content || '')
       && ['done','needs_you','check'].includes(parseStatus(row.content)?.state)) assistant=row
     if (userAt) break // older outcomes cannot gate the latest genuine request
@@ -69,8 +76,8 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
 export function ownerMovedOn(db, sessionId, completedAt) {
   const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
   const rows = db.prepare(`SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
-    AND COALESCE(active,1)=1 AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
-  return rows.length>512 || rows.some(row => !internal(row.content) && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind))
+    AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
+  return rows.length>512 || rows.some(row => isHumanRequest({ ...row, role: 'user' }))
 }
 // Automatic resumption is for the turn that was waiting on the helper; after two hours it is stale.
 export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=2*3600,includeDelivered=false,delegationId}={}) {

@@ -1,0 +1,81 @@
+# Hermes owned open work
+
+A finish report must not hand the owner's attention back to them just to get
+permission to start work the agent already owns. Hermes gets the additional
+`OWNED_OPEN_WORK_INSTRUCTIONS`; the routed-agent prompt is unchanged.
+
+## Evidence and enforcement
+
+- `server/owned-open-work.mjs` is pure policy: extract explicitly agent-owned
+  **Still open:** items, count successful handle-creating calls, and project
+  unmet done/FYI reports as `status: running`, `wizard_waiting_on: owned_work`.
+  Owner decisions (`needs_you`, `check`) and other agents are untouched.
+- `server/owned-open-work-follow-through.mjs` reads the explicitly mounted Hermes
+  `state.db`, read-only. It pairs assistant `tool_calls` with tool results by
+  `tool_call_id`, only after the triggering user row through the final reply.
+  Unknown schemas or incomplete evidence are not treated as zero handles.
+  Stream events omit results/arguments, are bounded and disappear on restart;
+  the run queue alone misses native/locked runs. The persisted transcript is the
+  common restart-safe source for both execution paths.
+- A five-second watcher finds recent Wizard finishes without needing a browser
+  open. It uses the **same private admission function**, durable queue and
+  model-lock preparation as delegation follow-through. Its input starts
+  `[Wizard follow-through]` and the existing Wizard history projection labels
+  it `role: system`, `display_kind: run_context`, from `Wizard follow-through`,
+  never an owner-authored message.
+- A separate service SQLite file records a unique claim for **both** the
+  triggering run/user identity and reply identity before admission. Stable
+  idempotency keys and service-only continuation metadata carry the identity
+  through the normal queue. Admission and eventual dispatch revalidate the
+  exact reply, request boundary, age and session lease. A newer owner turn or
+  decision revokes authority. No claim is written into Hermes' database.
+- Exactly one correction is allowed. Its own reply is never prompted again;
+  if it still lists unmet work it falls back to FYI with its ask unchanged,
+  without an owned-work spinner. Admission failures and expired authority also
+  fall back without claiming work is running. An uncertain admission is not
+  automatically retried by this policy (the durable queue owns transport retry).
+
+## Options
+
+Default-on for Hermes when `hermesStatePath` is explicitly provided. Portable
+HTTP-only installations do not expose complete tool-result evidence, so this
+policy deliberately does not infer dispatch or start corrective runs there.
+`ownedOpenWork: false` disables it, and the existing `followThrough: false`
+ownership switch also disables it on staging services sharing Hermes.
+
+`ownedOpenWorkStatePath` overrides the separate claims file; otherwise it is
+beside `runQueueStatePath` (suffix `.owned-open-work.db`), or beside the mounted
+Hermes DB (suffix `.wizard-owned-open-work.db`). Preserve this file with service
+state across deploys. `ownedOpenWorkIntervalMs` overrides the watcher interval.
+Tests can inject `ownedOpenWorkReader` and `ownedOpenWorkFinder` without an HTTP
+backdoor or new public mutation route.
+
+## Safe check after deployment
+
+Run from the deployed release directory (Node 22.5+):
+
+```sh
+node scripts/verify-owned-open-work.mjs
+```
+
+Or, with the deployed release directory in `RELEASE`:
+
+```sh
+node "$RELEASE/scripts/verify-owned-open-work.mjs"
+```
+
+This imports the **installed release's** modules, creates a disposable synthetic
+`state.db` under `TMPDIR`, feeds it a Hermes done reply with an undispatched
+Archimedes-owned item, and asserts:
+
+1. `before.status` is `running`, `before.wizard_waiting_on` is `owned_work`, and
+   the status ask is `Starting the follow-up work it listed.`
+2. Two evaluations produce exactly one **synthetic** continuation.
+3. An unmet continuation reply becomes FYI with its original ask; no second
+   continuation is created.
+
+Expected JSON ends with `real_dispatches: 0` and `passed: true`. No owner state,
+real run, scheduler, worker, deployed configuration or service is modified.
+The integration regression in `tests/owned-open-work.test.ts` additionally
+exercises the actual service session-list path, private continuation admission,
+durable queue and history labelling against a fake upstream.
