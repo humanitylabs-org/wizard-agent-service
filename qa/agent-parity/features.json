@@ -959,6 +959,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "app-job-routing",
+      "description": "Each agent learns which of its own apps does which job, and the main agent's pointer skills send it through the app's shipped skill first.",
+      "layer": "server",
+      "how_to_test": "Install a synthetic app with a provides job and a shipped skill into the real Service's apps.json, restart, and open the wizard MCP gateway with each kind's own credential and transport. Main: the wizard-job-<job> pointer skill is written, tells it to load the app's skill with skill_view first, and the gateway kernel points at that skills index. Other kinds have no pointer skills: their gateway kernel lists the job -> app map for their own apps instead. Uninstall: the pointer disappears and no kind is told about the app. Disposable fixture checks; the live-model proof for the main agent is ops/acceptance/pointer-skills (fresh KVM VM).",
+      "source_refs": [
+        "server/agent-bridge.mjs",
+        "hermes-plugin/wizard-os/kernel.py"
+      ],
+      "reference_tests": [
+        "tests/agent-bridge.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "app-job-routing",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-isolation",
       "description": "Verify standard credentials cannot enumerate/open/search private threads",
       "layer": "runtime",
