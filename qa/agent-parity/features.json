@@ -1097,6 +1097,22 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "chat-pins-sync",
+      "description": "Pinned Chats threads are the same on every device of the owner for main and routed threads; a stale or simultaneous device never drops or revives another device's pin.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-pins.test.mjs: pins key on the rendered row id for main, host-profile, container and restricted threads; a pin on one client shows on another and an unpin syncs back; a client that has not pulled keeps the other's pin; GET,GET,PUT,PUT between two clients keeps both pins (read-back replay); offline taps stay queued. Synthetic source-executed evidence; live two-browser check recorded on humanitylabs-org/wizard-ux#670.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-pins.js",
+        "wizard-ux/web/live.js",
+        "server/ui-preferences.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-pins.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }
