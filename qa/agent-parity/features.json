@@ -18,6 +18,11 @@
   },
   "policies": [
     {
+      "id": "private-incognito-only",
+      "kinds": ["main", "host-profile", "container", "restricted"],
+      "rule": "Private agent only, by owner decision: each standard runtime must refuse Incognito before upstream admission."
+    },
+    {
       "id": "owner-scoped-hermes-only",
       "kinds": ["host-profile", "container", "restricted"],
       "rule": "Owner-scoped hermes-only: James explicitly requested 'Archimedes only' on 27 Oct 2026 for owned-open-work follow-through. Routed instructions, status projection and admissions remain untouched; this does not exempt any other chat feature."
@@ -40,6 +45,21 @@
     }
   ],
   "features": [
+    {
+      "id": "private-incognito",
+      "description": "Temporary private-agent chats never enter ordinary stores; standard agents are explicitly refused. This matrix fixture proves the privacy policy, not real-container or confidential-model operation.",
+      "layer": "server",
+      "fixture": "private-incognito-policy",
+      "how_to_test": "Assert the real Service refuses Incognito on the standard agent of each runtime kind with 409 incognito_private_only before upstream admission; use the dedicated synthetic private browser/stock rig for positive no-persistence proof.",
+      "source_refs": ["server/incognito.mjs", "ops/agent-runtime/incognito_runtime.py", "wizard-ux/web/core/incognito-chat.js"],
+      "reference_tests": ["tests/incognito.node.mjs", "ops/agent-runtime/test_incognito_runtime.py", "scripts/incognito-stock-acceptance.py"],
+      "policy_exemptions": [
+        {"kind":"main","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"host-profile","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"container","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"restricted","policy":"private-incognito-only","assertion":"private-incognito-policy"}
+      ]
+    },
     {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up instructions and follow-through; routed kinds retain existing prompts, done state and admission behavior.",

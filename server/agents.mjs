@@ -405,8 +405,17 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
   // No gateway and no shared skills for an agent without one: nothing outside its own home is reachable.
   const standardUrl = standardChatsEndpoint(gatewayUrl,standardChatsUrl)
-  if (wantsGateway(agent, gatewayUrl) || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
+  const privateSearch = agent.privacy === 'private' && agent.model.provider === TINFOIL.id
+  if (wantsGateway(agent, gatewayUrl) || privateSearch || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
     lines.push('mcp_servers:')
+    if (privateSearch) {
+      // Second official attested proxy in the inference sidecar's network namespace.
+      // Never connect MCP directly to public HTTPS or fall back to ordinary search.
+      lines.push('  tinfoil_search:', `    url: ${yamlString(`http://agent-${agent.id}-tinfoil:3302/mcp`)}`,
+        '    headers:', '      Authorization: "Bearer ${TINFOIL_API_KEY}"',
+        '      X-Tinfoil-Tool-PII-Check: "true"', '      X-Tinfoil-Tool-Injection-Check: "true"',
+        '    timeout: 180', '    connect_timeout: 90', '    sampling:', '      enabled: false')
+    }
     if (gatewayUrl) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
@@ -1436,6 +1445,9 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     return reply
   }
   return {
+    incognitoStart: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/start`, payload),
+    incognitoStop: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/stop`, payload),
+    incognitoLease: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/lease`, payload),
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
