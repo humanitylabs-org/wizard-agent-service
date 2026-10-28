@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { projectOwnedOpenWork } from '../server/owned-open-work.mjs'
+import { projectOwnedOpenWork, ownedOpenItems, countDispatchHandles, dispatchHandles, nonHoldingFollowUpIds } from '../server/owned-open-work.mjs'
+import { guardHeavyStatus } from '../server/thread-status.mjs'
 import { createOwnedWorkFollowThrough, readOwnedOpenWork, OWNED_WORK_PREFIX } from '../server/owned-open-work-follow-through.mjs'
 
 const root = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'wizard-owned-work-proof-'))
@@ -42,5 +43,18 @@ try {
   const after = projectOwnedOpenWork({ status: 'completed', wizard_attention: attention }, readOwnedOpenWork(path, 'wizard_owned_smoke'))
   assert.equal(after.wizard_attention.state, 'fyi')
   assert.equal(after.wizard_attention.ask, attention.ask)
-  console.log(JSON.stringify({ before, synthetic_continuations: admissions, after, real_dispatches: 0, passed: true }, null, 2))
+  add('user', '[reporter] Synthetic rewrite'); add('assistant', reply)
+  add('user', '[Wizard schedule] Synthetic wakeup'); add('assistant', reply)
+  assert.equal(readOwnedOpenWork(path, 'wizard_owned_smoke').continuation, true)
+  await worker.tick(); assert.equal(admissions, 1)
+  assert.deepEqual(ownedOpenItems('**Still open:**\n- Archimedes: Want me to start the soak? Reply yes'), [])
+  assert.deepEqual(ownedOpenItems('**Still open:**\n- You: the check covers Archimedes only for now.'), [])
+  const tools = [{ role: 'assistant', tool_calls: JSON.stringify([{ id: 'wrapped', function: { name: 'mcp__tool_call', arguments: JSON.stringify({ calls: [{ name: 'wizard_heavy_submit', arguments: {} }] }) } }]) },
+    { role: 'tool', tool_call_id: 'wrapped', content: JSON.stringify({ job_id: 'heavy_synthetic', state: 'queued' }) }]
+  assert.equal(countDispatchHandles(tools), 1)
+  const finished = '**Fix verified.**\n**Still open:**\n- Archimedes: started optional follow-up heavy_synthetic running now'
+  const ids = new Set(nonHoldingFollowUpIds(finished, attention, dispatchHandles(tools)))
+  assert.deepEqual([...ids], ['heavy_synthetic'])
+  assert.equal(guardHeavyStatus(attention, { sessionId: 'synthetic', jobs: [{ job_id: 'heavy_synthetic', sessionId: 'synthetic', state: 'queued' }], nonHoldingIds: ids }), attention)
+  console.log(JSON.stringify({ before, synthetic_continuations: admissions, after, owner_corrections: true, real_dispatches: 0, passed: true }, null, 2))
 } finally { worker?.close(); db.close(); rmSync(root, { recursive: true, force: true }) }

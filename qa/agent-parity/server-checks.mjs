@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -18,6 +19,32 @@ const admit = async (s, body) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'owned-open-work': async s => {
+    await admit(s, { input: 'Synthetic approved backend fix' })
+    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), s.kind === 'main', 'owner-scoped Hermes-only instructions at the real HTTP boundary')
+    const status = { state: 'done', ask: 'The fix is verified.' }
+    const evidence = { agentId: s.id, ownedCount: 1, handleCount: 0, continuation: false }
+    if (s.kind === 'main') assert.equal(guardOwnedOpenWork(status, evidence).state, 'fyi')
+    else assert.equal(guardOwnedOpenWork(status, evidence), status, 'routed status remains the same object')
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const text = `Verified fix.
+
+**Still open:**
+- Archimedes: run the next checks
+[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', output: text })
+    row.messages.push({ role: 'assistant', timestamp: Date.now()/1000 + 1, content: text })
+    const writes = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    const before = writes().length
+    for (let i = 0; i < 2; i++) {
+      const response = await s.request('/api/sessions?view=list'); assert.equal(response.status, 200)
+      const item = (await response.json()).data.find(x => x.id === row.id)
+      assert.equal(item.attention.state, 'done', 'no main-only guard leaks into routed list projection')
+      assert.notEqual(item.wizard_waiting_on, 'owned_work')
+    }
+    assert.equal(writes().length, before, 'listing routed work never dispatches an owned-work correction')
+    assert.ok(!writes().some(r => JSON.stringify(r.body).includes('[Wizard follow-through] Your last reply lists')))
+  },
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
@@ -359,6 +386,42 @@ export const serverChecks = {
     assert.ok(!JSON.stringify(body).includes(s.root));assert.ok(!JSON.stringify(body).includes('parity-runtime-secret'))
     const target=s.seen.filter(x=>x.method==='POST'&&x.path.endsWith('/v1/runs')).at(-1)
     assert.equal(target.path,s.kind==='host-profile'?'/p/parity-profile/v1/runs':'/v1/runs')
+  },
+  'app-job-routing': async s => {
+    // A synthetic app with a job and a shipped skill, installed the App Manager way (apps.json + skill under the OS home).
+    const osHome = join(s.root, 'os'), skills = join(osHome, 'skills')
+    mkdirSync(join(skills, 'parity-video'), { recursive: true })
+    writeFileSync(join(skills, 'parity-video', 'SKILL.md'), '---\nname: parity-video\ndescription: Synthetic app workflow.\n---\nCall make_short.\n')
+    const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], skill: 'skills/parity-video/SKILL.md', mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const install = apps => writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    const kernel = async () => {
+      const r = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
+      assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+      return (await r.json()).result.instructions
+    }
+    const pointer = join(skills, 'wizard-job-short-form-video', 'SKILL.md')
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    if (s.kind !== 'main') {
+      // The install picker ticks this standard agent for the new app (#58): its own list, nothing else.
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = [...new Set([...(agent.permissions.wizard_apps || []), 'parity-video'])]
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    install([parityQa, app]); await s.restart()
+    const text = await kernel()
+    if (s.kind === 'main') {
+      assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
+      assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
+      assert.match(text, /wizard-job-<job> skill in your skills/u)
+    } else {
+      // No pointer skills outside the main agent's index: the gateway tells this agent its own jobs instead.
+      assert.doesNotMatch(text, /wizard-job-<job>/u)
+      assert.match(text, /- short-form video -> Synthetic Video \(`mcp__wizard__parity_video__\*`\)/u)
+    }
+    install([parityQa]); await s.restart()
+    const after = await kernel()
+    assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
+    assert.doesNotMatch(after, /Synthetic Video/u)
   },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false

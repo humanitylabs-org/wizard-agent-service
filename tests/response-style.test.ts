@@ -41,11 +41,12 @@ it('Concise keeps the live owned-work follow-through rule without forcing Summar
   for (const join of [true, false]) {
     const instructions = runInstructions({ join, response_style: 'concise' })
     expect(instructions).not.toContain('Under **Still open:**')
-    expect(instructions).toContain('For any unfinished work you own, name its live handle and when it lands')
-    expect(instructions).toContain('Dispatch agent-owned follow-ups within existing authority in this same turn')
-    expect(instructions).toContain('Only owner decisions, money, external sends, or wider authority may be asked of the owner')
+    expect(instructions).toContain('State each owned follow-up plainly as either started (name its live handle and when it lands) or a clear question to the owner')
+    expect(instructions).toContain('started follow-ups do not delay that reply or its done alert')
+    expect(instructions).toContain('This applies regardless of reply style and does not require headings or a fixed format.')
   }
-  expect(runInstructions({ join: true, response_style: 'summary' })).toContain('Under **Still open:**')
+  expect(runInstructions({ join: true, response_style: 'summary' })).toContain('**Still open:**')
+  expect(runInstructions({ join: true, response_style: 'summary' })).toContain('State each owned follow-up plainly')
 })
 it('response style is an owner setting', async () => {
   const path = fresh(), proof = 'synthetic-owner-proof-'.repeat(3)

@@ -1,34 +1,29 @@
-// Pure finish-report policy. Runtime evidence is read from Hermes state.db by
-// owned-open-work-follow-through.mjs: assistant tool_calls paired by tool_call_id
-// with persisted tool results, strictly after the triggering user row. SSE logs
-// omit arguments/results, are bounded/in-memory, and disappear on restart; queue
-// records alone do not cover native/locked runs. Never infer dispatch from prose.
-const OFFER = /\b(?:say the word|want me to|shall I|if you want me to\s+queue|I can\s+queue)\b/iu
+// Pure finish-report policy. Dispatch evidence comes from paired canonical tool
+// calls/results, never from prose, SSE starts or queue admission alone.
+const OFFER = /\b(?:say the word|want me to|shall I|if you want|I can\s+queue)\b/iu
 const AGENT = /\b(?:mine|me|I|I['’]ll|Archimedes|agent)\b/iu
-
-// An item that states an existing handle ("already scheduled", "running now", "queued job")
-// may be paid for by a dispatch from an earlier turn of the same thread; the reader
-// credits it only against real earlier handle-creating tool calls, never prose alone.
-const CLAIMED_HANDLE = /\b(?:already\s+(?:scheduled|queued|running|started|dispatched|submitted)|scheduled\s+for|running\s+now|is\s+running|queued\s+(?:job|as)|in\s+the\s+queue)\b/iu
+const OWNER = /^(?:\*\*)?\s*(?:You|James|Owner|Yours)\s*:/iu
+const QUESTION = /\b(?:want me to|would you like me to|should I|shall I|may I|can I)\b[^?\n]+\?/iu
+const CLAIMED_HANDLE = /\b(?:started|already\s+(?:scheduled|queued|running|dispatched|submitted)|scheduled\s+for|running\s+now|is\s+running|queued\s+(?:job|as)|in\s+the\s+queue)\b/iu
 export const claimsExistingHandle = item => CLAIMED_HANDLE.test(String(item ?? ''))
 
-export function ownedOpenItems(replyText) {
-  const text = String(replyText ?? '')
-  const label = /\*\*Still open:\*\*/iu.exec(text)
+export function openWorkItems(replyText) {
+  const label = /\*\*Still open:\*\*/iu.exec(String(replyText ?? ''))
   if (!label) return []
-  const section = text.slice(label.index + label[0].length).split(/\*\*[^*\n]+:\*\*|\[WIZARD_STATUS_V1\]/u)[0]
-  const items = section.split(/(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)/u).slice(1)
-    .map(item => item.trim()).filter(item => AGENT.test(item) || OFFER.test(item))
-  // An inline/non-bullet offer is also owned, but do not count it twice.
-  if (OFFER.test(section) && !items.some(item => OFFER.test(item))) items.push(section.trim())
-  return items
+  const section = String(replyText).slice(label.index + label[0].length).split(/\*\*[^*\n]+:\*\*|\[WIZARD_STATUS_V1\]/u)[0]
+  const bullets = section.split(/(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)/u).slice(1)
+  return (bullets.length ? bullets : [section]).map(item => item.trim()).filter(Boolean)
+}
+export function ownedOpenItems(replyText) {
+  return openWorkItems(replyText).filter(item => !OWNER.test(item) && !QUESTION.test(item)
+    && (AGENT.test(item) || OFFER.test(item)))
 }
 
 const json = value => {
   if (typeof value !== 'string') return value
   try { return JSON.parse(value) } catch { return null }
 }
-const toolName = name => String(name ?? '').split('.').at(-1)
+const toolName = name => String(name ?? '').split('.').at(-1).replace(/^mcp__/u, '')
 const isCreate = (name, args) => {
   if (['wizard_schedule', 'wizard_heavy_submit', 'kanban_create', 'supervisor_build'].includes(name)) return true
   if (name === 'delegate_task') return !args?.action || ['spawn', 'create'].includes(args.action)
@@ -36,21 +31,21 @@ const isCreate = (name, args) => {
 }
 const failed = value => value && typeof value === 'object' && (value.error || value.success === false
   || value.ok === false || ['failed', 'error', 'cancelled', 'declined'].includes(value.status))
-const liveHandle = value => {
-  if (!value || typeof value !== 'object' || failed(value)) return false
-  if (Array.isArray(value)) return value.some(liveHandle)
-  if (['id', 'job_id', 'schedule_id', 'task_id', 'delegation_id', 'run_id', 'thread_id', 'conversation_id', 'handle']
-    .some(key => ['string', 'number'].includes(typeof value[key]) && String(value[key]).length)) return true
-  return ['data', 'result', 'receipt', 'job', 'schedule', 'task'].some(key => liveHandle(json(value[key])))
+const handleIds = value => {
+  value = json(value)
+  if (!value || typeof value !== 'object' || failed(value)) return []
+  if (Array.isArray(value)) return value.flatMap(handleIds)
+  const ids = ['id', 'job_id', 'schedule_id', 'task_id', 'delegation_id', 'run_id', 'thread_id', 'conversation_id', 'handle', 'build_id']
+    .flatMap(key => ['string', 'number'].includes(typeof value[key]) && String(value[key]).length ? [String(value[key])] : [])
+  return [...ids, ...['data', 'result', 'receipt', 'job', 'schedule', 'task'].flatMap(key => handleIds(value[key]))]
 }
 
-// Accept transcript rows (assistant tool_calls + role=tool results), not merely
-// tool.started/tool.completed frames. Unknown/missing/failed evidence counts zero.
-export function countDispatchHandles(runToolEvents = []) {
+// A one-call deferred wrapper returns the tool's bare JSON, not {results:[...]}.
+// In that shape `name` is a human schedule title, not the called tool's name.
+export function dispatchHandles(runToolEvents = []) {
   const results = new Map(runToolEvents.filter(row => row.role === 'tool' && row.tool_call_id)
     .map(row => [row.tool_call_id, json(row.content)]))
-  const seen = new Set()
-  let count = 0
+  const seen = new Set(), handles = []
   for (const row of runToolEvents) {
     if (row.role !== 'assistant') continue
     const calls = json(row.tool_calls)
@@ -62,29 +57,43 @@ export function countDispatchHandles(runToolEvents = []) {
       const args = json(call.function?.arguments ?? call.arguments) ?? {}
       const result = results.get(call.id)
       if (failed(result)) continue
-      if (isCreate(name, args)) { if (liveHandle(result)) count++; continue }
+      const add = (name, args, result) => {
+        const ids = handleIds(result)
+        if (isCreate(name, args) && ids.length) handles.push({ name, ids, at: Number(row.timestamp), rowId: row.id })
+      }
+      if (isCreate(name, args)) { add(name, args, result); continue }
       if (name !== 'tool_call' || !Array.isArray(args.calls)) continue
       const innerResults = Array.isArray(result) ? result : result?.results
-      if (!Array.isArray(innerResults)) continue
-      // Match names and position: a successful sibling cannot pay for a failed call.
+      if (!Array.isArray(innerResults)) {
+        if (args.calls.length === 1) add(toolName(args.calls[0].name), json(args.calls[0].arguments) ?? {}, result)
+        continue // ambiguous multi-call bare results fail closed
+      }
       args.calls.forEach((inner, index) => {
-        const returned = innerResults[index]
-        const innerName = toolName(inner.name)
+        const returned = innerResults[index], innerName = toolName(inner.name)
         if (!returned || failed(returned) || (returned.name ?? returned.tool) && toolName(returned.name ?? returned.tool) !== innerName) return
-        if (isCreate(innerName, json(inner.arguments) ?? {}) && liveHandle(json(returned.result ?? returned))) count++
+        add(innerName, json(inner.arguments) ?? {}, json(returned.result ?? returned))
       })
     }
   }
-  return count
+  return handles
+}
+export const countDispatchHandles = rows => dispatchHandles(rows).length
+
+// Exempt only explicitly identified, started follow-ups from an already verified
+// outcome. Required builds/handoffs, missing markers, old handles and ambiguous
+// descriptions still hold. Identity is matched to this reply's actual dispatch.
+export function nonHoldingFollowUpIds(replyText, status, handles = []) {
+  if (!['done', 'fyi'].includes(status?.state)) return []
+  const before = String(replyText ?? '').split(/\*\*Still open:\*\*/iu)[0]
+  if (!/\b(?:verified|tested|passed|fixed|checks? pass(?:es|ed)?)\b/iu.test(before)) return []
+  const items = ownedOpenItems(replyText).filter(item => /\b(?:follow[- ]?up|optional|extra)\b/iu.test(item) && claimsExistingHandle(item))
+  return handles.flatMap(handle => handle.ids.filter(id => items.some(item => item.split(/[^\p{L}\p{N}_:-]+/u).includes(id))))
 }
 
 export function guardOwnedOpenWork(status, { agentId, ownedCount = 0, handleCount = 0, continuation = false } = {}) {
   if (agentId !== 'hermes' || !['done', 'fyi'].includes(status?.state) || ownedCount <= handleCount) return status
-  // fyi is the marker vocabulary; the session projection below overrides the list's
-  // execution state. A failed correction stops after one turn without changing its ask.
   return { ...status, state: 'fyi', ...(continuation ? {} : { ask: 'Starting the follow-up work it listed.' }) }
 }
-
 export function projectOwnedOpenWork(session, evidence) {
   if (!evidence || evidence.status && !['done', 'fyi'].includes(evidence.status.state)) return session
   const guarded = guardOwnedOpenWork(session.wizard_attention, evidence)

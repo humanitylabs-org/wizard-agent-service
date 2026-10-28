@@ -6,14 +6,14 @@ import { parseStatus } from './thread-status.mjs'
 
 // Keep the continuation watermark and owner-gate readers on one machine-input boundary.
 export { isHumanRequest } from './delegation-receipts.mjs'
-import { isHumanRequest, internalHelperMessage } from './delegation-receipts.mjs'
+import { isHumanRequest, internalHelperMessage, retainedMessagesWhere } from './delegation-receipts.mjs'
 export const INTERNAL_HELPER_MESSAGE = { test: internalHelperMessage }
 
 // IDs, not timestamps alone: a newly inserted backdated/same-timestamp request also invalidates work.
 export function requestWatermark(db, sessionId) {
   const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
   const rows = db.prepare(`SELECT id,role,content,timestamp ${cols.has('display_kind') ? ',display_kind' : ''}
-    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user'
+    ${cols.has('message_uid') ? ',message_uid' : ''} FROM messages WHERE session_id=? AND role='user' AND ${retainedMessagesWhere(cols)}
     ORDER BY id DESC LIMIT 513`).all(sessionId)
   const row = rows.find(isHumanRequest)
   if (!row && rows.length > 512) return null // incomplete history is not authority to resume
@@ -84,8 +84,9 @@ export function captureContinuation(path, pending) {
   } catch { return null } finally { db?.close() }
 }
 export function helperAnswerAfter(db, sessionId, completedAt, delegationId) {
+  const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r => r.name))
   const rows = db.prepare(`SELECT role,content,timestamp,display_kind FROM messages WHERE session_id=?
-    AND timestamp>=? ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
+    AND timestamp>=? AND ${retainedMessagesWhere(cols)} ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, completedAt)
   if (rows.length > 512) return null // unknown, not invented evidence of an answered completion
   const completion = rows.findLast(r => (r.role === 'user' && completionDelegationId(r.content) === delegationId) || isReceiptDelivery(r,delegationId))
   return Boolean(completion && rows.some(r => r.role === 'assistant' && Number(r.timestamp) > Number(completion.timestamp)
