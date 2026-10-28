@@ -230,6 +230,8 @@ finally:
         p=run(['docker','compose','-p',PROJECT,'-f',str(FILE),'down','--remove-orphans'],check=False,timeout=90)
     receipt['cleanup_no_project_containers']=not run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+PROJECT],check=False).stdout.strip()
     receipt['cleanup_no_project_networks']=not run(['docker','network','ls','-q','--filter','label=com.docker.compose.project='+PROJECT],check=False).stdout.strip()
+    receipt['six_privacy_checks_complete']=all(check.get('status')=='passed' for check in receipt['six_privacy_checks'].values())
     (OUT/'receipt.json').write_text(json.dumps(receipt,indent=2))
     print(json.dumps(receipt,indent=2))
     if receipt['phase']!='complete' or not all(receipt['checks'].values()):sys.exit(1)
+    if not receipt['six_privacy_checks_complete']:sys.exit(2)  # never green-light a partial security gate
