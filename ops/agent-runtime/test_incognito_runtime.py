@@ -193,6 +193,17 @@ class Tests(unittest.TestCase):
    cfg=yaml.safe_load((root/'config.yaml').read_text());self.assertEqual(cfg['toolsets'],['all']);self.assertIn('synthetic',cfg['mcp_servers']);self.assertEqual(cfg['model']['fallbacks'],['local'])
    self.assertIn('synthetic',cfg['plugins']['enabled']);self.assertIn('wizard-incognito-policy',cfg['plugins']['enabled']);self.assertEqual(json.loads(result)['history_search'],'unavailable')
    self.assertFalse((root/'.ready').exists());self.assertFalse((root/'.lease').exists())
+ def test_incognito_inherits_attested_search_route_bearer_and_check_headers(self):
+  import yaml
+  search={'url':'http://agent-synthetic-tinfoil:3302/mcp','headers':{'Authorization':'Bearer ${TINFOIL_API_KEY}','X-Tinfoil-Tool-PII-Check':'true','X-Tinfoil-Tool-Injection-Check':'true'},'sampling':{'enabled':False}}
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);(root/'config.yaml').write_text(yaml.safe_dump({'mcp_servers':{'tinfoil_search':search}}));(root/'.env').write_text('TINFOIL_API_KEY=synthetic-only\n')
+   script=INSTALL.replace("pathlib.Path('/opt/data')",'pathlib.Path('+repr(d)+')').replace('from gateway.config import Platform',"from types import SimpleNamespace\nPlatform=[SimpleNamespace(value='api_server')]")
+   subprocess.check_output([sys.executable,'-c',script],input=json.dumps({'key':'synthetic-new','environment':{},'policy':POLICY}).encode())
+   cfg=yaml.safe_load((root/'config.yaml').read_text())
+   self.assertEqual(cfg['mcp_servers']['tinfoil_search'],search)
+   ns={};exec(POLICY,ns)
+   self.assertIsNone(ns['block']('mcp__tinfoil_search__search',{'query':'synthetic'}))
  def test_stream_copy_is_bounded_binary_pipe_not_archive_file(self):
   with patch('incognito_runtime._docker_command',lambda a:a):
    result=stream_copy([sys.executable,'-c',"import sys;sys.stdout.buffer.write(b'x'*4096)"],[sys.executable,'-c','import sys;assert len(sys.stdin.buffer.read())==4096'],8192)
