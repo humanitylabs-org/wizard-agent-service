@@ -67,7 +67,7 @@ def call(action, value, session_id):
         request = urllib.request.Request(origin + '/wizard/internal/schedules/' + action,
             data=json.dumps({**value, 'session_id': session_id}).encode(), method='POST',
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(request, timeout=15) as response:
             return response.read(131072).decode()
     except urllib.error.HTTPError as error:
         try:

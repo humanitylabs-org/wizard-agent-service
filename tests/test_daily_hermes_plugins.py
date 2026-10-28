@@ -168,5 +168,51 @@ class ProgressContracts(unittest.TestCase):
         progress.register(types.SimpleNamespace(register_hook=lambda event, fn: calls.append((event, fn))))
         self.assertEqual(calls, [('pre_llm_call', progress.turn_context)])
 
+class LoopbackNeverUsesProxy(unittest.TestCase):
+    """Oscar's review repro: an env proxy must never see the loopback bearer request."""
+    def test_env_proxy_is_ignored_for_every_plugin(self):
+        import http.server, os, threading
+        hits = {'service': 0, 'proxy': 0}
+        def handler(kind, body):
+            class H(http.server.BaseHTTPRequestHandler):
+                def do_POST(self):
+                    hits[kind] += 1
+                    self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                    self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                    self.wfile.write(body)
+                def log_message(self, *args): pass
+            return H
+        service = http.server.HTTPServer(('127.0.0.1', 0), handler('service', json.dumps({'content': [{'text': 'ok'}], 'ok': True}).encode()))
+        proxy = http.server.HTTPServer(('127.0.0.1', 0), handler('proxy', b'{}'))
+        for server in (service, proxy):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            secrets.clear()
+            secrets.update(WIZARD_HEAVY_ORIGIN='http://127.0.0.1:%d' % service.server_port, WIZARD_HEAVY_TOKEN='fixture-capability')
+            env = {'http_proxy': 'http://127.0.0.1:%d' % proxy.server_port, 'HTTP_PROXY': 'http://127.0.0.1:%d' % proxy.server_port, 'no_proxy': '', 'NO_PROXY': ''}
+            with patch.dict(os.environ, env):
+                self.assertEqual(agents.call('list', {}), 'ok')
+                schedule.call('list', {}, 'wizard_1_fixture')
+            self.assertEqual(hits, {'service': 2, 'proxy': 0})
+        finally:
+            service.shutdown(); proxy.shutdown()
+
+class ResponseBounds(unittest.TestCase):
+    def setUp(self):
+        secrets.clear()
+        secrets.update(WIZARD_HEAVY_ORIGIN='http://127.0.0.1:8923', WIZARD_HEAVY_TOKEN='fixture-capability')
+
+    def test_escaped_64k_content_is_read_whole_and_oversize_is_refused(self):
+        big = '"\n' * 40000
+        with patch.object(agents.urllib.request, 'build_opener', return_value=types.SimpleNamespace(open=lambda *a, **k: Response({'content': [{'text': big}]}))):
+            self.assertEqual(agents.call('memory_read', {}), big)
+        huge = 'x' * (agents.MAX_RESPONSE + 10)
+        with patch.object(agents.urllib.request, 'build_opener', return_value=types.SimpleNamespace(open=lambda *a, **k: Response({'content': [{'text': huge}]}))):
+            self.assertIn('too large', agents.call('memory_read', {}))
+
+    def test_progress_manifest_declares_its_hook(self):
+        manifest = (ROOT / 'hermes-plugin' / 'wizard-work-progress' / 'plugin.yaml').read_text()
+        self.assertIn('provides_hooks:\n  - pre_llm_call', manifest)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

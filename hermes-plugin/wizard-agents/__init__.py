@@ -12,6 +12,10 @@ import urllib.request
 from agent.secret_scope import get_secret
 
 
+# 64 KiB raw content can expand up to 6x when JSON-escaped twice; bound with headroom.
+MAX_RESPONSE = 1024 * 1024
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -43,8 +47,11 @@ def call(tool, value):
         request = urllib.request.Request(origin + '/wizard/internal/agents/' + tool,
             data=json.dumps(value).encode(), method='POST',
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
-            payload = json.loads(response.read(80000).decode())
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(request, timeout=15) as response:
+            body = response.read(MAX_RESPONSE + 1)
+            if len(body) > MAX_RESPONSE:
+                return json.dumps({'error': 'agent read response too large'})
+            payload = json.loads(body.decode())
     except urllib.error.HTTPError as error:
         try:
             payload = json.loads(error.read(4096).decode())
