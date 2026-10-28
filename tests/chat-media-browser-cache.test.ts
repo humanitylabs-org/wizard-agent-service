@@ -3,7 +3,7 @@
 // a day-old copy). Agent-made artifacts are content-hashed, so they are cached for good.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -73,6 +73,15 @@ describe('chat media browser cache', () => {
     expect(edited.status).toBe(200)
     expect(edited.headers.get('etag')).not.toBe(etag)
     expect(await edited.text()).toBe('edited in Wizard Files\n')
+
+    // Same size, mtime put back (an editor or sync tool preserving times): the ETag still moves.
+    const stamped = edited.headers.get('etag')!
+    const { mtime } = statSync(path)
+    writeFileSync(path, 'EDITED IN WIZARD FILES\n')
+    utimesSync(path, mtime, mtime)
+    const sameSize = await fetch(`${base}/wizard/files/${id}/content`, { headers: { 'If-None-Match': stamped } })
+    expect(sameSize.status).toBe(200)
+    expect(await sameSize.text()).toBe('EDITED IN WIZARD FILES\n')
 
     const part = await fetch(`${base}/wizard/files/${id}/content`, { headers: { Range: 'bytes=0-5', 'If-None-Match': edited.headers.get('etag')! } })
     expect(part.status).toBe(206)

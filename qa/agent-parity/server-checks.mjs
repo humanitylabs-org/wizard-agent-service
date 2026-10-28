@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -208,6 +208,16 @@ export const serverChecks = {
     assert.equal(image.status, 200); assert.equal(image.headers.get('content-type'), 'image/png')
     assert.ok(image.headers.get('content-disposition').includes('download.png'))
     assert.deepEqual(Buffer.from(await image.arrayBuffer()), png)
+    // Browser cache (every runtime): attachments are immutable; owner files revalidate and an edit shows at once.
+    assert.equal(image.headers.get('cache-control'), 'private, no-cache')
+    const etag = image.headers.get('etag'); assert.ok(etag, 'owner file carries a validator')
+    assert.equal((await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })).status, 304)
+    const index = JSON.parse(readFileSync(join(s.root, 'media.json')))
+    const onDisk = join(s.root, 'files', index.files.find(f => f.id === file.id).rel), { mtime } = statSync(onDisk)
+    const edited = Buffer.from(png); edited[edited.length - 1] ^= 1; writeFileSync(onDisk, edited); utimesSync(onDisk, mtime, mtime)
+    const fresh = await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })
+    assert.equal(fresh.status, 200, 'same-size edit with preserved mtime is not served as 304'); assert.deepEqual(Buffer.from(await fresh.arrayBuffer()), edited)
+    for (const item of s.mediaItems) assert.equal((await s.raw(`/wizard/attachments/${item.id}`)).headers.get('cache-control'), 'private, max-age=31536000, immutable')
     const document = await s.raw(`/wizard/attachments/${s.mediaItems[1].id}`)
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))

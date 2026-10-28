@@ -5606,8 +5606,8 @@ function buildWizardServer(options, lifetime) {
           const opened = mediaFiles.open(id, range || null)
           const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
           const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
-          if (Number.isFinite(opened.mtimeMs)) {
-            headers.ETag = `W/"${id}-${opened.size}-${Math.trunc(opened.mtimeMs)}"`
+          if (typeof opened.version === 'string') {
+            headers.ETag = `W/"${id}-${opened.size}-${opened.version}"`
             const match = typeof request.headers['if-none-match'] === 'string' ? request.headers['if-none-match'] : ''
             if (!range && match.split(',').map((tag) => tag.trim()).includes(headers.ETag)) {
               opened.stream?.destroy()
