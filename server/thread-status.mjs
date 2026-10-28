@@ -29,12 +29,24 @@ export const SUMMARY_REPLY_INSTRUCTIONS = 'When a final reply finishes, fixes, s
 
 // Existing installs and callers without a preference keep the Summary contract.
 export const FINISH_REPORT_INSTRUCTIONS = SUMMARY_REPLY_INSTRUCTIONS
-export const finishReportInstructions = style => style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : SUMMARY_REPLY_INSTRUCTIONS
+// Own: Wizard adds no reply-shape rule at all; the agent keeps the style its owner already set up.
+export const finishReportInstructions = style => style === 'own' ? '' : style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : SUMMARY_REPLY_INSTRUCTIONS
 
 // Hermes-only extension: callers for other agents retain the shared finish contract verbatim.
 export const OWNED_OPEN_WORK_INSTRUCTIONS = 'Under **Still open:**, every bullet you own must name its live handle and when it lands (running now, scheduled for <time>, or queued job). Dispatch agent-owned follow-ups within existing authority in this same turn; never offer them as a question or say "say the word". Only owner decisions, money, external sends, or wider authority may be asked of the owner.'
 
 export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (only when the work cannot move until the user does one specific thing: decide, approve, reply, install, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi), done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check), check (only when the user\'s own judgment is the missing piece: whether a new feature or design is what they meant, whether they like it (look, feel, wording, taste), or a real-device behaviour you could not verify yourself; and only once the change is already running where the user will try it: live on the server they use, or for a phone or desktop app update, confirmed installed on their device. While a build, publish or self-update is still on its way, use fyi, keep checking, and send check only after it has landed), fyi (an answer, report, or update with no action). ask is what the Ready list shows, read cold by someone who has not opened the thread: one or two short plain sentences, at most 140 characters. For needs_you, first say what is waiting in everyday words, then the exact thing to do (\"Phone update for everyone is ready. Reply ship to send it\", \"Two desk layouts to choose from. Pick A or B\"); if the action is a reply word, the sentence says what that word does. For check, say what changed and what to judge (\"New chat groups are live. Say if the 11 groups feel right\"), never \"Test that X works\". For done and fyi, state the outcome in plain words. Never put internal words in ask: no PR, issue or version numbers, branch, flag, script, job, file or app IDs, and no team jargon such as lane, gate, waive, receipt, cutover, soak, parity or unblock; never a vague \"Review this\" or \"Let me know\". The reply itself ends with the same ask in plain words. ' + SUBJECT_RULE + ' ' + TITLE_INSTRUCTIONS + ' ' + SPACE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers. A background handoff is still agent-owned work, never a done/FYI result. Before saying work is running, verify the actual worker and its continuation/delivery handle. If a terminal tool says completion notifications are unsupported, stay in the owning turn and wait for its result or arrange and verify a durable continuation; an untracked background process does not finish the request. Return to the owner with a self-contained verified outcome or one concrete owner-only gate, not a promise to resume.'
+
+// Wizard OS protocol only: the status marker, its fields and when to omit it. Drops the parts of
+// STATUS_INSTRUCTIONS that steer how the agent writes or follows through (for the Own reply style).
+export const STATUS_ECHO_RULE = 'The reply itself ends with the same ask in plain words. '
+export const STATUS_PROTOCOL_INSTRUCTIONS = (() => {
+  const cut = STATUS_INSTRUCTIONS.indexOf(' A background handoff is still agent-owned work')
+  return STATUS_INSTRUCTIONS.slice(0, cut).replace(STATUS_ECHO_RULE, '')
+})()
+// Own: the one style source is the agent's own persona, so the owner's "reply like this from now on" lands there.
+export const OWN_STYLE_SOURCE = 'Wizard adds no reply-style rules: how you write comes from your own persona and memory. When the owner asks to change how you reply from now on, record it in your own persona file (SOUL.md in your home for Hermes) so it holds on every surface.'
+export const statusInstructions = style => style === 'own' ? STATUS_PROTOCOL_INSTRUCTIONS : STATUS_INSTRUCTIONS
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()

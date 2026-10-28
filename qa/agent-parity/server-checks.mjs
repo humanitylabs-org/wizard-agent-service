@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -113,6 +113,15 @@ export const serverChecks = {
       assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
       assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
     }
+    // Own: Wizard OS facts and status protocol only; no reply-shape rule on any runtime kind.
+    const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: 'own' }), method: 'PUT' })
+    assert.equal(put.status, 200)
+    await s.request('/api/sessions', post({ id: 'wizard_parity_own' }))
+    await admit(s, { session_id: 'wizard_parity_own', input: 'Synthetic owner style change', instructions: 'Force a different style' })
+    const own = sent(s).instructions
+    assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: own keeps the status protocol`)
+    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: own drops style rule ${rule.slice(0, 40)}`)
+    assert.ok(own.includes('Wizard renders Markdown'), `${s.kind}: own keeps Wizard facts`)
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }

@@ -84,7 +84,7 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions; changes apply on the next turn without restart.",
+      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions, or with Own only Wizard OS facts and the status protocol and no reply-style rule; changes apply on the next turn without restart.",
       "layer": "server",
       "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
