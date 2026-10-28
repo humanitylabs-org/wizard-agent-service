@@ -237,6 +237,52 @@ describe('setup API (box-local listener)', () => {
     expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('todo')
   })
 
+  it('stops saying connected once the last phone leaves the tailnet, until a phone opens Wizard again', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath })
+    await call(port, '/wizard/v1/setup/phone/start', jsonPost())
+    helper.signIn()
+    helper.state.https_enabled = true
+    expect((await call(port, '/wizard/v1/setup/phone/start', jsonPost())).body.step).toBe('serving')
+    helper.state.peers = [{ id: 'c', name: 'iphone', os: 'iOS', online: true, last_seen: null }]
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: new Date().toISOString() } })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+
+    // An offline phone is still on the tailnet: still connected.
+    helper.state.peers = [{ id: 'c', name: 'iphone', os: 'iOS', online: false, last_seen: '2026-10-01T10:00:00Z' }]
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+
+    // The owner removes the phone in Tailscale's admin (a laptop stays): it can't reach Wizard any more.
+    helper.state.peers = [{ id: 'a', name: 'laptop', os: 'macOS', online: true, last_seen: null }]
+    const removed = await call(port, '/wizard/v1/setup/phone')
+    expect(removed.body).toMatchObject({ step: 'serving', phones: [] })
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe('')
+    expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('in_progress')
+
+    // The phone rejoins the tailnet: only a hint, as the first time, until it opens Wizard.
+    helper.state.peers.push({ id: 'd', name: 'iphone', os: 'iOS', online: true, last_seen: null })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('serving')
+  })
+
+  it('keeps connected when the helper peer list is full, since an offline phone may be past its 32-peer cap', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath })
+    await call(port, '/wizard/v1/setup/phone/start', jsonPost())
+    helper.signIn()
+    helper.state.https_enabled = true
+    expect((await call(port, '/wizard/v1/setup/phone/start', jsonPost())).body.step).toBe('serving')
+    const seen = new Date().toISOString()
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: seen } })
+    // 32 online laptops fill the helper's list; the owner's offline iPhone sorts after them and is cut off.
+    helper.state.peers = Array.from({ length: 32 }, (_, i) => ({ id: `l${i}`, name: `laptop-${String(i).padStart(2, '0')}`, os: 'macOS', online: true, last_seen: null }))
+    await call(port, '/wizard/v1/setup/phone')
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe(seen)
+  })
+
   it('never turns Serve on or records anything from a poll before the owner pressed start', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
