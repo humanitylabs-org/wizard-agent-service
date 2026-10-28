@@ -84,7 +84,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
-    response_style: value.response_style === 'concise' ? 'concise' : 'summary',
+    response_style: RESPONSE_STYLES.includes(value.response_style) ? value.response_style : 'summary',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
@@ -192,6 +192,9 @@ export function updateSettings(path, mutate) {
   return normalizeSettings(raw)
 }
 
+// Own: Wizard sends only Wizard OS facts and protocol, no reply-style rules.
+export const RESPONSE_STYLES = ['summary', 'concise', 'own']
+
 // Bounded, local-only experiment counters. No timestamps, identifiers, content or network sink.
 const counter = n => Number.isSafeInteger(n) && n >= 0 ? n : 0
 export function recordResponseStyleSwitch(raw, before, after) {
@@ -200,7 +203,7 @@ export function recordResponseStyleSwitch(raw, before, after) {
   raw.response_style_experiment = {
     assigned: ['summary', 'concise'].includes(prior.assigned) ? prior.assigned : before,
     source: ['new_install', 'existing_install'].includes(prior.source) ? prior.source : 'existing_install',
-    switches: { summary: counter(prior.switches?.summary), concise: counter(prior.switches?.concise) },
+    switches: { summary: counter(prior.switches?.summary), concise: counter(prior.switches?.concise), ...(after === 'own' || Object.hasOwn(prior.switches ?? {}, 'own') ? { own: counter(prior.switches?.own) } : {}) },
   }
   raw.response_style_experiment.switches[after] = Math.min(Number.MAX_SAFE_INTEGER, raw.response_style_experiment.switches[after] + 1)
 }
@@ -216,7 +219,7 @@ export function initializeResponseStyle(path, { existingInstall = true, choose =
     if (current.source === 'invalid') return current.settings
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8'))
-      if (['summary', 'concise'].includes(raw?.response_style)) return current.settings
+      if (RESPONSE_STYLES.includes(raw?.response_style)) return current.settings
     } catch { return current.settings }
   }
   try {
