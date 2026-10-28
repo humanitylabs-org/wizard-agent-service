@@ -41,6 +41,16 @@
   ],
   "features": [
     {
+      "id": "message-reply",
+      "description": "Reply to assistant or owner messages with a per-thread quoted draft and a quote card after send/reload, on both shells and every skin.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/notification-reply-send.test.mjs tests/context-draft-lifecycle.test.mjs. Real outbox source sends a message quotation to a local HTTP fixture for main, host-profile, container and restricted destinations; assert exact session and agent plus parsed history quote. Run qa-message-reply.cjs against an isolated candidate gateway: desktop and phone select Reply, retain draft/chip across polling and skin switches, cancel, send and inspect outbound input, then reload the synthetic history quote card. Fixture routing is not live agent/model execution. Companion UX PR: humanitylabs-org/wizard-ux#672.",
+      "source_refs": ["wizard-ux/web/core/chats.js", "wizard-ux/web/core/chat-kit.js", "wizard-ux/web/outbox.js"],
+      "reference_tests": ["wizard-ux/tests/notification-reply-send.test.mjs", "wizard-ux/tests/context-draft-lifecycle.test.mjs", "wizard-ux/qa-message-reply.cjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up instructions and follow-through; routed kinds retain existing prompts, done state and admission behavior.",
       "layer": "server",
