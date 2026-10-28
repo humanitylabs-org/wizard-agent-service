@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import stat
 import subprocess
 import importlib.util
@@ -45,6 +46,7 @@ from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import hermes_lock
+from incognito_runtime import IncognitoManager
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
@@ -1111,9 +1113,20 @@ def driver_for(agent: dict, driver, restricted_driver):
     return driver
 
 
-def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None):
+def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None, incognito_manager=None):
+    # Production constructs/reaps the manager before serving. Non-Incognito helper clients and
+    # lightweight handler fixtures must not gain a Docker dependency or background reaper.
+    manager_lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
+        incognito_manager = None
+
+        def _incognito(self):
+            with manager_lock:
+                if Handler.incognito_manager is None:
+                    Handler.incognito_manager = IncognitoManager(driver, docker=docker, failure=RuntimeFailure,
+                        image=DEFAULT_IMAGE, proxy_image=DEFAULT_PROXY_IMAGE, container_for=container_for)
+                return Handler.incognito_manager
 
         def log_message(self, fmt, *args):  # no request logging (paths only, never bodies)
             sys.stderr.write("[agent-runtime] " + (fmt % args)[:200] + "\n")
@@ -1137,7 +1150,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census|incognito/start|incognito/stop|incognito/lease)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1162,6 +1175,25 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     if not main_container:
                         raise RuntimeFailure("main_delivery_unavailable", 503)
                     self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
+                    return
+                if action.startswith("incognito/"):
+                    if not isinstance(payload, dict):
+                        raise RuntimeFailure("invalid_payload", 400)
+                    sid = payload.get("session_id")
+                    incognito = self._incognito()
+                    if action == "incognito/start":
+                        agent = agents.read(agent_id)
+                        # The manager needs the real restricted driver's project lookup
+                        # for a read-only seed exec, never a normal-runtime fallback.
+                        chosen = driver_for(agent, driver, restricted_driver)
+                        if chosen is not driver:
+                            raise RuntimeFailure("incognito_unsupported_runtime", 409)
+                        result = incognito.start(agent, sid)
+                    elif action == "incognito/stop":
+                        result = incognito.stop(agent_id, sid)
+                    else:
+                        result = incognito.lease(agent_id, sid)
+                    self._json(200, result)
                     return
                 agent = agents.read(agent_id)
                 chosen = driver_for(agent, driver, restricted_driver)
@@ -1188,6 +1220,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}\n")
                 self._json(502, {"error": "runtime_failed"})
 
+    Handler.incognito_manager = incognito_manager
     return Handler
 
 
@@ -1196,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--agents-dir", required=True, type=Path)
     ap.add_argument("--token-file", type=Path)
     ap.add_argument("--port", type=int, default=7795)
+    ap.add_argument("--incognito-owner", help="scope orphan cleanup to this helper instance label")
     ap.add_argument("--driver", choices=["runtipi", "compose"], default="runtipi")
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
@@ -1223,9 +1257,22 @@ def main(argv: list[str] | None = None) -> int:
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
-    sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
-    server.serve_forever()
+    incognito = IncognitoManager(driver, docker=docker, failure=RuntimeFailure, image=DEFAULT_IMAGE,
+        proxy_image=DEFAULT_PROXY_IMAGE, container_for=container_for, owner=args.incognito_owner)
+    handler = make_handler(token, agents, driver, args.main_container, restricted_driver, incognito)
+    server = None
+    def terminate(signum, frame):
+        raise SystemExit(0)
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+        sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
+        server.serve_forever()
+    finally:
+        incognito.close()
+        if server:
+            server.server_close()
+        signal.signal(signal.SIGTERM, previous)
     return 0
 
 

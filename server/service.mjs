@@ -75,6 +75,7 @@ import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isSch
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
+import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
@@ -2722,6 +2723,7 @@ function buildWizardServer(options, lifetime) {
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
     followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
@@ -4732,6 +4734,7 @@ function buildWizardServer(options, lifetime) {
   const withoutHiddenSeen = (request, state) => !state || typeof state !== 'object' || !state.threads || typeof state.threads !== 'object'
     ? state : { ...state, threads: withoutHiddenSessions(request, state.threads) }
   const sideAgent = (request, sessionId, explicit = '') => {
+    if (typeof sessionId === 'string' && /(?:^|[:/])incog_/u.test(sessionId)) throw new AgentError(410, 'incognito_closed', 'incognito')
     if (!agents) { if (explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'not_found', 'agent.id'); return MAIN_AGENT_ID }
     if (explicit) {
       const agent = agents?.read(explicit)
@@ -4788,6 +4791,17 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  const incognito = createIncognito({ registry: agents, runtime: agentRuntime, fetchImpl: rawFetchImpl,
+    upstreamHost: options.agentUpstreamHost || '',
+    proxyContext: { sendJson, isAllowedProxyRequest, secretGuard, mainSecrets: agentCtx?.mainSecrets || [],
+      readJson: async request => {
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new AgentError(415, 'json_required', 'incognito')
+        const value = parseJsonBody(await readBoundedBody(request, 70_000))
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentError(400, 'invalid_request', 'incognito')
+        return value
+      } },
+  })
+  lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
@@ -4821,6 +4835,10 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (isIncognitoPath(url.pathname)) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (await incognito.handle(url, request, response)) return
       }
       if (url.pathname === '/wizard/standard-chats/mcp') {
         if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
