@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
@@ -122,33 +122,24 @@ export const serverChecks = {
     assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
   },
   'finish-report-instructions': async s => {
-    await admit(s, { input: 'Synthetic task-finish prompt delivery check' })
-    const instructions = sent(s).instructions
-    assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
-    assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
-    assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
-    for (const style of ['concise', 'summary']) {
+    assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, 'own', `${s.kind}: fresh settings default to Own`)
+    await admit(s, { input: 'Synthetic fresh-install persona contract' })
+    const fresh = sent(s).instructions
+    assert.ok(fresh.includes(STATUS_PROTOCOL_INSTRUCTIONS) && fresh.includes('SOUL.md in your home'))
+    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS]) assert.ok(!fresh.includes(rule), `${s.kind}: fresh install has no imposed style`)
+    // One style source: whatever an older shell saved, every runtime gets Wizard OS facts + status protocol only.
+    for (const style of ['summary', 'concise', 'own']) {
       const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
       assert.equal(put.status, 200)
-      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, style)
-      // Use a fresh thread: the first synthetic run may still be active in its queue.
+      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, 'own')
       const session_id = `wizard_parity_${style}`
       await s.request('/api/sessions', post({ id: session_id }))
       await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
-      const prompt = sent(s).instructions
-      const selected = style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : FINISH_REPORT_INSTRUCTIONS
-      assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
-      assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
+      const own = sent(s).instructions
+      assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
+      for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
+      assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
     }
-    // Own: Wizard OS facts and status protocol only; no reply-shape rule on any runtime kind.
-    const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: 'own' }), method: 'PUT' })
-    assert.equal(put.status, 200)
-    await s.request('/api/sessions', post({ id: 'wizard_parity_own' }))
-    await admit(s, { session_id: 'wizard_parity_own', input: 'Synthetic owner style change', instructions: 'Force a different style' })
-    const own = sent(s).instructions
-    assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: own keeps the status protocol`)
-    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: own drops style rule ${rule.slice(0, 40)}`)
-    assert.ok(own.includes('Wizard renders Markdown'), `${s.kind}: own keeps Wizard facts`)
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -235,6 +226,16 @@ export const serverChecks = {
     assert.equal(image.status, 200); assert.equal(image.headers.get('content-type'), 'image/png')
     assert.ok(image.headers.get('content-disposition').includes('download.png'))
     assert.deepEqual(Buffer.from(await image.arrayBuffer()), png)
+    // Browser cache (every runtime): attachments are immutable; owner files revalidate and an edit shows at once.
+    assert.equal(image.headers.get('cache-control'), 'private, no-cache')
+    const etag = image.headers.get('etag'); assert.ok(etag, 'owner file carries a validator')
+    assert.equal((await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })).status, 304)
+    const index = JSON.parse(readFileSync(join(s.root, 'media.json')))
+    const onDisk = join(s.root, 'files', index.files.find(f => f.id === file.id).rel), { mtime } = statSync(onDisk)
+    const edited = Buffer.from(png); edited[edited.length - 1] ^= 1; writeFileSync(onDisk, edited); utimesSync(onDisk, mtime, mtime)
+    const fresh = await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })
+    assert.equal(fresh.status, 200, 'same-size edit with preserved mtime is not served as 304'); assert.deepEqual(Buffer.from(await fresh.arrayBuffer()), edited)
+    for (const item of s.mediaItems) assert.equal((await s.raw(`/wizard/attachments/${item.id}`)).headers.get('cache-control'), 'private, max-age=31536000, immutable')
     const document = await s.raw(`/wizard/attachments/${s.mediaItems[1].id}`)
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))

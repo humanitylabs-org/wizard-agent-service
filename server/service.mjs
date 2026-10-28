@@ -300,12 +300,9 @@ const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 /** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  if (contract.response_style === 'own') return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
-  let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
-  if (contract.response_style === 'concise') instructions = instructions
-    .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
-    .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
-  return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
+  return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
@@ -1767,7 +1764,9 @@ function safeContentHeaders(file, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(disposition, file.filename),
-    'Cache-Control': 'private, no-store',
+    // Owner files can be edited in place through Wizard Files under the same id: the owner's browser keeps a copy
+    // but asks first (a 304 costs no bytes), so an edit shows at once. Never stored by shared caches.
+    'Cache-Control': 'private, no-cache',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -1793,7 +1792,8 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment', decodeURIComponent(encodedName)),
-    'Cache-Control': 'private, no-store',
+    // Attachment ids are content-bound and never reused: cache them in the owner's browser, never in shared caches.
+    'Cache-Control': 'private, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -5541,7 +5541,8 @@ function buildWizardServer(options, lifetime) {
             'Content-Type': artifact.mime,
             'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-store',
+            // Artifact ids are the content's own hash: the bytes behind an id never change.
+            'Cache-Control': 'private, max-age=31536000, immutable',
             'X-Content-Type-Options': 'nosniff',
           }
           const range = typeof request.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range.trim()) : null
@@ -5629,6 +5630,15 @@ function buildWizardServer(options, lifetime) {
           const opened = mediaFiles.open(id, range || null)
           const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
           const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
+          if (typeof opened.version === 'string') {
+            headers.ETag = `W/"${id}-${opened.size}-${opened.version}"`
+            const match = typeof request.headers['if-none-match'] === 'string' ? request.headers['if-none-match'] : ''
+            if (!range && match.split(',').map((tag) => tag.trim()).includes(headers.ETag)) {
+              opened.stream?.destroy()
+              const { 'Content-Length': _, ...notModified } = headers
+              response.writeHead(304, notModified); response.end(); return
+            }
+          }
           if (opened.status === 416) {
             response.writeHead(416, { ...headers, 'Content-Range': `bytes */${opened.size}` }); response.end(); return
           }
