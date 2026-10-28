@@ -20,6 +20,7 @@ const digest = text => createHash('sha256').update(text).digest('hex')
 const hidden = new Set(['commentary', 'hidden', 'system', 'internal_notification', 'async_delegation_complete'])
 const MAX_ROWS = 10_000
 const MAX_AGE = 2 * 3600
+const CLAIM_GRACE = 120
 
 export function readOwnedOpenWork(path, sessionId) {
   if (!path || !sessionId) return null
@@ -39,8 +40,7 @@ export function readOwnedOpenWork(path, sessionId) {
     const users = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${retained} ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
     const user = users.find(row => !/^\s*\[(?:reporter|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT)/u.test(String(row.content ?? '')))
     const owner = users.find(row => isHumanRequest(row) && !String(row.content ?? '').startsWith('[reporter]'))
-      ?? (users.length < 513 ? users.at(-1) : null)
-    if (!user || !owner) return null
+    if (!user || !owner) return null // machine-only chains have no owner authority
     const continuation = users.some(row => row.id >= owner.id && String(row.content ?? '').startsWith(OWNED_WORK_PREFIX))
     const items = ownedOpenItems(latest.content)
     const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${retained} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
@@ -124,6 +124,13 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS owned_work_chain ON owned_work_claims(session_id,chain_id)')
   const claimFor = evidence => db.prepare('SELECT * FROM owned_work_claims WHERE session_id=? AND (run_id=? OR reply_id=? OR chain_id=?)')
     .get(evidence.sessionId, evidence.runId, evidence.messageId, evidence.chainId ?? evidence.runId)
+  const canClaim = evidence => {
+    const claim = claimFor(evidence)
+    // Only reconcile an interrupted admission of this exact witness, never a
+    // rewritten reply or another machine turn in an already-claimed owner chain.
+    return !claim || claim.state === 'claimed' && claim.created_at < now()/1000 - CLAIM_GRACE
+      && claim.run_id === evidence.runId && claim.reply_id === evidence.messageId && claim.fingerprint === evidence.fingerprint
+  }
   // Session-list projection reads only sessions the scanner flagged (or that hold a
   // claim), so listing hundreds of threads never seeks hundreds of transcripts.
   const candidates = new Map()
@@ -135,10 +142,11 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     if (now()/1000 - candidates.get(sessionId) > MAX_AGE) { candidates.delete(sessionId); return null }
     const evidence = read(sessionId)
     if (!evidence) {
-      // The admitted continuation is running: keep the previous green status hidden until
-      // its own reply lands (then that reply is evaluated, as a continuation, on its own).
-      const pending = db.prepare("SELECT 1 FROM owned_work_claims WHERE session_id=? AND state IN ('claimed','admitted') AND created_at>=? LIMIT 1")
-        .get(sessionId, now()/1000 - 15 * 60)
+      // A fresh claim may be admitting; an admitted continuation may be running.
+      // Stale claimed rows need recovery, not a fabricated running continuation.
+      const pending = db.prepare(`SELECT 1 FROM owned_work_claims WHERE session_id=? AND
+        ((state='claimed' AND created_at>=?) OR (state='admitted' AND created_at>=?)) LIMIT 1`)
+        .get(sessionId, now()/1000 - CLAIM_GRACE, now()/1000 - 15 * 60)
       return pending ? { agentId: 'hermes', sessionId, ownedCount: 1, handleCount: 0, continuation: false } : null
     }
     if (!evidence.status) return null
@@ -156,26 +164,32 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
       const found = await scan(now())
       for (const evidence of found) if (evidence?.sessionId && evidence.items?.length) candidates.set(evidence.sessionId, now()/1000)
       // Flagged threads that were busy (or otherwise skipped) on an earlier scan are re-read
-      // each tick until claimed or aged out; the incremental scan alone would never revisit them.
+      // each tick until admitted/failed or aged out, including stale interrupted claims.
       const seen = new Set(found.map(evidence => evidence?.sessionId))
       for (const [sessionId, at] of candidates) {
         if (seen.has(sessionId) || now()/1000 - at > MAX_AGE) continue
         const evidence = read(sessionId)
-        if (evidence && !claimFor(evidence)) found.push(evidence)
+        if (evidence && canClaim(evidence)) found.push(evidence)
       }
       for (const evidence of found) {
         if (stopped) break
         if (evidence.agentId !== 'hermes' || evidence.continuation || !evidence.items?.length
-          || guardOwnedOpenWork(evidence.status, evidence) === evidence.status || claimFor(evidence)
+          || guardOwnedOpenWork(evidence.status, evidence) === evidence.status || !canClaim(evidence)
           || await busy(evidence.sessionId)) continue
         const token = { kind: OWNED_WORK_KIND, agent_id: 'hermes', session_id: evidence.sessionId,
           sessionId: evidence.sessionId, runId: evidence.runId, chainId: evidence.chainId ?? evidence.runId, messageId: evidence.messageId,
           userId: evidence.userId, fingerprint: evidence.fingerprint }
         try { await validate(token) } catch { continue }
-        // Commit the per-run AND per-reply witness BEFORE sending. The queue's
-        // stable key reconciles a transport retry; restart never creates a new turn.
-        const claimed = db.prepare('INSERT OR IGNORE INTO owned_work_claims(session_id,run_id,reply_id,fingerprint,state,created_at,chain_id) VALUES(?,?,?,?,?,?,?)')
-          .run(evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, 'claimed', now()/1000, evidence.chainId ?? evidence.runId)
+        // Persist before sending. Reclaim the same interrupted witness atomically,
+        // refreshing its grace period so concurrent controllers cannot both retry.
+        // The unchanged stable queue key reconciles a crash after queue admission.
+        const at = now()/1000
+        const claimed = claimFor(evidence)
+          ? db.prepare(`UPDATE owned_work_claims SET created_at=? WHERE session_id=? AND run_id=? AND reply_id=?
+              AND fingerprint=? AND state='claimed' AND created_at<?`)
+            .run(at, evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, at - CLAIM_GRACE)
+          : db.prepare('INSERT OR IGNORE INTO owned_work_claims(session_id,run_id,reply_id,fingerprint,state,created_at,chain_id) VALUES(?,?,?,?,?,?,?)')
+            .run(evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, 'claimed', at, evidence.chainId ?? evidence.runId)
         if (!claimed.changes) continue
         const key = `wizard-owned-work-${digest(`${evidence.sessionId}\0${evidence.runId}`).slice(0, 40)}`
         const input = `${OWNED_WORK_PREFIX}\n${evidence.items.map(item => `- ${item}`).join('\n')}\nResolve each item plainly: either start it within existing authority (wizard_schedule, wizard_heavy_submit, delegate_task or kanban_create) and name its handle and when it lands, or ask the owner one clear question about starting it. Do not widen authority: ask for owner decisions, money or external sends. A verified requested outcome remains done even with started optional follow-ups. This is the only automatic correction in this owner request chain; do not leave ambiguous offers.`

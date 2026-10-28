@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -159,7 +160,117 @@ describe('owned open work starts without the owner asking', () => {
   })
 })
 
+describe('owned work claim recovery', () => {
+  function persistedClaim(state = 'claimed', age = 121) {
+    const clock = { at: Date.now() }, current: { value: any } = { value: evidence(reply(), { chainId: 'owner' }) }
+    const statePath = join(directory(), 'claims.db')
+    const admit = vi.fn(async (..._args: any[]) => ({}))
+    const options: any = { statePath, sessionDbPath: '', now: () => clock.at, read: () => current.value,
+      find: vi.fn(async () => []), validate: vi.fn(async () => {}), admit }
+    // Simulate a process exiting after the claim INSERT and before admission.
+    createOwnedWorkFollowThrough(options).close()
+    const db = new DatabaseSync(statePath); cleanup.push(() => db.close())
+    const e = current.value, createdAt = clock.at/1000 - age
+    db.prepare('INSERT INTO owned_work_claims(session_id,run_id,reply_id,fingerprint,state,created_at,chain_id) VALUES(?,?,?,?,?,?,?)')
+      .run(e.sessionId, e.runId, e.messageId, e.fingerprint, state, createdAt, e.chainId)
+    const worker = createOwnedWorkFollowThrough(options); cleanup.push(() => worker.close())
+    const key = `wizard-owned-work-${createHash('sha256').update(`${e.sessionId}\0${e.runId}`).digest('hex').slice(0, 40)}`
+    const rows = () => db.prepare('SELECT * FROM owned_work_claims').all()
+    return { worker, options, admit, clock, current, key, rows, createdAt }
+  }
+  it('retries a stale claimed row after restart with the original key and no fresh scan hit', async () => {
+    const f = persistedClaim()
+    await f.worker.tick(); await f.worker.tick()
+    expect(f.options.find).toHaveBeenCalledTimes(2)
+    expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'admitted', run_id: '1', reply_id: '2', chain_id: 'owner' })])
+  })
+  it.each([0, 119, 120])('skips a fresh claimed row aged %s seconds', async age => {
+    const f = persistedClaim('claimed', age)
+    // Include an explicit scan hit as well as the persisted-candidate path.
+    f.options.find.mockResolvedValue([f.current.value])
+    await Promise.all([f.worker.tick(), f.worker.tick()])
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'claimed', created_at: f.createdAt })])
+  })
+  it('revisits a fresh claim once its grace period expires', async () => {
+    const f = persistedClaim('claimed', 119)
+    await f.worker.tick(); expect(f.admit).not.toHaveBeenCalled()
+    f.clock.at += 2000
+    await f.worker.tick(); expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+  })
+  it.each(['admitted', 'failed'])('never retries a terminal %s claim, even after another restart', async state => {
+    const f = persistedClaim(state)
+    f.options.find.mockResolvedValue([f.current.value])
+    await f.worker.tick()
+    const restarted = createOwnedWorkFollowThrough(f.options); cleanup.push(() => restarted.close())
+    f.clock.at += 121_000
+    await restarted.tick()
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state, created_at: f.createdAt })])
+  })
+  it('marks a failed recovery terminal rather than retrying it', async () => {
+    const f = persistedClaim()
+    f.admit.mockRejectedValueOnce(new Error('queue unavailable'))
+    await f.worker.tick()
+    f.clock.at += 121_000
+    await f.worker.tick()
+    expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'failed' })])
+  })
+  it('only one controller can reclaim a stale row while admission is pending', async () => {
+    const f = persistedClaim()
+    let release!: () => void
+    f.admit.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({}) }))
+    const other = createOwnedWorkFollowThrough(f.options); cleanup.push(() => other.close())
+    const first = f.worker.tick(), second = other.tick()
+    try {
+      await vi.waitFor(() => expect(f.admit).toHaveBeenCalledTimes(1))
+      expect(f.rows()[0].created_at).toBe(f.clock.at/1000)
+      await other.tick()
+      expect(f.admit).toHaveBeenCalledTimes(1)
+    } finally { release?.(); await Promise.all([first, second]) }
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'admitted' })])
+  })
+  it.each([{ runId: 'new-machine-run' }, { messageId: 'rewritten-reply' }, { fingerprint: 'rewritten-content' }])('never recovers a stale claim against a different witness: %s', async change => {
+    const f = persistedClaim()
+    f.current.value = { ...f.current.value, ...change }
+    f.options.find.mockResolvedValue([f.current.value])
+    await f.worker.tick()
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'claimed', created_at: f.createdAt })])
+  })
+  it.each([
+    ['claimed', 119, true], ['claimed', 121, false], ['admitted', 121, true], ['failed', 119, false],
+  ])('projects missing evidence only while %s at age %s is pending', (state, age, pending) => {
+    const f = persistedClaim(state as string, age as number)
+    f.current.value = null
+    expect(Boolean(f.worker.evidenceFor('wizard_owned'))).toBe(pending)
+  })
+})
+
 describe('owned work evidence', () => {
+  it.each([
+    ['process_wakeup:schedule', 'Scheduled task'], ['process_wakeup:supervisor', 'Builder task'],
+    ['system', 'Service task'], ['internal_notification', 'Service notice'],
+    [null, '[Wizard schedule] Scheduled task'], [null, '[supervisor build] Builder task'],
+  ])('machine-only user rows grant no evidence or admission: %s / %s', async (display_kind, content) => {
+    const f = transcript()
+    f.add('user', content!, { display_kind }); f.add('user', content!, { display_kind })
+    f.add('assistant', reply())
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')).toBeNull()
+    expect(findOwnedOpenWork(f.path)).toEqual([])
+    const admit = vi.fn(async () => ({}))
+    const worker = createOwnedWorkFollowThrough({ sessionDbPath: f.path, statePath: join(f.root, 'claims.db'), admit })
+    cleanup.push(() => worker.close())
+    await worker.tick()
+    expect(worker.evidenceFor('wizard_owned')).toBeNull()
+    expect(admit).not.toHaveBeenCalled()
+    expect(() => requireOwnedWorkContinuation(f.path, { kind: 'owned-open-work', agent_id: 'hermes', sessionId: 'wizard_owned' })).toThrow('no longer current')
+  })
   it('rewound rows grant neither owner-chain authority nor handle credit', () => {
     const f = transcript(); f.add('user', 'Current request')
     f.add('user', 'Deleted request')
