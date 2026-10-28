@@ -707,11 +707,19 @@ class RuntipiDriver:
                                 target[field] = value
                 except (ValueError, TypeError, AttributeError):
                     raise RuntimeFailure("search_override_conflict") from None
-                payload = {"dockerCompose": json.dumps(merged, indent=2) + "\n", "appEnv": before.get("appEnv") or ""}
+                env = (before.get("appEnv") or "").rstrip("\n")
+                payload = {"dockerCompose": json.dumps(merged, indent=2) + "\n", "appEnv": env + "\n" if env else ""}
             rt.req("PUT", f"/user-config/{self.urn(agent)}", payload)
             if wants_private_search(agent):
+                # Runtipi stores each field with an extra trailing newline, so
+                # verify the parsed override and the env text, not raw bytes.
                 after = rt.req("GET", f"/user-config/{self.urn(agent)}")
-                if any((after.get(key) or "") != value for key, value in payload.items()):
+                try:
+                    same = (json.loads(after.get("dockerCompose") or "") == merged
+                            and (after.get("appEnv") or "").rstrip("\n") == payload["appEnv"].rstrip("\n"))
+                except ValueError:
+                    same = False
+                if not same:
                     raise RuntimeFailure("search_override_unverified")
 
     def _images(self, agent: dict) -> list[str]:

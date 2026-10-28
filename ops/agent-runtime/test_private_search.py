@@ -66,6 +66,24 @@ class PrivateSearchTests(unittest.TestCase):
         self.assertEqual(args[2]['appEnv'], 'KEEP=1\n')
         driver._override(self.agent(),rt)  # idempotent
 
+    def test_runtipi_trailing_newline_on_readback_still_verifies(self):
+        # Live Runtipi returns each stored field with one extra "\n"; that must not refuse apply.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        driver.home_mount='stock'; driver.proxy_image=ar.DEFAULT_PROXY_IMAGE
+        state={'dockerCompose': json.dumps({'services': {}}), 'appEnv':'KEEP=1\n'}
+        def req(method, path, payload=None):
+            if method == 'PUT':
+                state.update({k: v + '\n' for k, v in payload.items()})
+            return dict(state)
+        rt=Mock(); rt.req.side_effect=req
+        driver._override(self.agent(),rt)
+        driver._override(self.agent(),rt)  # second apply reads the padded copy back
+        self.assertEqual(state['appEnv'].rstrip('\n'), 'KEEP=1')
+        self.assertIn('agent-synthetic-search', json.loads(state['dockerCompose'])['services'])
+        bad=Mock(); bad.req.side_effect=lambda m,p,payload=None: {'dockerCompose': json.dumps({'services': {}}), 'appEnv':''}
+        with self.assertRaises(ar.RuntimeFailure): driver._override(self.agent(),bad)
+
     def test_custom_yaml_conflict_is_refused_before_put(self):
         from unittest.mock import Mock
         driver=object.__new__(ar.RuntipiDriver)
