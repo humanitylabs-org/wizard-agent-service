@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
-import { STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 export const checks = {
   ...serverChecks,
@@ -165,8 +165,8 @@ export const checks = {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Two desk layouts are ready for the owner to choose.' }))
     assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1)
-    assert.ok(sent.body.instructions.includes(STATUS_INSTRUCTIONS), 'the complete shared status contract reaches the runtime')
-    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR', 'The reply itself ends with the same ask in plain words.']) {
+    assert.ok(sent.body.instructions.includes(STATUS_PROTOCOL_INSTRUCTIONS), 'the shared status protocol reaches the runtime')
+    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR']) {
       assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
     }
     assert.ok(!sent.body.instructions.includes('under 90 characters'))
