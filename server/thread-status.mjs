@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isSilentResult, isScheduleInput } from './scheduler.mjs'
+import { heavyResultOwed } from './heavy-wait.mjs'
 export { SUPERVISOR_SPELL } from './supervisor.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
@@ -22,9 +23,30 @@ const OPEN_MARKER = /\[WIZARD_STATUS_V1\][\s\S]*$/u
 
 // Keep the reply-length rule before status instructions in both runtime prompts: the status
 // marker still governs the final line. Replies are concise prose, not a fixed report template.
-export const FINISH_REPORT_INSTRUCTIONS = 'Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.'
+export const CONCISE_REPLY_INSTRUCTIONS = 'Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.'
+
+export const SUMMARY_REPLY_INSTRUCTIONS = 'When a final reply finishes, fixes, ships or stages work (state done, check, or needs_you after work), format it as a finish report: first one plain verdict sentence in bold, with no label; then short paragraphs of one to three sentences, each starting with a bold label, in this order, leaving out any label with nothing to say: **What was wrong:** (fixes only), **What I did:**, **Does it work:** (the check that actually ran and what it returned, never "should work"), **What you need to do:** (one action; the same as the status ask when state is needs_you), **Still open:** (at most three bullets, each naming who owns it). No other headings, tables or recap; links sit inside the paragraph they belong to. Conversation, quick answers, ideation, interim progress and background-handoff messages stay free-form, and a reply that fits in three sentences never uses this format.' + ' Briefly restate what we are doing so someone opening the thread cold understands the original request and the result.'
+
+// Existing installs and callers without a preference keep the Summary contract.
+export const FINISH_REPORT_INSTRUCTIONS = SUMMARY_REPLY_INSTRUCTIONS
+// Own: Wizard adds no reply-shape rule at all; the agent keeps the style its owner already set up.
+export const finishReportInstructions = style => style === 'own' ? '' : style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : SUMMARY_REPLY_INSTRUCTIONS
+
+// Hermes-only extension: callers for other agents retain the shared finish contract verbatim.
+export const OWNED_OPEN_WORK_INSTRUCTIONS = 'State each owned follow-up plainly as either started (name its live handle and when it lands) or a clear question to the owner, such as "Want me to start X? Reply yes". Do not leave ambiguous offers such as "mine to finish" with nothing moving, "say the word", or "if you want" without a clear question. Once the requested outcome is verified, use done (or fyi for an update); started follow-ups do not delay that reply or its done alert. When using Still open, identify started optional follow-ups as follow-ups and name their handles. Work the requested outcome itself depends on is not an optional follow-up: keep a background handoff in working until that outcome is verified. This applies regardless of reply style and does not require headings or a fixed format.'
 
 export const STATUS_INSTRUCTIONS = 'End every final reply with one status line for the Wizard chat list, alone on the last line, exactly in this form: [WIZARD_STATUS_V1]{"state":"needs_you","ask":"Decide whether to ship the desks preview","subject":"Wizard OS","title":"Wizard OS · Desks"}[/WIZARD_STATUS_V1]. Wizard hides it from the user. state is one of: needs_you (only when the work cannot move until the user does one specific thing: decide, approve, reply, install, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi), done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check), check (only when the user\'s own judgment is the missing piece: whether a new feature or design is what they meant, whether they like it (look, feel, wording, taste), or a real-device behaviour you could not verify yourself; and only once the change is already running where the user will try it: live on the server they use, or for a phone or desktop app update, confirmed installed on their device. While a build, publish or self-update is still on its way, use fyi, keep checking, and send check only after it has landed), fyi (an answer, report, or update with no action). ask is what the Ready list shows, read cold by someone who has not opened the thread: one or two short plain sentences, at most 140 characters. For needs_you, first say what is waiting in everyday words, then the exact thing to do (\"Phone update for everyone is ready. Reply ship to send it\", \"Two desk layouts to choose from. Pick A or B\"); if the action is a reply word, the sentence says what that word does. For check, say what changed and what to judge (\"New chat groups are live. Say if the 11 groups feel right\"), never \"Test that X works\". For done and fyi, state the outcome in plain words. Never put internal words in ask: no PR, issue or version numbers, branch, flag, script, job, file or app IDs, and no team jargon such as lane, gate, waive, receipt, cutover, soak, parity or unblock; never a vague \"Review this\" or \"Let me know\". The reply itself ends with the same ask in plain words. ' + SUBJECT_RULE + ' ' + TITLE_INSTRUCTIONS + ' ' + SPACE_INSTRUCTIONS + ' Leave the line out of interim progress messages and when ending a turn to wait for background helpers. A background handoff is still agent-owned work, never a done/FYI result. Before saying work is running, verify the actual worker and its continuation/delivery handle. If a terminal tool says completion notifications are unsupported, stay in the owning turn and wait for its result or arrange and verify a durable continuation; an untracked background process does not finish the request. Return to the owner with a self-contained verified outcome or one concrete owner-only gate, not a promise to resume.'
+
+// Wizard OS protocol only: the status marker, its fields and when to omit it. Drops the parts of
+// STATUS_INSTRUCTIONS that steer how the agent writes or follows through (for the Own reply style).
+export const STATUS_ECHO_RULE = 'The reply itself ends with the same ask in plain words. '
+export const STATUS_PROTOCOL_INSTRUCTIONS = (() => {
+  const cut = STATUS_INSTRUCTIONS.indexOf(' A background handoff is still agent-owned work')
+  return STATUS_INSTRUCTIONS.slice(0, cut).replace(STATUS_ECHO_RULE, '')
+})()
+// Own: the one style source is the agent's own persona, so the owner's "reply like this from now on" lands there.
+export const OWN_STYLE_SOURCE = 'Wizard adds no reply-style rules: how you write comes from your own persona and memory. When the owner asks to change how you reply from now on, record it in your own persona file (SOUL.md in your home for Hermes) so it holds on every surface.'
+export const statusInstructions = style => style === 'own' ? STATUS_PROTOCOL_INSTRUCTIONS : STATUS_INSTRUCTIONS
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -54,6 +76,16 @@ export function parseStatus(text) {
   }
   if (text.replace(MARKER, '').match(OPEN_MARKER)) return null
   return found
+}
+
+// Apply after parsing/backfill, including cached rows: heavy work can change
+// independently of the assistant's final reply. An owner decision still wins.
+export function guardHeavyStatus(status, { jobs = [], agentId = 'hermes', sessionId = '', isDelivered = () => false, nonHoldingIds = new Set() } = {}) {
+  if (!['done', 'check'].includes(status?.state)) return status
+  const pending = jobs?.some(job => (job.agent_id ?? 'hermes') === agentId
+    && (job.sessionId ?? job.session_id) === sessionId && heavyResultOwed(job, isDelivered)
+    && !(agentId === 'hermes' && status.state === 'done' && nonHoldingIds.has(job.job_id ?? job.id)))
+  return pending ? { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' } : status
 }
 
 // Provenance is independent of attention: publishers may send an app-only marker.

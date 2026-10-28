@@ -19,8 +19,10 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 try:  # loaded as a package by Hermes
     from . import kernel as _kernel
+    from . import media as _media
 except ImportError:  # loaded as a plain module (tests)
     import kernel as _kernel  # type: ignore[no-redef]
+    import media as _media  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 SECTION_ID = "wizard-os.kernel"
@@ -151,3 +153,6 @@ def register(ctx) -> None:
     ctx.register_system_prompt_section(SECTION_ID, _section, position="after_memory", max_chars=2000)
     ctx.register_tool(name="wizard_follow_up", toolset="wizard_os", schema=_FOLLOW_UP_SCHEMA,
                       handler=_follow_up_request, emoji="👁")
+    # Every MEDIA: file the agent sends lands where Wizard chats can show it (media.py).
+    if hasattr(ctx, "register_hook"):
+        ctx.register_hook("transform_llm_output", _media.transform_llm_output)

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -18,6 +19,32 @@ const admit = async (s, body) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'owned-open-work': async s => {
+    await admit(s, { input: 'Synthetic approved backend fix' })
+    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), s.kind === 'main', 'owner-scoped Hermes-only instructions at the real HTTP boundary')
+    const status = { state: 'done', ask: 'The fix is verified.' }
+    const evidence = { agentId: s.id, ownedCount: 1, handleCount: 0, continuation: false }
+    if (s.kind === 'main') assert.equal(guardOwnedOpenWork(status, evidence).state, 'fyi')
+    else assert.equal(guardOwnedOpenWork(status, evidence), status, 'routed status remains the same object')
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const text = `Verified fix.
+
+**Still open:**
+- Archimedes: run the next checks
+[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', output: text })
+    row.messages.push({ role: 'assistant', timestamp: Date.now()/1000 + 1, content: text })
+    const writes = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    const before = writes().length
+    for (let i = 0; i < 2; i++) {
+      const response = await s.request('/api/sessions?view=list'); assert.equal(response.status, 200)
+      const item = (await response.json()).data.find(x => x.id === row.id)
+      assert.equal(item.attention.state, 'done', 'no main-only guard leaks into routed list projection')
+      assert.notEqual(item.wizard_waiting_on, 'owned_work')
+    }
+    assert.equal(writes().length, before, 'listing routed work never dispatches an owned-work correction')
+    assert.ok(!writes().some(r => JSON.stringify(r.body).includes('[Wizard follow-through] Your last reply lists')))
+  },
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
@@ -100,6 +127,28 @@ export const serverChecks = {
     assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
     assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
     assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+    for (const style of ['concise', 'summary']) {
+      const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
+      assert.equal(put.status, 200)
+      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, style)
+      // Use a fresh thread: the first synthetic run may still be active in its queue.
+      const session_id = `wizard_parity_${style}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
+      const prompt = sent(s).instructions
+      const selected = style === 'concise' ? CONCISE_REPLY_INSTRUCTIONS : FINISH_REPORT_INSTRUCTIONS
+      assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
+      assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
+    }
+    // Own: Wizard OS facts and status protocol only; no reply-shape rule on any runtime kind.
+    const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: 'own' }), method: 'PUT' })
+    assert.equal(put.status, 200)
+    await s.request('/api/sessions', post({ id: 'wizard_parity_own' }))
+    await admit(s, { session_id: 'wizard_parity_own', input: 'Synthetic owner style change', instructions: 'Force a different style' })
+    const own = sent(s).instructions
+    assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: own keeps the status protocol`)
+    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: own drops style rule ${rule.slice(0, 40)}`)
+    assert.ok(own.includes('Wizard renders Markdown'), `${s.kind}: own keeps Wizard facts`)
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
