@@ -159,14 +159,15 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
         for a in owners:
             known = [_tool_entry(t) for t in (tools.get(a["id"]) or [])[:8]]
             down = "" if a["status"] == "running" else f" It is {a['status']} right now: tell the owner (`wam doctor`)."
-            lines.append(f"- {a['name']}: pick the tool whose purpose matches the request and call it.{down}")
+            how = (f"load its skill `{a['id']}` with skill_view first (it holds the app's workflow and model rules), "
+                   "then call the tool whose purpose matches the request." if a["skill"]
+                   else "pick the tool whose purpose matches the request and call it.")
+            lines.append(f"- {a['name']}: {how}{down}")
             if known:
                 lines += [f"  - `{agent_tool_name(a['prefix'], n, harness)}`" + (f": {p}" if p else "") for n, p in known]
             else:
                 lines.append(f"  - `{agent_tool_name(a['prefix'], '*', harness)}`")
             lines.append(f"  Its address (for files it serves): {a['address']}")
-            if a["skill"]:
-                lines.append(f"  Its skill `{a['id']}` (skill_view) has details for long or unusual jobs; the tools above come first.")
         tail = " If one is not in your tool list, run it with tool_call and that exact name." if harness == "hermes" else ""
         out[job_skill_name(job)] = "\n".join([
             "---",

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -116,11 +116,84 @@ describe('agent bridge: kernel', () => {
     const diag = readFileSync(join(dir, 'skills', 'wizard-job-diagnostics', 'SKILL.md'), 'utf8')
     expect(diag).toContain('name: wizard-job-diagnostics')
     expect(diag).toContain('description: Use when the owner asks for diagnostics.')
-    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n  Its skill `hello-wizard` (skill_view)')
+    expect(diag).toContain("- Hello Wizard: load its skill `hello-wizard` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n")
+    expect(diag).not.toContain('come first')
     expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__transcriber__*`')
     expect(existsSync(join(dir, 'skills', '_jobs'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'wizard-job-gone'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true) // app skills untouched
+  })
+
+  it('acceptance: three apps (two share a job, one has none), removal and idempotent re-runs', () => {
+    const dir = box([])
+    const video = app('defleur-video', 3, { name: 'DeFleur Video', provides: ['short-form-video', 'video-editing'] })
+    const clipper = app('clipper', 4, { provides: ['short-form-video'], skill: '' })
+    const notes = app('notes', 5, { provides: [] })
+    const listing = () => readdirSync(join(dir, 'skills')).filter((n) => n.startsWith('wizard-job-')).sort()
+    const read = (name) => readFileSync(join(dir, 'skills', name, 'SKILL.md'), 'utf8')
+    const write = (apps) => { writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps })); return writePointerSkills(dir, bridgeApps({ apps })) }
+
+    // Install all three: one pointer per job; the shared job names both apps; the app with no job gets none.
+    expect(write([video, clipper, notes])).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).toBe([
+      '---',
+      'name: wizard-job-short-form-video',
+      'description: Use when the owner asks for short-form video. The installed Clipper or DeFleur Video app does it; call its tools, never search files.',
+      '---',
+      '',
+      '# short-form video',
+      '',
+      '- Clipper: pick the tool whose purpose matches the request and call it.',
+      '  - `mcp__wizard__clipper__*`',
+      '  Its address (for files it serves): http://127.0.0.1:4',
+      "- DeFleur Video: load its skill `defleur-video` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.",
+      '  - `mcp__wizard__defleur_video__*`',
+      '  Its address (for files it serves): http://127.0.0.1:3',
+      '',
+      'Tools are on the `wizard` MCP server. If one is not in your tool list, run it with tool_call and that exact name. Paths are relative to the owner\'s Files root.',
+      '',
+      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
+      '',
+    ].join('\n'))
+    expect(read('wizard-job-video-editing')).toContain('The installed DeFleur Video app does it')
+    expect(read('wizard-job-video-editing')).not.toContain('Clipper')
+    for (const name of listing()) expect(read(name)).not.toMatch(/notes/iu)
+
+    // Re-running on the same apps.json changes nothing on disk (same bytes, same mtimes).
+    const stat = (name) => statSync(join(dir, 'skills', name, 'SKILL.md')).mtimeMs
+    const before = Object.fromEntries(listing().map((n) => [n, [read(n), stat(n)]]))
+    const later = new Date(Date.now() + 5000)
+    for (const name of listing()) utimesSync(join(dir, 'skills', name, 'SKILL.md'), later, later)
+    const pinned = Object.fromEntries(listing().map((n) => [n, stat(n)]))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    for (const name of listing()) { expect(read(name)).toBe(before[name][0]); expect(stat(name)).toBe(pinned[name]) }
+
+    // Uninstall Clipper: the shared pointer now names only DeFleur Video.
+    write([video, notes])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).not.toContain('Clipper')
+    expect(read('wizard-job-short-form-video')).toContain('The installed DeFleur Video app does it')
+
+    // Uninstall DeFleur Video: both of its pointers disappear; app skills (not ours) stay.
+    expect(write([notes])).toEqual([])
+    expect(listing()).toEqual([])
+    expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true)
+
+    // The Hermes plugin does the same removal when it is the writer (service down).
+    write([video, clipper, notes])
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [clipper] }))
+    const future = new Date(Date.now() + 10000)
+    utimesSync(join(dir, 'apps.json'), future, future)
+    const py = (code) => execFileSync('python3', ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import kernel; from pathlib import Path; ${code}`, dir]).toString().trim()
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe("['wizard-job-short-form-video']")
+    expect(listing()).toEqual(['wizard-job-short-form-video'])
+    expect(read('wizard-job-short-form-video')).toBe(pointerSkills(bridgeApps({ apps: [clipper] }))['wizard-job-short-form-video'])
+    // and is a no-op once its stamp is newer than apps.json
+    const past = new Date(Date.now() - 10000)
+    utimesSync(join(dir, 'apps.json'), past, past)
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe('None')
   })
 
   it('the Python plugin renders the same bytes as the service', () => {

@@ -164,13 +164,15 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
     const lines = owners.flatMap((a) => {
       const known = (tools[a.id] || []).slice(0, 8).map(toolEntry)
       const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
-      const head = `- ${a.name}: pick the tool whose purpose matches the request and call it.${down}`
+      const how = a.skill
+        ? `load its skill \`${a.id}\` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.`
+        : 'pick the tool whose purpose matches the request and call it.'
+      const head = `- ${a.name}: ${how}${down}`
       const rows = known.length
         ? known.map((t) => `  - \`${agentToolName(a.prefix, t.name, harness)}\`${t.purpose ? `: ${t.purpose}` : ''}`)
         : [`  - \`${agentToolName(a.prefix, '*', harness)}\``]
       const address = [`  Its address (for files it serves): ${a.address}`]
-      const skill = a.skill ? [`  Its skill \`${a.id}\` (skill_view) has details for long or unusual jobs; the tools above come first.`] : []
-      return [head, ...rows, ...address, ...skill]
+      return [head, ...rows, ...address]
     })
     out[jobSkillName(job)] = [
       '---',
