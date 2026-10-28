@@ -125,7 +125,9 @@ describe('item operations on shared lists (PATCH)', () => {
     const before = readFileSync(join(d, 'ui-preferences.json'), 'utf8')
     for (const ops of [undefined, [], {}, [null], [{ op: 'add', key: 'compact', item: true }], [{ op: 'add', key: 'pinnedChats', item: 1 }], [{ op: 'add', key: 'pinnedChats', item: '<x>' }],
       [{ op: 'add', key: 'pinnedChats', item: 'wizard_new' }], [{ op: 'front', key: 'pinnedChats', items: ['a'] }], [{ op: 'add', key: 'spaces', item: { id: 'Bad ID' } }],
-      [{ op: 'set', key: 'spaces/a/name', item: '' }], [{ op: 'add', key: 'spaces/a/threads', item: 'x', extra: 1 }], [{ op: 'move', key: 'subjectOrder', item: 'A' }], Array(101).fill({ op: 'remove', key: 'pinnedChats', item: 'x' })])
+      [{ op: 'set', key: 'spaces/a/name', item: '' }], [{ op: 'add', key: 'spaces/a/threads', item: 'x', extra: 1 }], [{ op: 'move', key: 'subjectOrder', item: 'A' }],
+      [{ op: 'remove', key: 'pinnedChats', item: '<invalid>' }], [{ op: 'remove', key: 'subjectOrder', item: 'bad\nsubject' }], [{ op: 'front', key: 'subjectOrder', items: ['x'.repeat(121)] }],
+      [{ op: 'remove', key: 'spaces', item: 'Bad ID' }], [{ op: 'remove', key: 'spaces/a/threads', item: '<x>' }], Array(101).fill({ op: 'remove', key: 'pinnedChats', item: 'x' })])
       expect((await fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops }) })).status).toBe(400)
     expect((await fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops: [], compact: true }) })).status).toBe(400)
     expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe(before)
