@@ -21,7 +21,7 @@ const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)
 export const serverChecks = {
   'owned-open-work': async s => {
     await admit(s, { input: 'Synthetic approved backend fix' })
-    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), s.kind === 'main', 'owner-scoped Hermes-only instructions at the real HTTP boundary')
+    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), false, 'persona-owned follow-up style is never imposed at any runtime HTTP boundary')
     const status = { state: 'done', ask: 'The fix is verified.' }
     const evidence = { agentId: s.id, ownedCount: 1, handleCount: 0, continuation: false }
     if (s.kind === 'main') assert.equal(guardOwnedOpenWork(status, evidence).state, 'fyi')
