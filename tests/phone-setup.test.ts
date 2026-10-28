@@ -266,6 +266,20 @@ describe('setup API (box-local listener)', () => {
     expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('serving')
   })
 
+  it('keeps a visit recorded through environment-pinned access, whatever the helper lists', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath, tailnetAccessPinned: true })
+    helper.signIn()
+    helper.state.https_enabled = true
+    const seen = new Date().toISOString()
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: seen } })
+    helper.state.peers = [{ id: 'a', name: 'laptop', os: 'macOS', online: true, last_seen: null }]
+    await call(port, '/wizard/v1/setup/phone')
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe(seen)
+  })
+
   it('keeps connected when the helper peer list is full, since an offline phone may be past its 32-peer cap', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
