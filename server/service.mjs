@@ -116,7 +116,7 @@ const AGENT_FILE_MIMES = new Map(Object.entries({
   '.mov': 'video/quicktime',
 }))
 const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
-const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
+const AGENT_MEDIA_LINE = /^\s*MEDIA:[ \t]*(\/[^\r\n]+?)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
 const ROUTED_MIRROR_FRESH_MS = 20_000
