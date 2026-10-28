@@ -289,6 +289,11 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     doc = {"services": services, "x-runtipi": {"schema_version": 2, "overrides": []}}
     if doc_volumes:
         doc["volumes"] = doc_volumes
+    import private_seal
+    try:
+        doc = private_seal.apply(doc, agent, ports=ports)
+    except ValueError:
+        raise RuntimeFailure("private_network_policy_invalid", 409) from None
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
 
 
@@ -665,6 +670,11 @@ class RuntipiDriver:
         return pkg
 
     def _override(self, agent: dict, rt) -> None:
+        import private_seal
+        if private_seal.enabled(agent):
+            # A materialized legacy recipe adds the shared Runtipi network.
+            # Fail closed until installed !override replacement is rehearsed.
+            raise RuntimeFailure("private_sealed_recipe_not_admitted", 409)
         doc = {"services": {}}
         main, _ = service_names(agent)
         if self.home_mount == "alongside":

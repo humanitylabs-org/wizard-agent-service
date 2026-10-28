@@ -215,8 +215,10 @@ class IncognitoManager:
 
     def _remove(self, state):
         # Shared source networks/sidecars are never labeled, stopped or removed.
-        try: self._docker(['rm','-f',state['name']],required=False)
-        except Exception: pass  # Label sweeps retry orphan cleanup; never expose Docker diagnostics.
+        for name in (state.get('edge'), state['name']):
+            if not name: continue
+            try: self._docker(['rm','-f',name],required=False)
+            except Exception: pass  # Label sweeps retry orphan cleanup; never expose Docker diagnostics.
 
     def sweep(self, startup=False):
         with self.lock:
@@ -224,7 +226,7 @@ class IncognitoManager:
             for key, state in list(self.sessions.items()):
                 if now >= state['lease'] or now >= state['deadline']:
                     self._remove(state); del self.sessions[key]
-            active = {s['name'] for s in self.sessions.values()}
+            active = {name for s in self.sessions.values() for name in (s['name'], s.get('edge')) if name}
             for kind in ('container', 'network'):
                 for ident in self._discover(kind):
                     args = ['inspect', '--format', '{{.Name}}', ident] if kind == 'container' else ['network', 'inspect', '--format', '{{.Name}}', ident]
@@ -253,6 +255,14 @@ class IncognitoManager:
             if not networks or meta['HostConfig'].get('NetworkMode') in ('host','none'):
                 raise self.failure('incognito_unsupported_runtime',409)
             environment=dict(v.split('=',1) for v in meta['Config'].get('Env',[]) if '=' in v)
+            from private_seal import POLICY, LABEL as SEAL_LABEL
+            sealed = (meta['Config'].get('Labels') or {}).get(SEAL_LABEL) == POLICY
+            if sealed:
+                # No inherited public/shared network is ever accepted for a sealed sibling.
+                for network in networks:
+                    n = json.loads(self._docker(['network','inspect',network]).stdout)[0]
+                    if not n.get('Internal') or (n.get('Options') or {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true':
+                        raise self.failure('incognito_unsealed_network',409)
             uid=meta['Config'].get('User') or environment.get('HERMES_UID','10000')+':'+environment.get('HERMES_GID','10000')
             # Stock dispatch starts as root, then drops to its declared numeric account.
             # Our direct Python entrypoint must start as that account, never root.
@@ -272,6 +282,9 @@ class IncognitoManager:
                       '--tmpfs','/var/log:rw,nosuid,nodev,size=16m,mode=1777',
                       '-p','127.0.0.1::8642','-e','HOME=/opt/data','-e','HERMES_HOME=/opt/data',
                       '-e','HERMES_WORKDIR=/opt/data','-e','PYTHONDONTWRITEBYTECODE=1','--workdir','/opt/data']
+                if sealed:
+                    at = args.index('-p'); del args[at:at+2]
+                    args += ['--label', SEAL_LABEL + '=' + POLICY]
                 if self.owner: args += ['--label', 'wizard.incognito.owner=' + self.owner]
                 for host in meta['HostConfig'].get('ExtraHosts') or []: args+=['--add-host',host]
                 for dns in meta['HostConfig'].get('Dns') or []: args+=['--dns',dns]
@@ -308,7 +321,26 @@ class IncognitoManager:
                 step = 'verify_policy'
                 self._docker(['exec',state['name'],PYTHON,'-c',VERIFY])
                 step = 'resolve_port'
-                port=self._docker(['port',state['name'],'8642/tcp']).stdout.strip()
+                port_source = state['name']
+                if sealed:
+                    from private_seal import EDGE_IMAGE
+                    sibling = json.loads(self._docker(['inspect',state['name']]).stdout)[0]
+                    address = sibling['NetworkSettings']['Networks'][networks[0]]['IPAddress']
+                    # Only this fixed incoming edge has an uplink. It has no
+                    # CONNECT listener and binds ingress to its uplink address.
+                    state['edge'] = state['name'] + '-edge'
+                    edge_args = ['create','--name',state['edge'],'--label',LABEL,
+                                 '--restart','no','--read-only','--log-driver','none',
+                                 '--cap-drop','ALL','--security-opt','no-new-privileges:true',
+                                 '--pids-limit','64','--memory','64m','--network','bridge',
+                                 '-p','127.0.0.1::8642','-e','ALLOWED_HOSTS=[]',
+                                 '-e','INGRESS_ROUTES='+json.dumps([[8642,address,8642]])]
+                    if self.owner: edge_args += ['--label','wizard.incognito.owner='+self.owner]
+                    self._docker([*edge_args,EDGE_IMAGE])
+                    self._docker(['network','connect',networks[0],state['edge']])
+                    self._docker(['start',state['edge']])
+                    port_source = state['edge']
+                port=self._docker(['port',port_source,'8642/tcp']).stdout.strip()
                 if not re.fullmatch(r'127\.0\.0\.1:[0-9]{1,5}',port) or not 1<=int(port.split(':')[1])<=65535:
                     raise self.failure('incognito_port_invalid',502)
                 origin='http://'+port
