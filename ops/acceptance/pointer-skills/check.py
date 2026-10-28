@@ -131,7 +131,7 @@ class Box:
         self.meta["was_image_id"] = self.sh("docker", "image", "inspect", "-f", "{{.Id}}", "ps-was:candidate").strip()
         cfg = "\n".join([
             "model:", "  provider: custom", f"  base_url: {self.a.base_url}", f"  api_key: {self.model_key}",
-            f"  default: {self.a.model}", "agent:", "  max_turns: 30",
+            f"  default: {self.a.model}", "agent:", "  max_turns: 30", f"  reasoning_effort: {self.a.reasoning}",
             "mcp_servers:", "  wizard:", f"    url: http://{WAS}:8787/wizard/mcp",
             "    headers:", "      Authorization: Bearer ${WIZARD_MCP_TOKEN}",
             "skills:", "  external_dirs:", "    - /opt/wizard-os/skills", ""])
@@ -343,6 +343,8 @@ def main():
     for k in ("--was-src", "--wam-src", "--hermes-image", "--py-image", "--model", "--base-url", "--out"):
         ap.add_argument(k, required=True)
     ap.add_argument("--trials", type=int, default=3)
+    # Tinfoil's DeepSeek V4.1 rejects Hermes' default (medium); it accepts low/high/xhigh/max.
+    ap.add_argument("--reasoning", default="high")
     a = ap.parse_args()
     key = sys.stdin.readline().strip()
     if not key:
