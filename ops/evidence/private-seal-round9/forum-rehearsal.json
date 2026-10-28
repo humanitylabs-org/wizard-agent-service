@@ -1,0 +1,117 @@
+{
+  "synthetic_only": true,
+  "live_touched": false,
+  "phase": "complete",
+  "checks": {
+    "both_official_proxies_attested": true,
+    "direct_internet_ip_refused": true,
+    "example_com_refused": true,
+    "curl_example_com_failed_inside_agent": true,
+    "no_edge_or_provider_egress_listener_from_agent": true,
+    "agent_internal_only_without_bridge_address": true,
+    "provider_has_only_internal_networks": true,
+    "undeclared_connect_refused": true,
+    "incognito_start": true,
+    "incognito_outbound_refused": true,
+    "incognito_no_uplink_no_disk_no_logs": true,
+    "incognito_send_completed": true,
+    "incognito_reply_has_citation": true,
+    "native_search_tool_called": true,
+    "stopped_provider_unreachable": true,
+    "stopped_provider_no_completed_answer": true,
+    "provider_recovered_attested": true,
+    "provider_restore_real_run_succeeds": true,
+    "incognito_close_removes_exact_sibling": true,
+    "incognito_close_removes_own_edge": true,
+    "marker_and_key_absent_proxy_logs": true
+  },
+  "six_privacy_checks": {
+    "a_relay_ehbp_capture": {
+      "status": "not_run",
+      "reason": "Official proxy encrypts EHBP inside TLS; legacy package has no old authenticated relay port 8090. No packet/header proof claimed."
+    },
+    "b_hermes_seal_client_reachability": {
+      "status": "passed",
+      "method": "Actual stock-image synthetic agent, internal-only metadata, direct public-IP/host/CONNECT refusal and both attested listeners reachable."
+    },
+    "c_client_topology_egress": {
+      "status": "passed",
+      "method": "Official in-seal proxy has two internal networks, no uplink. CONNECT edge denies example.com."
+    },
+    "d_provider_key_location": {
+      "status": "blocked",
+      "reason": "Round9A legacy stock configuration requires provider bearer in Hermes. Network-only changes cannot meet old provider-only-key contract."
+    },
+    "e_stopped_provider_fail_closed": {
+      "status": "partial",
+      "reason": "Both listeners unreachable, no completed stock answer while stopped, fallback_providers empty. If stock remains retrying after 30s, cancel explicitly before restoring; a terminal provider-failure result is not claimed."
+    },
+    "f_provider_logs_data_codeword_scan": {
+      "status": "partial",
+      "reason": "Official proxy stdout/stderr scanned, marker/key absent; read-only proxies have no durable mounts. Not the old provider-app data-volume scanner."
+    }
+  },
+  "attestation": {
+    "3301": {
+      "configRepo": "tinfoilsh/confidential-model-router",
+      "enclaveHost": "inference.tinfoil.sh",
+      "releaseTag": "v0.0.167",
+      "releaseDigest": "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+      "securityVerified": true,
+      "steps": {
+        "fetchDigest": {
+          "status": "success"
+        },
+        "verifyCode": {
+          "status": "success"
+        },
+        "verifyEnclave": {
+          "status": "success"
+        },
+        "compareMeasurements": {
+          "status": "success"
+        },
+        "verifyCertificate": {
+          "status": "success"
+        }
+      }
+    },
+    "3302": {
+      "configRepo": "tinfoilsh/confidential-websearch",
+      "enclaveHost": "websearch.tinfoil.sh",
+      "releaseTag": "v0.5.16",
+      "releaseDigest": "1a56a78bc6d06417278495452c7b25b8944ef65dfc346868b2c780043e7840b2",
+      "securityVerified": true,
+      "steps": {
+        "fetchDigest": {
+          "status": "success"
+        },
+        "verifyCode": {
+          "status": "success"
+        },
+        "verifyEnclave": {
+          "status": "success"
+        },
+        "compareMeasurements": {
+          "status": "success"
+        },
+        "verifyCertificate": {
+          "status": "success"
+        }
+      }
+    }
+  },
+  "network_refusals": {
+    "internet_ip": true,
+    "edge_connect": true,
+    "edge_ingress": true,
+    "host_bridge": true,
+    "provider_egress": true,
+    "example_com": true
+  },
+  "curl_example_com_exit_code": 6,
+  "stopped_provider_stock_run_status": "running",
+  "cleanup_no_project_containers": true,
+  "cleanup_no_project_networks": true,
+  "six_privacy_checks_complete": false
+}

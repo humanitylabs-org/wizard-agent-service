@@ -1,0 +1,55 @@
+{
+  "syntheticOnly": true,
+  "checks": [
+    {
+      "name": "exact HTTPS review URL HTTP 200",
+      "pass": true
+    },
+    {
+      "name": "nebula Incognito switch available",
+      "pass": true
+    },
+    {
+      "name": "nebula track visible",
+      "pass": true
+    },
+    {
+      "name": "grove Incognito switch available",
+      "pass": true
+    },
+    {
+      "name": "grove track visible",
+      "pass": true
+    },
+    {
+      "name": "real sealed sibling starts through delivered preview",
+      "pass": true
+    },
+    {
+      "name": "no Incognito run error",
+      "pass": true
+    },
+    {
+      "name": "search run reaches terminal UI state",
+      "pass": true
+    },
+    {
+      "name": "real search reply contains citation",
+      "pass": true
+    },
+    {
+      "name": "Close removes temporary conversation",
+      "pass": true
+    },
+    {
+      "name": "unrelated mutations fenced",
+      "pass": true
+    },
+    {
+      "name": "zero browser page errors",
+      "pass": true
+    }
+  ],
+  "pageErrors": 0,
+  "failedRequest": "net::ERR_ABORTED"
+}
