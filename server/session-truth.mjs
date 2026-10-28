@@ -322,7 +322,9 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
           current.lastUserAt = timestamp
           current.requestPreview = row.content.trim()
         }
-        if (visibleAssistant && !current.lastUserAt) current.replies.unshift({ timestamp, status: parseStatus(row.content) })
+        // Row order proves this reply follows the latest user even when the
+        // provider stores both in the same timestamp tick.
+        if (visibleAssistant && !current.lastUserAt) current.replies.unshift({ timestamp, status: parseStatus(row.content), afterUser: true })
         if (!current.lastAssistantAt && visibleAssistant) {
           current.lastAssistantAt = timestamp
           // The agent's own status line on its latest reply, while no newer request follows it.

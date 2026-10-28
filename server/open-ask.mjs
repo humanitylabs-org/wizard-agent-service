@@ -21,7 +21,7 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
   for (const reply of replies) {
     const at = replyEpoch(reply.timestamp)
     lastAssistantAt = Math.max(lastAssistantAt, at)
-    if (at <= replyEpoch(lastUserAt)) continue
+    if (at < replyEpoch(lastUserAt) || at === replyEpoch(lastUserAt) && !reply.afterUser) continue
     let status = reply.status ?? parseStatus(reply.content)
     if (!status) continue
     if (background && ASK_STATES.has(status.state) && FUTURE_ASK.test(status.ask)) status = { ...status, state: 'fyi' }

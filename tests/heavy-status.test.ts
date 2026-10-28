@@ -75,7 +75,10 @@ it('old finished heavy jobs never pull threads back into Working', async () => {
         expect(job.notice_delivered_at).toBeUndefined()
         expect(job.delivery_backfill).toBeUndefined()
         expect(heavyResultOwed(job)).toBe(true)
-        expect(guardHeavyStatus(status, { sessionId: job.sessionId, jobs: queue.rows() }).state).toBe('fyi')
+        // Done is not an owner ask and is no longer demoted by unrelated heavy
+        // work. Check still waits for undelivered results after migration/reopen.
+        expect(guardHeavyStatus(status, { sessionId: job.sessionId, jobs: queue.rows() })).toBe(status)
+        expect(guardHeavyStatus({ ...status, state: 'check' }, { sessionId: job.sessionId, jobs: queue.rows() }).state).toBe('fyi')
       }
       expect(queue.pendingNotices('hermes', 'running').map((job: any) => job.job_id)).toEqual(['active_running'])
     }

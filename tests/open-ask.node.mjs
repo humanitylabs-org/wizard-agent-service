@@ -78,6 +78,17 @@ test('future-tense guards cover will, once, when the helper, after the helper an
     assert.equal(solve([reply({ state: 'needs_you', ask })]).section, 'Working', ask)
   }
 })
+test('same-tick owner and reply use proven message order, never revive an older ask', () => {
+  const content = `QR ready\n[WIZARD_STATUS_V1]${JSON.stringify(qr)}[/WIZARD_STATUS_V1]`
+  const user = { role: 'user', content: 'Connect my phone', timestamp: 20 }
+  const assistant = { role: 'assistant', content, timestamp: 20 }
+  const after = latestVisibleSessionMessages({ data: [user, assistant] })
+  const before = latestVisibleSessionMessages({ data: [assistant, user] })
+  assert.equal(resolveThreadSection({ replies: after.replies, lastUserAt: 20, background: 'helper' }).section, 'Ready')
+  assert.equal(resolveThreadSection({ replies: before.replies, lastUserAt: 20, background: 'helper' }).section, 'Working')
+  assert.equal(resolveThreadSection({ replies: [{ ...reply(qr, 20), afterUser: true }], lastUserAt: 20, background: 'helper' }).section, 'Ready')
+})
+
 test('prompt requires a status even for handoffs and uses the request view', () => {
   assert.ok(STATUS_INSTRUCTIONS.includes('including replies that hand work to a helper'))
   assert.ok(STATUS_INSTRUCTIONS.includes("the user's request cannot move forward"))
