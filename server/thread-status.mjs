@@ -44,6 +44,8 @@ export const STATUS_PROTOCOL_INSTRUCTIONS = (() => {
   const cut = STATUS_INSTRUCTIONS.indexOf(' A background handoff is still agent-owned work')
   return STATUS_INSTRUCTIONS.slice(0, cut).replace(STATUS_ECHO_RULE, '')
 })()
+// Own: the one style source is the agent's own persona, so the owner's "reply like this from now on" lands there.
+export const OWN_STYLE_SOURCE = 'Wizard adds no reply-style rules: how you write comes from your own persona and memory. When the owner asks to change how you reply from now on, record it in your own persona file (SOUL.md in your home for Hermes) so it holds on every surface.'
 export const statusInstructions = style => style === 'own' ? STATUS_PROTOCOL_INSTRUCTIONS : STATUS_INSTRUCTIONS
 
 const clip = (value, max) => {

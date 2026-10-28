@@ -71,7 +71,7 @@ it('response style is an owner setting', async () => {
 
 it('Own style sends Wizard OS facts and protocol only, never reply-style rules', () => {
   const style = ['Apply the same intelligence', 'Scale the response to the request', 'owns the requested outcome', 'Finish with one self-contained', 'Briefly restate', 'The reply itself ends with the same ask', 'A background handoff is still agent-owned work', 'Answer with the same care']
-  const facts = ['Wizard renders Markdown', 'MEDIA:/absolute/path', 'Skins/My skin/', '[WIZARD_STATUS_V1]', 'Leave the line out of interim progress messages']
+  const facts = ['record it in your own persona file (SOUL.md in your home', 'Wizard renders Markdown', 'MEDIA:/absolute/path', 'Skins/My skin/', '[WIZARD_STATUS_V1]', 'Leave the line out of interim progress messages']
   for (const join of [true, false]) {
     const own = runInstructions({ join, response_style: 'own' })
     for (const text of [SUMMARY_REPLY_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, ...style]) expect(own).not.toContain(text)
