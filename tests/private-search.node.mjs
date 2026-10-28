@@ -17,7 +17,7 @@ test('private native MCP search always pins the in-network attested route and sa
   assert.equal(cfg.mcp_servers.tinfoil_search.sampling.enabled, false)
   assert.deepEqual(cfg.fallback_providers, [])
   assert.ok(cfg.agent.disabled_toolsets.includes('web'))
-  assert.ok(!text.includes('https://websearch.tinfoil.sh'))
+  assert.equal(new URL(cfg.mcp_servers.tinfoil_search.url).protocol, 'http:')
 })
 test('native search coexists with scoped app and explicit standard-history transports', () => {
   const cfg = parse(hermesConfigYaml({ ...privateAgent, permissions: { ...privateAgent.permissions, read_standard_chats: true } }, { gatewayUrl: 'http://scoped/wizard/mcp' }))
