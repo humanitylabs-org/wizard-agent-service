@@ -17,6 +17,7 @@ import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MA
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
+import { ownerApprovalFromTool } from './owner-approval-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
@@ -1491,6 +1492,8 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
     if (role === 'tool') {
+      const approval = ownerApprovalFromTool(sourceMessage.content)
+      if (approval) projected.owner_approval = approval
       const toolName = safeHistoryText(message.tool_name, 80).replace(/^functions\./, '')
       const plan = PLAN_TOOLS.has(toolName) ? historyPlan(message.content) : null
       const question = toolName === 'clarify' ? historyQuestion({}, message.content) : null
