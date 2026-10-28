@@ -1382,7 +1382,9 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   const latestAssistant = visible.find((message) => message.role === 'assistant') ?? null
   const status = latest?.role === 'assistant' ? latest.status ?? null : null
   const appId = latest?.role === 'assistant' ? latest.appId ?? null : null
-  const replies = visible.filter(m => m.role === 'assistant').map(m => ({ timestamp: m.created_at, status: m.status ?? null })).reverse()
+  const userIndex = visible.findIndex(m => m.role === 'user')
+  const replies = visible.flatMap((m, index) => m.role === 'assistant'
+    ? [{ timestamp: m.created_at, status: m.status ?? null, afterUser: userIndex < 0 || index < userIndex }] : []).reverse()
   if (latest) { delete latest.status; delete latest.appId }
   return {
     latest,

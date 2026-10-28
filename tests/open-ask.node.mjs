@@ -39,6 +39,7 @@ const reply = (status, timestamp = 20) => ({ timestamp, status })
 const solve = (replies, background = 'helper', lastUserAt = 10) => resolveThreadSection({ replies, background, lastUserAt })
 const cases = [
   ['QR delivered while helper builds button', [reply(qr)], 'helper', 10, 'Ready', qr],
+  ['immediate QR action with future result stays Ready while helper runs', [reply({ state: 'needs_you', ask: 'Scan this QR; it will link the phone' })], 'helper', 10, 'Ready', { state: 'needs_you', ask: 'Scan this QR; it will link the phone' }],
   ['handoff-only reply with helper running', [reply({ state: 'fyi', ask: 'A helper is building the button' })], 'helper', 10, 'Working'],
   ['unmarked handoff reply with helper running', [reply(null)], 'helper', 10, 'Working'],
   ['needs_you then later fyi progress keeps the original ask', [reply(qr), reply({ state: 'fyi', ask: 'Still building' }, 30)], 'helper', 10, 'Ready', qr],
@@ -77,6 +78,17 @@ test('future-tense guards cover will, once, when the helper, after the helper an
     assert.equal(solve([reply({ state: 'needs_you', ask })]).section, 'Working', ask)
   }
 })
+test('same-tick owner and reply use proven message order, never revive an older ask', () => {
+  const content = `QR ready\n[WIZARD_STATUS_V1]${JSON.stringify(qr)}[/WIZARD_STATUS_V1]`
+  const user = { role: 'user', content: 'Connect my phone', timestamp: 20 }
+  const assistant = { role: 'assistant', content, timestamp: 20 }
+  const after = latestVisibleSessionMessages({ data: [user, assistant] })
+  const before = latestVisibleSessionMessages({ data: [assistant, user] })
+  assert.equal(resolveThreadSection({ replies: after.replies, lastUserAt: 20, background: 'helper' }).section, 'Ready')
+  assert.equal(resolveThreadSection({ replies: before.replies, lastUserAt: 20, background: 'helper' }).section, 'Working')
+  assert.equal(resolveThreadSection({ replies: [{ ...reply(qr, 20), afterUser: true }], lastUserAt: 20, background: 'helper' }).section, 'Ready')
+})
+
 test('prompt requires a status even for handoffs and uses the request view', () => {
   assert.ok(STATUS_INSTRUCTIONS.includes('including replies that hand work to a helper'))
   assert.ok(STATUS_INSTRUCTIONS.includes("the user's request cannot move forward"))
