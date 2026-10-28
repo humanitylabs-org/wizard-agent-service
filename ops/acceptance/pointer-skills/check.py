@@ -242,6 +242,15 @@ class Box:
         ev, before = self.listing("01-skills-fresh-box.txt")
         self.record("Fresh box has no pointer skills", not any(n.startswith("wizard-job-") for n in before), f"skills folder: {before}", [ev])
 
+        # The model route answers a plain turn (otherwise every later check is about the route, not routing).
+        sid = self.new_thread()
+        run = self.send(sid, "Reply with the single word: ready")
+        t = self.transcript(sid) | {"phase": "route-check", "run": run}
+        evr = self.dump("01-route-check.json", t)
+        if run.get("status") != "completed":
+            self.record("Model route answers a plain turn", False, f"run {run.get('status')}: {run.get('error')}", [evr])
+            raise RuntimeError("model route failed; see evidence/01-route-check.json and hermes logs")
+
         # Install: app container up, then the App Manager's registry write (apps.json + the app's shipped skill).
         self.sh("docker", "run", "-d", "--name", APP, "--network", NET, "-v", f"{self.app_dir}:/log",
                 "-e", "CALL_LOG=/log/calls.jsonl", "-u", "1000:1000", self.a.py_image, "python", "/log/fake_app.py")
@@ -267,7 +276,7 @@ class Box:
             new = [c for c in self.calls()[n0:] if c.get("method") == "tools/call"]
             picked = any((c.get("params") or {}).get("name") == "create_short" for c in new)
             hits += picked
-            t |= {"phase": "installed", "trial": i + 1, "run_status": run.get("status"), "run_error": run.get("error"),
+            t |= {"phase": "installed", "trial": i + 1, "run_status": run.get("status"), "run_error": run.get("error"), "run": run,
                   "app_tool_calls": [c.get("params") for c in new], "picked_app_tool": picked}
             self.trials.append(t)
             self.dump(f"03-installed-trial-{i + 1}.json", t)
@@ -294,19 +303,36 @@ class Box:
         t = self.transcript(sid)
         named = [c for c in t["tool_calls"] if "defleur" in json.dumps(c).lower()]
         mentions = "defleur" in t["final_reply"].lower()
-        t |= {"phase": "uninstalled", "run_status": run.get("status"), "run_error": run.get("error"),
+        t |= {"phase": "uninstalled", "run_status": run.get("status"), "run_error": run.get("error"), "run": run,
               "app_tool_calls_after": len(self.calls()) - n0, "defleur_tool_calls": named, "reply_mentions_app": mentions}
         self.trials.append(t)
         evu = self.dump("05-uninstalled-thread.json", t)
         self.record(f"After uninstall a new thread neither calls nor names {APP_NAME}", not named and not mentions and run.get("status") == "completed",
                     f"run {run.get('status')}; defleur tool calls {len(named)}; reply mentions app: {mentions}", [evu])
-        self.sh("docker", "logs", WAS, check=False)
-        self.dump("was.log", subprocess.run(["docker", "logs", WAS], capture_output=True, text=True).stdout[-20000:])
         self.meta["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.save()
         return all(c["pass"] for c in self.results)
 
+    def collect_logs(self):
+        """Hermes and Agent Service logs for diagnosis, with the model key and tokens scrubbed."""
+        def scrub(text):
+            for secret in (self.model_key, self.key, self.mcp_token):
+                text = text.replace(secret, "<redacted>")
+            return text
+        for name, cmd in (("hermes-container.log", ["docker", "logs", "--tail", "400", HERMES]),
+                          ("was.log", ["docker", "logs", "--tail", "400", WAS])):
+            p = subprocess.run(cmd, capture_output=True, text=True)
+            self.dump(name, scrub(p.stdout + p.stderr)[-60000:])
+        logs = []
+        for f in sorted((self.data / "logs").glob("*.log")) if (self.data / "logs").is_dir() else []:
+            logs.append(f"== {f.name}\n" + "\n".join(f.read_text(errors="replace").splitlines()[-300:]))
+        self.dump("hermes-logs.txt", scrub("\n".join(logs))[-80000:])
+
     def teardown(self):
+        try:
+            self.collect_logs()
+        except Exception as e:  # noqa: BLE001
+            self.say("log collection failed:", e)
         for c in (HERMES, WAS, APP):
             self.sh("docker", "rm", "-f", c, check=False)
         shutil.rmtree(self.data, ignore_errors=True)  # holds the model key
