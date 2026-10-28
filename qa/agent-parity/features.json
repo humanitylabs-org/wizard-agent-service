@@ -613,14 +613,16 @@
     },
     {
       "id": "download-links",
-      "description": "Download assistant and user attachments through authenticated public URLs",
+      "description": "Download assistant and user attachments through authenticated public URLs; the owner's browser caches attachments for good and revalidates owner files",
       "layer": "server",
-      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition.",
+      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition. Attachments carry private immutable caching; owner files carry private no-cache plus an ETag that answers 304 unchanged and 200 after a same-size edit with preserved mtime.",
       "source_refs": [
-        "server/service.mjs"
+        "server/service.mjs",
+        "server/media-files.mjs"
       ],
       "reference_tests": [
-        "tests/content-disposition.test.ts"
+        "tests/content-disposition.test.ts",
+        "tests/chat-media-browser-cache.test.ts"
       ],
       "fixture": "download-links",
       "policy_exemptions": []
