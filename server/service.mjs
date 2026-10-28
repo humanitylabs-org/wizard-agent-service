@@ -299,12 +299,9 @@ const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 /** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  if (contract.response_style === 'own') return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
-  let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
-  if (contract.response_style === 'concise') instructions = instructions
-    .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
-    .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
-  return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
+  return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
