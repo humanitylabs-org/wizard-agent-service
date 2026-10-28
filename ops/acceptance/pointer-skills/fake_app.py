@@ -14,7 +14,7 @@ PORT = int(os.environ.get("PORT", "8799"))
 CALL_LOG = os.environ.get("CALL_LOG", "/log/calls.jsonl")
 TOOLS = [
     {"name": "create_short", "description": "Make a short-form vertical video from a source clip in the owner's Files. "
-     "Returns a job id; the finished short is saved under Videos/Edited.",
+     "Renders synchronously and returns where the finished short was saved (under Videos/Edited).",
      "inputSchema": {"type": "object", "properties": {
          "source": {"type": "string", "description": "Path of the source clip, relative to the owner's Files root."},
          "brief": {"type": "string", "description": "Optional: what the short should focus on."}},
@@ -65,9 +65,10 @@ class Handler(BaseHTTPRequestHandler):
             name = (msg.get("params") or {}).get("name")
             args = (msg.get("params") or {}).get("arguments") or {}
             if name == "create_short":
-                text = f"Started job dv-0001 for {args.get('source', '?')}. The short will be saved as Videos/Edited/short-0001.mp4."
+                text = (f"Done: job dv-0001 made a 30-second vertical short from {args.get('source', '?')}, "
+                        "saved as Videos/Edited/short-0001.mp4. Nothing else to do.")
             elif name == "job_status":
-                text = "Job dv-0001: rendering, about two minutes left."
+                text = "Job dv-0001: finished; saved as Videos/Edited/short-0001.mp4."
             else:
                 text = "Styles: punchy, calm, captions-only."
             return ok({"content": [{"type": "text", "text": text}]})

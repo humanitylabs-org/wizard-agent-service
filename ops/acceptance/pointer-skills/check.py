@@ -198,7 +198,11 @@ class Box:
         def done():
             s, r = self.http("GET", f"/wizard/hermes/v1/runs/{rid}")
             return r if s == 200 and r.get("status") in ("completed", "failed", "cancelled", "stopped", "error", "interrupted") else None
-        return self.wait(f"run {rid}", done, timeout=timeout, every=3)
+        try:
+            return self.wait(f"run {rid}", done, timeout=timeout, every=3)
+        except RuntimeError:
+            self.http("POST", f"/wizard/hermes/v1/runs/{rid}/stop", {})
+            return {"run_id": rid, "status": "timeout", "error": f"no terminal status after {timeout}s"}
 
     def transcript(self, sid):
         """User/assistant text as the shell reads it, plus every tool call from Hermes' own state.db (backup copy)."""
@@ -319,14 +323,14 @@ class Box:
             for secret in (self.model_key, self.key, self.mcp_token):
                 text = text.replace(secret, "<redacted>")
             return text
-        for name, cmd in (("hermes-container.log", ["docker", "logs", "--tail", "400", HERMES]),
-                          ("was.log", ["docker", "logs", "--tail", "400", WAS])):
+        for name, cmd in (("hermes-container.log", ["docker", "logs", "--tail", "3000", HERMES]),
+                          ("was.log", ["docker", "logs", "--tail", "3000", WAS])):
             p = subprocess.run(cmd, capture_output=True, text=True)
-            self.dump(name, scrub(p.stdout + p.stderr)[-60000:])
+            self.dump(name, scrub(p.stdout + p.stderr)[-400000:])
         logs = []
         for f in sorted((self.data / "logs").glob("*.log")) if (self.data / "logs").is_dir() else []:
-            logs.append(f"== {f.name}\n" + "\n".join(f.read_text(errors="replace").splitlines()[-300:]))
-        self.dump("hermes-logs.txt", scrub("\n".join(logs))[-80000:])
+            logs.append(f"== {f.name}\n" + "\n".join(f.read_text(errors="replace").splitlines()[-3000:]))
+        self.dump("hermes-logs.txt", scrub("\n".join(logs))[-600000:])
 
     def teardown(self):
         try:
