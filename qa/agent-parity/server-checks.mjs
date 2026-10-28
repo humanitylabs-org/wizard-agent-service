@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -18,6 +19,32 @@ const admit = async (s, body) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'owned-open-work': async s => {
+    await admit(s, { input: 'Synthetic approved backend fix' })
+    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), s.kind === 'main', 'owner-scoped Hermes-only instructions at the real HTTP boundary')
+    const status = { state: 'done', ask: 'The fix is verified.' }
+    const evidence = { agentId: s.id, ownedCount: 1, handleCount: 0, continuation: false }
+    if (s.kind === 'main') assert.equal(guardOwnedOpenWork(status, evidence).state, 'fyi')
+    else assert.equal(guardOwnedOpenWork(status, evidence), status, 'routed status remains the same object')
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const text = `Verified fix.
+
+**Still open:**
+- Archimedes: run the next checks
+[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', output: text })
+    row.messages.push({ role: 'assistant', timestamp: Date.now()/1000 + 1, content: text })
+    const writes = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    const before = writes().length
+    for (let i = 0; i < 2; i++) {
+      const response = await s.request('/api/sessions?view=list'); assert.equal(response.status, 200)
+      const item = (await response.json()).data.find(x => x.id === row.id)
+      assert.equal(item.attention.state, 'done', 'no main-only guard leaks into routed list projection')
+      assert.notEqual(item.wizard_waiting_on, 'owned_work')
+    }
+    assert.equal(writes().length, before, 'listing routed work never dispatches an owned-work correction')
+    assert.ok(!writes().some(r => JSON.stringify(r.body).includes('[Wizard follow-through] Your last reply lists')))
+  },
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
