@@ -1767,7 +1767,8 @@ function safeContentHeaders(file, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(disposition, file.filename),
-    'Cache-Control': 'private, no-store',
+    // File ids are random and their uploads never change: the owner's browser may keep them a day.
+    'Cache-Control': 'private, max-age=86400',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -1793,7 +1794,8 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment', decodeURIComponent(encodedName)),
-    'Cache-Control': 'private, no-store',
+    // Attachment ids are content-bound and never reused: cache them in the owner's browser, never in shared caches.
+    'Cache-Control': 'private, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
   }
 }
