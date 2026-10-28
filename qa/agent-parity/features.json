@@ -36,6 +36,26 @@
   ],
   "features": [
     {
+      "id": "private-incognito",
+      "description": "Temporary private-agent chats never enter ordinary stores; standard agents are explicitly refused. This matrix fixture proves the privacy policy, not real-container or confidential-model operation.",
+      "layer": "server",
+      "fixture": "private-incognito-policy",
+      "how_to_test": "Assert the real Service refuses Incognito on the standard agent of each runtime kind with 409 incognito_private_only before upstream admission; use the dedicated synthetic private browser/stock rig for positive no-persistence proof.",
+      "source_refs": [
+        "server/incognito.mjs",
+        "ops/agent-runtime/incognito_runtime.py",
+        "wizard-ux/web/core/incognito-chat.js"
+      ],
+      "reference_tests": [
+        "tests/incognito.node.mjs",
+        "ops/agent-runtime/test_incognito_runtime.py",
+        "scripts/incognito-stock-acceptance.py"
+      ],
+      "policy_exemptions": [
+        "private agent only, by owner decision"
+      ]
+    },
+    {
       "id": "provider-signin-recovery",
       "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route.",
       "layer": "server",
