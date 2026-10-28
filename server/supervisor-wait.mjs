@@ -5,7 +5,7 @@ import { readHermesSessionTruth } from './session-truth.mjs'
 import { withoutOwnerGates } from './heavy-wait.mjs'
 
 export const SUPERVISOR_WAIT_CAP_SECONDS = 12 * 3600
-export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = Date.now()) {
+export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = Date.now(), { includeOwnerGates = false } = {}) {
   const waits = new Map(), wanted = [...new Set(ids)]
   if (!supervisorPath || !hermesPath || !wanted.length) return waits
   let db, hermes
@@ -36,7 +36,7 @@ export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = 
       wait.pending++; wait.since = Math.min(wait.since, since)
       waits.set(build.parent, wait)
     }
-    return withoutOwnerGates(hermesPath, waits)
+    return includeOwnerGates ? waits : withoutOwnerGates(hermesPath, waits)
   } catch { return new Map() } finally { db?.close(); hermes?.close() }
 }
 
