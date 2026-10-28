@@ -255,8 +255,8 @@ class IncognitoManager:
             if not networks or meta['HostConfig'].get('NetworkMode') in ('host','none'):
                 raise self.failure('incognito_unsupported_runtime',409)
             environment=dict(v.split('=',1) for v in meta['Config'].get('Env',[]) if '=' in v)
-            from private_seal import POLICY, LABEL as SEAL_LABEL
-            sealed = (meta['Config'].get('Labels') or {}).get(SEAL_LABEL) == POLICY
+            from private_seal import POLICY as SEAL_POLICY, LABEL as SEAL_LABEL
+            sealed = (meta['Config'].get('Labels') or {}).get(SEAL_LABEL) == SEAL_POLICY
             if sealed:
                 # No inherited public/shared network is ever accepted for a sealed sibling.
                 for network in networks:
@@ -284,7 +284,7 @@ class IncognitoManager:
                       '-e','HERMES_WORKDIR=/opt/data','-e','PYTHONDONTWRITEBYTECODE=1','--workdir','/opt/data']
                 if sealed:
                     at = args.index('-p'); del args[at:at+2]
-                    args += ['--label', SEAL_LABEL + '=' + POLICY]
+                    args += ['--label', SEAL_LABEL + '=' + SEAL_POLICY]
                 if self.owner: args += ['--label', 'wizard.incognito.owner=' + self.owner]
                 for host in meta['HostConfig'].get('ExtraHosts') or []: args+=['--add-host',host]
                 for dns in meta['HostConfig'].get('Dns') or []: args+=['--dns',dns]

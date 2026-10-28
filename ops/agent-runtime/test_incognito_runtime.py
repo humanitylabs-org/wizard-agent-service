@@ -52,6 +52,7 @@ class Tests(unittest.TestCase):
   self.assertIn('type=bind,src=/synthetic/gateway,dst=/run/agent-gateway',args)
   self.assertNotIn('/synthetic/home',' '.join(args));self.assertNotIn('synthetic-secret',' '.join(args))
   self.assertIn('synthetic-secret',r.install['environment'].values())
+  self.assertEqual(r.install['policy'],POLICY)  # network-policy names must never shadow plugin code
   self.assertEqual(result['history_search'],'available');self.assertEqual(len(r.transfers),2)
   self.assertEqual(r.transfers[0][0][1],'synthetic-source');self.assertEqual(r.transfers[0][1][-4:],['tar','-x','--no-same-owner','-C','/opt/data'][-4:])
   self.assertEqual(r.transfers[1][2],TOTAL_LIMIT-10240)

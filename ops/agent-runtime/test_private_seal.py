@@ -67,6 +67,11 @@ class PrivateSealTests(unittest.TestCase):
         with self.assertRaises(ar.RuntimeFailure) as caught: driver._override(fixture(), rt)
         self.assertEqual(caught.exception.code, 'private_sealed_recipe_not_admitted')
         rt.req.assert_not_called()
+        driver.agents = Mock(); driver.cli = Mock()
+        for action in ('apply','start'):
+            with self.assertRaises(ar.RuntimeFailure):getattr(driver,action)(fixture())
+        driver.agents.add_provider_keys.assert_not_called()
+        driver.cli.Config.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

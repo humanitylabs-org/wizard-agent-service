@@ -115,6 +115,9 @@ print(json.dumps(out))
     receipt['network_refusals'] = boundary
     receipt['checks']['direct_internet_ip_refused'] = boundary['internet_ip']
     receipt['checks']['example_com_refused'] = boundary['example_com']
+    curl = run(['docker','exec',source,'curl','--noproxy','*','--connect-timeout','3','--max-time','5','https://example.com'],check=False)
+    receipt['checks']['curl_example_com_failed_inside_agent'] = curl.returncode in (5,6,7,28)
+    receipt['curl_example_com_exit_code'] = curl.returncode
     receipt['checks']['no_edge_or_provider_egress_listener_from_agent'] = all(boundary.values())
     meta = json.loads(run(['docker', 'inspect', source]).stdout)[0]
     networks = [json.loads(run(['docker','network','inspect', n]).stdout)[0] for n in meta['NetworkSettings']['Networks']]
@@ -138,7 +141,13 @@ p=json.load(sys.stdin);h=pathlib.Path('/opt/data');(h/'config.yaml').write_text(
 ''', json.dumps({'key':key,'config':config}))
     receipt['phase'] = 'incognito_start'
     driver = SimpleNamespace(agents=object(),project=lambda _:PROJECT)
-    manager = IncognitoManager(driver,docker=ar.docker,failure=ar.RuntimeFailure,image=AGENT_IMAGE,proxy_image=ar.DEFAULT_PROXY_IMAGE,container_for=lambda *_:source,background=False,owner='r9b-synthetic')
+    def synthetic_docker(args, **kwargs):
+        p = ar.docker(args, **kwargs)
+        if p.returncode and args[:1] == ['exec']:
+            # Exclusively synthetic containers/config; never generic/live stderr.
+            receipt['synthetic_exec_failure'] = (p.stderr[-4000:]).replace(key,'[REDACTED]').replace(marker,'[SYNTHETIC]')
+        return p
+    manager = IncognitoManager(driver,docker=synthetic_docker,failure=ar.RuntimeFailure,image=AGENT_IMAGE,proxy_image=ar.DEFAULT_PROXY_IMAGE,container_for=lambda *_:source,background=False,owner='r9b-synthetic')
     sid='incog_'+secrets.token_hex(16)
     state=manager.start(agent,sid);target=manager.sessions[('synthetic',sid)]['name']
     receipt['checks']['incognito_start'] = True
@@ -172,10 +181,31 @@ try:urllib.request.urlopen('http://agent-synthetic-tinfoil:3301/v1/models',timeo
 except Exception:print('true')
 ''',container=target)
     receipt['checks']['stopped_provider_unreachable']=failure
+    failed_admission=api('/v1/runs','POST',{'session_id':sid,'input':'Reply only OK, without using tools.'})
+    failed_run={}
+    for _ in range(30):
+        failed_run=api('/v1/runs/'+failed_admission['run_id'])
+        if failed_run.get('status') in ('completed','failed','cancelled'):break
+        manager.lease('synthetic',sid);time.sleep(1)
+    receipt['stopped_provider_stock_run_status']=failed_run.get('status')
+    receipt['checks']['stopped_provider_no_completed_answer']=failed_run.get('status')!='completed'
+    if failed_run.get('status') not in ('completed','failed','cancelled'):
+        api('/v1/runs/'+failed_admission['run_id']+'/stop','POST',{})
+        for _ in range(30):
+            cancelled=api('/v1/runs/'+failed_admission['run_id'])
+            if cancelled.get('status') in ('failed','cancelled','completed'):break
+            manager.lease('synthetic',sid);time.sleep(1)
     compose('start','agent-synthetic-tinfoil','agent-synthetic-search')
     recovery=exec_py(verify,container=target,timeout=90)
     receipt['checks']['provider_recovered_attested']=set(recovery)=={'3301','3302'}
-    receipt['six_privacy_checks']['e_stopped_provider_fail_closed']={'status':'partial','reason':'Successful real inference/search before stop; both listeners become unreachable; restored attestations. No terminal stock failed-run/no-fallback proof yet.'}
+    restored=api('/v1/runs','POST',{'session_id':sid,'input':'Reply with only RECOVERED, without using tools.'})
+    recovered={}
+    for _ in range(90):
+        recovered=api('/v1/runs/'+restored['run_id'])
+        if recovered.get('status') in ('completed','failed','cancelled'):break
+        manager.lease('synthetic',sid);time.sleep(1)
+    receipt['checks']['provider_restore_real_run_succeeds']=recovered.get('status')=='completed' and 'RECOVERED' in json.dumps(recovered)
+    receipt['six_privacy_checks']['e_stopped_provider_fail_closed']={'status':'passed' if failed_run.get('status')=='failed' and receipt['checks']['provider_restore_real_run_succeeds'] else 'partial','reason':'Both listeners unreachable, no completed stock answer while stopped, fallback_providers empty. If stock remains retrying after 30s, cancel explicitly before restoring; a terminal provider-failure result is not claimed.'}
     receipt['phase']='close_and_scan'
     manager.stop('synthetic',sid)
     receipt['checks']['incognito_close_removes_exact_sibling']=run(['docker','inspect',target],check=False).returncode!=0

@@ -77,9 +77,9 @@ def client_hello(sock, host):
                 if typ != 0:
                     raise ValueError('SNI')
                 names.append(name.decode('ascii'))
-    if p != end or names != [host]:
+    if p != end or len(names) != 1 or (host is not None and names != [host]):
         raise ValueError('SNI mismatch')
-    return wire
+    return (wire, hostname(names[0])) if host is None else wire
 
 
 def public_connection(host):
@@ -146,6 +146,26 @@ class Handler(socketserver.BaseRequestHandler):
             pass
 
 
+class DirectTLSHandler(socketserver.BaseRequestHandler):
+    """Raw TLS passthrough for SDK certificate validation that ignores HTTPS_PROXY.
+
+    Read SNI before opening any upstream; never decrypt TLS or select a target
+    from DNS/IP supplied by a client. The verifier still validates peer TLS.
+    """
+    def handle(self):
+        self.request.settimeout(20)
+        try:
+            hello, host = client_hello(self.request, None)
+            if host not in self.server.allowed:
+                raise ValueError('undeclared SNI')
+            with public_connection(host) as upstream:
+                upstream.sendall(hello)
+                self.request.settimeout(60); upstream.settimeout(60)
+                pump(self.request, upstream)
+        except (ValueError, OSError, IndexError, struct.error, UnicodeError):
+            pass
+
+
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -162,6 +182,13 @@ if __name__ == '__main__':
         ingress = module_from_spec(spec); spec.loader.exec_module(ingress)
         ingress.start(routes)
     allowed = frozenset(hostname(h) for h in json.loads(os.environ['ALLOWED_HOSTS']))
+    direct = frozenset(hostname(h) for h in json.loads(os.environ.get('DIRECT_TLS_HOSTS', '[]')))
+    if not direct <= allowed:
+        raise ValueError('direct TLS hosts must be declared')
+    if direct:
+        direct_server = Server((os.environ['LISTEN_IP'], 443), DirectTLSHandler)
+        direct_server.allowed = direct
+        threading.Thread(target=direct_server.serve_forever, daemon=True).start()
     if not allowed:
         # Local providers get fixed incoming TCP routes, never a CONNECT listener.
         threading.Event().wait()

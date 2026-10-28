@@ -60,6 +60,10 @@ def apply(doc, agent, *, ports):
     command[command.index('--bind') + 1] = str(seal[3])
     command += ['--host', 'inference.tinfoil.sh', '--repo', 'tinfoilsh/confidential-model-router']
     provider['environment'] = {'HTTPS_PROXY': f'http://{egress[3]}:3128', 'NO_PROXY': ''}
+    # The SDK's validateTLS uses a raw tls.Dial and ignores HTTPS_PROXY.
+    # Exact enclave aliases reach only an SNI-checked opaque TLS edge; no DNS
+    # relay, public interface, certificate substitution or SDK patch is used.
+    provider['extra_hosts'] = {h: str(egress[3]) for h in ('inference.tinfoil.sh','websearch.tinfoil.sh')}
     provider['dns'] = ['127.0.0.1']
     provider['restart'] = 'no'
     search = services[main+'-search']
@@ -72,6 +76,7 @@ def apply(doc, agent, *, ports):
         'networks': {seal_name: {'ipv4_address': str(seal[4])},
                      egress_name: {'ipv4_address': str(egress[3])}, uplink_name: {}},
         'environment': {'LISTEN_IP': str(egress[3]), 'ALLOWED_HOSTS': json.dumps(HOSTS),
+                        'DIRECT_TLS_HOSTS': json.dumps(['inference.tinfoil.sh','websearch.tinfoil.sh']),
                         'INGRESS_ROUTES': json.dumps([[8642, str(seal[2]), 8642]])},
         'ports': [f"127.0.0.1:{agent['runtime']['port']}:8642"] if ports else [],
         'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],

@@ -669,12 +669,15 @@ class RuntipiDriver:
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", f"agent {agent['id']} package"], check=True, capture_output=True)
         return pkg
 
-    def _override(self, agent: dict, rt) -> None:
+    def _require_network_admitted(self, agent: dict) -> None:
         import private_seal
         if private_seal.enabled(agent):
             # A materialized legacy recipe adds the shared Runtipi network.
-            # Fail closed until installed !override replacement is rehearsed.
+            # Fail before key provisioning/start until installed replacement is rehearsed.
             raise RuntimeFailure("private_sealed_recipe_not_admitted", 409)
+
+    def _override(self, agent: dict, rt) -> None:
+        self._require_network_admitted(agent)
         doc = {"services": {}}
         main, _ = service_names(agent)
         if self.home_mount == "alongside":
@@ -792,6 +795,7 @@ class RuntipiDriver:
         return agent["runtime"]["app_id"] in self.cli.installed_ids(rt)
 
     def apply(self, agent: dict) -> dict:
+        self._require_network_admitted(agent)
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
         self._override(agent, rt)
@@ -808,6 +812,7 @@ class RuntipiDriver:
         return self.start(agent)
 
     def start(self, agent: dict) -> dict:
+        self._require_network_admitted(agent)
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
         rt.req("POST", f"/app-lifecycle/{self.urn(agent)}/start", {}, timeout=300)
