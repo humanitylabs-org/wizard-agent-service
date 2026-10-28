@@ -1132,6 +1132,24 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "synced-list-ops",
+      "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
+      "layer": "ux",
+      "how_to_test": "In wizard-agent-service, npx vitest run tests/ui-preferences.test.ts covers PATCH item operations (concurrent devices on one list, idempotency, gone Space no-op, 400 without writing, PUT kept for older shells). In wizard-ux, node --test tests/synced-lists.test.mjs runs every synced list key through tests/two-devices.mjs (stale device and GET,GET,PUT,PUT race, with and without PATCH support) for main, host-profile, container and restricted thread ids. Synthetic source-executed evidence; live two-browser check recorded on the wizard-ux PR.",
+      "source_refs": [
+        "server/ui-preferences.mjs",
+        "server/service.mjs",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "tests/ui-preferences.test.ts",
+        "wizard-ux/tests/synced-lists.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }

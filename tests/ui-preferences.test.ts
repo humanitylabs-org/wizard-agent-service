@@ -91,3 +91,57 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
   })
 })
+
+const patch = (u: string, ops: any, headers = {}) => fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ ops }) })
+describe('item operations on shared lists (PATCH)', () => {
+  const space = (id: string, threads: string[] = []) => ({ id, name: 'Space ' + id, threads, createdAt: '2026-10-28T08:00:00.000Z' })
+  it('two devices editing the same list at the same moment both keep their change', async () => {
+    const u = await start(home())
+    expect((await put(u, { spaces: [space('work', ['wizard_1'])], pinnedChats: ['wizard_1'], subjectOrder: ['Home', 'Work'] })).status).toBe(200)
+    // Each device only knows its own item; neither sends a whole list, so neither can erase the other.
+    const r = await Promise.all([
+      patch(u, [{ op: 'add', key: 'spaces/work/threads', item: 'wizard_desk' }, { op: 'add', key: 'pinnedChats', item: 'wizard_desk' }]),
+      patch(u, [{ op: 'add', key: 'spaces/work/threads', item: 'wizard_phone' }, { op: 'remove', key: 'pinnedChats', item: 'wizard_1' }, { op: 'add', key: 'spaces', item: space('home') }]),
+      patch(u, [{ op: 'front', key: 'subjectOrder', items: ['Work', 'Ideas'] }]),
+    ])
+    expect(r.map(x => x.status)).toEqual([200, 200, 200])
+    const got = await (await fetch(u)).json()
+    expect(got.spaces.map((s: any) => [s.id, s.threads])).toEqual([['work', ['wizard_1', 'wizard_desk', 'wizard_phone']], ['home', []]])
+    expect(got.pinnedChats).toEqual(['wizard_desk'])
+    expect(got.subjectOrder).toEqual(['Work', 'Ideas', 'Home'])
+    expect(await (await patch(u, [{ op: 'add', key: 'pinnedChats', item: 'wizard_x' }])).json()).toMatchObject({ pinnedChats: ['wizard_desk', 'wizard_x'], compact: false })
+  })
+  it('operations are idempotent and a gone Space is a no-op, not an error', async () => {
+    const u = await start(home())
+    const ops = [{ op: 'add', key: 'spaces', item: space('a', ['wizard_1']) }, { op: 'add', key: 'spaces/a/threads', item: 'wizard_2' }, { op: 'set', key: 'spaces/a/name', item: 'Renamed' }]
+    const once = await (await patch(u, ops)).json(), twice = await (await patch(u, ops)).json()
+    expect(twice).toEqual(once); expect(once.spaces).toEqual([{ ...space('a', ['wizard_1', 'wizard_2']), name: 'Renamed' }])
+    expect((await patch(u, [{ op: 'remove', key: 'spaces', item: 'a' }, { op: 'add', key: 'spaces/a/threads', item: 'wizard_3' }])).status).toBe(200)
+    expect((await (await fetch(u)).json()).spaces).toEqual([])
+  })
+  it('rejects malformed operations and results that break a list limit without writing anything', async () => {
+    const d = home(), u = await start(d)
+    expect((await put(u, { subjectOrder: ['A'], pinnedChats: Array.from({ length: 300 }, (_, i) => 'wizard_' + i) })).status).toBe(200)
+    const before = readFileSync(join(d, 'ui-preferences.json'), 'utf8')
+    for (const ops of [undefined, [], {}, [null], [{ op: 'add', key: 'compact', item: true }], [{ op: 'add', key: 'pinnedChats', item: 1 }], [{ op: 'add', key: 'pinnedChats', item: '<x>' }],
+      [{ op: 'add', key: 'pinnedChats', item: 'wizard_new' }], [{ op: 'front', key: 'pinnedChats', items: ['a'] }], [{ op: 'add', key: 'spaces', item: { id: 'Bad ID' } }],
+      [{ op: 'set', key: 'spaces/a/name', item: '' }], [{ op: 'add', key: 'spaces/a/threads', item: 'x', extra: 1 }], [{ op: 'move', key: 'subjectOrder', item: 'A' }], Array(101).fill({ op: 'remove', key: 'pinnedChats', item: 'x' })])
+      expect((await fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops }) })).status).toBe(400)
+    expect((await fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops: [], compact: true }) })).status).toBe(400)
+    expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe(before)
+  })
+  it('keeps PUT working for older shells, and PATCH needs the same access, JSON and same-site write as PUT', async () => {
+    const u = await start(home(), true); expect((await patch(u, [{ op: 'add', key: 'pinnedChats', item: 'wizard_1' }])).status).toBe(403)
+    const open = await start(home())
+    expect((await patch(open, [{ op: 'add', key: 'pinnedChats', item: 'wizard_1' }], { 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+    expect((await fetch(open, { method: 'PATCH', body: '{"ops":[]}' })).status).toBe(415)
+    const allowed = await fetch(open, { method: 'DELETE' }); expect(allowed.status).toBe(405); expect(allowed.headers.get('allow')).toBe('GET, PUT, PATCH')
+    expect((await put(open, { pinnedChats: ['wizard_old_shell'] })).status).toBe(200)
+    expect((await (await patch(open, [{ op: 'add', key: 'pinnedChats', item: 'wizard_new_shell' }])).json()).pinnedChats).toEqual(['wizard_old_shell', 'wizard_new_shell'])
+  })
+  it('keeps stored keys this version does not know', async () => {
+    const d = home(), file = join(d, 'ui-preferences.json'); writeFileSync(file, JSON.stringify({ future: { x: 1 }, compact: true }))
+    const u = await start(d); expect((await patch(u, [{ op: 'add', key: 'pinnedChats', item: 'wizard_1' }])).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ future: { x: 1 }, compact: true, pinnedChats: ['wizard_1'] })
+  })
+})
