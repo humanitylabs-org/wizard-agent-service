@@ -74,15 +74,15 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
       const record = load().find((item) => item.id === id)
       if (!record) return null
       const path = hostPath(record)
-      const size = statSync(path).size
-      if (!range) return { status: 200, size, stream: createReadStream(path), record }
+      const { size, mtimeMs } = statSync(path)
+      if (!range) return { status: 200, size, mtimeMs, stream: createReadStream(path), record }
       const match = /^bytes=(\d*)-(\d*)$/u.exec(range)
-      if (!match) return { status: 416, size, record }
+      if (!match) return { status: 416, size, mtimeMs, record }
       let start = match[1] === '' ? size - Number(match[2]) : Number(match[1])
       let end = match[1] === '' || match[2] === '' ? size - 1 : Number(match[2])
-      if (!Number.isSafeInteger(start) || start < 0 || start >= size || end < start) return { status: 416, size, record }
+      if (!Number.isSafeInteger(start) || start < 0 || start >= size || end < start) return { status: 416, size, mtimeMs, record }
       end = Math.min(end, size - 1)
-      return { status: 206, size, start, end, stream: createReadStream(path, { start, end }), record }
+      return { status: 206, size, mtimeMs, start, end, stream: createReadStream(path, { start, end }), record }
     },
     save(data, { filename, mime }) {
       const sha256 = createHash('sha256').update(data).digest('hex')

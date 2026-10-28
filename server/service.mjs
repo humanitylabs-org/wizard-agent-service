@@ -1767,8 +1767,9 @@ function safeContentHeaders(file, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(disposition, file.filename),
-    // File ids are random and their uploads never change: the owner's browser may keep them a day.
-    'Cache-Control': 'private, max-age=86400',
+    // Owner files can be edited in place through Wizard Files under the same id: the owner's browser keeps a copy
+    // but asks first (a 304 costs no bytes), so an edit shows at once. Never stored by shared caches.
+    'Cache-Control': 'private, no-cache',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -5516,7 +5517,8 @@ function buildWizardServer(options, lifetime) {
             'Content-Type': artifact.mime,
             'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-store',
+            // Artifact ids are the content's own hash: the bytes behind an id never change.
+            'Cache-Control': 'private, max-age=31536000, immutable',
             'X-Content-Type-Options': 'nosniff',
           }
           const range = typeof request.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range.trim()) : null
@@ -5604,6 +5606,15 @@ function buildWizardServer(options, lifetime) {
           const opened = mediaFiles.open(id, range || null)
           const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
           const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
+          if (Number.isFinite(opened.mtimeMs)) {
+            headers.ETag = `W/"${id}-${opened.size}-${Math.trunc(opened.mtimeMs)}"`
+            const match = typeof request.headers['if-none-match'] === 'string' ? request.headers['if-none-match'] : ''
+            if (!range && match.split(',').map((tag) => tag.trim()).includes(headers.ETag)) {
+              opened.stream?.destroy()
+              const { 'Content-Length': _, ...notModified } = headers
+              response.writeHead(304, notModified); response.end(); return
+            }
+          }
           if (opened.status === 416) {
             response.writeHead(416, { ...headers, 'Content-Range': `bytes */${opened.size}` }); response.end(); return
           }
