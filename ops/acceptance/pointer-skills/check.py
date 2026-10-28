@@ -265,7 +265,7 @@ class Box:
             self.wait("pointer skill written", lambda: pointer.is_file() and "create_short" in pointer.read_text(), timeout=90)
             ok = True
         except RuntimeError:
-            ok = pointer.is_file()
+            ok = False  # a wildcard-only pointer means tool discovery never landed: the check fails
         ev, after = self.listing("02-skills-after-install.txt")
         evp = self.dump("02-pointer-SKILL.md", pointer.read_text() if pointer.is_file() else "(missing)")
         self.record("Install writes the job's pointer skill (with the app's real tool names)", ok,

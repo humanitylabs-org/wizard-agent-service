@@ -98,8 +98,11 @@ function jobsOf(apps) {
  * `jobMap` adds the fallback job -> app map (max 12 lines); the generic harness, which has no skills index,
  * always gets it.
  */
-export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false } = {}) {
+export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false, skillsIndex } = {}) {
   const hermes = harness === 'hermes'
+  // Only the main agent's skills index holds wizard-job-* pointers (#58). Any other agent on the gateway is told the
+  // jobs directly, limited to the apps on its own list.
+  const pointers = hermes && skillsIndex !== false
   const meta = hermes ? `mcp__${MCP_SERVER_NAME}__${META_TOOL}` : META_TOOL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
@@ -108,17 +111,17 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
       'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
-    hermes
+    pointers
       ? 'When a request matches a wizard-job-<job> skill in your skills:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
+    ...(pointers ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
     `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Save routing-only app-job skills.',
   ]
-  if (jobMap || !hermes) {
+  if (jobMap || !pointers) {
     const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
       `- ${jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
     text.push('', 'Jobs on this box:', ...(rows.length ? rows : ['- (no apps installed yet)']))
@@ -531,7 +534,7 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap }),
+          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap, skillsIndex: agentId === GATEWAY_MAIN_AGENT && writeSkills && Boolean(osHome) }),
         })
       }
       if (method === 'ping') return reply({})

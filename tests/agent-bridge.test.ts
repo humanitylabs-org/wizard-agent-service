@@ -208,6 +208,11 @@ describe('agent bridge: kernel', () => {
       expect(py("print(kernel.render_kernel(apps), end='')", reg)).toBe(renderKernel(bridgeApps(reg)))
       expect(py("print(kernel.render_kernel(apps, job_map=True), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { jobMap: true }))
       expect(py("print(kernel.render_kernel(apps, 'generic'), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { harness: 'generic' }))
+      // An agent without the main skills index (any non-main agent): no pointer wording, its own jobs inline.
+      const noIndex = renderKernel(bridgeApps(reg), { skillsIndex: false })
+      expect(py("print(kernel.render_kernel(apps, skills_index=False), end='')", reg)).toBe(noIndex)
+      expect(noIndex).not.toContain('wizard-job-<job>')
+      expect(noIndex).toContain('Jobs on this box:')
       expect(JSON.parse(py('print(json.dumps(kernel.pointer_skills(apps)))', reg))).toEqual(pointerSkills(bridgeApps(reg)))
       const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare']]))
       expect(JSON.parse(py(`print(json.dumps(kernel.pointer_skills(apps, tools=${JSON.stringify(JSON.stringify(tools))} and json.loads(${JSON.stringify(JSON.stringify(tools))}))))`, reg))).toEqual(pointerSkills(bridgeApps(reg), { tools }))
