@@ -39,6 +39,7 @@ const reply = (status, timestamp = 20) => ({ timestamp, status })
 const solve = (replies, background = 'helper', lastUserAt = 10) => resolveThreadSection({ replies, background, lastUserAt })
 const cases = [
   ['QR delivered while helper builds button', [reply(qr)], 'helper', 10, 'Ready', qr],
+  ['immediate QR action with future result stays Ready while helper runs', [reply({ state: 'needs_you', ask: 'Scan this QR; it will link the phone' })], 'helper', 10, 'Ready', { state: 'needs_you', ask: 'Scan this QR; it will link the phone' }],
   ['handoff-only reply with helper running', [reply({ state: 'fyi', ask: 'A helper is building the button' })], 'helper', 10, 'Working'],
   ['unmarked handoff reply with helper running', [reply(null)], 'helper', 10, 'Working'],
   ['needs_you then later fyi progress keeps the original ask', [reply(qr), reply({ state: 'fyi', ask: 'Still building' }, 30)], 'helper', 10, 'Ready', qr],

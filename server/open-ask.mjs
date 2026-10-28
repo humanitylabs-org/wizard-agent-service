@@ -1,7 +1,8 @@
 // Attention is an unanswered owner action, not the lifecycle of a background worker.
 import { parseStatus } from './thread-status.mjs'
 
-const FUTURE_ASK = /\b(?:will|once|soon)\b|\b(?:when|after)\s+the\s+helper\b/iu
+// Match deferred availability, not an explanation of what an immediate action will do.
+const FUTURE_ASK = /\b(?:I|we|it|helper)\s+will\s+(?:send|have|share|post|give|arrive)\b|\bonce\s+(?:the\s+helper|ready)\b|\b(?:when|after)\s+the\s+helper\b|\bsoon\b/iu
 const ASK_STATES = new Set(['needs_you', 'check'])
 export function replyEpoch(value) {
   const numeric = Number(value)

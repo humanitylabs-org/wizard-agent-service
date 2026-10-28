@@ -499,7 +499,7 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers all ten Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists. tests/heavy-status.test.ts keeps check in Working until heavy results land; done is not demoted and never creates an open ask. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/open-ask.mjs",
@@ -1083,6 +1083,22 @@
       ],
       "reference_tests": [
         "wizard-ux/tests/desktop-window-refresh.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "stop-on-send",
+      "description": "Stop shows the moment a message is sent; before the run exists it withdraws the pending send (no run admitted), after that it stops the exact run from the receipt",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/stop-before-run.test.mjs. The real outbox runs against a local HTTP boundary: Stop during upload, server transcription or offline waiting creates zero /v1/runs calls and keeps the recording; Stop while the run POST is in flight resolves with the receipt's run id; a steer in flight that is rejected after Stop never becomes a new turn. The real LIVE.cancelSend block runs for main, host-profile, container and restricted threads and withdraws only that thread's sends and stops only its own run (including a reply queued to steer the live run, and a slow phone take arriving after the tap hold). This is synthetic source-executed evidence; fenced browser QA on a scratch shell is reported separately. Companion UX PR: humanitylabs-org/wizard-ux#649.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/stop-before-run.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []
