@@ -36,7 +36,7 @@ import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
@@ -5089,7 +5089,7 @@ function buildWizardServer(options, lifetime) {
         const seed = url.pathname.endsWith('/seed')
         if (seed && !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!(seed ? ['POST'] : ['GET', 'PUT']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT' }); return }
+        if (!(seed ? ['POST'] : ['GET', 'PUT', 'PATCH']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT, PATCH' }); return }
         if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
         const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
         let patch
@@ -5098,7 +5098,7 @@ function buildWizardServer(options, lifetime) {
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
-          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : request.method === 'PATCH' ? patchUiPreferences(path, patch) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }
