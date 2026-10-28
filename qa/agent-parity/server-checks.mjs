@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { post, png } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
@@ -140,6 +140,15 @@ export const serverChecks = {
       assert.ok(prompt.includes(`${selected}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: ${style} reaches upstream`)
       assert.ok(!prompt.includes(style === 'concise' ? FINISH_REPORT_INSTRUCTIONS : CONCISE_REPLY_INSTRUCTIONS))
     }
+    // Own: Wizard OS facts and status protocol only; no reply-shape rule on any runtime kind.
+    const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: 'own' }), method: 'PUT' })
+    assert.equal(put.status, 200)
+    await s.request('/api/sessions', post({ id: 'wizard_parity_own' }))
+    await admit(s, { session_id: 'wizard_parity_own', input: 'Synthetic owner style change', instructions: 'Force a different style' })
+    const own = sent(s).instructions
+    assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: own keeps the status protocol`)
+    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: own drops style rule ${rule.slice(0, 40)}`)
+    assert.ok(own.includes('Wizard renders Markdown'), `${s.kind}: own keeps Wizard facts`)
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -367,6 +376,42 @@ export const serverChecks = {
     assert.ok(!JSON.stringify(body).includes(s.root));assert.ok(!JSON.stringify(body).includes('parity-runtime-secret'))
     const target=s.seen.filter(x=>x.method==='POST'&&x.path.endsWith('/v1/runs')).at(-1)
     assert.equal(target.path,s.kind==='host-profile'?'/p/parity-profile/v1/runs':'/v1/runs')
+  },
+  'app-job-routing': async s => {
+    // A synthetic app with a job and a shipped skill, installed the App Manager way (apps.json + skill under the OS home).
+    const osHome = join(s.root, 'os'), skills = join(osHome, 'skills')
+    mkdirSync(join(skills, 'parity-video'), { recursive: true })
+    writeFileSync(join(skills, 'parity-video', 'SKILL.md'), '---\nname: parity-video\ndescription: Synthetic app workflow.\n---\nCall make_short.\n')
+    const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], skill: 'skills/parity-video/SKILL.md', mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const install = apps => writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    const kernel = async () => {
+      const r = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
+      assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+      return (await r.json()).result.instructions
+    }
+    const pointer = join(skills, 'wizard-job-short-form-video', 'SKILL.md')
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    if (s.kind !== 'main') {
+      // The install picker ticks this standard agent for the new app (#58): its own list, nothing else.
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = [...new Set([...(agent.permissions.wizard_apps || []), 'parity-video'])]
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    install([parityQa, app]); await s.restart()
+    const text = await kernel()
+    if (s.kind === 'main') {
+      assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
+      assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
+      assert.match(text, /wizard-job-<job> skill in your skills/u)
+    } else {
+      // No pointer skills outside the main agent's index: the gateway tells this agent its own jobs instead.
+      assert.doesNotMatch(text, /wizard-job-<job>/u)
+      assert.match(text, /- short-form video -> Synthetic Video \(`mcp__wizard__parity_video__\*`\)/u)
+    }
+    install([parityQa]); await s.restart()
+    const after = await kernel()
+    assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
+    assert.doesNotMatch(after, /Synthetic Video/u)
   },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false

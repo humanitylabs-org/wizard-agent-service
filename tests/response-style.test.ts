@@ -2,7 +2,9 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { createWizardServer, runInstructions } from '../server/service.mjs'
+import { createWizardServer, runInstructions, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
+import { agentRunInstructions } from '../server/agents-http.mjs'
+import { SUMMARY_REPLY_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, SUPERVISOR_SPELL } from '../server/thread-status.mjs'
 import { initializeResponseStyle, normalizeSettings, readSettings } from '../server/wizard-os-settings.mjs'
 const dirs: string[] = []
 const fresh = () => { const dir = mkdtempSync(join(tmpdir(), 'style-')); dirs.push(dir); return join(dir, 'settings.json') }
@@ -66,4 +68,37 @@ it('response style is an owner setting', async () => {
     expect(raw.response_style_experiment).toEqual({ assigned: 'summary', source: 'existing_install', switches: { summary: 1, concise: 1 } })
     expect(JSON.stringify(raw)).not.toContain('FORGED_CONTENT')
   } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+})
+
+it('Own style sends Wizard OS facts and protocol only, never reply-style rules', () => {
+  const style = ['Apply the same intelligence', 'Scale the response to the request', 'owns the requested outcome', 'Finish with one self-contained', 'Briefly restate', 'The reply itself ends with the same ask', 'A background handoff is still agent-owned work', 'Answer with the same care']
+  const facts = ['record it in your own persona file (SOUL.md in your home', 'Wizard renders Markdown', 'MEDIA:/absolute/path', 'Skins/My skin/', '[WIZARD_STATUS_V1]', 'Leave the line out of interim progress messages']
+  for (const join of [true, false]) {
+    const own = runInstructions({ join, response_style: 'own' })
+    for (const text of [SUMMARY_REPLY_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, ...style]) expect(own).not.toContain(text)
+    for (const text of [STATUS_PROTOCOL_INSTRUCTIONS, SUPERVISOR_SPELL, ...facts]) expect(own).toContain(text)
+    expect(own.includes('Wizard brings their results back to you as a follow-up turn')).toBe(!join)
+    expect(own.endsWith(STATUS_PROTOCOL_INSTRUCTIONS)).toBe(true)
+  }
+  const agent = agentRunInstructions('own')
+  for (const text of [SUMMARY_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, ...style]) expect(agent).not.toContain(text)
+  for (const text of [STATUS_PROTOCOL_INSTRUCTIONS, SUPERVISOR_SPELL, 'private agents are not readable by standard agents', ...facts.filter(text => text !== 'Skins/My skin/')]) expect(agent).toContain(text)
+  // Existing styles are byte-for-byte unchanged.
+  expect(runInstructions({ join: true, response_style: 'summary' })).toBe(WIZARD_RUN_INSTRUCTIONS)
+  expect(STATUS_INSTRUCTIONS.startsWith(STATUS_PROTOCOL_INSTRUCTIONS.slice(0, 200))).toBe(true)
+})
+it('Own is a saved owner choice that survives restart and normalization', async () => {
+  const path = fresh(), proof = 'synthetic-owner-proof-'.repeat(3)
+  initializeResponseStyle(path)
+  const server = createWizardServer({ requireAccess: false, ownerProof: proof, settingsPath: path, followThrough: false })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = `http://127.0.0.1:${(server.address() as any).port}`
+  try {
+    const put = await fetch(origin + '/wizard/v1/settings', { method: 'PUT', headers: { 'x-wizard-owner-proof': proof, 'content-type': 'application/json' }, body: JSON.stringify({ response_style: 'own' }) })
+    expect(put.status).toBe(200)
+    expect(readSettings(path).settings.response_style).toBe('own')
+    expect(JSON.parse(readFileSync(path, 'utf8')).response_style_experiment.switches).toEqual({ summary: 0, concise: 0, own: 1 })
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+  expect(initializeResponseStyle(path, { choose: () => { throw Error('rerolled') } })?.response_style).toBe('own')
+  expect(normalizeSettings({ response_style: 'own' }).response_style).toBe('own')
 })

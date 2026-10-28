@@ -123,7 +123,7 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions; changes apply on the next turn without restart.",
+      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions, or with Own only Wizard OS facts and the status protocol and no reply-style rule; changes apply on the next turn without restart.",
       "layer": "server",
       "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
@@ -538,7 +538,7 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered.",
+      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
       "source_refs": [
         "server/thread-status.mjs"
       ],
@@ -979,6 +979,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "app-job-routing",
+      "description": "Each agent learns which of its own apps does which job, and the main agent's pointer skills send it through the app's shipped skill first.",
+      "layer": "server",
+      "how_to_test": "Install a synthetic app with a provides job and a shipped skill into the real Service's apps.json, restart, and open the wizard MCP gateway with each kind's own credential and transport. Main: the wizard-job-<job> pointer skill is written, tells it to load the app's skill with skill_view first, and the gateway kernel points at that skills index. Other kinds have no pointer skills: their gateway kernel lists the job -> app map for their own apps instead. Uninstall: the pointer disappears and no kind is told about the app. Disposable fixture checks; the live-model proof for the main agent is ops/acceptance/pointer-skills (fresh KVM VM).",
+      "source_refs": [
+        "server/agent-bridge.mjs",
+        "hermes-plugin/wizard-os/kernel.py"
+      ],
+      "reference_tests": [
+        "tests/agent-bridge.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "app-job-routing",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-isolation",
       "description": "Verify standard credentials cannot enumerate/open/search private threads",
       "layer": "runtime",
@@ -1117,6 +1133,56 @@
       ],
       "reference_tests": [
         "wizard-ux/tests/desktop-window-refresh.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "stop-on-send",
+      "description": "Stop shows the moment a message is sent; before the run exists it withdraws the pending send (no run admitted), after that it stops the exact run from the receipt",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/stop-before-run.test.mjs. The real outbox runs against a local HTTP boundary: Stop during upload, server transcription or offline waiting creates zero /v1/runs calls and keeps the recording; Stop while the run POST is in flight resolves with the receipt's run id; a steer in flight that is rejected after Stop never becomes a new turn. The real LIVE.cancelSend block runs for main, host-profile, container and restricted threads and withdraws only that thread's sends and stops only its own run (including a reply queued to steer the live run, and a slow phone take arriving after the tap hold). This is synthetic source-executed evidence; fenced browser QA on a scratch shell is reported separately. Companion UX PR: humanitylabs-org/wizard-ux#649.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/stop-before-run.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "chat-pins-sync",
+      "description": "Pinned Chats threads are the same on every device of the owner for main and routed threads; a stale or simultaneous device never drops or revives another device's pin.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-pins.test.mjs: pins key on the rendered row id for main, host-profile, container and restricted threads; a pin on one client shows on another and an unpin syncs back; a client that has not pulled keeps the other's pin; GET,GET,PUT,PUT between two clients keeps both pins (read-back replay); offline taps stay queued. Synthetic source-executed evidence; live two-browser check recorded on humanitylabs-org/wizard-ux#670.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-pins.js",
+        "wizard-ux/web/live.js",
+        "server/ui-preferences.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-pins.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "synced-list-ops",
+      "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
+      "layer": "ux",
+      "how_to_test": "In wizard-agent-service, npx vitest run tests/ui-preferences.test.ts covers PATCH item operations (concurrent devices on one list, idempotency, gone Space no-op, 400 without writing, PUT kept for older shells). In wizard-ux, node --test tests/synced-lists.test.mjs runs every synced list key through tests/two-devices.mjs (stale device and GET,GET,PUT,PUT race, with and without PATCH support) for main, host-profile, container and restricted thread ids. Synthetic source-executed evidence; live two-browser check recorded on the wizard-ux PR.",
+      "source_refs": [
+        "server/ui-preferences.mjs",
+        "server/service.mjs",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "tests/ui-preferences.test.ts",
+        "wizard-ux/tests/synced-lists.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []

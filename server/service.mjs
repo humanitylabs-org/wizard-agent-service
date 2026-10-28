@@ -25,7 +25,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -35,8 +35,8 @@ import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
-import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
+import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
@@ -117,7 +117,7 @@ const AGENT_FILE_MIMES = new Map(Object.entries({
   '.mov': 'video/quicktime',
 }))
 const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
-const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
+const AGENT_MEDIA_LINE = /^\s*MEDIA:[ \t]*(\/[^\r\n]+?)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
 const ROUTED_MIRROR_FRESH_MS = 20_000
@@ -148,11 +148,20 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
+// The run contract has two kinds of text. Client facts say what Wizard is and how it works (rendering,
+// links, files, skins); they are true for every agent. Style rules shape how the agent works and writes;
+// the Own reply style leaves them out so the owner's existing agent keeps its own habits.
+const WIZARD_CLIENT_INTRO = 'You are serving the user through Wizard, a first-party mobile client for their Hermes Agent.'
+const WIZARD_STYLE_INTRO = 'Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require.'
+const WIZARD_CLIENT_FACTS = `Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
+const WIZARD_OUTCOME_OWNERSHIP = 'The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.'
+const WIZARD_FINISH_SHAPE = 'Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.'
 
-The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
+export const WIZARD_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_STYLE_INTRO} ${WIZARD_CLIENT_FACTS}
 
-Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+${WIZARD_OUTCOME_OWNERSHIP}
+
+${WIZARD_FINISH_SHAPE}
 
 ${SUPERVISOR_SPELL}
 
@@ -161,6 +170,15 @@ ${OWNED_OPEN_WORK_INSTRUCTIONS}
 ${FINISH_REPORT_INSTRUCTIONS}
 
 ${STATUS_INSTRUCTIONS}`
+
+// Own reply style: Wizard OS facts and protocol only.
+export const OWN_STYLE_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_CLIENT_FACTS}
+
+${OWN_STYLE_SOURCE}
+
+${SUPERVISOR_SPELL}
+
+${STATUS_PROTOCOL_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -277,9 +295,12 @@ function operatorBody(method, pathname, body) {
 
 // Without joined delegation, helpers finish after the run ends and Wizard brings their results back
 // as a follow-up turn; the agent should say what is running and stop, not wait or poll.
+// Own style states the mechanism only, not what the agent should do about it.
+const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this run ends; Wizard brings their results back to you as a follow-up turn in this thread.'
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
-/** @param {{ join: boolean, response_style?: 'summary' | 'concise' }} [contract] */
+/** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
+  if (contract.response_style === 'own') return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
   let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
   if (contract.response_style === 'concise') instructions = instructions
     .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
@@ -5086,7 +5107,7 @@ function buildWizardServer(options, lifetime) {
         const seed = url.pathname.endsWith('/seed')
         if (seed && !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!(seed ? ['POST'] : ['GET', 'PUT']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT' }); return }
+        if (!(seed ? ['POST'] : ['GET', 'PUT', 'PATCH']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT, PATCH' }); return }
         if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
         const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
         let patch
@@ -5095,7 +5116,7 @@ function buildWizardServer(options, lifetime) {
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
-          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : request.method === 'PATCH' ? patchUiPreferences(path, patch) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }
@@ -5203,7 +5224,7 @@ function buildWizardServer(options, lifetime) {
         if (principal.kind === 'agent') { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
         if (Object.hasOwn(input, 'response_style')) {
           if (principal.kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
-          if (!['summary', 'concise'].includes(input.response_style)) { sendJson(response, 400, { error: 'invalid_response_style' }); return }
+          if (!RESPONSE_STYLES.includes(input.response_style)) { sendJson(response, 400, { error: 'invalid_response_style' }); return }
         }
         if (!settingsPath) { sendJson(response, 503, { error: 'settings_unavailable' }); return }
         const settings = normalizeSettings({ ...current, ...input, agents: { ...current.agents, ...input.agents } }, settingsOptions)

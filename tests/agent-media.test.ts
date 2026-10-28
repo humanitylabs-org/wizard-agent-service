@@ -34,6 +34,7 @@ beforeAll(async () => {
         { id: 'file-first', role: 'assistant', content: `Download first.\nMEDIA:${apkSource}\nThen screenshot.\nMEDIA:${source}`, timestamp: 12 },
         { id: 'literal', role: 'assistant', content: `Example only:\n\`\`\`text\nMEDIA:/example/screenshot.png\n\`\`\``, timestamp: 11 },
         { id: 'assistant-apk', role: 'assistant', content: `Latest build.\n\nMEDIA:${apkSource}\n\nInstall it over the old copy.`, timestamp: 8 },
+        { id: 'assistant-spaced', role: 'assistant', content: `Spaced tag.\n\nMEDIA: ${source}  \n\nEnd.`, timestamp: 13 },
         { id: 'assistant-missing', role: 'assistant', content: `Here it is.\n\nMEDIA:${join(sourceRoot, 'gone.pdf')}`, timestamp: 9 },
         ...['user', 'assistant'].map(role => ({ id: `${role}-inline-file`, role, content: [
           { type: 'text', text: `Review screenshot\n\n[WIZARD_FILES_V1]\n${JSON.stringify([
@@ -158,6 +159,14 @@ describe('agent image delivery', () => {
     expect(content).toContain('[file: gone.pdf unavailable]')
     expect(content).not.toContain(sourceRoot)
     expect(payload.data.find((message) => message.id === 'unsafe')?.content).toBe('[file: passwd unavailable]')
+  })
+
+  it('shows a MEDIA line written with a space after the colon', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'assistant-spaced')?.content ?? ''
+    expect(content).toContain('<helm_attachments>')
+    expect(content).not.toContain('unavailable')
+    expect(content).not.toContain(sourceRoot)
   })
 
   it('projects completed run output before the client renders it', async () => {
