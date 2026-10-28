@@ -24,7 +24,7 @@ async function rig(t, opts = {}) {
     if (/\/v1\/runs\/run-\d+$/.test(path)) return Response.json({ run_id: path.split('/').pop(), session_id: messages.at(-1).session_id, status: 'completed', output: opts.leak ? key : messages.map(x => x.input).join(' | ') })
     return Response.json({ error: 'unexpected' }, { status: 500 })
   }
-  const runtime = { incognitoStart: async () => ({ origin: 'http://127.0.0.1:23456', key, history_search: opts.history || 'available' }), incognitoStop: async (agent, data) => { stopped.push(data.session_id) }, incognitoLease: async () => ({ ok: true }) }
+  const runtime = { incognitoStart: async () => (now += opts.slowStart || 0, { origin: 'http://127.0.0.1:23456', key, history_search: opts.history || 'available' }), incognitoStop: async (agent, data) => { stopped.push(data.session_id) }, incognitoLease: async () => ({ ok: true }) }
   const registry = { read: id => id === agent.id ? { ...agent, ...opts.agent } : null,
     pin: (...a) => durable.push(a), noteRun: (...a) => durable.push(a), observeSessions: (...a) => durable.push(a) }
   const manager = createIncognito({ registry, runtime, fetchImpl, now: () => now, leaseMs: 1000, maxMs: 3000,
@@ -124,4 +124,14 @@ test('expired/restarted service cannot reopen targets; forgotten sessions are de
   assert.equal((await fresh.request('/' + id + '/v1/runs/run-1')).status, 410)
   const second = await fresh.start(); await fresh.manager.close()
   assert.ok(fresh.stopped.includes(second))
+})
+test('a slow runtime start does not expire the new chat on its first lease (Oscar for Miguel, 28 Oct 2026)', async t => {
+  const s = await rig(t, { slowStart: 120_000 }), id = await s.start()
+  assert.equal((await s.request('/' + id + '/lease', 'POST', {})).status, 200)
+  assert.deepEqual(s.stopped, [])
+})
+test('the consent instruction names the owner, never a specific person', async () => {
+  const { INCOGNITO_INSTRUCTIONS } = await import('../server/incognito.mjs')
+  assert.match(INCOGNITO_INSTRUCTIONS, /ask the owner for permission/)
+  assert.doesNotMatch(INCOGNITO_INSTRUCTIONS, /James/)
 })

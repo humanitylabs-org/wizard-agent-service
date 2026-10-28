@@ -210,6 +210,40 @@ class Tests(unittest.TestCase):
   for worker in workers:worker.join()
   self.assertEqual(len(successes),1);self.assertEqual(errors,['incognito_already_active'])
   r.names.append('synthetic-late-orphan');m.sweep();self.assertEqual(len(r.names),1);m.close();self.assertFalse(r.names)
+ def test_slow_start_never_blocks_another_agents_lease(self):
+  # Oscar for Miguel, 28 Oct 2026: provisioning held the manager lock, so a lease for another open chat waited past BOOT's 90s.
+  import threading
+  r=Rig();m=r.manager();other=dict(AGENT,id='other');OTHER='incog_'+'b'*32
+  m.start(other,OTHER)
+  entered=threading.Event();release=threading.Event()
+  def slow(*a):entered.set();release.wait(5);return 10240
+  r.transfer=slow;m.transfer=slow
+  worker=threading.Thread(target=lambda:m.start(AGENT,SID));worker.start()
+  self.assertTrue(entered.wait(5))
+  done=threading.Event();threading.Thread(target=lambda:(m.lease('other',OTHER),done.set())).start()
+  self.assertTrue(done.wait(2),'lease waited on a slow start')
+  m.sweep();self.assertEqual(len(r.names),2,'periodic sweep never removes a sibling being provisioned')
+  with self.assertRaises(Failure) as err:m.start(AGENT,'incog_'+'c'*32)
+  self.assertEqual(err.exception.code,'incognito_already_active')
+  release.set();worker.join(5);self.assertIn(('synthetic',SID),m.sessions);m.close()
+ def test_close_during_slow_start_admits_nothing(self):
+  import threading
+  r=Rig();m=r.manager();entered=threading.Event();release=threading.Event();errors=[]
+  def slow(*a):entered.set();release.wait(5);return 10240
+  m.transfer=slow
+  def go():
+   try:m.start(AGENT,SID)
+   except Failure as err:errors.append(err.code)
+  worker=threading.Thread(target=go);worker.start();self.assertTrue(entered.wait(5))
+  m.close();release.set();worker.join(5)
+  self.assertEqual(errors,['incognito_runtime_failed']);self.assertFalse(m.sessions);self.assertFalse(r.names)
+ def test_docker_unavailable_at_boot_does_not_crash_the_runtime_helper(self):
+  r=Rig();real=r.docker
+  def down(args,**kw):
+   if args[:2]==['ps','-aq']:return SimpleNamespace(returncode=1,stdout='',stderr='docker starting')
+   return real(args,**kw)
+  r.docker=down;m=r.manager()
+  r.docker=real;m.docker=real;r.names.append('synthetic-orphan');m.sweep();self.assertFalse(r.names);m.close()
  def _http_routes(self,runtipi=False):
   import agent_runtime as runtime,threading,http.client,types
   with tempfile.TemporaryDirectory() as d:

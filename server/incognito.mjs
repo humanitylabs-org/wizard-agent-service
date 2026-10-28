@@ -7,7 +7,7 @@ import { principalOf } from './principals.mjs'
 const SESSION = /^incog_[a-f0-9]{32}$/u
 export const isIncognitoPath = pathname => /^\/wizard\/v1\/agents\/[^/]+\/incognito(?:\/|$)/u.test(pathname)
 const ROUTE = /^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})\/incognito(?:\/(incog_[a-f0-9]{32})(\/.*)?)?$/u
-export const INCOGNITO_INSTRUCTIONS = 'This is an Incognito conversation. Your home, memories, facts, skills and history are a disposable RAM copy: read them, search past chats and use your normal tools. Memory, fact and skill writes inside this RAM home are allowed and vanish when it ends. Never write transcripts, summaries, titles or history from this session to the Wizard service or any durable store. Cron, schedules, kanban, delegation, heavy jobs and cross-platform send_message are unavailable. Before EVERY external write or action (including Wizard Notes, Calendar, Files and Messenger sends), explain exactly what will change, ask James for permission, and wait for an explicit yes in this conversation. A request to perform the action is not that confirmation. Read-only app access is allowed. Never change the normal private home. Never reference this conversation outside it. Use Markdown when useful.'
+export const INCOGNITO_INSTRUCTIONS = 'This is an Incognito conversation. Your home, memories, facts, skills and history are a disposable RAM copy: read them, search past chats and use your normal tools. Memory, fact and skill writes inside this RAM home are allowed and vanish when it ends. Never write transcripts, summaries, titles or history from this session to the Wizard service or any durable store. Cron, schedules, kanban, delegation, heavy jobs and cross-platform send_message are unavailable. Before EVERY external write or action (including Wizard Notes, Calendar, Files and Messenger sends), explain exactly what will change, ask the owner for permission, and wait for an explicit yes in this conversation. A request to perform the action is not that confirmation. Read-only app access is allowed. Never change the normal private home. Never reference this conversation outside it. Use Markdown when useful.'
 const failure = (status, code) => new AgentError(status, code, 'incognito')
 
 export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyContext, upstreamHost = '', now = Date.now, leaseMs = 90_000, maxMs = 2 * 60 * 60_000 }) {
@@ -68,7 +68,7 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
       if (closing || pendingAgents.has(agentId) || [...sessions.values()].some(s => s.agent.id === agentId)) throw failure(409, 'incognito_already_open')
       if (agent.model?.provider !== 'tinfoil') throw failure(409, 'confidential_provider_required')
       pendingAgents.add(agentId)
-      const entry = { id: `incog_${randomBytes(16).toString('hex')}`, agent, expires: now() + leaseMs, deadline: now() + maxMs, abort: new AbortController(), streams: new Set(), runs: new Set(), busy: false }
+      const entry = { id: `incog_${randomBytes(16).toString('hex')}`, agent, expires: 0, deadline: 0, abort: new AbortController(), streams: new Set(), runs: new Set(), busy: false }
       try {
         const target = await runtime.incognitoStart(agentId, { session_id: entry.id })
         const origin = new URL(target.origin)
@@ -80,6 +80,8 @@ export function createIncognito({ registry, runtime, fetchImpl = fetch, proxyCon
         if (!created.ok) throw failure(503, 'incognito_unavailable')
         await created.body?.cancel()
         if (closing || request.aborted || response.destroyed) { await destroy(entry); return true }
+        // The lease and idle clocks start at admission: a slow runtime start must not expire the chat on its first lease.
+        entry.expires = now() + leaseMs; entry.deadline = now() + maxMs
         sessions.set(entry.id, entry)
         proxyContext.sendJson(response, 201, { session_id: entry.id, incognito: true, history_search: target.history_search === 'available' ? 'available' : 'unavailable', lease_seconds: Math.floor(leaseMs / 1000) })
       } catch (error) {
