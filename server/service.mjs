@@ -299,7 +299,9 @@ const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 /** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  if (contract.response_style === 'own') return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
+  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
+  return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
   let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
   if (contract.response_style === 'concise') instructions = instructions
     .replace('Under **Still open:**, every bullet you own must name', 'For any unfinished work you own, name')

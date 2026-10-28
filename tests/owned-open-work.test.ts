@@ -209,7 +209,9 @@ describe('owned-work service wiring', () => {
     expect(before.status).toBe('running'); expect(before.wizard_attention?.state).not.toBe('done')
     await vi.waitFor(() => expect(f.sent).toHaveLength(1))
     expect(f.sent[0].input).toContain(OWNED_WORK_PREFIX)
-    expect(f.sent[0].instructions).toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
+    // Summary is retired: continuations carry the Wizard OS contract only, never the owned-work style rule.
+    expect(f.sent[0].instructions).not.toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
+    expect(f.sent[0].instructions).toContain('Wizard renders Markdown')
     const history = await fetch(`http://127.0.0.1:${f.server.address().port}/wizard/hermes/api/sessions/wizard_owned/messages?view=wizard`).then(r => r.json())
     const machineTurn = history.data.find((row: any) => row.run_context?.original?.startsWith(OWNED_WORK_PREFIX))
     expect(machineTurn).toMatchObject({ role: 'system', display_kind: 'run_context', content: '', shareable: false })

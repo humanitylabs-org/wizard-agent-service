@@ -13,3 +13,12 @@ Synthetic Forum full suite on the feature head: 125 Vitest files, 1,524 passed /
 ## Own
 
 `own` sends only Wizard OS facts and protocol: what Wizard is, Markdown/links/MEDIA/My skin rendering, the background-result follow-up turn, the supervisor phrase, and the `WIZARD_STATUS_V1` marker with its fields. It adds no reply-shape or work-style rule (no finish report, no concise rule, no "same intelligence/scale the response", no outcome-ownership or recap paragraphs, no owned-follow-up rule, no "reply ends with the ask"). The agent keeps the style its owner already gave it. Summary and Concise prompts are byte-for-byte unchanged.
+
+## One style source (Summary and Concise retired)
+
+Every owner and every agent is on Own. Two layers reach an agent, and only two:
+
+1. **Wizard OS context** (product-owned, same for every agent and harness): what Wizard is, rendering, links, files, skins, installed apps and jobs, screen context, supervisor phrase, and the `WIZARD_STATUS_V1` protocol. Never reply style. Detaching an alongside agent removes this layer and nothing else.
+2. **The agent's own persona** (owner-owned, one per agent): `SOUL.md` in that agent's home for Hermes, or the equivalent file for another harness. Wizard never copies or overrides it. The Own context tells the agent that lasting "reply like this from now on" requests belong there, so each agent can have its own voice and the preference survives attach, detach and other surfaces.
+
+`wizard link` already backs SOUL.md up untouched on attach, so alongside agents keep their voice and detach cleanly. `response_style` is still accepted from older shells but always reads back `own` and no longer changes prompts.

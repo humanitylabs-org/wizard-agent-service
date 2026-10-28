@@ -84,7 +84,8 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
-    response_style: RESPONSE_STYLES.includes(value.response_style) ? value.response_style : 'summary',
+    // Retired choice: every owner is on Own (Wizard adds no reply style); older shells may still PUT a value.
+    response_style: 'own',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),

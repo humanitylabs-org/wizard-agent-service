@@ -74,11 +74,13 @@ describe('finish-report prompt', () => {
     expect(FINISH_REPORT_INSTRUCTIONS).toBe(SUMMARY_REPLY_INSTRUCTIONS)
     expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('Briefly restate what we are doing')
     expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('a reply that fits in three sentences never uses this format')
-    expect(runInstructions({ join: true })).toContain('briefly recover the original request')
-    const concise = runInstructions({ join: true, response_style: 'concise' })
-    expect(concise).toContain(CONCISE_REPLY_INSTRUCTIONS)
-    expect(concise).not.toContain(SUMMARY_REPLY_INSTRUCTIONS)
-    expect(concise).not.toContain('briefly recover the original request')
+    // Summary/Concise are retired from the run contract: every saved style gets Wizard OS facts only.
+    for (const response_style of [undefined, 'summary', 'concise', 'own'] as const) {
+      const sent = runInstructions({ join: true, response_style })
+      expect(sent).not.toContain(SUMMARY_REPLY_INSTRUCTIONS)
+      expect(sent).not.toContain(CONCISE_REPLY_INSTRUCTIONS)
+      expect(sent).not.toContain('briefly recover the original request')
+    }
   })
   it('asks for concise prose with no fixed report template', () => {
     expect(CONCISE_REPLY_INSTRUCTIONS).toBe('Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.')
