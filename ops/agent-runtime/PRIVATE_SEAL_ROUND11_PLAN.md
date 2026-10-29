@@ -12,8 +12,8 @@ Read-only selection was refreshed during Round11. Fail closed and regenerate thi
 |---|---|
 | Live Agent Service | `3ecfd3718fd318005e128fb2ba18f40d48949f18` |
 | Independently selected agent runtime | `9f6855f4ed16806d89e6ee4b04deb9a2bdcb4e55` |
-| Hosted shell | `1f38e65de1d91c4bc9ce06dc1bd765d2a42dc68b` |
-| Service fallback shell | `1f38e65de1d91c4bc9ce06dc1bd765d2a42dc68b` |
+| Hosted shell | `b6338e76b0ac0772c192da9292a5222e30f3027d` |
+| Service fallback shell | `b6338e76b0ac0772c192da9292a5222e30f3027d` |
 | WAM CLI AND API | `543431650de49764833126dc6edc2e8a24c32fc1` |
 | Runtime's independent WAM source | `888a61c948bd701f6f2e7cb6fd876795f43fdcc4` |
 | Actual Runtipi daemon source | `fead192e9fb2d560fd3b875d092819b32e7189b6` |
@@ -23,7 +23,9 @@ Read-only selection was refreshed during Round11. Fail closed and regenerate thi
 | Stock client | `ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2`, image `sha256:06833b65195fc0dbe7cd136705da29defe42e2474eff2391e66ab00db3744476` |
 | Official attestation proxy | `ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3`, image `sha256:cbfababef82676898b0700a5f4895479a92468e99671156cb41fd7d685ee60e2` |
 
-The audit's earlier hosted `367a0b99` and fallback `f0a92607` are NOT the current shell selections. Both now select `1f38e65d`, which carries the later saved-message retry/connection-warning fix. Preserve it on BOTH surfaces. No shell change is needed for the seal.
+The audit's earlier hosted `367a0b99` and fallback `f0a92607` are NOT the current shell selections. During Round11 both first selected `1f38e65d`, then advanced together to `b6338e76`. Preserve the saved-message retry/connection-warning fix AND the approved Setup/device-flow preservation work carried by the later revision on BOTH surfaces. No shell change is needed for the seal. Recheck rather than chasing a moving selection into an unreviewed composition.
+
+Docker identity schemes differ: the live Docker 29/containerd engine exposes daemon manifest `f2e1be45…` as `.Id`, while forum's Docker 26 exposes config digest `sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9`. The staged runner verifies the exact manifest-to-config relation and source label inside the image archive before loading; these are the same selected image, not two daemon builds.
 
 **Do not deploy PR244 wholesale as the live Service.** At the accepted Round10b head `13980de`, its merge-base with selected Service `3ecfd37` is `7020b709ad8c8afcdf8f177072e1f211c4bcede6`, not `3ecfd37`. A selected-Service-to-candidate diff removes 138 lines in `server/incognito.mjs` and changes the newer agent/grant code. The independently selected runtime `9f6855f` IS an ancestor of the candidate. A future composition must port only the reviewed seal/credential/gateway changes onto the selected Service, preserve the newer Service Incognito/app/Recorder/Mizel binding and grant fixes, and package the runtime from its independent selected source. This round does not claim that composition is built or rehearsed.
 

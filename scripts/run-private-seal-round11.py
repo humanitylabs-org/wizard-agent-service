@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,6 +54,22 @@ def main():
               'synthetic_only':True,'live_touched':False,'migration_admitted':False,'errors':{}}
     try:
         assert command(['docker','ps','-aq','--filter','label='+owner]).stdout.strip() == ''
+        # Docker 29/containerd exposes the manifest as .Id; Docker 26 on forum
+        # exposes the config digest. Prove their exact relation in the archive.
+        with tarfile.open(ROOT/'deps/app-manager-image.tar.gz','r:gz') as tar:
+            index=json.load(tar.extractfile('index.json'))
+            selected=index['manifests'][0]['digest']
+            assert selected=='sha256:f2e1be459cf8e8ffc41225a3a676c7a704db6fd96c857a5e2b774c8eee6446d4'
+            raw=tar.extractfile('blobs/sha256/'+selected.split(':')[1]).read()
+            assert 'sha256:'+hashlib.sha256(raw).hexdigest()==selected
+            image_manifest=json.loads(raw)
+            config=image_manifest['config']['digest']
+            assert config=='sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
+            raw=tar.extractfile('blobs/sha256/'+config.split(':')[1]).read()
+            assert 'sha256:'+hashlib.sha256(raw).hexdigest()==config
+            assert json.loads(raw)['config']['Labels']['org.opencontainers.image.revision']=='fead192e9fb2d560fd3b875d092819b32e7189b6'
+            result['selected_daemon_manifest']=selected
+            result['selected_daemon_config']=config
         # Existing selected daemon image archive; import only, never run a host daemon.
         unzip = subprocess.Popen(['gzip','-dc',str(ROOT/'deps/app-manager-image.tar.gz')], stdout=subprocess.PIPE)
         try:
@@ -63,7 +80,7 @@ def main():
             if unzip.poll() is None: unzip.kill(); unzip.wait()
         expected = {'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2':'sha256:06833b65195fc0dbe7cd136705da29defe42e2474eff2391e66ab00db3744476',
                     'ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3':'sha256:cbfababef82676898b0700a5f4895479a92468e99671156cb41fd7d685ee60e2',
-                    'wizard-app-manager:grants-fix-fead192e9fb2-amd64':'sha256:f2e1be459cf8e8ffc41225a3a676c7a704db6fd96c857a5e2b774c8eee6446d4'}
+                    'wizard-app-manager:grants-fix-fead192e9fb2-amd64':'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'}
         result['images'] = {}
         for image, identity in expected.items():
             found = command(['docker','image','inspect','--format','{{.Id}}',image]).stdout.strip()

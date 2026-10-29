@@ -35,7 +35,8 @@ OUT = ROOT / 'qa/round11'
 WORK = ROOT / 'work-round11'
 OWNER = 'wizard.qa.round11=' + os.environ['R11_SOURCE_HEAD'][:12]
 DAEMON = 'wizard-app-manager:grants-fix-fead192e9fb2-amd64'
-DAEMON_ID = 'sha256:f2e1be459cf8e8ffc41225a3a676c7a704db6fd96c857a5e2b774c8eee6446d4'
+DAEMON_ID = 'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
+DAEMON_MANIFEST = 'sha256:f2e1be459cf8e8ffc41225a3a676c7a704db6fd96c857a5e2b774c8eee6446d4'
 STOCK = ar.DEFAULT_IMAGE
 DIND = 'r11-disposable-engine'
 KEY = 'SYNTHETIC-R11-' + secrets.token_hex(24)
@@ -213,7 +214,8 @@ def manager_phase():
     override = seal.runtipi_override(doc, urn)
     rt.req('PUT', f'/user-config/{urn}', {'dockerCompose': override, 'appEnv': ''})
     assert rt.req('GET', f'/user-config/{urn}')['isEnabled'] is True
-    life = {'daemon_image': DAEMON_ID, 'daemon_revision': 'fead192e9fb2d560fd3b875d092819b32e7189b6', 'steps': []}
+    life = {'daemon_image_config': DAEMON_ID, 'selected_daemon_manifest':DAEMON_MANIFEST,
+            'daemon_revision': 'fead192e9fb2d560fd3b875d092819b32e7189b6', 'steps': []}
     original_home_hash = hashlib.sha256((home/'history.txt').read_bytes()).hexdigest()
     original_key_hash = hashlib.sha256(keyfile.read_bytes()).hexdigest()
     def status(want):
