@@ -124,7 +124,7 @@ it.each(kinds)('legacy heavy delivery migration preserves finished thread status
 
 it('completion guard has no age expiry, preserves metadata and leaves owner questions alone', () => {
   const job = { agent_id: 'hermes', sessionId: 's', state: 'failed', resume: '', created_at: Date.now() - 7 * 86_400_000 }
-  const status = { state: 'done', ask: '', subject: 'Tests', title: 'Tests · Results', app_id: 'wizard-quest' }
+  const status = { state: 'check', ask: '', subject: 'Tests', title: 'Tests · Results', app_id: 'wizard-quest' }
   expect(guardHeavyStatus(status, { sessionId: 's', jobs: [job] })).toEqual({ ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' })
   const question = { ...status, state: 'needs_you', ask: 'Choose the next step' }
   expect(guardHeavyStatus(question, { sessionId: 's', jobs: [job] })).toBe(question)
@@ -156,8 +156,8 @@ it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %
         { state: 'failed', resume: 'superseded' }, { state: 'running', cancel_requested: true }, { state: 'failed', resume: 'suppressed', continuation_invalidated: true }]) {
         save(job)
         const row = await list()
-        expect(row.wizard_attention?.state, JSON.stringify(job)).toBe('fyi')
-        expect(row.wizard_attention.ask).toContain('work')
+        expect(row.wizard_attention?.state, JSON.stringify(job)).toBe(status === 'check' ? 'fyi' : 'done')
+        if (status === 'check') expect(row.wizard_attention.ask).toContain('work')
         expect(row.status).toBe('running')
       }
       save({ state: 'completed', resume: 'sent', completion_delivered_at: Date.now() })

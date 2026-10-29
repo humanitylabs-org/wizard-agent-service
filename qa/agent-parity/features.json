@@ -538,13 +538,18 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
-        "server/thread-status.mjs"
+        "server/thread-status.mjs",
+        "server/open-ask.mjs",
+        "server/session-list-view.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
         "tests/thread-status-backfill-list.test.ts",
-        "tests/heavy-status.test.ts"
+        "tests/heavy-status.test.ts",
+        "tests/open-ask.node.mjs",
+        "wizard-ux/tests/ready-open-ask.test.mjs"
       ],
       "fixture": "status-list-state",
       "policy_exemptions": []

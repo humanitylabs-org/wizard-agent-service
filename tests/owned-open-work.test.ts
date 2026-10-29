@@ -417,9 +417,9 @@ describe('owned-work service wiring', () => {
     expect([...ids]).toEqual(['heavy_followup', 'deleg_followup', 'schedule_followup'])
     const heavyJob = { job_id: 'heavy_followup', sessionId: 'wizard_owned', agent_id: 'hermes', state: 'running', resume: '', created_at: Date.now() }
     expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob], nonHoldingIds: ids })).toEqual(status())
-    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob, { ...heavyJob, job_id: 'required_build' }], nonHoldingIds: ids }).state).toBe('fyi')
-    // Routed agents still use the original false-done guard, even with exemptions supplied.
-    expect(guardHeavyStatus(status(), { agentId: 'philosopher', sessionId: 'wizard_owned', jobs: [{ ...heavyJob, agent_id: 'philosopher' }], nonHoldingIds: ids }).state).toBe('fyi')
+    // Done attention is retained; the independent background projection still keeps required work in Working.
+    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob, { ...heavyJob, job_id: 'required_build' }], nonHoldingIds: ids }).state).toBe('done')
+    expect(guardHeavyStatus(status(), { agentId: 'philosopher', sessionId: 'wizard_owned', jobs: [{ ...heavyJob, agent_id: 'philosopher' }], nonHoldingIds: ids }).state).toBe('done')
     const heavyDb = new DatabaseSync(join(f.root, 'heavy.db'))
     heavyDb.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
       .run(heavyJob.job_id, 'wizard_owned', 'wizardq_origin', 'fixture', 'hash', JSON.stringify(heavyJob), 'hermes'); heavyDb.close()
