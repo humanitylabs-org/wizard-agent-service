@@ -172,9 +172,13 @@ function normalizeAppearance(value, privacy) {
   return { glyph, hue }
 }
 
-function idList(value, check) {
+// An agent's app lists hold every installed app it may use (a new standard agent starts with all of them), so they
+// allow far more entries than the outside-tools list; a stored list must always read back (Codex, PR #265).
+export const APP_LIST_MAX = 512
+
+function idList(value, check, max = 64) {
   if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(item))) {
+  if (!Array.isArray(value) || value.length > max || !value.every((item) => typeof item === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(item))) {
     fail(400, 'invalid_permissions', check)
   }
   return [...new Set(value)]
@@ -209,9 +213,9 @@ export function normalizePermissions(base, patch = {}) {
     if (!FILES_LEVELS.includes(patch.files)) fail(400, 'invalid_permissions', 'agent.permissions.files')
     out.files = patch.files
   }
-  const wizardApps = idList(patch.wizard_apps, 'agent.permissions.wizard_apps')
+  const wizardApps = idList(patch.wizard_apps, 'agent.permissions.wizard_apps', APP_LIST_MAX)
   if (wizardApps) out.wizard_apps = wizardApps
-  const agentApps = idList(patch.agent_apps, 'agent.permissions.agent_apps')
+  const agentApps = idList(patch.agent_apps, 'agent.permissions.agent_apps', APP_LIST_MAX)
   if (agentApps) out.agent_apps = agentApps
   if (patch.other_agents !== undefined) {
     if (!OTHER_AGENTS_LEVELS.includes(patch.other_agents)) fail(400, 'invalid_permissions', 'agent.permissions.other_agents')
@@ -1000,8 +1004,8 @@ export function createAgentRegistry(options = {}) {
       // that sends either app list picks the apps itself.
       const hidden = privateApps()
       const { wizardApps, agentApps } = installedApps()
-      permissions.wizard_apps = wizardApps.filter((app) => !hidden.has(app.id)).map((app) => app.id)
-      permissions.agent_apps = agentApps.filter((app) => !hidden.has(app.id)).map((app) => app.id)
+      permissions.wizard_apps = wizardApps.filter((app) => !hidden.has(app.id)).map((app) => app.id).slice(0, APP_LIST_MAX)
+      permissions.agent_apps = agentApps.filter((app) => !hidden.has(app.id)).map((app) => app.id).slice(0, APP_LIST_MAX)
     }
     if (preset.privacy === 'private') {
       const kinds = appKinds()
