@@ -173,7 +173,7 @@ function normalizeAppearance(value, privacy) {
 }
 
 // An agent's app lists hold every installed app it may use (a new standard agent starts with all of them), so they
-// allow far more entries than the outside-tools list; a stored list must always read back (Codex, PR #265).
+// allow far more entries than the outside-tools list; a stored list must always read back (Codex review on PR 265).
 export const APP_LIST_MAX = 512
 
 function idList(value, check, max = 64) {

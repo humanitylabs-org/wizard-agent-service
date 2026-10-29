@@ -510,7 +510,7 @@ describe('per-agent access switches (Connections → Agents, Miguel 29 Oct 2026)
     expect(priv.permissions.agent_apps).toEqual([])
   })
 
-  it('a box with more than 64 apps: the new agent is created, reads back and lists every app (Codex, PR #265)', async () => {
+  it('a box with more than 64 apps: the new agent is created, reads back and lists every app (Codex review on PR 265)', async () => {
     const notes = await fakeApp('note_add')
     const dir = await box({ notes: notes.url })
     const many = Array.from({ length: 70 }, (_, i) => appEntry(`app${String(i).padStart(2, '0')}`, notes.url))
