@@ -615,6 +615,13 @@ export class DurableRunQueue {
     const key = `wizard-saved-retry-${publicRunId}`
     const existing = this.byIdempotencyKey(source.runtime, key)
     if (existing) {
+      // Recovery or another device may have admitted this source first. Never
+      // acknowledge a manual retry on a different route as the owner's choice;
+      // the existing execution cannot be switched and must not be duplicated.
+      const selected = parseJson(existing.body, {})
+      if (!automatic && ((route.model && selected.model !== route.model) || (route.provider && selected.provider !== route.provider))) {
+        throw requestError('This saved request already restarted on another model. Check the latest reply before retrying.', 412)
+      }
       // Crash recovery: insertion always precedes releasing the waiting source.
       if (source.waitingReason === 'provider_access') this._releaseProviderSource(source)
       return { record: existing, replayed: true }

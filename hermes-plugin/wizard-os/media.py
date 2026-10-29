@@ -27,7 +27,6 @@ from pathlib import Path
 
 IMAGE_LIMIT = 5 * 1024 * 1024
 FILE_LIMIT = 256 * 1024 * 1024
-COPY_LIMIT = 64 * 1024 * 1024  # larger files are hard-linked only (the hook has a 30 s budget)
 SENT_DIR = "wizard-sent"
 SHOWN_DIRS = ("images", "audio", "videos", "screenshots")
 FILE_SUFFIXES = {
@@ -130,12 +129,10 @@ class _Resolver:
         self.sent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = self.sent_dir / f".{key}.{os.getpid()}.tmp"
         try:
-            try:
-                os.link(real, temporary)
-            except OSError:
-                if size > COPY_LIMIT:
-                    return None
-                shutil.copyfile(real, temporary)
+            # A copy, never a hard link: a link shares the inode, so an agent that later rewrites the same path in
+            # place (screenshot.png again) would silently change what earlier chat messages show.
+            shutil.copyfile(real, temporary)
+            os.chmod(temporary, 0o600)
             os.replace(temporary, target)
         except OSError:
             try:
