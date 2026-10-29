@@ -9,6 +9,17 @@ import { DatabaseSync } from 'node:sqlite'
 import { ownerGate } from './delegation-receipts.mjs'
 
 export const HEAVY_WAIT_CAP_SECONDS = 12 * 3600
+const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+export const heavyCompletionDropped = job => terminal.has(job.state) && !job.completion_delivered_at
+  && (job.cancel_requested || job.continuation_invalidated || ['superseded', 'suppressed'].includes(job.resume))
+
+// Admission is not delivery: a queued continuation still owes its result. Unlike
+// the bounded list liveness hint, the completion guard must not expire by age.
+export function heavyResultOwed(job, isDelivered = () => false) {
+  if (!terminal.has(job.state)) return true
+  if (heavyCompletionDropped(job)) return !job.notice_delivered_at
+  return !(job.completion_delivered_at || isDelivered(job))
+}
 
 /** Live heavy jobs whose result is still owed to their thread: Map(sessionId -> { pending, since }). */
 export function pendingHeavyJobs(jobs, ids, nowMs = Date.now()) {

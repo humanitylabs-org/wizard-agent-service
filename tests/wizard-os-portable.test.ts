@@ -301,10 +301,10 @@ describe('fast router and delegation mode settings', () => {
     expect(normalizeSettings({ fast_router: { endpoint: 'file:///etc/passwd', key_env: 'lower' } }).fast_router).toMatchObject({ endpoint: '', key_env: '' })
   })
   it('detached instructions replace the join sentence', async () => {
-    const { runInstructions, WIZARD_RUN_INSTRUCTIONS } = await import('../server/service.mjs')
-    expect(runInstructions({ join: true })).toBe(WIZARD_RUN_INSTRUCTIONS)
+    const { runInstructions, OWN_STYLE_RUN_INSTRUCTIONS } = await import('../server/service.mjs')
+    expect(runInstructions({ join: true })).toBe(OWN_STYLE_RUN_INSTRUCTIONS)
     const detached = runInstructions({ join: false })
     expect(detached).not.toContain('Join any delegated work in this run')
-    expect(detached).toContain('Wizard returns their results to you as a follow-up turn')
+    expect(detached).toContain('Wizard brings their results back to you as a follow-up turn')
   })
 })

@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
+import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
@@ -25,7 +26,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, parseStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -34,14 +35,17 @@ import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
-import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
-import { readUiPreferences, updateUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
+import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
+import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
+import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
+import { projectOwnedOpenWork } from './owned-open-work.mjs'
+import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
@@ -51,6 +55,7 @@ import { createAgentAppActions } from './agent-app-actions.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
+import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -117,7 +122,7 @@ const AGENT_FILE_MIMES = new Map(Object.entries({
   '.mov': 'video/quicktime',
 }))
 const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
-const AGENT_MEDIA_LINE = /^\s*MEDIA:(\/[^\r\n]+)\s*$/gm
+const AGENT_MEDIA_LINE = /^\s*MEDIA:[ \t]*(\/[^\r\n]+?)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
 const ROUTED_MIRROR_FRESH_MS = 20_000
@@ -148,17 +153,37 @@ Routing contract:
 
 This is a same-profile private-Operator experience pilot. Describe it accurately.`
 
-export const WIZARD_RUN_INSTRUCTIONS = `You are serving the user through Wizard, a first-party mobile client for their Hermes Agent. Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require. Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.
+// The run contract has two kinds of text. Client facts say what Wizard is and how it works (rendering,
+// links, files, skins); they are true for every agent. Style rules shape how the agent works and writes;
+// the Own reply style leaves them out so the owner's existing agent keeps its own habits.
+const WIZARD_CLIENT_INTRO = 'You are serving the user through Wizard, a first-party mobile client for their Hermes Agent.'
+const WIZARD_STYLE_INTRO = 'Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require.'
+const WIZARD_CLIENT_FACTS = `Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
+const WIZARD_OUTCOME_OWNERSHIP = 'The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.'
+const WIZARD_FINISH_SHAPE = 'Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.'
 
-The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.
+export const WIZARD_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_STYLE_INTRO} ${WIZARD_CLIENT_FACTS}
 
-Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.
+${WIZARD_OUTCOME_OWNERSHIP}
+
+${WIZARD_FINISH_SHAPE}
 
 ${SUPERVISOR_SPELL}
+
+${OWNED_OPEN_WORK_INSTRUCTIONS}
 
 ${FINISH_REPORT_INSTRUCTIONS}
 
 ${STATUS_INSTRUCTIONS}`
+
+// Own reply style: Wizard OS facts and protocol only.
+export const OWN_STYLE_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_CLIENT_FACTS}
+
+${OWN_STYLE_SOURCE}
+
+${SUPERVISOR_SPELL}
+
+${STATUS_PROTOCOL_INSTRUCTIONS}`
 
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
@@ -275,9 +300,14 @@ function operatorBody(method, pathname, body) {
 
 // Without joined delegation, helpers finish after the run ends and Wizard brings their results back
 // as a follow-up turn; the agent should say what is running and stop, not wait or poll.
+// Own style states the mechanism only, not what the agent should do about it.
+const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this run ends; Wizard brings their results back to you as a follow-up turn in this thread.'
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
+/** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  return contract.join ? WIZARD_RUN_INSTRUCTIONS : WIZARD_RUN_INSTRUCTIONS.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
+  return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
@@ -582,7 +612,12 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (direct.createdAt) projected.wizard_assigned_at = direct.createdAt
               if (!projected.preview && direct.preview) projected.preview = direct.preview
               if (direct.queuePosition) projected.queue_position = direct.queuePosition
-              if (direct.queueReason) projected.queue_reason = direct.queueReason
+              projected.queue_reason = direct.queueReason || ''
+              if (direct.queueReason === 'provider_access') {
+                delete projected.wizard_safe_error
+                delete projected.wizard_reconnect
+                if (!projected.wizard_request_preview) projected.wizard_request_preview = direct.preview
+              }
             } else if (truth?.active && external && TERMINAL_RUN_STATUSES.has(external.status)) {
               // A notification/recovery turn can resume this session outside the
               // original admission. Its live lease outranks that old terminal
@@ -613,6 +648,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
                 if (latestDirect.status === 'failed' && (!latestDirect.safeError || /could not start this queued work/u.test(latestDirect.safeError))) projected.wizard_safe_error = 'Not sent: Wizard could not deliver this message. Tap Retry.'
               }
             }
+            // Upstream status may already say failed. A diagnosis still belongs to this latest run.
+            if (latestDirect?.status === 'failed' && latestDirect.reconnect && projected.status === 'failed') {
+              projected.wizard_reconnect = latestDirect.reconnect
+              projected.wizard_safe_error = ''
+            }
             // A failure the owner explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
@@ -631,7 +671,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
             // Keep the thread in Working so it reaches Ready only with the real answer.
             // The bounded helper projection also covers delivery followed by nonterminal FYI.
             // Owner-held findings do not manufacture a new Working turn.
-            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending
+            if ((truth?.helpersRunning || truth?.helperResultUnanswered || truth?.heavyPending || truth?.supervisorPending
               || truth?.helperStatus && truth.helperStatus.phase !== 'held')
               && !ACTIVE_RUN_STATUSES.has(projected.status)
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
@@ -1731,7 +1771,9 @@ function safeContentHeaders(file, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(disposition, file.filename),
-    'Cache-Control': 'private, no-store',
+    // Owner files can be edited in place through Wizard Files under the same id: the owner's browser keeps a copy
+    // but asks first (a 304 costs no bytes), so an edit shows at once. Never stored by shared caches.
+    'Cache-Control': 'private, no-cache',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -1757,7 +1799,8 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment', decodeURIComponent(encodedName)),
-    'Cache-Control': 'private, no-store',
+    // Attachment ids are content-bound and never reused: cache them in the owner's browser, never in shared caches.
+    'Cache-Control': 'private, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -1961,6 +2004,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
   const projectText = (value, userImageReferences = false) => {
     const artifacts = []
+    const positioned = new Set()
     const fences = []
     value = value.replace(/```[^\n]*\n[\s\S]*?```/g, block => `\u0000photo-fence-${fences.push(block) - 1}\u0000`)
     const durableImageHashes = new Set()
@@ -1978,6 +2022,13 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
       if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
+      if (!userImageReferences) {
+        if (positioned.has(artifact.id)) return ''
+        positioned.add(artifact.id)
+        // Existing clients strip this envelope and show its image at the bottom.
+        // New clients keep its position; no raw path or new permission crosses the wire.
+        return `\n\n<helm_attachments>${JSON.stringify({ items: [artifact], inline: artifact.kind === 'image' })}</helm_attachments>\n\n`
+      }
       return ''
     }
     let text = value.replace(AGENT_MEDIA_LINE, register)
@@ -1997,8 +2048,9 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
     if (userImageReferences) text = text.replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/gi, '')
     text = text.replace(/\n{3,}/g, '\n\n').trim()
     text = text.replace(/\u0000photo-fence-(\d+)\u0000/g, (_, i) => fences[Number(i)])
-    if (!artifacts.length) return text
-    const envelope = `<helm_attachments>${JSON.stringify({ items: artifacts })}</helm_attachments>`
+    const remaining = artifacts.filter(item => !positioned.has(item.id))
+    if (!remaining.length) return text
+    const envelope = `<helm_attachments>${JSON.stringify({ items: remaining })}</helm_attachments>`
     return text ? `${text}\n\n${envelope}` : envelope
   }
   const visit = (value, assistant = false) => {
@@ -2180,7 +2232,7 @@ const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encod
 
 // Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
 // cookies or credentials), and only content headers come back; redirects must stay on this origin.
-function proxyShellStatic(request, response, shellOrigin, url) {
+function proxyShellStatic(request, response, shellOrigin, url, body) {
   return new Promise((resolvePromise) => {
     // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
     const target = new URL(shellOrigin)
@@ -2188,6 +2240,12 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     target.search = url.search
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    if (body !== undefined) {
+      // The forwarded POST keeps its Origin so a same-origin receiver can still check it.
+      if (typeof request.headers.origin === 'string') headers.origin = request.headers.origin
+      headers['content-type'] = request.headers['content-type'] || 'application/json'
+      headers['content-length'] = String(body.length)
+    }
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
@@ -2199,7 +2257,7 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     })
     upstream.setTimeout(30000, () => upstream.destroy(new Error('timeout')))
     upstream.on('error', () => { if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' }); else response.destroy(); resolvePromise() })
-    upstream.end()
+    upstream.end(body)
   })
 }
 
@@ -2445,6 +2503,8 @@ export function createWizardServer(options = {}) {
   const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
+  const ownedStatePath = ownedWorkStatePathOf(options)
+  if (ownedStatePath && (options.hermesStatePath || options.ownedOpenWorkReader)) paths.push(ownedStatePath)
   const home = options.wizardOsHome || (options.appsJsonPath ? dirname(options.appsJsonPath) : '')
   const dirs = paths.map(path => dirname(resolve(String(path))))
   if (home) dirs.push(resolve(home))
@@ -2473,6 +2533,7 @@ function buildWizardServer(options, lifetime) {
   const tailnetVerifier = typeof options.tailnetVerifier === 'function' && options.tailnetVerifier.fromRequest ? options.tailnetVerifier : null
   // Wizard shell (wizard-ux) static files for phones on the tailnet listener: GET/HEAD only, after verification.
   const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
+  const diagnosticsOrigin = options.diagnosticsOrigin ? confinedUpstream(options.diagnosticsOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -2529,6 +2590,9 @@ function buildWizardServer(options, lifetime) {
   // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
   const gatewayOnly = options.agentBridge === 'gateway'
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
+  const devices = createDevices({ statePath: options.devicesStatePath || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'devices.json') : ''), now: options.devicesNow ?? Date.now })
+  const deviceTools = devicesTool({ devices, now: options.devicesNow ?? Date.now })
+  lifetime.own(() => { try { devices.flush() } catch { /* optional metadata must not block shutdown */ } })
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
@@ -2537,8 +2601,8 @@ function buildWizardServer(options, lifetime) {
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -2662,11 +2726,40 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling }) : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8), onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
+    agentId, sessionId, jobs,
+    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
+      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
+    isDelivered: job => {
+      if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
+      const run = agents?.runThread(agentId, job.resume)
+      return run?.session_id === sessionId && run?.heavy_origin === job.origin
+    },
+  })
+  const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
+  const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
+  const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
+    heavyStatus, heavyNotices }) : null
+  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
+  const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
+    || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
+    || Boolean(record.upstreamRunId && dismissedFailureStore.isDismissed(record.sessionId, record.upstreamRunId, record.agent_id))
+  const providerSignInReady = options.providerSignInReady ?? (async provider => {
+    const usage = await aiUsageReader.read()
+    return usage?.providers?.some(p => p.id === provider && p.status === 'ok') === true
+  })
+  const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
+    providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
+    providerAccessWindowSeconds: options.providerAccessWindowSeconds }
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+    decorateDispatch: (agentId, sessionId, body) => {
+      const note = heavyNotices(agentId, sessionId)
+      return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
+    }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
@@ -2675,6 +2768,7 @@ function buildWizardServer(options, lifetime) {
       if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
+    responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
     followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
@@ -2929,7 +3023,6 @@ function buildWizardServer(options, lifetime) {
   // The subject each thread was last served with, so the next run can be told to keep it.
   const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
-  const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     migrateJson(operatorWorkerStatePath, rows => rows.map(row => ({ ...row, agent_id: row.agent_id ?? MAIN_AGENT_ID, session_id: row.session_id ?? row.operatorSessionId, worker_agent_id: row.worker_agent_id ?? MAIN_AGENT_ID })))
     try {
@@ -2991,7 +3084,7 @@ function buildWizardServer(options, lifetime) {
     return hermesContractInFlight
   }
   const FULL_CONTRACT = { join: true, markdown: true }
-  const assertJoinedDelegationCapability = async () => {
+  const assertJoinedDelegationCapabilityBase = async () => {
     if (joinedDelegation === 'unchecked') return FULL_CONTRACT
     let contract
     try { contract = await runContract() }
@@ -3006,6 +3099,8 @@ function buildWizardServer(options, lifetime) {
     if (joinedDelegation === 'off') return { ...contract, join: false }
     return contract
   }
+
+  const assertJoinedDelegationCapability = async () => ({ ...await assertJoinedDelegationCapabilityBase(), response_style: readSettings(settingsPath).settings.response_style })
 
   const readExternalAssistantRuns = async (sessionIds, suppliedReferences) => {
     const references = suppliedReferences ?? readWizardAssistantRunReferences(inboxDbPath, sessionIds)
@@ -3312,7 +3407,7 @@ function buildWizardServer(options, lifetime) {
       provider: 'custom:tinfoil-operator',
       require_model_lock: true,
       model_options: { reasoning_effort: 'max' },
-      instructions: [WIZARD_RUN_INSTRUCTIONS, appProvenanceRunNote(appCatalog())].join('\n\n'),
+      instructions: [runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), appProvenanceRunNote(appCatalog())].join('\n\n'),
       ...runContractFields(await assertJoinedDelegationCapability()),
     })
     if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
@@ -3352,7 +3447,12 @@ function buildWizardServer(options, lifetime) {
     return record.completion
   }
 
+  let ownedOpenWork = null
   const requireHelperContinuation = async (continuation) => {
+    if (continuation?.kind === OWNED_WORK_KIND) {
+      if (!ownedOpenWork) throw Object.assign(new Error('Owned follow-up unavailable'), { status: 410 })
+      return ownedOpenWork.requireCurrent(continuation)
+    }
     if (hermesStatePath) return requireCurrentContinuation(hermesStatePath, continuation)
     return requireHttpContinuation((path) => hermesJson(path), continuation, FOLLOW_THROUGH_PREFIX)
   }
@@ -3483,6 +3583,8 @@ function buildWizardServer(options, lifetime) {
       catch { throw Object.assign(new Error('Hermes queued admission was invalid'), { status: 502 }) }
       const upstreamRunId = typeof payload.run_id === 'string' ? payload.run_id : typeof payload.id === 'string' ? payload.id : ''
       if (!upstreamRunId || !new RegExp(`^${ID}$`).test(upstreamRunId)) throw Object.assign(new Error('Hermes queued admission identity was invalid'), { status: 502 })
+      acknowledgeHeavyNotices('hermes', record.sessionId, parseJsonBody(queuedBody))
+      if (record.continuation?.kind === HEAVY_KIND && ['running', 'completed'].includes(payload.status)) heavyWork?.queue.delivered(record.continuation.job_id)
       if (record.trustedPaths.length) {
         runTrustedPaths.set(upstreamRunId, record.trustedPaths)
         runTrustedPaths.set(record.publicRunId, record.trustedPaths)
@@ -3549,6 +3651,7 @@ function buildWizardServer(options, lifetime) {
     // 409 when no agent is attached to the run, and 404 when Hermes no longer knows the run.
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
+      ...providerRecoveryOptions,
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
@@ -3786,7 +3889,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -3825,8 +3928,12 @@ function buildWizardServer(options, lifetime) {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
+      const heavyJobs = heavyWork?.queue.rows()
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
+        const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
+        if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
+        session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
         const renames = threadTitleStore.visibleHistory(session.id)
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         spaceFiling.apply('hermes', session.id, session.wizard_attention)
@@ -3941,10 +4048,20 @@ function buildWizardServer(options, lifetime) {
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
-              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(heavyJobRows(), listedSessionIds))) {
+              const followUps = new Map()
+              const holdingJobs = heavyJobRows().filter(job => {
+                const id = job.sessionId ?? job.session_id
+                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
+                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+                return !followUps.get(id).has(job.job_id ?? job.id)
+              })
+              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(holdingJobs, listedSessionIds))) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
+          }
+          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds)) {
+            const t = sessionTruth.get(id); if (t) t.supervisorPending = true
           }
           result = filterSessionList(
             result,
@@ -4014,7 +4131,7 @@ function buildWizardServer(options, lifetime) {
       if (hermes === null) return null
       // The session listing is refreshed in the background after it expires; a snapshot built from
       // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
-      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}` } catch { return null }
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}|${readSupervisorWaitRevision(options.supervisorStatePath)}` } catch { return null }
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {
@@ -4032,8 +4149,9 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = runQueue ? mergeStamps(runQueue.sessionStamps(), backgroundResults?.stamps()) : null
+      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
@@ -4188,6 +4306,7 @@ function buildWizardServer(options, lifetime) {
       await pipeline(
         Readable.fromWeb(upstream.body),
         replaceLiteral(record.upstreamRunId, record.publicRunId),
+        providerSignInEvents(),
         ...(record.idempotencyKey.startsWith('schedule:') ? [scheduledRunEvents()] : []),
         secretGuard([hermesKey, inboxToken, ...inboxTrustedRoots, ...record.trustedPaths]),
         response,
@@ -4290,6 +4409,18 @@ function buildWizardServer(options, lifetime) {
     })()
     helperAdmissions.set(key, admission)
     try { return await admission } finally { helperAdmissions.delete(key) }
+  }
+
+  // Same private admission/queue/locked-model route as delegation follow-through.
+  // The existing ownership switch also disables this watcher on staging copies.
+  const ownedWorkStatePath = ownedWorkStatePathOf(options)
+  if (options.followThrough !== false && options.ownedOpenWork !== false && ownedWorkStatePath && (hermesStatePath || options.ownedOpenWorkReader)) {
+    ownedOpenWork = createOwnedWorkFollowThrough({ statePath: ownedWorkStatePath, sessionDbPath: hermesStatePath,
+      ...(options.ownedOpenWorkReader ? { read: options.ownedOpenWorkReader } : {}),
+      ...(options.ownedOpenWorkFinder ? { find: options.ownedOpenWorkFinder } : {}),
+      admit: admitHelperContinuation, busy: helperSessionActive,
+      log: line => console.log(`[owned-open-work] ${line}`) })
+    lifetime.own(() => ownedOpenWork.close(), () => ownedOpenWork.stop())
   }
 
   // ---- Resumable uploads and shares (uploads.mjs; wizard-os spec/AGENT_SERVICE_API.md "Uploads"/"Shares").
@@ -4690,6 +4821,11 @@ function buildWizardServer(options, lifetime) {
     return id
   }
   const publicSettingsFor = (request, settings) => {
+    // Owner-only preferences are absent from non-owner round-trips, just like a hidden default.
+    if (principalOf(request).kind !== 'owner') {
+      const { response_style: _ownerStyle, ...publicSettings } = settings
+      settings = publicSettings
+    }
     const id = settings.agents?.default_agent_id
     const agent = agents?.read(id)
     if (agent && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : isPrivateAgent(agents, id) && !mayOpenAgent(request, id))) {
@@ -4811,6 +4947,21 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
+      if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        const body = await readBoundedBody(request, 256 * 1024)
+        try { devices.record(JSON.parse(body.toString('utf8'))?.session) } catch { /* recording must never break diagnostics */ }
+        // A box may keep its own diagnostics receiver (WIZARD_DIAGNOSTICS_ORIGIN); otherwise the shell answers as before.
+        const receiver = diagnosticsOrigin || tailnetShellOrigin
+        if (receiver) await proxyShellStatic(request, response, receiver, url, body)
+        else sendJson(response, 404, { error: 'not_found' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/devices' && request.method === 'GET') {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        sendJson(response, 200, { devices: devices.list() }); return
       }
       if (url.pathname === '/wizard/standard-chats/mcp') {
         if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
@@ -5054,11 +5205,20 @@ function buildWizardServer(options, lifetime) {
         } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
         return
       }
+      if (url.pathname === '/wizard/v1/provider-recovery') {
+        if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const source = runQueue?.get(url.searchParams.get('run_id'))
+        if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
+        const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
+        sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
+        return
+      }
       if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {
         const seed = url.pathname.endsWith('/seed')
         if (seed && !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!(seed ? ['POST'] : ['GET', 'PUT']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT' }); return }
+        if (!(seed ? ['POST'] : ['GET', 'PUT', 'PATCH']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT, PATCH' }); return }
         if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
         const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
         let patch
@@ -5067,7 +5227,7 @@ function buildWizardServer(options, lifetime) {
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
-          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : request.method === 'PATCH' ? patchUiPreferences(path, patch) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }
@@ -5173,10 +5333,15 @@ function buildWizardServer(options, lifetime) {
         // Never compare a non-owner guess with the hidden saved identity, even on safe round-trips.
         if (principal.kind !== 'owner' && input.agents && typeof input.agents === 'object') delete input.agents.default_agent_id
         if (principal.kind === 'agent') { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+        if (Object.hasOwn(input, 'response_style')) {
+          if (principal.kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
+          if (!RESPONSE_STYLES.includes(input.response_style)) { sendJson(response, 400, { error: 'invalid_response_style' }); return }
+        }
         if (!settingsPath) { sendJson(response, 503, { error: 'settings_unavailable' }); return }
         const settings = normalizeSettings({ ...current, ...input, agents: { ...current.agents, ...input.agents } }, settingsOptions)
         let stored = {}
         try { stored = JSON.parse(readFileSync(settingsPath, 'utf8')) } catch { /* new settings store */ }
+        recordResponseStyleSwitch(stored, current.response_style, settings.response_style)
         if (agents?.read(settings.agents.default_agent_id)?.role === 'recovery') throw new AgentError(409, 'recovery_cannot_be_default', 'agents.default_agent_id')
         mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
         const temporary = `${settingsPath}.${process.pid}.tmp`
@@ -5488,7 +5653,8 @@ function buildWizardServer(options, lifetime) {
             'Content-Type': artifact.mime,
             'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-store',
+            // Artifact ids are the content's own hash: the bytes behind an id never change.
+            'Cache-Control': 'private, max-age=31536000, immutable',
             'X-Content-Type-Options': 'nosniff',
           }
           const range = typeof request.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range.trim()) : null
@@ -5576,6 +5742,15 @@ function buildWizardServer(options, lifetime) {
           const opened = mediaFiles.open(id, range || null)
           const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
           const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
+          if (typeof opened.version === 'string') {
+            headers.ETag = `W/"${id}-${opened.size}-${opened.version}"`
+            const match = typeof request.headers['if-none-match'] === 'string' ? request.headers['if-none-match'] : ''
+            if (!range && match.split(',').map((tag) => tag.trim()).includes(headers.ETag)) {
+              opened.stream?.destroy()
+              const { 'Content-Length': _, ...notModified } = headers
+              response.writeHead(304, notModified); response.end(); return
+            }
+          }
           if (opened.status === 416) {
             response.writeHead(416, { ...headers, 'Content-Range': `bytes */${opened.size}` }); response.end(); return
           }
@@ -5855,6 +6030,9 @@ function buildWizardServer(options, lifetime) {
         }
         try { dismissedFailureStore.dismiss(sessionId, failureKey || `revision:${Date.now()}`) }
         catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        // Persist the fence first, then synchronously release every waiting send
+        // before acknowledging Dismiss. Startup applies the fence after a crash.
+        runQueue?.dismissProviderAccess(sessionId)
         sendJson(response, 200, { ok: true, dismissed: true, session_id: sessionId })
         return
       }
@@ -6053,6 +6231,15 @@ function buildWizardServer(options, lifetime) {
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
+          if (Object.hasOwn(requested, 'wizard_retry_run_id')) {
+            if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
+            const { wizard_retry_run_id: sourceId, ...validation } = requested
+            directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
+            const retried = await runQueue.retrySaved(sourceId, requested.session_id, requested)
+            threadDispositionStore.clearSession('direct', requested.session_id)
+            sendQueuedRun(response, 202, retried.record, { 'Idempotency-Replayed': String(retried.replayed) })
+            return
+          }
           quietWatcherAdmission = principal.kind === 'service'
             && request.headers['x-wizard-schedule-kind'] === 'watch'
           if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
@@ -6310,7 +6497,17 @@ function buildWizardServer(options, lifetime) {
             const truth = readHermesSessionTruth(hermesStatePath, [row.id]).get(row.id)
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
-            detailed.wizard_retry_input = truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            const saved = runQueue?.savedRetry(row.id)
+            detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            if (saved) {
+              detailed.wizard_retry_run_id = saved.publicRunId
+              detailed.status = saved.status
+              detailed.queue_reason = saved.waitingReason
+              if (saved.waitingReason === 'provider_access') {
+                delete detailed.wizard_safe_error
+                delete detailed.wizard_reconnect
+              }
+            }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))
           }
         }
@@ -6340,6 +6537,7 @@ function buildWizardServer(options, lifetime) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
+            result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
           // These display transforms retain row order/identity. Keep the original
@@ -6462,6 +6660,17 @@ function buildWizardServer(options, lifetime) {
   })
   server.scheduler = scheduler
   server.supervisor = supervisor
+  if (ownedOpenWork) {
+    server.ownedOpenWork = ownedOpenWork // testable private controller, never an HTTP authority
+    const tick = () => { if (!lifetime.closing) void lifetime.track(ownedOpenWork.tick()) }
+    let timer
+    server.once('listening', () => {
+      timer = setInterval(tick, options.ownedOpenWorkIntervalMs ?? 5_000)
+      timer.unref?.()
+      tick()
+    })
+    lifetime.own(() => clearInterval(timer), () => clearInterval(timer))
+  }
   // Stock Hermes finishes delegated work after the run; the service takes the next turn for the user.
   if (options.followThrough !== false) {
     let selfOrigin = ''
@@ -6477,7 +6686,7 @@ function buildWizardServer(options, lifetime) {
       find: options.followThroughFinder ?? (hermesStatePath ? undefined : createFollowThroughFinder({
         request: (path) => hermesJson(path),
         prefix: FOLLOW_THROUGH_PREFIX,
-        busy: (sessionId) => (runQueue?.latestProjections([sessionId]) ?? []).some((run) => LIVE.has(run.status)),
+        busy: (sessionId) => LIVE.has(runQueue?.latestStatus(sessionId)),
       })),
       enabled: async () => {
         if (!selfOrigin) return false

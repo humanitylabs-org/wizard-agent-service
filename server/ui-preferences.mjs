@@ -89,6 +89,60 @@ export function updateUiPreferences(path, patch) {
   return writePreferences(path, stored, { ...stored, ...patch }, patch)
 }
 
+// Item operations on shared lists. PUT replaces a whole list, so a device that had not pulled yet erased
+// another device's (or an agent's) change; an operation names only the item it changes and is applied to
+// the stored list inside the same synchronous read/merge/atomic rename as PUT. Every operation is idempotent.
+//   {op:'add'|'remove', key:'pinnedChats'|'subjectOrder', item:<string>}  add appends when absent
+//   {op:'front', key:'subjectOrder', items:[...]}  these first in this order, every other stored one after
+//   {op:'add', key:'spaces', item:{id,name,threads,createdAt,agent?}}  no-op when that id exists
+//   {op:'remove', key:'spaces', item:<space id>}
+//   {op:'add'|'remove', key:'spaces/<id>/threads', item:<thread id>}  no-op when the Space is gone
+//   {op:'set', key:'spaces/<id>/name', item:<name>}
+const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
+// Operands are checked even when they change nothing (removing an absent item), so malformed ops are always a 400.
+const SUBJECT = v => typeof v === 'string' && v.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(v)
+const listItem = { pinnedChats: v => typeof v === 'string' && THREAD_ID.test(v), subjectOrder: SUBJECT }
+const badOps = () => { throw Object.assign(new Error('invalid_preferences'), { status: 400 }) }
+export function applyUiPreferenceOps(prefs, ops) {
+  if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()
+  const next = { ...prefs }
+  for (const o of ops) {
+    if (!isPlainObject(o) || Object.keys(o).some(k => !['op', 'key', 'item', 'items'].includes(k)) || typeof o.key !== 'string') badOps()
+    const { op, key, item } = o
+    const sub = SPACE_KEY.exec(key)
+    if (key === 'pinnedChats' || key === 'subjectOrder') {
+      const list = next[key].slice(), str = listItem[key](item)
+      if (op === 'front' && key === 'subjectOrder' && Array.isArray(o.items) && o.items.length <= 60 && o.items.every(SUBJECT)) {
+        const first = [...new Set(o.items)]
+        next[key] = first.concat(list.filter(s => !first.includes(s))).slice(0, 60)
+      } else if ((op === 'add' || op === 'remove') && str) next[key] = op === 'add' ? (list.includes(item) ? list : list.concat(item)) : list.filter(s => s !== item)
+      else badOps()
+    } else if (key === 'spaces') {
+      if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = next.spaces.concat(item) }
+      else if (op === 'remove' && typeof item === 'string' && SPACE_ID.test(item)) next.spaces = next.spaces.filter(s => s.id !== item)
+      else badOps()
+    } else if (sub) {
+      const [, id, field] = sub
+      // Checked here too: a Space deleted meanwhile makes the operation a no-op, never a way past validation.
+      if (field === 'threads' ? !((op === 'add' || op === 'remove') && typeof item === 'string' && THREAD_ID.test(item)) : !(op === 'set' && text(item, 60))) badOps()
+      next.spaces = next.spaces.map(s => s.id !== id ? s : field === 'name' ? { ...s, name: item }
+        : { ...s, threads: op === 'add' ? (s.threads.includes(item) ? s.threads : s.threads.concat(item)) : s.threads.filter(t => t !== item) })
+    } else badOps()
+  }
+  return next
+}
+
+// PATCH {ops:[…]}: no await between read, apply and atomic rename, so it shares PUT's critical section.
+// Only the keys the operations touch are written; the result is validated exactly like a PUT of them.
+export function patchUiPreferences(path, body) {
+  if (!isPlainObject(body) || Object.keys(body).some(k => k !== 'ops')) badOps()
+  const stored = readStored(path) || {}
+  const current = sanitizeUiPreferences(stored), next = applyUiPreferenceOps(current, body.ops)
+  const patch = Object.fromEntries([...new Set(body.ops.map(o => SPACE_KEY.test(o.key) ? 'spaces' : o.key))].map(k => [k, next[k]]))
+  validateUiPreferences(patch)
+  return writePreferences(path, stored, { ...stored, ...patch }, patch)
+}
+
 // No await between read/check/write: shares PUT's process-local synchronous critical section.
 // A marker and every missing launcher key are committed by the very same atomic rename.
 export function seedUiPreferences(path, body) {

@@ -130,9 +130,9 @@ describe('#58 which agents can use an app', () => {
     // Main agent: standard, every current app ticked (no regression for an existing box).
     const mainAgent = (await (await fetch(`${base}/wizard/v1/agents/hermes`)).json()).agent
     expect(mainAgent).toMatchObject({ privacy: 'standard', permissions: { wizard_apps: ['notes'], agent_apps: ['scanner'] } })
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // A tool outside the agent's list answers like an app that is not installed, and never reaches the app.
     const refused = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'scanner__scan', arguments: {} })
     expect(refused.json.result.isError).toBe(true)
@@ -168,7 +168,7 @@ describe('#58 which agents can use an app', () => {
     // The owner narrows the main agent; a stored choice is kept from then on.
     const narrowed = await fetch(`${base}/wizard/v1/agents/hermes`, json({ permissions: { wizard_apps: ['notes'], agent_apps: [] } }, 'PATCH'))
     expect(narrowed.status).toBe(200)
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // Install a new app.
     const music = await fakeApp('play')
     writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false), appEntry('music', music.url)])
@@ -178,7 +178,7 @@ describe('#58 which agents can use an app', () => {
     // James, 23 Oct 2026: "the user should have to enable things manually."
     expect(byId[helper.id].permissions.wizard_apps).not.toContain('music')
     expect(byId.private.permissions).toMatchObject({ wizard_apps: [], agent_apps: [] })
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('music__play')
     // Re-reading does not re-add an app the owner unticked.
     await fetch(`${base}/wizard/v1/agents/${helper.id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))
@@ -214,8 +214,8 @@ describe('#58 which agents can use an app', () => {
     expect(after.agents.map((a: any) => [a.id, a.enabled])).toEqual([['hermes', false], ['helper', true], ['private', true]])
     const privAgent = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
     expect(privAgent.permissions.wizard_apps).toEqual(['notes'])
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // Ticked from the private agent's side now writes the gateway into its harness config.
     expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
     expect((await fetch(`${base}/wizard/v1/apps/nope/agents`)).status).toBe(404)
@@ -245,7 +245,7 @@ describe('#58 which agents can use an app', () => {
     expect(joined.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
     expect(applied).toContain('private')
     expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['airlock__airlock_submit', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['airlock__airlock_submit', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // A new private agent starts with Airlock ticked even when the client sends an empty app list; other apps stay off.
     const second = await create(base, { ...PRIVATE, label: 'Diary', permissions: { preset: 'private', wizard_apps: [], agent_apps: [] } })
     expect(second.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
@@ -442,7 +442,7 @@ describe('agentBridge gateway: container agents only', () => {
     const main = await fakeHermes('main')
     const base = await start(dir, main, { agentBridge: 'gateway' })
     const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     const allowed = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'notes__note_add', arguments: {} })
     expect(allowed.json.result.content[0].text).toBe('ran note_add')
     expect((await mcp(base, MAIN_TOKEN, 'tools/list')).status).toBe(404)

@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { ownerGate, ownerMovedOn, receiptConsumed } from './delegation-receipts.mjs'
 import { helperAnswerAfter } from './helper-continuation.mjs'
 import { helperDelegationQuery, assignedHelperCount, HELPER_SOURCE_LIMIT } from './helper-source.mjs'
+import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 const RUNNING = new Set(['running','stalling','finalizing'])
 const TERMINAL = new Set(['completed','failed','interrupted'])
 export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds = 120, activeSessionIds = new Set() } = {}) {
@@ -21,7 +22,10 @@ export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds =
     }
     const grouped = new Map()
     for (const row of all) { const rows=grouped.get(row.session_id) ?? [];rows.push(row);grouped.set(row.session_id,rows) }
-    for (const [sid, rows] of grouped) {
+    for (const [sid, sourceRows] of grouped) {
+      const followUps = readNonHoldingFollowUps(path, sid)
+      const rows = sourceRows.filter(row => !followUps.has(row.delegation_id))
+      if (!rows.length) continue
       const gate = ownerGate(db,sid)
       const active = activeSessionIds.has(sid) || Boolean(db.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(sid,sec))
       // A steer *before* completion belongs to this request. Only an owner turn after the
