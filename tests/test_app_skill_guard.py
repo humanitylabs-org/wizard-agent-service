@@ -134,6 +134,50 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertIsNone(self.call('terminal', command='cat ~/.wizard-os/skills/video-app/SKILL.md'))
         self.assertIsNone(self.call('terminal', command='printf x > ~/.wizard-os/skills/wizard-job-files/SKILL.md'))
 
+    def test_reads_and_verification_with_redirects_allowed(self):
+        # Oscar's review: these read-only and update/verify commands must pass.
+        allowed = [f'cat {self.skills}/video-app/SKILL.md 2>/dev/null',
+                   f'grep -n foo {self.skills}/video-app/SKILL.md | head -5 >&2',
+                   f'ls {self.skills} && wam install x/y',
+                   f'sha256sum {self.skills}/video-app/SKILL.md > /tmp/a',
+                   f'cmp {self.skills}/video-app/SKILL.md release/SKILL.md 2>&1',
+                   f'cp {self.skills}/video-app/SKILL.md /tmp/copy.md',
+                   f'wam update video-app && diff {self.skills}/video-app/SKILL.md src/SKILL.md > /tmp/d']
+        for command in allowed:
+            with self.subTest(command=command):
+                self.assertIsNone(self.call('terminal', command=command))
+        self.assertIsNone(self.call('execute_code', code=f'def f() -> str:\n    return open("{self.skills}/video-app/SKILL.md").read()'))
+
+    def test_write_targets_still_blocked(self):
+        for command in [f'echo x 2> {self.skills}/video-app/SKILL.md',
+                        f'printf x >| {self.skills}/video-app/SKILL.md',
+                        f'echo x | tee -a {self.skills}/video-app/SKILL.md',
+                        f'mv {self.skills}/video-app/SKILL.md /tmp/x',
+                        f'rm -rf {self.skills}/video-app',
+                        f'rsync -a src/ {self.skills}/video-app/',
+                        f'install -m644 a.md {self.skills}/video-app/SKILL.md',
+                        f'cd {self.skills}/video-app && sed -i s/a/b/ SKILL.md',
+                        f'cd {self.skills} && printf x > video-app/SKILL.md',
+                        f"python3 -c \"open('{self.skills}/video-app/SKILL.md','w').write('x')\""]:
+            with self.subTest(command=command):
+                self.blocked('terminal', command=command)
+
+    def test_destination_flags_quoted_text_and_relative_routing_writes(self):
+        # Codex review on the carried fix: per-command destination flags, quoting, routing exemption after cd.
+        for command in [f'cp --target-directory={self.skills}/video-app src.md',
+                        f'cp --target-directory {self.skills}/video-app src.md',
+                        f'cp -t {self.skills}/video-app src.md',
+                        f'install -t{self.skills}/video-app a.md',
+                        f'rsync -t src.md {self.skills}/video-app/']:
+            with self.subTest(command=command):
+                self.blocked('terminal', command=command)
+        for command in [f"printf '%s' '>{self.skills}/video-app/SKILL.md'",
+                        f'echo "> {self.skills}/video-app/SKILL.md" >/tmp/notes',
+                        f'cd {self.skills} && printf x > wizard-job-files/SKILL.md',
+                        f'rsync -t {self.skills}/video-app/SKILL.md /tmp/copy.md']:
+            with self.subTest(command=command):
+                self.assertIsNone(self.call('terminal', command=command))
+
     def test_home_resolution_is_dynamic_and_matches_kernel(self):
         custom = Path(self.tmp.name) / 'custom-wizard'
         custom.mkdir()
