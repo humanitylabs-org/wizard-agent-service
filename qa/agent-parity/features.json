@@ -1026,12 +1026,13 @@
       "id": "model-lock",
       "description": "Queue/steer/retry on one route while changing global default",
       "layer": "server",
-      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked.",
+      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked. In wizard-ux, node --test tests/agent-held-take-model.test.mjs checks that a take or Retry bound to a host-profile, container, restricted or Private agent rides on that agent's own route (an explicit pick on its provider is kept; a main-agent route is replaced by the agent default) while a main-thread take keeps its own route. These are fixture checks, not live runtime proof.",
       "source_refs": [
         "server/run-queue.mjs"
       ],
       "reference_tests": [
-        "tests/proxy-queue.test.ts"
+        "tests/proxy-queue.test.ts",
+        "wizard-ux/tests/agent-held-take-model.test.mjs"
       ],
       "fixture": "model-lock",
       "policy_exemptions": []
