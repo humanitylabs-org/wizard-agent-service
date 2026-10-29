@@ -451,6 +451,36 @@ describe('owned-work service wiring', () => {
     expect((await f.list()).wizard_attention.state).toBe('done'); expect(f.sent).toHaveLength(0)
     expect(f.server.ownedOpenWork).toBeUndefined()
   })
+  it('non-holding evidence is fresh after in-place edits, new owner turns and unreadable canonical state', async () => {
+    const { readHermesListRevision } = await import('../server/session-truth.mjs')
+    const { readNonHoldingFollowUps } = await import('../server/owned-open-work-follow-through.mjs')
+    const f = await service(false, true)
+    f.add('user', 'Fix the synthetic bug')
+    f.add('assistant', '', { tool_calls: [call('wizard_heavy_submit', {}, 'heavy_fresh')] })
+    f.add('tool', JSON.stringify({ job_id: 'heavy_fresh' }), { tool_call_id: 'heavy_fresh' })
+    const optional = reply('Archimedes: started optional follow-up checks: heavy_fresh running now').replace('The fix works.', 'The fix is verified.')
+    f.add('assistant', optional)
+    const replyId = f.db.prepare('SELECT MAX(id) id FROM messages').get()!.id
+    const heavyDb = new DatabaseSync(join(f.root, 'heavy.db'))
+    const job = { job_id: 'heavy_fresh', sessionId: 'wizard_owned', agent_id: 'hermes', state: 'running', resume: '', created_at: Date.now() }
+    heavyDb.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
+      .run(job.job_id, 'wizard_owned', 'wizardq_origin', 'fresh', 'hash', JSON.stringify(job), 'hermes')
+    heavyDb.close()
+    expect((await f.list()).status).not.toBe('running')
+    const revision = readHermesListRevision(f.path)
+    expect(revision).not.toBeNull()
+    const required = optional.replace('optional follow-up', 'required blocking')
+    f.db.prepare('UPDATE messages SET content=? WHERE id=?').run(required, replyId)
+    expect(readHermesListRevision(f.path)).toEqual(revision) // aggregate is NOT an exact revision
+    expect((await f.list()).status).toBe('running')
+    f.db.prepare('UPDATE messages SET content=? WHERE id=?').run(optional, replyId)
+    expect((await f.list()).status).not.toBe('running')
+    f.add('user', 'New request: wait for the required result')
+    expect((await f.list()).status).toBe('running')
+    f.db.exec('ALTER TABLE messages RENAME TO messages_unavailable')
+    expect(readHermesListRevision(f.path)).toBeNull()
+    expect(readNonHoldingFollowUps(f.path, 'wizard_owned').size).toBe(0)
+  })
 })
 
 describe('owned open work scan stays cheap on large transcripts', () => {
