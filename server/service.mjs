@@ -2235,6 +2235,8 @@ function proxyShellStatic(request, response, shellOrigin, url, body) {
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
     if (body !== undefined) {
+      // The forwarded POST keeps its Origin so a same-origin receiver can still check it.
+      if (typeof request.headers.origin === 'string') headers.origin = request.headers.origin
       headers['content-type'] = request.headers['content-type'] || 'application/json'
       headers['content-length'] = String(body.length)
     }
@@ -2525,6 +2527,7 @@ function buildWizardServer(options, lifetime) {
   const tailnetVerifier = typeof options.tailnetVerifier === 'function' && options.tailnetVerifier.fromRequest ? options.tailnetVerifier : null
   // Wizard shell (wizard-ux) static files for phones on the tailnet listener: GET/HEAD only, after verification.
   const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
+  const diagnosticsOrigin = options.diagnosticsOrigin ? confinedUpstream(options.diagnosticsOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -4874,7 +4877,9 @@ function buildWizardServer(options, lifetime) {
         if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
         const body = await readBoundedBody(request, 256 * 1024)
         try { devices.record(JSON.parse(body.toString('utf8'))?.session) } catch { /* recording must never break diagnostics */ }
-        if (tailnetShellOrigin) await proxyShellStatic(request, response, tailnetShellOrigin, url, body)
+        // A box may keep its own diagnostics receiver (WIZARD_DIAGNOSTICS_ORIGIN); otherwise the shell answers as before.
+        const receiver = diagnosticsOrigin || tailnetShellOrigin
+        if (receiver) await proxyShellStatic(request, response, receiver, url, body)
         else sendJson(response, 404, { error: 'not_found' })
         return
       }

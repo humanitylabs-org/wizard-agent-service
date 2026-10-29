@@ -37,7 +37,7 @@ async function stack(extra = {}) {
     devicesStatePath: join(root, 'devices.json'), requireJoinedDelegationCapability: false, followThrough: false, ...extra })
   const base = await listen(server)
   const tailnet = await listen(createTailnetIngress(server))
-  return { base, tailnet, seen }
+  return { base, tailnet, seen, upstream }
 }
 const post = (body: string, headers: Record<string, string> = owner) => ({ method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body })
 
@@ -52,9 +52,11 @@ it('intercept records owner session metadata and still forwards the exact body a
     expect(s.seen.at(-1).headers['content-type']).toBe('application/json')
     expect(s.seen.at(-1).headers['x-wizard-owner-proof']).toBeUndefined()
   }
+  await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: 'https://wizard.example.test' }))
+  expect(s.seen.at(-1).headers.origin).toBe('https://wizard.example.test')
   const response = await fetch(`${s.base}/wizard/v1/devices`, { headers: owner })
   expect(response.status).toBe(200)
-  expect((await response.json()).devices).toEqual([expect.objectContaining({ model: session.model, report_count: 3 })])
+  expect((await response.json()).devices).toEqual([expect.objectContaining({ model: session.model, report_count: 4 })])
   const stored = readFileSync(join(root, 'devices.json'), 'utf8')
   for (const omitted of ['events', 'accessibilityServices', 'must-not-store', 'discard']) expect(stored).not.toContain(omitted)
 })
@@ -112,4 +114,20 @@ it('lists and calls wizard_devices through the main gateway without adding it to
   expect((await rpc('tools/call', { name: 'wizard_devices' })).content[0].text).toContain('No phones have checked in yet.')
   await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(JSON.stringify({ session })))
   expect((await rpc('tools/call', { name: 'wizard_devices', arguments: {} })).content[0].text).toContain('Google Pixel 10 Pro XL (Android SDK 37): Wizard OS 0.10.18 (code 82), WebView app.vanadium.webview 156.0.8078.47.0')
+})
+
+it('a box diagnostics receiver gets the report instead of the shell, with its Origin', async () => {
+  const got: any[] = []
+  const receiver = await listen(createServer(async (req, res) => {
+    const parts = []; for await (const p of req) parts.push(p)
+    got.push({ url: req.url, body: Buffer.concat(parts).toString(), origin: req.headers.origin })
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}')
+  }))
+  const s = await stack({ diagnosticsOrigin: receiver })
+  const body = JSON.stringify({ session })
+  const response = await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: 'https://wizard.example.test' }))
+  expect(response.status).toBe(200)
+  expect(got).toEqual([{ url: '/wizard-os-home/api/diagnostics/scroll-capture', body, origin: 'https://wizard.example.test' }])
+  expect(s.seen).toEqual([])
+  expect((await (await fetch(`${s.base}/wizard/v1/devices`, { headers: owner })).json()).devices).toHaveLength(1)
 })

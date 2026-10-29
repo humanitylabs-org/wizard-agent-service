@@ -146,6 +146,7 @@ server = createWizardServer({
   accessVerifier,
   ...(tailnetVerifier ? { tailnetVerifier } : {}),
   tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  diagnosticsOrigin: process.env.WIZARD_DIAGNOSTICS_ORIGIN || '',
   privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
   tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
