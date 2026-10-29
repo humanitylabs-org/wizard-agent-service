@@ -115,16 +115,28 @@ export function fileInOneSpace(spaces, target, threads) {
   return spaces.map(s => s.id === target.id ? { ...s, threads: [...new Set([...s.threads, ...threads])] }
     : ownerOf(s) === agent && s.threads.some(t => moving.has(t)) ? { ...s, threads: s.threads.filter(t => !moving.has(t)) } : s)
 }
-// A full list naming a thread in several Spaces of one agent keeps it in exactly one: the Space it newly
-// joined in this write (a move made by an add-only client), else the first stored one.
+// Full snapshots may carry unresolved legacy duplicates. Preserve those memberships (including
+// explicit removals), rather than choosing a keeper by array order. One newly joined Space is an
+// old add-only client's move; several new targets are ambiguous and reject the whole write.
 export function oneSpaceEach(spaces, before = []) {
-  const had = new Set(before.flatMap(s => s.threads.map(t => `${s.id}\n${t}`))), keep = new Map()
-  for (const s of spaces) for (const t of s.threads) {
-    const k = `${ownerOf(s)}\n${t}`, fresh = !had.has(`${s.id}\n${t}`)
-    if (!keep.has(k) || (fresh && !keep.get(k).fresh)) keep.set(k, { id: s.id, fresh })
+  const memberships = list => {
+    const groups = new Map()
+    for (const s of list) for (const t of s.threads) {
+      const key = `${ownerOf(s)}\n${t}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push({ space: s, thread: t })
+    }
+    return groups
   }
-  return spaces.map(s => s.threads.every(t => keep.get(`${ownerOf(s)}\n${t}`).id === s.id) ? s
-    : { ...s, threads: s.threads.filter(t => keep.get(`${ownerOf(s)}\n${t}`).id === s.id) })
+  const had = memberships(before), moves = []
+  for (const [key, group] of memberships(spaces)) {
+    if (group.length < 2) continue
+    const old = new Set((had.get(key) || []).map(m => m.space.id))
+    const fresh = group.filter(m => !old.has(m.space.id))
+    if (fresh.length > 1) badOps()
+    if (fresh.length === 1) moves.push(fresh[0])
+  }
+  return moves.reduce((next, { space, thread }) => fileInOneSpace(next, space, [thread]), spaces)
 }
 export function applyUiPreferenceOps(prefs, ops) {
   if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()
