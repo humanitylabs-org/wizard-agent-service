@@ -74,6 +74,7 @@ export const serverChecks = {
     // automatic child as a retry on the owner's newly selected route.
     const race = await s.request('/v1/runs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_id:'wizard_parity',input:'untrusted preview',wizard_retry_run_id:first.run_id,model:'fixture-other',provider:'anthropic'}) })
     assert.equal(race.status, 412, `${s.kind}: mismatched recovered route must fail visibly`)
+    if (s.kind === 'main') assert.equal((await race.json()).error.code, 'saved_retry_route_changed')
     assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length, 'race never dispatches a second request')
   },
   'supervisor-reporter': async s => {
