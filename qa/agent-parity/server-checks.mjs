@@ -473,6 +473,35 @@ export const serverChecks = {
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
     assert.doesNotMatch(after, /Synthetic Video/u)
   },
+  'agent-app-access': async s => {
+    // Connections → Agents (Miguel, 29 Oct 2026): the owner turns one app off for this agent. Its tools leave this
+    // agent's list and a call is refused in plain words at once, without a restart; on again, it is no longer refused.
+    const osHome = join(s.root, 'os')
+    const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps: [parityQa, app] }))
+    const setApps = apps => {
+      if (s.kind === 'main') return writeFileSync(join(osHome, 'agents', '.main-agent.json'), JSON.stringify({ schema: 1, wizard_apps: apps, agent_apps: [] }))
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = apps; agent.permissions.agent_apps = []
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    const call = async () => {
+      const r = await s.agentMcp('tools/call', { name: 'parity_video__make_short', arguments: {} })
+      assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+      return (await r.json()).result
+    }
+    setApps(['parity-qa', 'parity-video']); await s.restart()
+    assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'an app that is on is never refused')
+    setApps(['parity-qa'])
+    const refused = await call()
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0].text, /^.+ is not allowed to use Synthetic Video\. The owner can turn it on in Connections\.$/u)
+    const listed = await s.agentMcp('tools/list')
+    assert.ok(!(await listed.json()).result.tools.some(t => t.name.startsWith('parity_video__')), 'turned-off app leaves the tool list')
+    setApps(['parity-qa', 'parity-video'])
+    assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
+  },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
     row.messages = [{ role: 'user', content: 'Synthetic request', timestamp: Date.now() / 1000 - 2 }]

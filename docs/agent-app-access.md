@@ -18,8 +18,8 @@ an agent → one switch per app, agent app and connector) and `wam agents access
   agent's lists. A change through the API sends `notifications/tools/list_changed` on the agent's open streams.
 - **Calls.** Every `tools/call` reads the lists again (the main agent's file is re-read when its stamp changes), so a
   call to an app that was just turned off is refused at once, even if the agent still has the tool in an old list:
-  `Oscar is not allowed to use Money. The owner can turn it on in Connections.` (the agent's label; the main agent's is
-  `WIZARD_MAIN_AGENT_LABEL`, default `Hermes`). The call never reaches the app.
+  `Oscar is not allowed to use Money. The owner can turn it on in Connections.` (the agent's label; the main agent's is what
+  the owner calls it, settings.json `agent.name`, else `WIZARD_MAIN_AGENT_LABEL`, default `Hermes`). The call never reaches the app.
 - **Private apps** (`privacy: private`) an agent may not use are still answered exactly like an app that is not
   installed, so a standard agent never learns that one is there (#59).
 

@@ -1227,6 +1227,16 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "agent-app-access",
+      "description": "The owner's per-agent app switch (Connections → Agents): an app turned off for an agent leaves that agent's tool list and its calls are refused in plain words at once; turned on again it is callable, without a restart.",
+      "layer": "server",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway) with a synthetic app on its own list (main: .main-agent.json, others: agent.json). The call is not refused; with the app off the call returns '<agent> is not allowed to use Synthetic Video. The owner can turn it on in Connections.' and tools/list has none of its tools; back on, the call is not refused, with no restart. tests/agents-sealed-apps.test.ts covers the owner API path, the private-app seal and new-agent defaults. Fixture HTTP evidence, not live runtime proof.",
+      "source_refs": ["server/agent-bridge.mjs", "server/agents.mjs"],
+      "reference_tests": ["tests/agents-sealed-apps.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "fixture": "agent-app-access",
+      "policy_exemptions": []
     }
   ]
 }

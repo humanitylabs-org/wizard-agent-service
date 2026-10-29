@@ -494,13 +494,20 @@ export function createAgentRegistry(options = {}) {
   // Resolved for every thread in a Chats list: rebuild only when .main-agent.json or apps.json changes.
   let mainMemo = { key: null, value: null }
   const fileStamp = (path) => { try { const st = statSync(path); return `${st.ino}:${st.size}:${st.mtimeMs}` } catch { return '-' } }
+  // What the owner calls his agent (settings.json agent.name, "Oscar"), else the deployment's label (default Hermes).
+  // "Wizard" is the settings default ("until the owner names it"), not a name he chose.
+  const ownerName = () => {
+    const name = options.settingsPath ? readJson(options.settingsPath)?.agent?.name : ''
+    const text = typeof name === 'string' ? cleanLabel(name, '') : ''
+    return text === 'Wizard' ? '' : text
+  }
   const mainAgent = () => {
-    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${mainLabel}`
+    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${options.settingsPath ? fileStamp(options.settingsPath) : ''}|${mainLabel}`
     if (mainMemo.key !== key) mainMemo = { key, value: buildMainAgent() }
     return structuredClone(mainMemo.value)
   }
   const buildMainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${ownerName() || mainLabel} (system)` : ownerName() || mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
