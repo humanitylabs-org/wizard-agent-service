@@ -24,22 +24,28 @@ The image lock, upstream Hermes core, owner history, models and providers are un
 
 ## Why schema 31 is consequential
 
-Upstream commit `751d8526e3507e8eb7e9e6e453e30019b6f97e29` adds
-`messages.message_uid TEXT`, a one-time per-row random UUID backfill and propagation
-through message reads, inserts, replacement and compaction clones. The old schema
-30 runtime does not know that field. Its startup does not reject a higher marker or
-lower it. Its writes omit the new column; replacement can lose durable identities
-while leaving the schema marker at 31. Later v31 startup gates the backfill on
-`current_version < 31`, so a marker already at 31 does not repair that history.
-This is a source-proven semantic risk, not a claim that any owner DB was inspected
-or that a lower fresh schema alone proves physical SQLite corruption.
+Upstream commit `751d8526e3507e8eb7e9e6e453e30019b6f97e29` introduces
+`messages.message_uid TEXT`. Current schema-31 source at
+`71d34bad1045610252eda02ee79549436896e784` also has `absorbed_message_uids`,
+`tool_call_uids`, `tool_call_uid`, an AFTER INSERT UID fallback trigger and bounded
+backfill tracked by `state_meta.message_uid_backfill` (not the initial version-only
+backfill). The old runtime does not reject or lower a higher schema marker.
+Its SELECT-* reads can retain unfamiliar text fields, and the surviving trigger
+can give old-runtime inserts non-null UIDs. Neither makes its writes compatible:
+the old INSERT/clone writers omit those four identity columns. Destructive message
+replacement can re-key messages via that trigger and drop merge/tool identity
+metadata while leaving the marker at 31. The current backfill skips a completed
+marker, and in any case cannot recover the original identities from freshly minted
+ones. This is a source-proven semantic risk, not a claim that any owner DB was
+inspected or that a lower fresh schema proves physical SQLite corruption.
 
 `tests/history_schema_acceptance.py` is an explicitly admitted Forum-only real
 Docker proof: exact pinned-image source hashes, same-version read/append/replace/
-restart, a synthetic v31 column/backfill fixture, an unguarded-write negative and
+restart, a synthetic fixture with the current v31 identity columns/trigger/backfill,
+an unguarded-write negative and
 actual importer move/archive refusal with synthetic byte/inode preservation and
-undo. No model is contacted. The v31 fixture is constructed using the exact
-upstream column/backfill delta; it is not presented as a full v31 runtime rehearsal.
+undo. No model is contacted. The v31 fixture is constructed using source-bound identity DDL and backfill;
+it is not presented as a full v31 runtime rehearsal.
 
 Run focused unit contracts with `tests/test_history_schema.py` (also included in
 `node scripts/test-hermes-import.mjs`). Mocked unit contracts are not Docker proof.

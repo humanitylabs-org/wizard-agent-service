@@ -91,15 +91,20 @@ print(json.dumps({'schema':30,'content_roundtrip':True,'integrity':'ok'}))
 c=sqlite3.connect('/opt/data/state.db')
 assert c.execute('SELECT version FROM schema_version').fetchall()==[(30,)]
 assert 'message_uid' not in [r[1] for r in c.execute('PRAGMA table_info(messages)')]
-# Exact v31 column/backfill delta, synthetic only. No upstream code is patched.
-c.execute('ALTER TABLE messages ADD COLUMN message_uid TEXT')
-c.execute('UPDATE messages SET message_uid = lower(hex(randomblob(16))) WHERE message_uid IS NULL')
+# Current v31 identity DDL/backfill from the pinned public-source contract.
+# Synthetic fixture only: do not patch or claim to execute a full current runtime.
+for column in identity_contract['message_columns']:
+    c.execute('ALTER TABLE messages ADD COLUMN ' + column + ' TEXT')
+c.executescript(identity_contract['uid_trigger_sql'])
+c.execute(identity_contract['uid_backfill_sql'], (0, 2000))
+c.execute("INSERT OR REPLACE INTO state_meta(key,value) VALUES ('message_uid_backfill','1')")
+c.execute("UPDATE messages SET absorbed_message_uids=? WHERE role='user'", (json.dumps(['synthetic-absorbed-identity']),))
 c.execute('UPDATE schema_version SET version=31')
 c.commit()
 uids=[r[0] for r in c.execute('SELECT message_uid FROM messages ORDER BY id')]
 assert len(uids)==2 and len(set(uids))==2 and all(uids)
 c.close()
-print(json.dumps({'synthetic_schema':31,'exact_v31_column_and_backfill':True,'message_uids':uids}))
+print(json.dumps({'synthetic_schema':31,'current_identity_columns_trigger_backfill':True,'message_uids':uids}))
 '''
     reopen = '''import json,sqlite3
 from hermes_state import SessionDB
@@ -137,13 +142,17 @@ db.replace_messages('schema-proof',db.get_messages('schema-proof'))
 db.close()
 c=sqlite3.connect(p)
 after=[r[0] for r in c.execute('SELECT message_uid FROM messages ORDER BY id')]
+absorbed=[r[0] for r in c.execute('SELECT absorbed_message_uids FROM messages ORDER BY id')]
 version=c.execute('SELECT version FROM schema_version').fetchall()
 integrity=c.execute('PRAGMA integrity_check').fetchall()
+completed=c.execute("SELECT value FROM state_meta WHERE key='message_uid_backfill'").fetchone()
 c.close()
-print(json.dumps({'schema_marker':version,'before_message_uids':before,'after_message_uids':after,'integrity':integrity,'expected_negative':'durable_identity_not_preserved'}),flush=True)
+print(json.dumps({'schema_marker':version,'before_message_uids':before,'after_message_uids':after,'absorbed_message_uids':absorbed,'backfill_completed':completed,'integrity':integrity,'expected_negative':'durable_identity_not_preserved'}),flush=True)
 # Exact consequential negative: ordinary old-runtime writes lose the v31 identities
 # while the higher marker remains. Do not call this physical SQLite corruption.
-assert version==[(31,)] and integrity==[('ok',)] and len(after)==3 and all(v is None for v in after)
+assert version==[(31,)] and integrity==[('ok',)] and completed==('1',)
+assert len(after)==3 and all(after) and set(before).isdisjoint(after)
+assert all(v is None for v in absorbed)
 raise SystemExit(17)
 '''
     def snapshot(home):
@@ -171,7 +180,7 @@ raise SystemExit(17)
         newer.mkdir(parents=True)
         (newer / 'config.yaml').write_text('model:\n  provider: synthetic\n  default: synthetic\n')
         run_image('newer-create', newer, create)
-        run_image('newer-synthetic31', newer, upgrade)
+        run_image('newer-synthetic31', newer, 'identity_contract=' + repr(contract) + '\n' + upgrade)
         # Keep the negative on a separate synthetic copy; never mutate the refused source.
         negative = scratch / 'unguarded'
         shutil.copytree(newer, negative)
