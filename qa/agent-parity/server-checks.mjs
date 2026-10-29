@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSyn
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { post, png } from './fixture.mjs'
+import { post, png, scene } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
@@ -18,6 +18,31 @@ const admit = async (s, body) => {
   const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', ...body }))
   assert.equal(r.status, 202)
   return r.json()
+}
+// The thread leaves Working as soon as the browser reads the finished run, well inside the 30 s
+// cached Hermes listing. The listing is read while the run is live, so a stale cache would show.
+const ACTIVE = new Set(['started', 'accepted', 'queued', 'running', 'stopping', 'waiting_for_approval'])
+const finishedRunLeavesWorking = async (s, fresh = true) => {
+  const listed = async () => (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+  const until = async (ok, label) => {
+    for (let n = 0; n < 40; n++) { const item = await listed(); if (ok(item)) return item; await new Promise(r => setTimeout(r, 25)) }
+    assert.fail(label)
+  }
+  const admitted = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic request' }))
+  assert.equal(admitted.status, 202)
+  const runId = (await admitted.json()).run_id
+  // A rename makes main re-read (and cache) the Hermes listing while the run is still live.
+  assert.equal((await s.request('/api/sessions/wizard_parity', { ...post({ hidden: false, title: 'Parity · Working' }), method: 'PATCH' })).status, 200)
+  await until(item => ACTIVE.has(item?.status), 'the live run lists as Working')
+  const run = [...s.runs.values()].at(-1)
+  Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: 'Synthetic reply' })
+  s.sessions.get('wizard_parity').messages.push({ role: 'assistant', content: 'Synthetic reply', timestamp: Date.now() / 1000 + 1 })
+  const read = await s.request(`/v1/runs/${runId}`)
+  assert.equal(read.status, 200); assert.equal((await read.json()).status, 'completed')
+  const done = await until(item => item && !ACTIVE.has(item.status), 'the finished run leaves Working within 1 s, not after the 30 s listing cache')
+  assert.ok(!ACTIVE.has(done.status))
+  // The listing behind the row is the finished one too (main's direct path re-reads its Hermes cache).
+  if (fresh) assert.equal(done.messageCount, 2, 'the row is read from the finished listing, not the cached running one')
 }
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
@@ -501,6 +526,17 @@ export const serverChecks = {
     assert.ok(!(await listed.json()).result.tools.some(t => t.name.startsWith('parity_video__')), 'turned-off app leaves the tool list')
     setApps(['parity-qa', 'parity-video'])
     assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
+  },
+  'finished-run-leaves-working': async s => {
+    await finishedRunLeavesWorking(s)
+    if (s.kind !== 'main') return
+    // Main admits through the durable run queue too (this scene runs it direct): both leave at once.
+    const queued = await scene('main', { canonicalSessionListing: true, fixtureSessionStatus: true })
+    try {
+      assert.equal((await queued.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile' }))).status, 201)
+      // The queue's own projection ends Working; its row count still comes from the cached listing.
+      await finishedRunLeavesWorking(queued, false)
+    } finally { await queued.close() }
   },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
