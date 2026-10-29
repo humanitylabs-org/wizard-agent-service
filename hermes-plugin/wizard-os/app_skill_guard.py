@@ -181,33 +181,77 @@ def _args(segment: str) -> list[str]:
     return out
 
 
+def _redirect_targets(segment: str) -> list[str]:
+    """File targets of real redirection operators. Quoted text such as `printf '>/path'` is a word, not an
+    operator; `>&2`, `2>&1` and `>&-` duplicate descriptors and have no file target."""
+    try:
+        lex = shlex.shlex(segment, posix=True, punctuation_chars='<>&|')
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:  # unbalanced quotes: fall back to the conservative raw scan
+        return [m.group(2) for m in REDIRECT_RE.finditer(segment)]
+    out = []
+    for op, target in zip(tokens, tokens[1:]):
+        if '>' not in op or set(op) - set('<>&|'):
+            continue
+        if op.endswith('&') and (target.isdigit() or target == '-'):
+            continue
+        out.append(target)
+    return out
+
+
+def _dest_operands(cmd: str, rest: list[str]) -> list[str]:
+    """Destination of cp/install/ln (`-t DIR`, `-tDIR`, `--target-directory[=]DIR`, else the last operand) and
+    rsync (always the last operand; its `-t` is --times)."""
+    if cmd != 'rsync':
+        for i, w in enumerate(rest):
+            if w.startswith('--target-directory='):
+                return [w.split('=', 1)[1]]
+            if w in ('-t', '--target-directory') and i + 1 < len(rest):
+                return [rest[i + 1]]
+            if re.fullmatch(r'-[A-Za-z]*t.+', w) and not w.startswith('--'):
+                return [w[w.index('t') + 1:]]
+    operands = [w for w in rest if not w.startswith('-')]
+    return operands[-1:] if len(operands) >= 2 or (cmd == 'ln' and operands) else []
+
+
 def _shell_write_target(text: str) -> str | None:
     """Return the protected path a shell command writes to, if any.
 
     Only the write *target* counts: reading an installed skill while redirecting
-    stderr or output elsewhere is verification, not an edit.
+    stderr or output elsewhere is verification, not an edit. Relative targets after
+    `cd` into a skill root are resolved against it, so the wizard-job-* routing
+    exemption still applies.
     """
-    cwd_protected = False
+    cwd = None   # the literal skill-root directory a `cd` entered, if any
+
+    def hit_for(word: str) -> str | None:
+        word = word.strip('\'"')
+        hit = _skill_token(word)
+        if hit:
+            return hit
+        if cwd and word and not word.startswith(('/', '~', '$')):
+            return _skill_token(cwd.rstrip('/') + '/' + word)
+        return None
+
     for segment in SEGMENT_RE.split(text):
         segment = segment.strip()
         if not segment:
             continue
-        for match in REDIRECT_RE.finditer(segment):
-            target = match.group(2)
-            hit = _skill_token(target)
-            if hit or (cwd_protected and not target.startswith(('/', '~', '$')) and target != '/dev/null'):
-                return hit or target
+        for target in _redirect_targets(segment):
+            hit = hit_for(target)
+            if hit:
+                return hit
         words = _args(segment)
         if not words:
             continue
         cmd, rest = os.path.basename(words[0]), words[1:]
         if cmd == 'cd':
-            cwd_protected = bool(rest and _skill_token(rest[0]))
+            cwd = rest[0].strip('\'"') if rest and _skill_token(rest[0]) else None
             continue
         if cmd == 'wam':  # App Manager's own install/update path.
             continue
         operands = [w for w in rest if not w.startswith('-')]
-        relative = lambda w: cwd_protected and not w.startswith(('/', '~', '$'))
         candidates: list[str] = []
         if cmd in ANY_ARG_WRITERS:
             candidates = operands
@@ -215,18 +259,15 @@ def _shell_write_target(text: str) -> str | None:
                                   or re.fullmatch(r"-[a-zA-Z]*i\S*", w) for w in rest):
             candidates = operands
         elif cmd in DEST_WRITERS:
-            if '-t' in rest and rest.index('-t') + 1 < len(rest):
-                candidates = [rest[rest.index('-t') + 1]]
-            elif len(operands) >= 2 or (cmd == 'ln' and operands):
-                candidates = operands[-1:]
+            candidates = _dest_operands(cmd, rest)
         elif cmd in {'python', 'python3', 'perl', 'node', 'ruby'} and PY_WRITE_RE.search(segment):
             path = _literal_skill_path(segment)
             if path:
                 return path
         for word in candidates:
-            hit = _skill_token(word)
-            if hit or relative(word):
-                return hit or word
+            hit = hit_for(word)
+            if hit:
+                return hit
     return None
 
 

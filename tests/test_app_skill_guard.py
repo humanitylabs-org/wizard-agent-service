@@ -162,6 +162,22 @@ class AppSkillGuardTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.blocked('terminal', command=command)
 
+    def test_destination_flags_quoted_text_and_relative_routing_writes(self):
+        # Codex review on the carried fix: per-command destination flags, quoting, routing exemption after cd.
+        for command in [f'cp --target-directory={self.skills}/video-app src.md',
+                        f'cp --target-directory {self.skills}/video-app src.md',
+                        f'cp -t {self.skills}/video-app src.md',
+                        f'install -t{self.skills}/video-app a.md',
+                        f'rsync -t src.md {self.skills}/video-app/']:
+            with self.subTest(command=command):
+                self.blocked('terminal', command=command)
+        for command in [f"printf '%s' '>{self.skills}/video-app/SKILL.md'",
+                        f'echo "> {self.skills}/video-app/SKILL.md" >/tmp/notes',
+                        f'cd {self.skills} && printf x > wizard-job-files/SKILL.md',
+                        f'rsync -t {self.skills}/video-app/SKILL.md /tmp/copy.md']:
+            with self.subTest(command=command):
+                self.assertIsNone(self.call('terminal', command=command))
+
     def test_home_resolution_is_dynamic_and_matches_kernel(self):
         custom = Path(self.tmp.name) / 'custom-wizard'
         custom.mkdir()
