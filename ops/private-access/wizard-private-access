@@ -242,7 +242,10 @@ class Tailscale:
             if not isinstance(peer, dict) or owner_id is None or peer.get("UserID") != owner_id:
                 continue
             stable = str(peer.get("ID") or peer.get("PublicKey") or peer.get("HostName") or "")
-            name = str(peer.get("HostName") or str(peer.get("DNSName") or "").split(".")[0] or "device")[:64]
+            # The MagicDNS label is the device's name on the tailnet; iOS reports "localhost" as its HostName.
+            label = str(peer.get("DNSName") or "").split(".")[0]
+            host = str(peer.get("HostName") or "")
+            name = (label or (host if host.lower() != "localhost" else "") or "device")[:64]
             peers.append({
                 "id": hashlib.sha256(("wizard-peer:" + stable).encode()).hexdigest()[:16],
                 "name": name,

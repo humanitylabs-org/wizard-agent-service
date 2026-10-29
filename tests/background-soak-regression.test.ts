@@ -74,6 +74,23 @@ describe('background soak regressions', () => {
     expect(result.results.map((r: any) => r.session_id)).toEqual(['wizard_tail'])
   })
 
+  it('exposes pending results per thread for the Chats list cache fingerprint', async () => {
+    const began = Date.now()
+    const bg = createBackgroundResults({ queue: () => null, request: async (path: string) => {
+      if (path.includes('/messages?')) return { data: [
+        { id: 1, role: 'user', content: 'Finish the task', timestamp: began / 1000 - 11000 },
+        { id: 2, role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_tail] saved', timestamp: began / 1000 - 10800 },
+      ] }
+      return { data: [{ id: 'wizard_tail', message_count: 2, last_active: began / 1000 - 10800 }] }
+    } })
+    expect(bg.stamps().size).toBe(0)
+    let result: any
+    for (let n = 0; n < 20; n++) { result = await bg.list(); if (!result.scanning && result.results.length) break; await flush() }
+    const stamps = bg.stamps()
+    expect([...stamps.keys()]).toEqual(['wizard_tail'])
+    expect(stamps.get('wizard_tail')).toBe(`${result.results[0].id};`)
+  })
+
   it('uses small catalog pages and at most two concurrent history reads', async () => {
     let active = 0, peak = 0
     const limits: number[] = []

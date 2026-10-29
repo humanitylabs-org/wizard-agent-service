@@ -15,6 +15,7 @@ USER_EVENT_KINDS = {"async_delegation_complete", "internal_notification", "syste
 HUMAN_SESSION_SOURCES = {"webui", "telegram", "discord", "slack", "whatsapp", "signal", "wizard-mobile"}
 HUMAN_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 INTERNAL_USER_PREFIXES = (
+    "[Agent-to-agent",
     "[IMPORTANT: Background process ",
     "[ASYNC DELEGATION BATCH COMPLETE",
     "[CONTEXT COMPACTION — REFERENCE ONLY]",
@@ -64,7 +65,7 @@ def latest_visible_users(
     latest: dict[str, float] = {}
     session_ids = list(thread_by_session)
     targets = ",".join("(?)" for _ in session_ids)
-    prefix_clauses = "\n".join("AND substr(content, 1, ?) <> ?" for _ in INTERNAL_USER_PREFIXES)
+    prefix_clauses = "\n".join("AND substr(trim(content), 1, ?) <> ?" for _ in INTERNAL_USER_PREFIXES)
     parameters: list[Any] = [*session_ids, *USER_EVENT_KINDS]
     parameters.append(EMPTY_TOOL_RESPONSE_NUDGE)
     for prefix in INTERNAL_USER_PREFIXES:

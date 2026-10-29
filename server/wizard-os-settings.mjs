@@ -83,6 +83,8 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
+    // Retired choice: every owner is on Own (Wizard adds no reply style); older shells may still PUT a value.
+    response_style: 'own',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
@@ -190,6 +192,27 @@ export function updateSettings(path, mutate) {
   return normalizeSettings(raw)
 }
 
+// Own: Wizard sends only Wizard OS facts and protocol, no reply-style rules.
+export const RESPONSE_STYLES = ['summary', 'concise', 'own']
+
+// Bounded, local-only experiment counters. No timestamps, identifiers, content or network sink.
+const counter = n => Number.isSafeInteger(n) && n >= 0 ? n : 0
+export function recordResponseStyleSwitch(raw, before, after) {
+  if (before === after) return
+  const prior = raw.response_style_experiment || {}
+  raw.response_style_experiment = {
+    assigned: ['summary', 'concise'].includes(prior.assigned) ? prior.assigned : before,
+    source: ['new_install', 'existing_install'].includes(prior.source) ? prior.source : 'existing_install',
+    switches: { summary: counter(prior.switches?.summary), concise: counter(prior.switches?.concise), ...(after === 'own' || Object.hasOwn(prior.switches ?? {}, 'own') ? { own: counter(prior.switches?.own) } : {}) },
+  }
+  raw.response_style_experiment.switches[after] = Math.min(Number.MAX_SAFE_INTEGER, raw.response_style_experiment.switches[after] + 1)
+}
+
+/** Retired selection: startup is read-only; fresh and legacy installs all use Own. */
+export function initializeResponseStyle(path, _options = {}) {
+  return readSettings(path).settings
+}
+
 function readJsonFile(path, limit = 2 * 1024 * 1024) {
   if (!path || !existsSync(path)) return null
   try {
@@ -199,6 +222,8 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 }
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
+const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
+const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
@@ -222,7 +247,15 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
+      // Omit only when the key is absent (pre-metadata installations); [] is an explicit declaration, and a present
+      // malformed value (string, null) normalizes to [] so it is never mistaken for an old registration.
+      ...(Object.hasOwn(app, 'voice_names') ? { voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
+        typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [] } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
+      // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
+      ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
+      ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
@@ -242,7 +275,11 @@ export function readApps({ appsJsonPath, launcherPath }) {
   const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
   const requested = installed?.slots?.chats?.default
   const active = candidates.includes(requested) ? requested : CHATS_DEFAULT
-  return { schema: 1, apps: out, slots: { chats: { default: active, candidates } },
+  // Owner's "In development" list (launcher.json in_development: [app ids]): apps the owner considers unfinished.
+  // The launcher folds them under an "In development" row; any id may be listed, including shell built-ins.
+  const inDevelopment = Array.isArray(launcher?.in_development)
+    ? [...new Set(launcher.in_development.map(v => cleanText(v, 64)).filter(v => /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)))].slice(0, 200) : []
+  return { schema: 1, apps: out, ...(inDevelopment.length ? { in_development: inDevelopment } : {}), slots: { chats: { default: active, candidates } },
     parking: [{ slot: 'chats', name: 'Chats', required: false, default_app: CHATS_DEFAULT, active, state: 'filled' }] }
 }
 

@@ -180,7 +180,7 @@ describe('persisted default and recovery contract', () => {
           "permissions": {
             "agent_apps": [],
             "files": "shared-write",
-            "other_agents": "none",
+            "other_agents": "read",
             "outside_tools": [
               "web",
               "search",
@@ -197,6 +197,7 @@ describe('persisted default and recovery contract', () => {
               "spotify",
             ],
             "preset": "standard",
+            "shared_with_agents": true,
             "wizard_apps": [
               "notes",
             ],

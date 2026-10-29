@@ -75,6 +75,43 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(out['accountCount'], 0)
         self.assertTrue(out['actions']['add'])
 
+    def test_exact_email_hash_without_the_email(self):
+        import hashlib
+        out = m.provider_accounts('chatgpt', lambda _: [row(), row('b', 'r2')], self.fetch)
+        want = hashlib.sha256(b'private@example.com').hexdigest()[:16]
+        self.assertEqual([a['emailHash'] for a in out['accounts']], [want, want])
+        self.assertNotIn('private@example.com', json.dumps(out))
+        plain = row(label='Work'); plain['access_token'] = 'opaque'
+        self.assertNotIn('emailHash', m.provider_accounts('claude', lambda _: [plain], self.fetch)['accounts'][0])
+
+    def test_listing_declares_it_reports_email_hashes(self):
+        # Connection apps fall back to comparing masked emails only for plugins that predate emailHash; this marker
+        # tells them a row without a hash is not the same account, even when the masks match.
+        out = m.provider_accounts('claude', lambda _: [], self.fetch)
+        self.assertEqual(out['identity'], {'emailHash': 'sha256-16'})
+
+    def test_email_like_label_is_never_hashed_as_the_account(self):
+        # A label is owner-typed text, not proof of the account: an opaque token labelled with someone's
+        # address must not get that address's hash (the app would merge two unrelated accounts).
+        labelled = row(label='other@example.com'); labelled['access_token'] = 'opaque'
+        account = m.provider_accounts('claude', lambda _: [labelled], self.fetch)['accounts'][0]
+        self.assertNotIn('emailHash', account)
+        self.assertNotIn('other@example.com', json.dumps(account))
+
+    def test_long_anthropic_profile_email_is_hashed_whole(self):
+        import hashlib
+        long_email = ('a' * 60) + '@' + ('d' * 100) + '.example'
+        original = m._anthropic_get
+        m._anthropic_get = lambda path, token: {'account': {'email': long_email}} if path == 'profile' else {}
+        try:
+            plan, usage, email = m._anthropic_quota('opaque')
+            self.assertEqual(email, long_email)
+            claude = row(label='Work'); claude['access_token'] = 'opaque-long'
+            account = m.provider_accounts('claude', lambda _: [claude], self.fetch)['accounts'][0]
+        finally:
+            m._anthropic_get = original
+        self.assertEqual(account['emailHash'], hashlib.sha256(long_email.encode()).hexdigest()[:16])
+
     def test_labels_mask_email_and_credential_like_values(self):
         out = m.provider_accounts('chatgpt', lambda _: [row(label='private@example.com')], self.fetch)
         self.assertEqual(out['accounts'][0]['name'], 'p***@e***')

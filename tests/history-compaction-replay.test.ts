@@ -29,4 +29,33 @@ describe('compaction replays in Wizard history', () => {
     const userTwin = { ...reply, id: 61, role: 'user' }
     expect(ids(project([reply, question, again, userTwin]))).toEqual([10, 12, 60, 61])
   })
+
+  it('drops a multipart replay of a stored string question with an image', () => {
+    const stored = { ...question, id: 70, content: 'Why fewer threads?\n[FILES]\n[screenshot]\n\n<memory-context>note</memory-context>' }
+    const replay = { ...question, id: 71, content: [
+      { type: 'text', text: 'Why fewer threads?\n[FILES]' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+      { type: 'text', text: '<memory-context>note</memory-context>' },
+    ] }
+    const answer = { id: 72, session_id: 's', role: 'assistant', timestamp: 301, content: 'They load lazily.', finish_reason: 'stop' }
+    expect(ids(project([stored, replay, answer]))).toEqual([70, 72])
+  })
+
+  it('keeps a multipart same-timestamp message whose text differs', () => {
+    const replay = { ...question, id: 73, content: [{ type: 'text', text: 'A different question entirely.' }] }
+    expect(ids(project([question, replay]))).toEqual([12, 73])
+  })
+
+  it('drops a multipart replay when only one copy still carries recalled memory context', () => {
+    const restored = { ...question, id: 80, content: [
+      { type: 'text', text: 'Why fewer threads?\n' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+    ] }
+    const replay = { ...question, id: 81, content: [
+      { type: 'text', text: 'Why fewer threads?' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+      { type: 'text', text: '<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data.]\nfact\n</memory-context>' },
+    ] }
+    expect(ids(project([restored, replay]))).toEqual([80])
+  })
 })

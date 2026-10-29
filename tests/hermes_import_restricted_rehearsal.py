@@ -65,6 +65,18 @@ def access_only(value):
     return value
 
 
+def effective_call(call):
+    fn = call.get('function', call)
+    args = fn.get('arguments') or {}
+    if isinstance(args, str):
+        args = json.loads(args)
+    if fn.get('name') == 'tool_call':
+        entries = args.get('calls', [args] if args.get('name') else [])
+        if isinstance(entries, list) and len(entries) == 1 and entries[0].get('name') == 'wizard_heavy_submit':
+            return entries[0]['name'], entries[0]['arguments']
+    return fn.get('name'), args
+
+
 def model_exercise(service, cid, model, fact):
     session = 'wizard_import_restricted_' + secrets.token_hex(6)
     # This helper does POST, PATCH hidden, GET and asserts true before returning.
@@ -131,18 +143,15 @@ finally: db.close()
                 results[msg.get('tool_call_id')] = {'text': msg.get('content')}
     terminals, fact_ok, submissions = [], False, []
     for call in calls:
-        fn = call.get('function', call)
-        args = fn.get('arguments') or {}
-        if isinstance(args, str):
-            args = json.loads(args)
+        tool_name, args = effective_call(call)
         result = results.get(call.get('id'), {})
-        if fn.get('name') == 'terminal':
+        if tool_name == 'terminal':
             out = str(result.get('output') or '') if isinstance(result, dict) else ''
             out = '\n'.join(x for x in out.splitlines() if not re.search(r'token\s*:', x, re.I))
             terminals.append({'command': args.get('command'), 'exit_code': result.get('exit_code'), 'output': out[:2500]})
-        if fn.get('name') == 'wizard_heavy_submit':
+        if tool_name == 'wizard_heavy_submit':
             submissions.append({'arguments': args, 'receipt': result})
-        if fn.get('name') == 'fact_store' and args.get('action') == 'search':
+        if tool_name == 'fact_store' and args.get('action') == 'search':
             fact_ok = fact in json.dumps(result, ensure_ascii=False)
     reply = '\n'.join(str(x.get('content', '')) for x in messages if x['role'] == 'assistant')
     model_config = row.get('model_config') or {}
@@ -159,7 +168,9 @@ finally: db.close()
          canonical_model=row.get('model'), canonical_provider=observed_provider,
          canonical_tool_results=terminals, fact_store_existing_fact_verified=fact_ok,
          reply_marker='IMPORT_RESTRICTED_CHECK' in reply, reply_fact_verified=fact in reply,
-         model_gate_pass=passed, heavy_job_gate_pass=heavy_pass)
+         model_gate_pass=passed, heavy_job_gate_pass=heavy_pass,
+         model_tool_names=[x.get('function', x).get('name') for x in calls],
+         heavy_tool_called=bool(submissions))
     return passed
 
 
@@ -332,6 +343,16 @@ def main():
         probe(['sh', '-c', 'p="$1/.restricted-import-write-$$"; printf probe > "$p" && rm "$p" && test ! -e "$p"', 'probe', str(workspace)])
         probe(['sh', '-c', 'printf probe > "$1/.restricted-import-write-refused"', 'probe', str(context)], expected=2)
         probe(['sh', '-c', 'test ! -e /var/run/docker.sock && test ! -e /run/docker.sock && test ! -e "$1/.wizard-os/agents/private" && test ! -e /opt/data/.wizard-os/agents/private', 'probe', str(source.parent)])
+        plugin_probe = command(['docker', 'exec', cid, '/opt/hermes/.venv/bin/python', '-c',
+            'import json; from hermes_cli.plugins import get_plugin_manager; from tools.registry import registry; '
+            'p=get_plugin_manager(); p.discover_and_load(); '
+            'print(json.dumps({"registered_agent_heavy_tools":registry.get_tool_names_for_toolset("wizard-agent-heavy")}))'],
+            log=False, timeout=90)
+        h.require(plugin_probe.returncode == 0, 'agent_heavy_plugin_probe_failed')
+        h.require(bool(plugin_probe.stdout.strip()), 'agent_heavy_plugin_probe_empty')
+        tools = json.loads(plugin_probe.stdout.strip().splitlines()[-1])
+        emit(**tools)
+        h.require('wizard_heavy_submit' in tools['registered_agent_heavy_tools'], 'agent_heavy_tool_not_registered')
         section('5. Live Service hidden session then one original-provider model turn')
         model_pass = model_exercise(service, cid, plan['summary']['model'], fact)
         h.require(model_pass, 'restricted_acceptance_remaining_gates')

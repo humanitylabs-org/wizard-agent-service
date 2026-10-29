@@ -98,6 +98,9 @@ describe('restart during a live run', () => {
     expect(body).toMatchObject({ session_id: 'wizard_wisdom', model: 'claude-opus-5-5', provider: 'anthropic', require_model_lock: true })
     expect(body.input).toMatch(/^\[Wizard follow-through\] Wizard restarted/u)
     expect(body.input).toContain('On Wisdom, I am unable to select this large Chinese character')
+    // The owner's message is already in the thread: the resume names it, never repeats it.
+    expect(body.input).toContain('not a new or repeated message from the owner')
+    expect(body.input).not.toContain('The interrupted request was')
     expect(decisions).toEqual([{ state: 'admitted', reason: '', recoveryRunId: recovery.publicRunId }])
 
     // More ticks and another restart never admit a second recovery.

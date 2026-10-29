@@ -85,7 +85,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     return [...unique.values()]
   }
   const admitted = key => queue()?.byIdempotencyKey('direct', key)
-  const isBusy = id => busy(id) || (queue()?.latestProjections([id]) || []).some(row => ACTIVE.has(row.status))
+  const isBusy = id => busy(id) || ACTIVE.has(queue()?.latestStatus(id))
   const consumed = (rows, delegationId, at, messageId, sourceKind = 'transcript') => rows.some(row => {
     if (delegationId && row.role === 'user' && textOf(row).includes(`${RECEIPT_PREFIX}${delegationId}\n`)) return true
     if (delegationId && Number(row.timestamp) > at && (row.role === 'tool' || row.role === 'assistant' && row.tool_calls?.length)) {
@@ -213,6 +213,14 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   }
   const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
   return {
+    // Thread id -> identity of its pending saved results. The Chats list cache fingerprints cached rows
+    // with this: a result that appears or clears re-projects its thread instead of serving a stale row
+    // (a stale wizard_background_result row tripped the cache self-check and turned the cache off).
+    stamps() {
+      const out = new Map()
+      for (const row of cache.records) if (!admitted(row.key)) out.set(row.sessionId, `${out.get(row.sessionId) ?? ''}${row.id};`)
+      return out
+    },
     async list() {
       // Deliver one settled generation even when the client's polling interval
       // exceeds refreshMs; otherwise every poll can restart 'scanning'.

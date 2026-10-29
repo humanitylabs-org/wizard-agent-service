@@ -123,10 +123,9 @@ class ImportTests(unittest.TestCase):
         plan = self.plan()
         for entry in plan['credentials']:
             if entry['kind'] == 'config-field': entry['approved'] = True
-        result = self.apply(m.approve(plan))
-        imported = m.load_yaml((self.wizard / 'agents/fixture-agent/home/config.yaml').read_text())
-        self.assertNotIn('WIZARD_HEAVY_TOKEN', imported.get('env', {}))
-        self.undo(result)
+        with self.assertRaisesRegex(m.ImportFailure, 'inline_credentials_require_secret_store'):
+            self.apply(m.approve(plan))
+        self.assertFalse((self.wizard / 'agents').exists())
         self.assertEqual(m.load_yaml((self.home / 'config.yaml').read_text()), config)
 
     def test_corrupt_backup_fails_before_any_rollback_mutation(self):
@@ -339,6 +338,47 @@ class ImportTests(unittest.TestCase):
         m.approve(p)
         with self.assertRaisesRegex(m.ImportFailure, 'writer_units'):
             self.apply(p)
+    def test_approved_heavy_grant_exposes_plugin_in_explicit_api_toolsets_only(self):
+        cfg = m.load_yaml((self.home / 'config.yaml').read_text())
+        cfg['platform_toolsets'] = {'api_server': ['terminal', 'memory'], 'telegram': ['memory']}
+        original = m.yaml.safe_dump(cfg)
+        (self.home / 'config.yaml').write_text(original)
+        p = self.plan()
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        unchanged = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertEqual(unchanged['platform_toolsets']['api_server'], ['terminal', 'memory'])
+        (self.home / 'config.yaml').write_text(original)
+        p['grants'] = {'heavy': True}
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        granted = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertIn('wizard-agent-heavy', granted['plugins']['enabled'])
+        self.assertEqual(granted['platform_toolsets']['api_server'], ['terminal', 'memory', 'wizard-agent-heavy'])
+        self.assertEqual(granted['platform_toolsets']['telegram'], ['memory'])
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        twice = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertEqual(twice['platform_toolsets']['api_server'].count('wizard-agent-heavy'), 1)
+        p['grants'] = {'heavy': False}
+        m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+        revoked = m.load_yaml((self.home / 'config.yaml').read_text())
+        self.assertNotIn('wizard-agent-heavy', revoked['platform_toolsets']['api_server'])
+        self.assertNotIn('wizard-agent-heavy', revoked['plugins']['enabled'])
+
+    def test_heavy_api_allowlist_shapes_fail_closed_or_preserve_defaults(self):
+        original = m.load_yaml((self.home / 'config.yaml').read_text())
+        for value in [None, [], ['terminal'], 'terminal']:
+            cfg = {**original, 'platform_toolsets': {'api_server': value, 'telegram': ['memory']}}
+            (self.home / 'config.yaml').write_text(m.yaml.safe_dump(cfg))
+            p = self.plan(); p['grants'] = {'heavy': True}
+            if isinstance(value, str):
+                with self.assertRaisesRegex(m.ImportFailure, 'api_toolsets_invalid'):
+                    m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+                continue
+            m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
+            actual = m.load_yaml((self.home / 'config.yaml').read_text())
+            expected = None if value is None else [*value, 'wizard-agent-heavy']
+            self.assertEqual(actual['platform_toolsets']['api_server'], expected)
+            self.assertEqual(actual['platform_toolsets']['telegram'], ['memory'])
+
     def test_takeover_wiring_keeps_own_cron_messaging(self):
         p = self.plan()
         p['mode'] = 'take-over'
@@ -346,6 +386,7 @@ class ImportTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN="fixture-secret"', (self.home / '.env').read_text())
         self.assertTrue(json.loads((self.home / 'cron/jobs.json').read_text())['jobs'][0]['enabled'])
         self.assertTrue(m.load_yaml((self.home / 'config.yaml').read_text())['gateway']['platforms']['telegram']['enabled'])
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'the writer census reads /proc/<pid>/fd and F_SETLEASE: Linux only')
     def test_live_writable_fd_refuses_move(self):
         # A different process, same owner, holding a writable FD blocks rename even for rehearsal.
         import subprocess, sys
