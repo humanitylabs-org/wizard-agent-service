@@ -6138,10 +6138,22 @@ function buildWizardServer(options, lifetime) {
               signal: controller.signal,
             })
         const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
+        // Error responses are untrusted too: never publish agent-owned active
+        // content on the owner origin. Only the events route may return SSE.
+        const mime = contentType.split(';', 1)[0].trim().toLowerCase()
+        const bodiless = [204, 205, 304].includes(upstream.status)
+        if (!bodiless && mime !== 'application/json' && !(request.method === 'GET' && /\/events$/.test(upstreamPath) && mime === 'text/event-stream')) {
+          await upstream.body?.cancel().catch(() => {})
+          response.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'" })
+          response.end(JSON.stringify({ error: 'invalid_upstream_media_type' }))
+          return
+        }
         const responseHeaders = {
           'Content-Type': contentType,
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
         }
         const replayed = upstream.headers.get('idempotency-replayed')
         if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
