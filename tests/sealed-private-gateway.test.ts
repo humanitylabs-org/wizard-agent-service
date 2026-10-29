@@ -46,7 +46,7 @@ async function socketMcp(path: string, token: string, method: string, params: un
 
 const SEALED = { network_policy: 'tinfoil-sealed-v1', sealed_gateway: true, provider_key_location: 'provider' }
 
-describe('sealed private agent scoped gateway (synthetic Mizel)', () => {
+describe('sealed private agent scoped gateway (synthetic Mizel + Recorder)', () => {
   it('opt-in predicate is exact and the rendered config uses the socket edge URL', () => {
     const base = { privacy: 'private', runtime: SEALED }
     expect(sealedGateway(base)).toBe(true)
@@ -58,12 +58,13 @@ describe('sealed private agent scoped gateway (synthetic Mizel)', () => {
     expect(yaml).toContain('fallback_providers: []')
   })
 
-  it('Mizel tools reach the sealed agent only on its socket; other apps and TCP are refused', async () => {
+  it('Mizel and Recorder tools reach the sealed agent only on its socket; other apps and TCP are refused', async () => {
     const mizel = await fakeApp('search_meetings', 'SYNTHETIC-MIZEL-R10')
     const notes = await fakeApp('note_add', 'SYNTHETIC-NOTES')
+    const recorder = await fakeApp('search_recordings', 'SYNTHETIC-RECORDER-R10')
     const dir = mkdtempSync(join(tmpdir(), 'r10-sealed-gw-'))
     mkdirSync(join(dir, 'agents'), { recursive: true })
-    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [appEntry('mizel', mizel.url), appEntry('notes', notes.url)] }))
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [appEntry('mizel', mizel.url), appEntry('notes', notes.url), appEntry('recorder', recorder.url)] }))
     const upstream = createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(req.url === '/api/model/options' ? { providers: [] } : { data: [] })) })
     servers.push(upstream)
     const up = await listen(upstream) as import('node:net').AddressInfo
@@ -81,7 +82,7 @@ describe('sealed private agent scoped gateway (synthetic Mizel)', () => {
     const file = join(dir, 'agents', id, 'agent.json')
     const stored = JSON.parse(readFileSync(file, 'utf8')); stored.runtime = { ...stored.runtime, ...SEALED }; writeFileSync(file, JSON.stringify(stored))
     // The owner ticks Mizel for this agent; the update rewrites the harness and prepares its socket.
-    const ticked = await fetch(`${base}/wizard/v1/agents/${id}`, json({ permissions: { wizard_apps: ['mizel'] } }, 'PATCH'))
+    const ticked = await fetch(`${base}/wizard/v1/agents/${id}`, json({ permissions: { wizard_apps: ['mizel', 'recorder'] } }, 'PATCH'))
     expect(ticked.status).toBe(200)
     const home = join(dir, 'agents', id, 'home')
     expect(readFileSync(join(home, 'config.yaml'), 'utf8')).toContain('http://edge:8923/wizard/mcp')
@@ -92,9 +93,11 @@ describe('sealed private agent scoped gateway (synthetic Mizel)', () => {
     for (let i = 0; i < 50; i++) { try { readFileSync(socket); } catch (e: any) { if (e.code !== 'ENOENT') break } await new Promise((r) => setTimeout(r, 20)) }
     const listed = await socketMcp(socket, token, 'tools/list')
     expect(listed.status).toBe(200)
-    expect(listed.json.result.tools.map((t: any) => t.name).sort()).toEqual(['mizel__search_meetings', 'wizard_apps'])
+    expect(listed.json.result.tools.map((t: any) => t.name).sort()).toEqual(['mizel__search_meetings', 'recorder__search_recordings', 'wizard_apps'])
     const called = await socketMcp(socket, token, 'tools/call', { name: 'mizel__search_meetings', arguments: {} })
     expect(called.json.result.content[0].text).toBe('SYNTHETIC-MIZEL-R10')
+    const rec = await socketMcp(socket, token, 'tools/call', { name: 'recorder__search_recordings', arguments: {} })
+    expect(rec.json.result.content[0].text).toBe('SYNTHETIC-RECORDER-R10')
     const refused = await socketMcp(socket, token, 'tools/call', { name: 'notes__note_add', arguments: {} })
     expect(refused.json.result.isError).toBe(true)
     expect(notes.calls).toEqual([])
@@ -102,5 +105,6 @@ describe('sealed private agent scoped gateway (synthetic Mizel)', () => {
     const tcp = await fetch(`${base}/wizard/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }) })
     expect(tcp.status).not.toBe(200)
     expect(mizel.calls).toEqual(['search_meetings'])
+    expect(recorder.calls).toEqual(['search_recordings'])
   })
 })

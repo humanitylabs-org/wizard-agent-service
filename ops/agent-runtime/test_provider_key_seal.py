@@ -33,9 +33,14 @@ def fixture(**runtime):
     return agent
 
 
-def compose(agent, home='/srv/agents/synthetic/home'):
+KEYDIR = Path(tempfile.mkdtemp(prefix='r10-service-'))
+SERVICE_KEY = KEYDIR / 'tinfoil.key'
+SERVICE_KEY.write_text(SYNTHETIC_KEY + '\n'); SERVICE_KEY.chmod(0o600)
+
+
+def compose(agent, home='/srv/agents/synthetic/home', key=str(SERVICE_KEY)):
     return json.loads(ar.compose_doc(agent, image='stock-hermes', proxy_image=ar.DEFAULT_PROXY_IMAGE,
-                                     home_source=home, uid=1234, gid=1234, ports=True))
+                                     home_source=home, uid=1234, gid=1234, ports=True, key_source=key))
 
 
 class KeyLocationComposeTests(unittest.TestCase):
@@ -53,13 +58,13 @@ class KeyLocationComposeTests(unittest.TestCase):
         self.assertEqual(search[search.index('--bind') + 1], '10.248.91.2')
         self.assertEqual(key['environment']['UPSTREAM_IP'], '10.248.91.2')
         self.assertTrue(doc['networks']['agent-synthetic-keyed']['internal'])
-        # Key directory is a sibling of the Hermes home, read-only, only in the injector.
-        self.assertEqual(key['volumes'], ['/srv/agents/synthetic/provider-key:/run/provider-key:ro'])
-        self.assertEqual(key['user'], '1234:1234')
+        # The Service's own key file, read-only, only in the injector, as its owner. No copy.
+        self.assertEqual(key['volumes'], [f'{SERVICE_KEY}:/run/provider-key/key:ro'])
+        self.assertEqual(key['user'], f'{os.getuid()}:{os.getgid()}')
         self.assertEqual(key['logging'], {'driver': 'none'})
         for name, svc in s.items():
             if name != 'agent-synthetic-key':
-                self.assertNotIn('provider-key', json.dumps(svc), name)
+                self.assertNotIn(str(SERVICE_KEY), json.dumps(svc), name)
         self.assertNotIn('TINFOIL_API_KEY', json.dumps(doc))
 
     def test_unknown_location_or_missing_keyed_subnet_fails_closed(self):
@@ -67,6 +72,13 @@ class KeyLocationComposeTests(unittest.TestCase):
         agent = fixture(); del agent['runtime']['sealed_networks']['keyed']
         with self.assertRaises(ar.RuntimeFailure): compose(agent)
         with self.assertRaises(ar.RuntimeFailure): compose(fixture(), home='/srv/agents/synthetic/data')
+        with self.assertRaises(ar.RuntimeFailure) as caught: compose(fixture(), key='')
+        with self.assertRaises(ar.RuntimeFailure) as caught: compose(fixture(), key=str(KEYDIR / 'absent'))
+        self.assertEqual(caught.exception.code, 'provider_not_configured')
+        # A key inside the agents tree (backup/export scope) or readable by others is refused.
+        with self.assertRaises(ar.RuntimeFailure): compose(fixture(), key='/srv/agents/shared.key')
+        loose = KEYDIR / 'loose.key'; loose.write_text('x\n'); loose.chmod(0o640)
+        with self.assertRaises(ar.RuntimeFailure): compose(fixture(), key=str(loose))
 
     def test_legacy_location_is_unchanged(self):
         agent = fixture(provider_key_location='')
@@ -100,26 +112,26 @@ class ServiceOwnedMigrationTests(unittest.TestCase):
         self.agents = ar.Agents(self.tmp / 'agents', keyfile)
         (self.tmp / 'agents' / 'synthetic' / 'gateway.key').write_text('synthetic-gateway-token\n')
 
-    def test_migration_moves_key_out_of_home_and_rollback_retires_copy(self):
+    def test_migration_leaves_no_key_in_agent_tree_and_rollback_restores(self):
         agent = fixture(sealed_gateway=True)
+        before = {p: p.read_bytes() for p in (self.tmp / 'agents').rglob('*') if p.is_file() and p.name != '.env'}
         self.agents.add_provider_keys(agent)
         self.assertNotIn(SYNTHETIC_KEY, self.env.read_text())
         self.assertIn('TINFOIL_API_KEY=' + seal.PLACEHOLDER_KEY, self.env.read_text())
         self.assertIn('API_SERVER_KEY=synthetic-api', self.env.read_text())
-        key = self.tmp / 'agents' / 'synthetic' / seal.KEY_DIR / 'key'
-        self.assertEqual(key.read_text().strip(), SYNTHETIC_KEY)
-        self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o400)
-        self.assertEqual(stat.S_IMODE(key.parent.stat().st_mode), 0o700)
+        # Backup/export scope: nothing anywhere under the agents root holds the key.
+        for path in (self.tmp / 'agents').rglob('*'):
+            if path.is_file():
+                self.assertNotIn(SYNTHETIC_KEY.encode(), path.read_bytes(), path)
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data)   # history/identity untouched
         digest = (self.tmp / 'agents' / 'synthetic' / 'gateway-edge' / 'token.sha256').read_text().strip()
         self.assertRegex(digest, r'^[0-9a-f]{64}$')
-        self.assertNotIn('synthetic-gateway-token', digest)
-        # Idempotent re-run (restart) keeps the same contract.
         self.agents.add_provider_keys(agent)
         self.assertEqual(self.env.read_text().count('TINFOIL_API_KEY='), 1)
-        # Rollback: legacy location restores the bearer and removes the injector copy.
+        # Forced rollback: legacy location restores the bearer in the home only.
         self.agents.add_provider_keys(fixture(provider_key_location=''))
         self.assertIn('TINFOIL_API_KEY=' + SYNTHETIC_KEY, self.env.read_text())
-        self.assertFalse(key.parent.exists())
 
     def test_missing_service_key_fails_before_home_write(self):
         self.agents.tinfoil_key_file = self.tmp / 'absent'
@@ -128,18 +140,13 @@ class ServiceOwnedMigrationTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'provider_not_configured')
         self.assertEqual(self.env.read_text(), before)
 
-    def test_symlinked_key_dir_is_refused(self):
-        (self.tmp / 'elsewhere').mkdir()
-        os.symlink(self.tmp / 'elsewhere', self.tmp / 'agents' / 'synthetic' / seal.KEY_DIR)
-        with self.assertRaises(ar.RuntimeFailure): self.agents.add_provider_keys(fixture())
-        self.assertEqual(list((self.tmp / 'elsewhere').iterdir()), [])
-
 
 class RuntipiSealedRecipeTests(unittest.TestCase):
     def driver(self, state):
         from unittest.mock import Mock
         driver = object.__new__(ar.RuntipiDriver)
         driver.image, driver.proxy_image, driver.home_mount = 'stock-hermes', ar.DEFAULT_PROXY_IMAGE, 'stock'
+        driver.agents = ar.Agents(KEYDIR / 'agents', SERVICE_KEY)
         def req(method, path, payload=None):
             if method == 'PUT':
                 state.update(payload)

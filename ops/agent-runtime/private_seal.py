@@ -17,7 +17,9 @@ HOSTS = ('atc.tinfoil.sh', 'github-proxy.tinfoil.sh', 'tuf-repo-cdn.sigstore.dev
 # Provider-only key contract (round 10): Hermes holds this public constant,
 # never the provider bearer. The Service-owned injector replaces it.
 PLACEHOLDER_KEY = 'wizard-sealed-provider-key-held-by-injector'
-KEY_DIR = 'provider-key'          # Service-owned, sibling of the agent home
+# The injector mounts the Service's own provider key file read-only; no
+# per-agent copy exists (agent backups/exports/imports cannot capture one).
+KEY_TARGET = '/run/provider-key/key'
 GATEWAY_IMAGE = 'restricted-agent-sidecars:local'   # REUSE restricted scoped edge.py
 KEY_IMAGE = 'wizard-private-network-edge:round10'   # same stdlib egress image + injector
 
@@ -60,14 +62,27 @@ def gateway(agent):
     return value
 
 
-def key_mount(home_source):
-    """Host directory beside (never inside) the Hermes home."""
+def agent_root(home_source):
     if not home_source.endswith('/home'):
         raise ValueError('private_network_policy_invalid')
-    return home_source[:-len('/home')] + '/' + KEY_DIR
+    return home_source[:-len('/home')]
 
 
-def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
+def key_owner(key_source, home_source):
+    """Absolute Service key file outside the agent tree; injector runs as its owner."""
+    import os
+    if not key_source.startswith('/') or key_source.startswith(agent_root(home_source).rsplit('/', 1)[0] + '/'):
+        raise ValueError('private_network_policy_invalid')
+    try:
+        st = os.stat(key_source)
+    except OSError:
+        raise ValueError('provider_not_configured') from None
+    if st.st_mode & 0o077:
+        raise ValueError('private_network_policy_invalid')
+    return st.st_uid, st.st_gid
+
+
+def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000, key_source=''):
     if not enabled(agent):
         return doc
     nets = networks(agent)
@@ -119,6 +134,7 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
     internal = [(seal_name, seal), (egress_name, egress)]
     if key_injected(agent):
         keyed = nets[2]; keyed_name = main + '-keyed'
+        key_uid, key_gid = key_owner(key_source, home_source)
         internal.append((keyed_name, keyed))
         # Hermes keeps its unchanged URL; the seal alias now names the
         # injector. The official proxy leaves the seal: only the injector
@@ -131,11 +147,11 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
             'networks': {seal_name: {'ipv4_address': str(seal[3]), 'aliases': [proxy]},
                          keyed_name: {'ipv4_address': str(keyed[3])}},
             'environment': {'LISTEN_IP': str(seal[3]), 'UPSTREAM_IP': str(keyed[2]),
-                            'PORTS': json.dumps([3301, 3302]), 'KEY_FILE': '/run/provider-key/key'},
-            'volumes': [f'{key_mount(home_source)}:/run/provider-key:ro'],
+                            'PORTS': json.dumps([3301, 3302]), 'KEY_FILE': KEY_TARGET},
+            'volumes': [f'{key_source}:{KEY_TARGET}:ro'],
             'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
-            # Same owner as the Service-written 0400 key file; no other reader.
-            'user': f'{int(uid)}:{int(gid)}', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
+            # Same owner as the Service key file (0600/0400); no other reader.
+            'user': f'{key_uid}:{key_gid}', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
             'logging': {'driver': 'none'}, 'depends_on': [proxy],
         }
         client.setdefault('depends_on', [])
@@ -144,7 +160,7 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
     if gateway(agent):
         # REUSE the restricted scoped edge: token-hash + path allowlist, then
         # the Service's per-agent Unix socket. No TCP route to the Service.
-        root = key_mount(home_source).rsplit('/', 1)[0]
+        root = agent_root(home_source)
         services[main + '-gateway'] = {
             'image': GATEWAY_IMAGE, 'command': ['python3', '/srv/edge.py'],
             'networks': {seal_name: {'ipv4_address': str(seal[5]), 'aliases': ['edge']}},

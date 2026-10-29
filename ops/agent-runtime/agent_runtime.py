@@ -185,12 +185,9 @@ class Agents:
             if not key:
                 raise RuntimeFailure("provider_not_configured", 503)
             if injected:
-                # Service-owned migration: provider key leaves the Hermes home
-                # and lives only beside it for the injector (never printed).
-                self.write_provider_key(agent, key, env_path.parent)
+                # Service-owned migration: the bearer leaves the Hermes home;
+                # only the injector reads the Service's own key file (no copy).
                 key = private_seal.PLACEHOLDER_KEY
-            else:
-                self.retire_provider_key(agent)
             lines.append(f"TINFOIL_API_KEY={key}")
         if scoped_gateway:
             self.write_gateway_hash(agent)
@@ -226,20 +223,8 @@ class Agents:
             tmp.unlink(missing_ok=True)
             raise RuntimeFailure("provider_key_owner_mismatch", 409) from None
 
-    def write_provider_key(self, agent: dict, key: str, home: Path) -> None:
-        import private_seal
-        self._owned_file(self.root / agent["id"] / private_seal.KEY_DIR, "key", key, home)
-
-    def retire_provider_key(self, agent: dict) -> None:
-        """Rollback/legacy path: the injector copy is removed, never left stale."""
-        import private_seal
-        directory = self.root / agent["id"] / private_seal.KEY_DIR
-        if directory.is_symlink():
-            raise RuntimeFailure("provider_key_dir_unsafe", 409)
-        if directory.is_dir():
-            for child in directory.iterdir():
-                child.unlink()
-            directory.rmdir()
+    def key_source(self) -> str:
+        return str(Path(self.tinfoil_key_file).resolve()) if self.tinfoil_key_file else ""
 
     def write_gateway_hash(self, agent: dict) -> None:
         token = self.secret(agent["id"], "gateway.key")
@@ -310,7 +295,8 @@ def wants_private_search(agent: dict) -> bool:
     return agent.get("privacy") == "private" and (agent.get("model") or {}).get("provider") == "tinfoil"
 
 
-def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
+def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool,
+                key_source: str = "") -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
     main, proxy = service_names(agent)
@@ -352,8 +338,10 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         doc["volumes"] = doc_volumes
     import private_seal
     try:
-        doc = private_seal.apply(doc, agent, ports=ports, home_source=home_source, uid=uid, gid=gid)
-    except ValueError:
+        doc = private_seal.apply(doc, agent, ports=ports, home_source=home_source, uid=uid, gid=gid, key_source=key_source)
+    except ValueError as error:
+        if str(error) == "provider_not_configured":
+            raise RuntimeFailure("provider_not_configured", 503) from None
         raise RuntimeFailure("private_network_policy_invalid", 409) from None
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
 
@@ -418,7 +406,7 @@ class ComposeDriver:
         path = self.agents.root / agent["id"] / "runtime" / "docker-compose.yml"
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text(compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=str(home),
-                                    uid=st.st_uid, gid=st.st_gid, ports=True))
+                                    uid=st.st_uid, gid=st.st_gid, ports=True, key_source=self.agents.key_source()))
         return path
 
     def apply(self, agent: dict) -> dict:
@@ -722,7 +710,8 @@ class RuntipiDriver:
         (pkg / "wizard.md").write_text(wizard_md(agent))
         (pkg / "runtipi" / "config.json").write_text(config_doc(agent, version=agent.get("runtime", {}).get("version") or "0.1.0"))
         (pkg / "runtipi" / "docker-compose.yml").write_text(
-            compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=stock_home, uid=1000, gid=1000, ports=False))
+            compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=stock_home, uid=1000, gid=1000, ports=False,
+                        key_source=self.agents.key_source()))
         git = ["git", "-C", str(pkg), "-c", "user.name=Wizard OS", "-c", "user.email=agents@wizard.local"]
         if not (pkg / ".git").exists():
             subprocess.run(["git", "init", "-q", str(pkg)], check=True)
@@ -741,7 +730,8 @@ class RuntipiDriver:
     def _sealed_doc(self, agent: dict) -> dict:
         stock_home = f"${{ROOT_FOLDER_HOST}}/app-data/wizard-os/agents/{agent['id']}/home"
         return json.loads(compose_doc(agent, image=self.image, proxy_image=self.proxy_image,
-                                      home_source=stock_home, uid=1000, gid=1000, ports=False))
+                                      home_source=stock_home, uid=1000, gid=1000, ports=False,
+                                      key_source=self.agents.key_source()))
 
     def _sealed_override(self, agent: dict, rt) -> None:
         """Final owner override replaces every sealed service; exact readback or refuse."""
