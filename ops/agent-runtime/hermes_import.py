@@ -475,8 +475,8 @@ class DockerRuntime:
         # No source/config/credential mounts and no gateway/model startup. Probe
         # this exact approved image in a fresh disposable, networkless home.
         name = 'wizard-import-schema-' + secrets.token_hex(6)
-        code = ('import json,sqlite3; from hermes_state import SessionDB; '
-                'db=SessionDB("/opt/data/state.db"); '
+        code = ('import json,sqlite3; from pathlib import Path; from hermes_state import SessionDB; '
+                'db=SessionDB(Path("/opt/data/state.db")); '
                 'c=sqlite3.connect("/opt/data/state.db"); '
                 'print(json.dumps(c.execute("SELECT version FROM schema_version").fetchall())); '
                 'c.close(); db.close()')

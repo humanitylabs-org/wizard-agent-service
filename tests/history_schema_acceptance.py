@@ -16,6 +16,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ops/agent-runtime'))
 import hermes_import as h
@@ -43,6 +44,34 @@ def main():
     scratch = Path(tempfile.mkdtemp(prefix='schema-docker-'))
     before_probes = set(h.run(['docker', 'ps', '-aq', '--filter', 'name=^/wizard-import-schema-']).splitlines())
     before_volumes = set(h.run(['docker', 'volume', 'ls', '-q']).splitlines())
+
+    class ObservedDockerRuntime(h.DockerRuntime):
+        def history_schema_version(self):
+            # Preserve the actual product subprocess result before h.run discards
+            # stderr on refusal. Only this fixed public/synthetic probe is logged.
+            real_run = subprocess.run
+            def observe(argv, **kwargs):
+                is_probe = (argv[:2] == ['docker', 'run'] and '--name' in argv
+                            and argv[argv.index('--name') + 1].startswith('wizard-import-schema-'))
+                try:
+                    result = real_run(argv, **kwargs)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    if is_probe:
+                        with (evidence / 'product-probes.jsonl').open('a') as out:
+                            out.write(json.dumps({
+                                'name': argv[argv.index('--name') + 1], 'error': type(exc).__name__,
+                                'stdout': str(getattr(exc, 'stdout', None)),
+                                'stderr': str(getattr(exc, 'stderr', None))}) + '\n')
+                    raise
+                if is_probe:
+                    with (evidence / 'product-probes.jsonl').open('a') as out:
+                        out.write(json.dumps({'name': argv[argv.index('--name') + 1],
+                            'code_sha256': hashlib.sha256(argv[-1].encode()).hexdigest(),
+                            'exit_code': result.returncode, 'stdout': result.stdout,
+                            'stderr': result.stderr}) + '\n')
+                return result
+            with patch.object(h.subprocess, 'run', side_effect=observe):
+                return super().history_schema_version()
 
     def run_image(phase, home, code, expected_exit=0):
         name = 'wizard-schema-proof-' + token + '-' + phase
@@ -73,7 +102,8 @@ def main():
 
     create = '''import json,sqlite3
 from hermes_state import SessionDB
-p='/opt/data/state.db'
+from pathlib import Path
+p=Path('/opt/data/state.db')
 db=SessionDB(p)
 db.create_session('schema-proof','cli')
 db.append_message('schema-proof','user','synthetic prompt')
@@ -108,7 +138,8 @@ print(json.dumps({'synthetic_schema':31,'current_identity_columns_trigger_backfi
 '''
     reopen = '''import json,sqlite3
 from hermes_state import SessionDB
-p='/opt/data/state.db'
+from pathlib import Path
+p=Path('/opt/data/state.db')
 db=SessionDB(p)
 rows=db.get_messages('schema-proof')
 assert [m['content'] for m in rows]==['synthetic prompt','synthetic answer']
@@ -129,7 +160,8 @@ print(json.dumps({'schema':30,'read_append_replace_restart':True,'integrity':'ok
 '''
     unsafe = '''import json,sqlite3
 from hermes_state import SessionDB
-p='/opt/data/state.db'
+from pathlib import Path
+p=Path('/opt/data/state.db')
 c=sqlite3.connect(p)
 before=[r[0] for r in c.execute('SELECT message_uid FROM messages ORDER BY id')]
 c.close()
@@ -162,7 +194,7 @@ raise SystemExit(17)
         report['image_inspect'] = json.loads(h.run(['docker', 'image', 'inspect', image]))[0]
         digest = image.split('@', 1)[1]
         assert any(x.endswith('@' + digest) for x in report['image_inspect']['RepoDigests'])
-        target = h.DockerRuntime({'image': image}, scratch, 'fixture').history_schema_version()
+        target = ObservedDockerRuntime({'image': image}, scratch, 'fixture').history_schema_version()
         assert target == 30
         report['fresh_target_schema'] = target
         equal = scratch / 'equal'
@@ -173,7 +205,7 @@ raise SystemExit(17)
                         'print(json.dumps({"source_sha256":observed}),flush=True); assert observed==expected')
         run_image('image-source', equal, source_check)
         run_image('equal-create', equal, create)
-        h.DockerRuntime({'image': image}, scratch, 'fixture').check_history(equal)
+        ObservedDockerRuntime({'image': image}, scratch, 'fixture').check_history(equal)
         run_image('equal-roundtrip', equal, reopen)
         owner = scratch / 'owner'
         newer = owner / '.hermes'
@@ -186,7 +218,7 @@ raise SystemExit(17)
         shutil.copytree(newer, negative)
         run_image('unguarded-write-negative', negative, unsafe, 17)
         before = snapshot(newer)
-        factory = lambda *a: h.DockerRuntime(*a)  # real adapter; no fake Docker transport or runtime
+        factory = lambda *a: ObservedDockerRuntime(*a)  # unchanged real adapter, result observation only
         refused = []
         for kind in ('move', 'archive'):
             source = newer
