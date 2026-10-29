@@ -547,6 +547,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "finished-run-leaves-working",
+      "description": "A thread leaves Working as soon as its run finishes, not when the cached listing expires",
+      "layer": "server",
+      "how_to_test": "Admit a run, make the list read Hermes while the run is live, finish the run and read its status as the browser does, then list again: the thread must stop listing as Working within 1 s, well inside main's 30 s cached Hermes listing, and its row must come from the finished listing (two messages). Main runs the direct admission path (fails without the re-read) and the durable-queue path (Working ends from the queue projection); host-profile, container and restricted list live through their agent and are asserted the same way. tests/list-working-after-reply.node.mjs also covers a listing read already in flight when the run ends. Fixture HTTP evidence only, not browser or live-model acceptance.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/list-working-after-reply.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "finished-run-leaves-working",
+      "policy_exemptions": []
+    },
+    {
       "id": "automatic-titles",
       "description": "Complete an untitled thread and verify its generated title after list reload without touching other agents",
       "layer": "server",

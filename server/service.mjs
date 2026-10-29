@@ -3720,6 +3720,15 @@ function buildWizardServer(options, lifetime) {
     }
     return canonicalSessionInFlight
   }
+  // A read already in flight may have captured the state from before this moment and would then
+  // store it for another CANONICAL_SESSION_CACHE_MS. Let it land, then read again.
+  const refreshCanonicalSessionsAfterNow = () => {
+    const earlier = canonicalSessionInFlight ? canonicalSessionInFlight.catch(() => undefined) : Promise.resolve()
+    return earlier.then(() => {
+      canonicalSessionCache.expiresAt = 0
+      return refreshCanonicalSessions()
+    })
+  }
   const loadCanonicalSessions = async () => {
     const now = Date.now()
     if (Array.isArray(canonicalSessionCache.sessions)) {
@@ -6422,7 +6431,13 @@ function buildWizardServer(options, lifetime) {
             const status = completedRun.status
             if (!ACTIVE_RUN_STATUSES.has(status)) spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output))
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
-            else if (tracked) directRuns.delete(runId)
+            else if (tracked) {
+              directRuns.delete(runId)
+              // The run just ended. The cached Hermes listing still says it is running and would keep the
+              // thread in Working for up to CANONICAL_SESSION_CACHE_MS (30 s) after the reply is on screen.
+              canonicalSessionCache.expiresAt = 0
+              void refreshCanonicalSessionsAfterNow().then(() => listCache.touch(), () => undefined)
+            }
           } catch { /* status projection is best effort */ }
         }
         if (upstream.ok && operator && request.method === 'POST' && upstreamPath === '/v1/runs' && pendingWorker) {
