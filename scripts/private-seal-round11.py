@@ -31,8 +31,9 @@ seal.KEY_IMAGE = os.environ['R11_KEY_IMAGE']
 from test_private_seal import fixture
 from wam.runtipi import Runtipi
 from incognito_runtime import PYTHON
-OUT = ROOT / 'qa/round11'
-WORK = ROOT / 'work-round11'
+from private_seal_round11_setup import unique_images, stock_config, STOCK_BOOT, stock_sessions_ready
+OUT = ROOT / 'qa/round11b'
+WORK = ROOT / 'work-round11b'
 OWNER = 'wizard.qa.round11=' + os.environ['R11_SOURCE_HEAD'][:12]
 DAEMON = 'wizard-app-manager:grants-fix-fead192e9fb2-amd64'
 DAEMON_ID = 'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
@@ -129,7 +130,7 @@ def manager_phase():
               ['--privileged', '-e', 'DOCKER_TLS_CERTDIR=', '-v', f'{ROOT}:{ROOT}',
                '-v', f'{engine}:/var/lib/docker'])
     wait(lambda: nd('info', check=False).returncode == 0, 90)
-    for image in (DAEMON, STOCK, ar.DEFAULT_PROXY_IMAGE, seal.EDGE_IMAGE, seal.KEY_IMAGE, 'python:3.12-slim'):
+    for image in unique_images((DAEMON, STOCK, ar.DEFAULT_PROXY_IMAGE, seal.EDGE_IMAGE, seal.KEY_IMAGE, 'python:3.12-slim')):
         import_image(image)
         # Runtipi may `down --rmi all` during install/update; retain exact imported
         # images so that no unpublished daemon or scratch edge is pulled by tag.
@@ -315,20 +316,42 @@ def stock_phase():
     owned_networks.append(net)
     state = WORK / 'stock'; state.mkdir(); home = state / 'home'; home.mkdir()
     # Model/provider config is synthetic only. No real selected agent is changed.
-    (home / 'config.yaml').write_text('model:\n  default: synthetic-vision\n  provider: custom\n  api_key: unused-synthetic-client-bearer\n  base_url: http://provider:8000/v1\nfallback_providers: []\ntoolsets: []\nagent:\n  max_turns: 2\n')
+    # JSON is valid YAML; use the already-proved stock fixture's mapping and
+    # explicit chat-completions shape, only inside this generated home.
+    (home / 'config.yaml').write_text(json.dumps(stock_config()))
     (home / '.env').write_text('OPENAI_API_KEY=' + KEY + '\nOPENAI_BASE_URL=http://provider:8000/v1\n')
     mock = ROOT / 'scripts/ci/round11-openai-fixture.py'
     flags = ['--network', net, '--network-alias', 'provider', '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none', '-v', f'{mock}:/fixture.py:ro', '-v', f'{state}:/state']
     container('r11-stock-provider', 'python:3.12-slim', ['python3', '/fixture.py'], flags)
-    container('r11-stock-client', STOCK, ['gateway', 'run'], ['--network', net, '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none',
-        '--entrypoint', '/opt/hermes/.venv/bin/hermes', '-v', f'{home}:/opt/data',
+    container('r11-stock-client', STOCK, ['-c', STOCK_BOOT], ['--network', net, '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none',
+        '--workdir', '/opt/data', '--entrypoint', PYTHON, '-v', f'{home}:/opt/data',
         '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-e', 'HERMES_WORKDIR=/opt/data',
         '-e', 'API_SERVER_ENABLED=true', '-e', 'API_SERVER_HOST=0.0.0.0', '-e', 'API_SERVER_PORT=8642', '-e', 'API_SERVER_KEY=' + APIKEY])
     def api(path, value=None):
         code = "import json,urllib.request;v=json.loads(input());r=urllib.request.Request('http://127.0.0.1:8642'+v['path'],None if v['value'] is None else json.dumps(v['value']).encode(),{'Authorization':'Bearer '+v['key'],'Content-Type':'application/json'});h=urllib.request.urlopen(r,timeout=10);print(h.read().decode())"
         return json.loads(docker('exec', '-i', 'r11-stock-client', PYTHON, '-c', code,
                                  data=json.dumps({'path':path,'value':value,'key':APIKEY})).stdout)
-    wait(lambda: api('/api/sessions'), 120)
+    # Retain bounded synthetic startup diagnostics instead of swallowing the
+    # failure for 120 seconds; fail immediately if the stock process exits.
+    startup: dict[str, object] = {'last_api_error':None}
+    def ready():
+        status = json.loads(docker('inspect','--format','{{json .State}}','r11-stock-client').stdout)
+        startup['container_state'] = status
+        if not status.get('Running'):
+            raise AssertionError('synthetic_stock_exited_before_readiness')
+        try:
+            return stock_sessions_ready(api('/api/sessions'))
+        except Exception as exc:
+            startup['last_api_error'] = {'class':type(exc).__name__, 'reason':str(exc)[:160]}
+            return False
+    try:
+        wait(ready, 120)
+    finally:
+        preflight = home / 'synthetic-preflight.json'
+        log = home / 'synthetic-startup.log'
+        startup['preflight'] = json.loads(preflight.read_text()) if preflight.exists() else None
+        startup['startup_tail'] = log.read_text(errors='replace')[-6000:] if log.exists() else 'startup_output_absent'
+        save('stock-startup.json', startup)
     sid = 'synthetic-r11-' + secrets.token_hex(8); api('/api/sessions', {'id':sid})
     terminal = {'failed','completed','cancelled'}
     def wait_run(run_id, seconds):

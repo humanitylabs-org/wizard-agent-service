@@ -9,6 +9,7 @@ import platform
 import subprocess
 import sys
 import tarfile
+from private_seal_round11_setup import node_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,28 +32,36 @@ def digest(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument('--source', required=True); args = parser.parse_args()
-    assert platform.machine() == 'x86_64' and str(ROOT).startswith('/srv/work/incog-seal-r11-')
+    parser = argparse.ArgumentParser(); parser.add_argument('--source', required=True)
+    parser.add_argument('--node', required=True); parser.add_argument('--node-sha256', required=True)
+    args = parser.parse_args()
+    assert platform.machine() == 'x86_64' and str(ROOT).startswith('/srv/work/incog-seal-r11b-')
     manifest = json.loads((ROOT / 'SOURCE.json').read_text())
     assert manifest['source_head'] == args.source
     assert len(args.source) == 40 and all(c in '0123456789abcdef' for c in args.source)
     for name, expected in manifest['files'].items():
         p = (ROOT / name).resolve(); assert p.is_relative_to(ROOT) and digest(p) == expected, name
-    qa = ROOT / 'qa/round11-control'
-    if qa.exists() or (ROOT/'qa/round11').exists() or (ROOT/'work-round11').exists():
+    qa = ROOT / 'qa/round11b-control'
+    if qa.exists() or (ROOT/'qa/round11b').exists() or (ROOT/'work-round11b').exists():
         raise SystemExit('refuse_existing_round11_work_or_evidence')
     qa.mkdir(parents=True)
     env = {**os.environ, 'R11_SOURCE_HEAD':args.source, 'R11_DOCKER_GATEWAY':'1',
            'R11_GATEWAY_IMAGE':'restricted-agent-sidecars:round11-' + args.source[:12],
            'R11_EDGE_IMAGE':'wizard-private-network-edge:round11-' + args.source[:12],
            'R11_KEY_IMAGE':'wizard-private-network-edge:round11-' + args.source[:12],
-           'PYTHONDONTWRITEBYTECODE':'1', 'TMPDIR':str(ROOT/'work-tmp-round11')}
+           'PYTHONDONTWRITEBYTECODE':'1', 'TMPDIR':str(ROOT/'work-tmp-round11b')}
     Path(env['TMPDIR']).mkdir()
     owner = 'wizard.qa.round11=' + args.source[:12]
     # No shared preview tag is rebuilt, no existing daemon/container is touched.
     result = {'source_head':args.source,'manifest_sha256':digest(ROOT/'SOURCE.json'),
               'synthetic_only':True,'live_touched':False,'migration_admitted':False,'errors':{}}
     try:
+        # Node20 collected zero tests; pin the binary and npm/vitest shebang PATH
+        # before any Docker, builds, or dependency installation.
+        env, result['node'] = node_environment(args.node, args.node_sha256, env)
+        command(['python3','-m','unittest','discover','-s','scripts/ci',
+                 '-p','test_private_seal_round11_setup.py','-v'], env=env,
+                log=qa/'setup-regressions.log', timeout=60)
         assert command(['docker','ps','-aq','--filter','label='+owner]).stdout.strip() == ''
         # Docker 29/containerd exposes the manifest as .Id; Docker 26 on forum
         # exposes the config digest. Prove their exact relation in the archive.
@@ -93,7 +102,7 @@ def main():
         command(['docker','build','-t',env['R11_GATEWAY_IMAGE'],'ops/agent-runtime/restricted-agent/sidecars'],log=qa/'gateway-build.log')
         for image in (env['R11_EDGE_IMAGE'],env['R11_GATEWAY_IMAGE']):
             result['images'][image] = command(['docker','image','inspect','--format','{{.Id}}',image]).stdout.strip()
-        command(['npm','install','--ignore-scripts','--no-package-lock'],log=qa/'npm-install.log',timeout=600)
+        command(['npm','install','--ignore-scripts','--no-package-lock'],env=env,log=qa/'npm-install.log',timeout=600)
         tests = command(['./node_modules/.bin/vitest','run','tests/sealed-private-gateway.test.ts','--reporter=json',
                          '--outputFile='+str(qa/'gateway-vitest.json')],env=env,log=qa/'gateway-vitest.log',timeout=300,check=False)
         report = json.loads((qa/'gateway-vitest.json').read_text())
@@ -103,7 +112,7 @@ def main():
         result['gateway']['passed_gate'] = tests.returncode == 0 and report.get('success') is True and report.get('numFailedTests') == 0 and report.get('numPassedTests') == 2
         phase = command(['python3','scripts/private-seal-round11.py'],env=env,log=qa/'runtime.log',timeout=2700,check=False)
         result['runtime_exit_code'] = phase.returncode
-        runtime = json.loads((ROOT/'qa/round11/receipt.json').read_text())
+        runtime = json.loads((ROOT/'qa/round11b/receipt.json').read_text())
         result['checks'] = runtime.get('checks',{})
         result['required_unmet'] = runtime['admission']['required_unmet']
         if not result['gateway']['passed_gate']: result['required_unmet'].append('actual_container_scoped_app_gateway')
