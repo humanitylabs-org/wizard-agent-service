@@ -47,7 +47,8 @@ describe('box-wide UI preferences HTTP contract', () => {
     for (const spaces of invalid) expect((await put(u, { spaces })).status).toBe(400)
     expect((await (await fetch(u)).json()).spaces).toEqual([space])
     // Accepted maximum shape exceeds the former 32 KB file/body ceiling; it must survive a GET.
-    const large = Array.from({length:50}, (_,i) => ({...space, id:'space-'+i, threads:Array.from({length:500},(_,j)=>'wizard_'+String(j).padStart(173,'x'))}))
+    // Distinct thread IDs per Space: a chat is in one Space at a time (full writes keep only one copy).
+    const large = Array.from({length:50}, (_,i) => ({...space, id:'space-'+i, threads:Array.from({length:500},(_,j)=>'w'+String(i).padStart(2,'0')+'_'+String(j).padStart(176,'x'))}))
     expect((await put(u, { spaces: large })).status).toBe(200)
     expect((await (await fetch(u)).json()).spaces).toEqual(large)
     expect((await put(u, { spaces: [] })).status).toBe(200)
