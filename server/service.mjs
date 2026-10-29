@@ -4042,10 +4042,14 @@ function buildWizardServer(options, lifetime) {
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
+              // The ledger includes every historical job. Reject jobs that cannot
+              // affect this wait before reading a transcript, then read each candidate
+              // thread once in this synchronous phase (never across an await).
+              const pendingIds = new Set(pendingHeavyJobs(heavyJobs, listedSessionIds).keys())
+              const nonHolding = new Map([...pendingIds].map(id => [id, nonHoldingFor(id)]))
               const holdingJobs = heavyJobs.filter(job => {
                 const id = job.sessionId ?? job.session_id
-                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
-                return !nonHoldingFor(id).has(job.job_id ?? job.id)
+                return !pendingIds.has(id) || !nonHolding.get(id).has(job.job_id ?? job.id)
               })
               for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
@@ -4077,9 +4081,13 @@ function buildWizardServer(options, lifetime) {
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
               const ownJobs = heavyJobs.filter(job => (job.agent_id ?? 'hermes') === 'hermes' && (job.sessionId ?? job.session_id) === session.id)
-              const nonHolding = ownJobs.length ? nonHoldingFor(session.id) : new Set()
-              const holdingJobs = ownJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
-              if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
+              // Delivered history cannot change this guard. Only a still-owed
+              // result needs fresh optional-follow-up evidence in this later phase.
+              if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, ownJobs)?.state === 'fyi') {
+                const nonHolding = nonHoldingFor(session.id)
+                const holdingJobs = ownJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
+                if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
+              }
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
               let replies = useTruth ? truth.replies : messages?.replies
