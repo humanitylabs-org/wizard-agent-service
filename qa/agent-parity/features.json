@@ -41,6 +41,16 @@
   ],
   "features": [
     {
+      "id": "holographic-fact-memory",
+      "description": "Stock local fact_store and prefetch recall survive process/container restart in each runtime's own Hermes home without crossing agent/profile homes.",
+      "layer": "runtime",
+      "how_to_test": "Run tests/holographic_container_proof.py on an isolated Docker worker. Real stock gateway containers model main-home, named-profile, managed-container and restricted-home scopes; the stock memory initializer must inject fact_store/fact_feedback, add/search/prefetch a canary, restart only its disposable gateway and recall again for every kind. Restricted proof also backs up via native SQLite-safe backup, imports into a second home, applies Wizard import wiring, and recalls. This is stock runtime home/tool behavior, not live Wizard routing or model adherence. Never use existing private agents or owner homes. The Holographic memory workflow saves the per-kind JSON results; an empty report or failed command fails CI.",
+      "source_refs": ["server/agents.mjs", "ops/agent-runtime/hermes_import.py"],
+      "reference_tests": ["tests/holographic-memory.test.ts", "tests/holographic_container_proof.py", "tests/test_hermes_import.py", "tests/managed-harness-upgrade.test.ts"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
       "layer": "server",
@@ -137,7 +147,7 @@
       "id": "chats-spaces",
       "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
-      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces (spaces_add and full PUT snapshots keep a chat in one Space per agent), refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
       "source_refs": [
         "server/ui-preferences.mjs",
         "server/spaces-tools.mjs",
@@ -149,6 +159,7 @@
         "tests/thread-spaces-http.test.ts",
         "tests/spaces-tools.test.ts",
         "tests/spaces-search-status.test.ts",
+        "tests/one-space-per-thread.test.ts",
         "tests/managed-harness-upgrade.test.ts",
         "qa/agent-parity/server-checks.mjs",
         "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"
@@ -430,12 +441,13 @@
       "id": "media-contract",
       "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
       "layer": "server",
-      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering.",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB, cache/images placement) and the status-line contract. This alone does not prove media rendering.",
       "source_refs": [
         "server/chat-presentation.mjs"
       ],
       "reference_tests": [
-        "tests/markdown-hint.test.ts"
+        "tests/markdown-hint.test.ts",
+        "tests/owner-file-handoff.test.ts"
       ],
       "fixture": "media-contract",
       "policy_exemptions": []
@@ -609,6 +621,21 @@
         "tests/agent-media.test.ts"
       ],
       "fixture": "assistant-media",
+      "policy_exemptions": []
+    },
+    {
+      "id": "sent-media-snapshot",
+      "description": "A file an agent sends is a snapshot: rewriting the source later never changes an earlier chat message",
+      "layer": "server",
+      "how_to_test": "Run the wizard-os media hook with each runtime's own home on a scratch file, store the rewritten reply, serve the attachment, rewrite the source in place and assert the served bytes are unchanged.",
+      "source_refs": [
+        "hermes-plugin/wizard-os/media.py",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/test_wizard_os_media_plugin.py"
+      ],
+      "fixture": "sent-media-snapshot",
       "policy_exemptions": []
     },
     {
@@ -1087,6 +1114,16 @@
         "tests/history-compaction-replay.test.ts"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "scheduler-notifications",
+      "description": "Scheduled notifications preserve silent output, agent app authority and thread visibility",
+      "layer": "server",
+      "how_to_test": "Run a notification schedule through the real Service and each runtime route with a bound notifications MCP app (main is denied in routed cases). Assert the scheduler's internal read retains the silent answer, owner proof plus the raw header still scrubs it, the app receives one notify as the job agent, and the agent's thread is hidden. Remove the app grant and run again: the same thread is unhidden, fallback is recorded and no notification is sent. Restricted uses a mode-0600 Unix ingress; host-profile uses /p/parity-profile.",
+      "source_refs": ["server/scheduler.mjs", "server/service.mjs", "server/agents-http.mjs", "server/agent-bridge.mjs"],
+      "reference_tests": ["tests/scheduler-notify-parity.test.ts", "qa/agent-parity/scheduler-notify.mjs"],
+      "fixture": "scheduler-notifications",
       "policy_exemptions": []
     },
     {

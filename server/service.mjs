@@ -1,6 +1,7 @@
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
+import { servePhoneFeed } from './phone-feed.mjs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -2132,6 +2133,8 @@ function setupWriteRefusal(request, tailnetIngress) {
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 // The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
 // (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+// Availability and send use the same authority: the job's own agent and only the apps that agent may use, so a
+// provider that agent cannot reach (a private agent, an unbound app) means a thread fallback, never a hidden loss.
 export function scheduleNotifier({ bridge, appsJsonPath }) {
   const pick = (agent) => {
     const providers = bridge.apps(agent).filter(app => app.jobs.includes('notifications'))
@@ -2141,7 +2144,8 @@ export function scheduleNotifier({ bridge, appsJsonPath }) {
     return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
   }
   return {
-    available: ({ agent = GATEWAY_MAIN_AGENT } = {}) => pick(agent === 'main' ? GATEWAY_MAIN_AGENT : agent)?.status === 'running',
+    // 'main' is the portable spelling (scheduler jobs, host system jobs); the bridge knows the main agent as hermes.
+    available: (agent = GATEWAY_MAIN_AGENT) => pick(agent === 'main' ? GATEWAY_MAIN_AGENT : agent)?.status === 'running',
     send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
       agent = agent === 'main' ? GATEWAY_MAIN_AGENT : agent
       const app = pick(agent)
@@ -4586,6 +4590,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
@@ -4860,6 +4865,9 @@ function buildWizardServer(options, lifetime) {
     if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
+      // Release bytes are public on the tailnet origin: the Android updater has no session/auth headers.
+      // This exact allow-list is deliberately before both principal and Serve identity gates.
+      if (await servePhoneFeed(request, response, options.phoneFeedDir)) return
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }

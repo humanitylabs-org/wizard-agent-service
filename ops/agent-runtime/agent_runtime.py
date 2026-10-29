@@ -347,6 +347,29 @@ class ComposeDriver:
         return {"ok": True}
 
 
+def machines_override(agents: "Agents", agent: dict) -> Path | None:
+    """Wizard Machines (ops/machines): mount this agent's own relay directory, read-only, at /run/wizard-machines.
+
+    Only for a restricted standard agent whose Service-owned agent.json carries grants.machines = true. The directory
+    holds the agent's relay socket and the `machine` client, never keys or addresses; which machines it reaches is the
+    owner's Machines registry. Created here (owner uid) so Docker never auto-creates it as root."""
+    if not (restricted(agent) and agent.get("privacy") == "standard" and (agent.get("grants") or {}).get("machines") is True):
+        return None
+    root = Path(os.environ.get("WIZARD_MACHINES_ROOT") or agents.root.parent / "machines")
+    sockets = root / "sockets"
+    for path, mode in ((root, 0o700), (sockets, 0o711), (sockets / agent["id"], 0o755)):
+        path.mkdir(mode=mode, exist_ok=True)
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise RuntimeFailure("machines_dir_unsafe", 500)
+    doc = {"services": {RESTRICTED_SERVICE: {"volumes": [{"type": "bind", "source": str(sockets / agent["id"]),
+                                                          "target": "/run/wizard-machines", "read_only": True}]}}}
+    path = agents.root / agent["id"] / "runtime" / "machines.json"
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.write_text(json.dumps(doc))
+    return path
+
+
 class RestrictedDriver:
     """Runs the pinned restricted runtime, optionally with its reviewed Claude grant override.
     Kept off Runtipi's shared network; the project holds the agent and its sidecars."""
@@ -407,6 +430,9 @@ class RestrictedDriver:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             path.write_text(json.dumps(module.compose_override(source)))  # mount metadata only
             files += ["-f", str(self.runtime_dir / "compose.claude-login.yml"), "-f", str(path)]
+        machines = machines_override(self.agents, agent)
+        if machines:
+            files += ["-f", str(machines)]
         override = self.agents.root / agent["id"] / "import-runtime.json"
         if agent.get("imported") and override.is_file():
             files += ["-f", str(override)]

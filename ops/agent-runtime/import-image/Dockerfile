@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gh jq && rm -rf
 RUN python3 -c 'import pathlib,shutil; root=pathlib.Path("/opt/hermes"); [(shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()) for p in root.iterdir() if p.name != ".venv"]'
 COPY source/ /opt/hermes/
 RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache -e /opt/hermes && \
-    /opt/hermes/.venv/bin/python -c 'import hermes_cli.backup, gateway.run; import sqlite3; assert sqlite3.sqlite_version_info >= (3, 53, 4)' && \
+    /opt/hermes/.venv/bin/python -c 'import hermes_cli.backup, gateway.run; import sqlite3; assert sqlite3.sqlite_version_info >= (3, 53, 4); from plugins.memory import load_memory_provider; p=load_memory_provider("holographic"); assert p is not None and p.is_available(), "stock holographic provider must be packaged"' && \
     git --version && dpkg-query -W gh && test -x /usr/bin/gh && ssh -V && jq --version && \
     /opt/hermes/.venv/bin/python -c 'import json,sys; c=json.load(open("/opt/hermes/install-stamp.json"))["commit"]; sys.exit(0 if c==sys.argv[1] else "install-stamp commit "+c+" != "+sys.argv[1])' "$HERMES_REVISION" && \
     /opt/hermes/.venv/bin/hermes --version

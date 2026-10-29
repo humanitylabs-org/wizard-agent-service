@@ -624,7 +624,8 @@ export function createAgentBridge({
     // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
     appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
     kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap }) },
-    apps: () => { refresh(); return apps },
+    // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
+    apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
     close: () => { if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
   }

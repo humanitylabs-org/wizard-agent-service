@@ -265,7 +265,8 @@ describe('owner-facing API and shared notification authority', () => {
     const called: any[] = []
     const bridge = { apps: (agent: string) => agent === 'hermes' ? [{ id: 'bell', prefix: 'bell', jobs: ['notifications'], status: 'running' }] : [], callTool: async (...args: any[]) => { called.push(args); return {} } }
     const notifier = scheduleNotifier({ bridge, appsJsonPath: join(root, 'absent') })
-    expect(notifier.available({ agent: 'private-agent' })).toBe(false)
+    expect(notifier.available('private-agent')).toBe(false)
+    expect(notifier.available('main')).toBe(true)
     await expect(notifier.send({ title: 'Test', message: 'Check maintenance', agent: 'private-agent' })).rejects.toThrow(/unavailable/)
     await notifier.send({ title: 'Test', message: 'Check maintenance', agent: 'main' })
     expect(called).toEqual([['bell__notify', { title: 'Test', message: 'Check maintenance' }, 'hermes']])

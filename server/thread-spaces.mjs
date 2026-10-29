@@ -4,7 +4,7 @@ const SPACE_ID = /^[a-z0-9-]{1,48}(?![\s\S])/u
 const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}(?![\s\S])/u
 export const normalizeSpaceId = v => typeof v === 'string' && SPACE_ID.test(v) ? v : null
 export const spaceAgent = s => s.agent || 'hermes'
-export const SPACE_INSTRUCTIONS = 'Space filing is optional: add space (one exact existing Space ID from this agent’s catalogue) to the final WIZARD_STATUS_V1 JSON only when this thread clearly belongs to that Space. Omit it when uncertain or no Space fits; never invent Spaces or IDs. The service adds membership without removing the thread from other Spaces. '
+export const SPACE_INSTRUCTIONS = 'Space filing is optional: add space (one exact existing Space ID from this agent’s catalogue) to the final WIZARD_STATUS_V1 JSON only when this thread clearly belongs to that Space. Omit it when uncertain or no Space fits; never invent Spaces or IDs. A thread is in one Space at a time: the service files only a thread that is in none of your Spaces yet and never moves one the owner (or an earlier status) already filed. '
 export function createSpaceFiling(path) {
   return {
     runNote(agent = 'hermes') {
@@ -17,7 +17,8 @@ export function createSpaceFiling(path) {
       // No await between read and atomic replacement: serialized with owner PUTs on this service.
       const spaces = readUiPreferences(path).spaces
       const space = spaces.find(s => s.id === status.space && spaceAgent(s) === agent)
-      if (!space || space.threads.includes(thread) || space.threads.length >= 500) return false
+      // One Space per thread: an already-filed thread stays where the owner (or an earlier status) put it.
+      if (!space || spaces.some(s => spaceAgent(s) === agent && s.threads.includes(thread)) || space.threads.length >= 500) return false
       space.threads = [...space.threads, thread]
       updateUiPreferences(path, { spaces })
       return true

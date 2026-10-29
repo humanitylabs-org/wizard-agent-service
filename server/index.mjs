@@ -2,7 +2,7 @@ import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
 import { existsSync, readFileSync } from 'node:fs'
 
@@ -159,6 +159,7 @@ server = createWizardServer({
   joinedDelegation,
   settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  phoneFeedDir: process.env.WIZARD_PHONE_FEED_DIR || resolve(process.env.WIZARD_APPS_JSON_PATH ? dirname(process.env.WIZARD_APPS_JSON_PATH) : osHome, 'phone'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
