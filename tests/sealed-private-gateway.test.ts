@@ -4,11 +4,43 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 import { RESTRICTED_GATEWAY_URL, hermesConfigYaml, sealedGateway } from '../server/agents.mjs'
 
 const servers: Server[] = []
+const exec = promisify(execFile)
+const dockerGateways = new Map<string, string>()
+const dockerCleanup: string[][] = []
+afterEach(async () => {
+  dockerGateways.clear()
+  for (const args of dockerCleanup.splice(0).reverse()) await exec('docker', args).catch(() => {})
+})
+async function containerGateway(socket: string, token: string, dir: string) {
+  if (process.env.R11_DOCKER_GATEWAY !== '1') return
+  const name = `r11-gateway-${process.pid}`
+  const image = process.env.R11_GATEWAY_IMAGE || 'restricted-agent-sidecars:round11'
+  const owner = `wizard.qa.round11=${(process.env.R11_SOURCE_HEAD || 'local').slice(0, 12)}`
+  await exec('docker', ['network', 'create', '--internal', '--opt', 'com.docker.network.bridge.inhibit_ipv4=true', '--label', owner, name])
+  dockerCleanup.push(['network', 'rm', name])
+  // Same synthetic owner uid: Unix inode permissions remain part of the test.
+  const uid = process.getuid!(), gid = process.getgid!()
+  await exec('docker', ['run', '-d', '--name', name, '--label', owner, '--network', name, '--network-alias', 'edge',
+    '--user', `${uid}:${gid}`, '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none',
+    '--tmpfs', `/run/edge-ingress:uid=${uid},gid=${gid},mode=0700`,
+    '-v', `${join(dir, 'agents', socket.split('/agents/')[1].split('/')[0], 'gateway')}:/run/agent-gateway:rw`,
+    '-e', 'EDGE_INGRESS_SOCKET=/run/edge-ingress/ingress.sock',
+    '-e', `EDGE_TOKEN_SHA256=${createHash('sha256').update(token).digest('hex')}`, image, 'python3', '/srv/edge.py'])
+  dockerCleanup.push(['rm', '-f', name])
+  const client = `${name}-client`
+  await exec('docker', ['run', '-d', '--name', client, '--label', owner, '--network', name,
+    '--read-only', '--log-driver', 'none', 'python:3.12-slim', 'python3', '-c', 'import time;time.sleep(1200)'])
+  dockerCleanup.push(['rm', '-f', client])
+  dockerGateways.set(socket, client)
+}
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) } })
 async function readBody(req: IncomingMessage) { let raw = ''; for await (const c of req) raw += c; return raw ? JSON.parse(raw) : undefined }
 
@@ -30,6 +62,23 @@ async function fakeApp(tool: string, marker: string) {
 const appEntry = (id: string, url: string) => ({ id, name: id, status: 'running', provides: [`${id}-job`], mcp: { url } })
 
 function viaSocket(path: string, token: string, body: unknown, session = '') {
+  const client = dockerGateways.get(path)
+  if (client) return (async () => {
+    const code = `import urllib.request,urllib.error,json,time
+v=json.loads(${JSON.stringify(JSON.stringify({ token, body, session }))})
+r=urllib.request.Request('http://edge:8923/wizard/mcp',json.dumps(v['body']).encode(),{'Content-Type':'application/json','Accept':'application/json, text/event-stream','Authorization':'Bearer '+v['token'],**({'Mcp-Session-Id':v['session']} if v['session'] else {})})
+for i in range(30):
+ try:
+  try: h=urllib.request.urlopen(r,timeout=10)
+  except urllib.error.HTTPError as e: h=e
+  raw=h.read();print(json.dumps({'status':h.status,'json':json.loads(raw) if raw else None,'session':h.headers.get('mcp-session-id','')}));break
+ except (OSError,ValueError):
+  if i==29:raise
+  time.sleep(.2)
+`
+    const result = await exec('docker', ['exec', client, 'python3', '-c', code])
+    return JSON.parse(result.stdout)
+  })()
   return new Promise<{ status: number, json: any, session: string }>((resolve, reject) => {
     const payload = JSON.stringify(body)
     const req = request({ socketPath: path, path: '/wizard/mcp', method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token, 'Content-Length': Buffer.byteLength(payload), ...(session ? { 'Mcp-Session-Id': session } : {}) } }, (res) => {
@@ -91,6 +140,7 @@ describe('sealed private agent scoped gateway (synthetic Mizel + Recorder)', () 
     const token = readFileSync(join(dir, 'agents', id, 'gateway.key'), 'utf8').trim()
     const socket = join(dir, 'agents', id, 'gateway', 'gateway.sock')
     for (let i = 0; i < 50; i++) { try { readFileSync(socket); } catch (e: any) { if (e.code !== 'ENOENT') break } await new Promise((r) => setTimeout(r, 20)) }
+    await containerGateway(socket, token, dir)
     const listed = await socketMcp(socket, token, 'tools/list')
     expect(listed.status).toBe(200)
     expect(listed.json.result.tools.map((t: any) => t.name).sort()).toEqual(['mizel__search_meetings', 'recorder__search_recordings', 'wizard_apps'])
@@ -106,5 +156,11 @@ describe('sealed private agent scoped gateway (synthetic Mizel + Recorder)', () 
     expect(tcp.status).not.toBe(200)
     expect(mizel.calls).toEqual(['search_meetings'])
     expect(recorder.calls).toEqual(['search_recordings'])
-  })
+    // A session admitted before revocation is not a cached capability.
+    const stale = await viaSocket(socket, token, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } })
+    expect((await fetch(`${base}/wizard/v1/agents/${id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))).status).toBe(200)
+    const revoked = await viaSocket(socket, token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mizel__search_meetings', arguments: {} } }, stale.session)
+    expect(revoked.status !== 200 || !!revoked.json?.error || revoked.json?.result?.isError === true).toBe(true)
+    expect(mizel.calls).toEqual(['search_meetings'])
+  }, 120000)
 })
