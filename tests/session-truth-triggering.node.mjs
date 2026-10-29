@@ -79,7 +79,7 @@ for (const affinity of ['INTEGER', 'TEXT', '']) {
   test(`triggering-user winner matches original retention and ties (affinity ${affinity || 'none'})`, () => {
     const f = fixture({ affinity })
     try {
-      f.put('user', 1, 'Owner'); f.put('assistant', 2, 'Answer')
+      f.put('user', 1, 'Owner', null); f.put('assistant', 2, 'Answer', '1')
       const { query } = capture(f)
       // Includes NULL-active authority, rewound history, compacted history, invalid states,
       // text-affinity edge cases, equal timestamps, foreign sessions and future requests.
@@ -93,7 +93,7 @@ for (const affinity of ['INTEGER', 'TEXT', '']) {
       for (const through of [0, 1, 2, 10, 11, 15, 30, 1000]) {
         assert.deepEqual(lookup(f, query, through), oracle(f, through), `cutoff ${through}`)
       }
-      f.put('user', 100, 'Earlier tie'); f.put('user', 100, 'Later tie', 0, 1)
+      f.put('user', 100, 'Earlier tie', null); f.put('user', 100, 'Later tie', '0', 1)
       assert.equal(lookup(f, query, 100)?.content, 'Later tie')
       // A separate connection's changes must be visible immediately, with no cached truth.
       const external = new DatabaseSync(f.path)
