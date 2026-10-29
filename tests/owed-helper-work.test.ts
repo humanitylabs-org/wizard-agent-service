@@ -16,12 +16,13 @@ async function fixture(fn: (ctx: any) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), 'owed-work-')), path = join(dir, 'state.db'), ledger = join(dir, 'supervisor.db')
   const db = new DatabaseSync(path), supervisorOwner = new Supervisor({ statePath: ledger, deliver: async () => { throw Error('test must not dispatch') } }), supervisor = supervisorOwner.db
   db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,started_at REAL,model TEXT,model_config TEXT);
-    CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,display_kind TEXT,finish_reason TEXT DEFAULT 'stop',tool_calls TEXT);
+    CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,compacted INT DEFAULT 0,display_kind TEXT,finish_reason TEXT DEFAULT 'stop',tool_calls TEXT);
     CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);
     CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY,origin_session_id TEXT,parent_session_id TEXT,origin_ui_session_id TEXT,state TEXT,dispatched_at REAL,completed_at REAL,task_json TEXT,delivery_state TEXT,result_json TEXT);`)
   for (const id of [sid,builder]) db.prepare('INSERT INTO sessions(id,started_at) VALUES(?,?)').run(id,sec-300)
   supervisor.prepare('INSERT INTO reviews(id,thread,state) VALUES(?,?,?)').run('review',sid,'open')
-  const say = (role: string,content: string,at: number,active=1,kind: string | null=null) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp,active,display_kind) VALUES(?,?,?,?,?,?)').run(sid,role,content,at,active,kind)
+  // This fixture's inactive rows model compaction, not rewind/deletion.
+  const say = (role: string,content: string,at: number,active=1,kind: string | null=null) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp,active,compacted,display_kind) VALUES(?,?,?,?,?,?,?)').run(sid,role,content,at,active,active === 0 ? 1 : 0,kind)
   const server = createWizardServer({ archivedSessionReader:()=>[], requireAccess:false, hermesKey:'fixture-only', hermesStatePath:path,sessionDbPath:path,followThrough:false, supervisorStatePath:ledger, supervisorIntervalMs:600000,
     fetchImpl:async (url: string)=>new Response(JSON.stringify(String(url).includes('/api/sessions?')?{data:[{id:sid,source:'api_server',title:'Owed work'}]}:{data:[]}),{headers:{'content-type':'application/json'}}),
   })

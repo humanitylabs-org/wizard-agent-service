@@ -6,7 +6,6 @@
 // GET /wizard/v1/bootstrap and never hardcode any of it.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { randomInt } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { appView } from './app-views.mjs'
 import { chatsView, CHATS_DEFAULT } from './chats-views.mjs'
@@ -84,7 +83,8 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     : []
   return {
     schema: 1,
-    response_style: RESPONSE_STYLES.includes(value.response_style) ? value.response_style : 'summary',
+    // Retired choice: every owner is on Own (Wizard adds no reply style); older shells may still PUT a value.
+    response_style: 'own',
     agents: { default_agent_id: typeof value.agents?.default_agent_id === 'string' && canStartAgent(value.agents.default_agent_id) ? value.agents.default_agent_id : 'hermes' },
     owner: {
       name: cleanText(owner.name, 80),
@@ -208,30 +208,9 @@ export function recordResponseStyleSwitch(raw, before, after) {
   raw.response_style_experiment.switches[after] = Math.min(Number.MAX_SAFE_INTEGER, raw.response_style_experiment.switches[after] + 1)
 }
 
-/** Call once at production startup, before stores are created. Never randomize a read or an upgrade. */
-export function initializeResponseStyle(path, { existingInstall = true, choose = () => randomInt(2) } = {}) {
-  if (!path) return
-  const existing = existingInstall || existsSync(path)
-  if (existsSync(path)) {
-    // Startup has always tolerated damaged settings. Do not turn an optional migration
-    // into an outage, rewrite invalid bytes, or rewrite an already assigned/read-only file.
-    const current = readSettings(path)
-    if (current.source === 'invalid') return current.settings
-    try {
-      const raw = JSON.parse(readFileSync(path, 'utf8'))
-      if (RESPONSE_STYLES.includes(raw?.response_style)) return current.settings
-    } catch { return current.settings }
-  }
-  try {
-    return updateSettings(path, raw => {
-      const style = existing ? 'summary' : choose() === 0 ? 'summary' : 'concise'
-      raw.response_style = style
-      raw.response_style_experiment = { assigned: style, source: existing ? 'existing_install' : 'new_install', switches: { summary: 0, concise: 0 } }
-    })
-  } catch (error) {
-    if (existing) return readSettings(path).settings
-    throw error // A new install must persist its assignment before serving any requests.
-  }
+/** Retired selection: startup is read-only; fresh and legacy installs all use Own. */
+export function initializeResponseStyle(path, _options = {}) {
+  return readSettings(path).settings
 }
 
 function readJsonFile(path, limit = 2 * 1024 * 1024) {

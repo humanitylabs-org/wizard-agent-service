@@ -18,6 +18,16 @@
   },
   "policies": [
     {
+      "id": "private-incognito-only",
+      "kinds": ["main", "host-profile", "container", "restricted"],
+      "rule": "Private agent only, by owner decision: each standard runtime must refuse Incognito before upstream admission."
+    },
+    {
+      "id": "owner-scoped-hermes-only",
+      "kinds": ["host-profile", "container", "restricted"],
+      "rule": "Owner-scoped hermes-only: James explicitly requested 'Archimedes only' on 27 Oct 2026 for owned-open-work follow-through. Routed instructions, status projection and admissions remain untouched; this does not exempt any other chat feature."
+    },
+    {
       "id": "private-history",
       "rule": "Private agent history, memory and home are invisible to standard agents. Do not test against existing private agents; use fresh disposable synthetic data."
     },
@@ -41,18 +51,27 @@
       "layer": "server",
       "fixture": "private-incognito-policy",
       "how_to_test": "Assert the real Service refuses Incognito on the standard agent of each runtime kind with 409 incognito_private_only before upstream admission; use the dedicated synthetic private browser/stock rig for positive no-persistence proof.",
-      "source_refs": [
-        "server/incognito.mjs",
-        "ops/agent-runtime/incognito_runtime.py",
-        "wizard-ux/web/core/incognito-chat.js"
-      ],
-      "reference_tests": [
-        "tests/incognito.node.mjs",
-        "ops/agent-runtime/test_incognito_runtime.py",
-        "scripts/incognito-stock-acceptance.py"
-      ],
+      "source_refs": ["server/incognito.mjs", "ops/agent-runtime/incognito_runtime.py", "wizard-ux/web/core/incognito-chat.js"],
+      "reference_tests": ["tests/incognito.node.mjs", "ops/agent-runtime/test_incognito_runtime.py", "scripts/incognito-stock-acceptance.py"],
       "policy_exemptions": [
-        "private agent only, by owner decision"
+        {"kind":"main","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"host-profile","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"container","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"restricted","policy":"private-incognito-only","assertion":"private-incognito-policy"}
+      ]
+    },
+    {
+      "id": "owned-open-work",
+      "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
+      "layer": "server",
+      "fixture": "owned-open-work",
+      "how_to_test": "Admit a synthetic HTTP turn per kind and inspect actual upstream instructions: no runtime receives OWNED_OPEN_WORK_INSTRUCTIONS, because reply and follow-up style belong to its persona. Project an owned Still open reply through the real session list, assert routed kinds stay done without owned_work or automatic sends, and execute the Hermes guard. tests/owned-open-work.test.ts additionally proves the main service's hidden continuation, restart dedupe and exact optional-handle behavior. These are disposable fixture checks, not live-model or browser proof.",
+      "source_refs": ["server/owned-open-work-follow-through.mjs", "server/owned-open-work.mjs", "server/thread-status.mjs", "server/service.mjs"],
+      "reference_tests": ["tests/owned-open-work.test.ts", "qa/agent-parity/server-checks.mjs", "qa/agent-parity/policy.test.mjs"],
+      "policy_exemptions": [
+        {"kind":"host-profile","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"},
+        {"kind":"container","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"},
+        {"kind":"restricted","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"}
       ]
     },
     {
@@ -104,9 +123,9 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions, or with Own only Wizard OS facts and the status protocol and no reply-style rule; changes apply on the next turn without restart.",
+      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved.",
       "layer": "server",
-      "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
+      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
@@ -614,14 +633,16 @@
     },
     {
       "id": "download-links",
-      "description": "Download assistant and user attachments through authenticated public URLs",
+      "description": "Download assistant and user attachments through authenticated public URLs; the owner's browser caches attachments for good and revalidates owner files",
       "layer": "server",
-      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition.",
+      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition. Attachments carry private immutable caching; owner files carry private no-cache plus an ETag that answers 304 unchanged and 200 after a same-size edit with preserved mtime.",
       "source_refs": [
-        "server/service.mjs"
+        "server/service.mjs",
+        "server/media-files.mjs"
       ],
       "reference_tests": [
-        "tests/content-disposition.test.ts"
+        "tests/content-disposition.test.ts",
+        "tests/chat-media-browser-cache.test.ts"
       ],
       "fixture": "download-links",
       "policy_exemptions": []
@@ -960,6 +981,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "app-job-routing",
+      "description": "Each agent learns which of its own apps does which job, and the main agent's pointer skills send it through the app's shipped skill first.",
+      "layer": "server",
+      "how_to_test": "Install a synthetic app with a provides job and a shipped skill into the real Service's apps.json, restart, and open the wizard MCP gateway with each kind's own credential and transport. Main: the wizard-job-<job> pointer skill is written, tells it to load the app's skill with skill_view first, and the gateway kernel points at that skills index. Other kinds have no pointer skills: their gateway kernel lists the job -> app map for their own apps instead. Uninstall: the pointer disappears and no kind is told about the app. Disposable fixture checks; the live-model proof for the main agent is ops/acceptance/pointer-skills (fresh KVM VM).",
+      "source_refs": [
+        "server/agent-bridge.mjs",
+        "hermes-plugin/wizard-os/kernel.py"
+      ],
+      "reference_tests": [
+        "tests/agent-bridge.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "app-job-routing",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-isolation",
       "description": "Verify standard credentials cannot enumerate/open/search private threads",
       "layer": "runtime",
@@ -1130,6 +1167,24 @@
       ],
       "reference_tests": [
         "wizard-ux/tests/chat-pins.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "synced-list-ops",
+      "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
+      "layer": "ux",
+      "how_to_test": "In wizard-agent-service, npx vitest run tests/ui-preferences.test.ts covers PATCH item operations (concurrent devices on one list, idempotency, gone Space no-op, 400 without writing, PUT kept for older shells). In wizard-ux, node --test tests/synced-lists.test.mjs runs every synced list key through tests/two-devices.mjs (stale device and GET,GET,PUT,PUT race, with and without PATCH support) for main, host-profile, container and restricted thread ids. Synthetic source-executed evidence; live two-browser check recorded on the wizard-ux PR.",
+      "source_refs": [
+        "server/ui-preferences.mjs",
+        "server/service.mjs",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "tests/ui-preferences.test.ts",
+        "wizard-ux/tests/synced-lists.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []

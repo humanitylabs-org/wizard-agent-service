@@ -26,9 +26,29 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
   `id`: `[a-z0-9-]{1,48}`; `name`: 1–60 characters, nonblank and without controls;
   `threads`: at most 500 unique canonical thread ids (same regex as pins); `createdAt`: ISO timestamp.
   Default: empty. Extra record fields are rejected. Deleted/unknown member ids are harmless in Chats.
-  Whole-array replacement: serialize edits to Spaces; there is no same-array compare-and-swap.
+  PUT replaces the whole array; shells and tools edit Spaces with PATCH operations (below).
   Wizard UX ships `skills/wizard-spaces` with an owner HTTP read/merge/write/readback helper and
   the requested-collection/back-fill skill; this is not an MCP-token authorization bypass.
+
+## Item operations (PATCH)
+
+`PUT` replaces a whole list, so a device that has not pulled yet would erase another device's or an
+agent's change (last writer wins per key). `PATCH /wizard/v1/ui-preferences` with `{"ops":[…]}` (1–100
+operations) changes single items instead. The service applies them to the stored lists inside the same
+synchronous read/merge/atomic rename as PUT and answers with the full preferences, like PUT:
+
+- `{"op":"add"|"remove","key":"pinnedChats"|"subjectOrder","item":"<string>"}`: add appends when absent.
+- `{"op":"front","key":"subjectOrder","items":[…]}`: these first, in this order; every other stored
+  subject keeps its relative order after them (at most 60 kept).
+- `{"op":"add","key":"spaces","item":{id,name,threads,createdAt,agent?}}`: no-op when that id exists.
+- `{"op":"remove","key":"spaces","item":"<space id>"}`.
+- `{"op":"add"|"remove","key":"spaces/<id>/threads","item":"<thread id>"}` and
+  `{"op":"set","key":"spaces/<id>/name","item":"<name>"}`: no-op when the Space no longer exists.
+
+Every operation is idempotent, so a client may resend a batch whose response it never saw. Malformed
+operations, or a result that breaks a key's limits, are a 400 and write nothing. Access, JSON and
+same-site rules are those of PUT. Older services answer PATCH with 405; clients then fall back to
+reading fresh, replaying their operations, PUT, and reading back.
 
 ## Launcher preferences and atomic migration
 

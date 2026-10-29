@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { kinds } from './fixture.mjs'
 import { checks, runCheck } from './checks.mjs'
+import { policyExemptions, applyPolicyExemption } from './policy.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const manifest = JSON.parse(readFileSync(join(root, 'qa/agent-parity/features.json'), 'utf8'))
@@ -18,7 +19,7 @@ if (JSON.stringify(manifest.runtime_kinds) !== JSON.stringify(kinds)) throw new 
 for (const f of manifest.features) {
   for (const field of ['id', 'description', 'layer', 'how_to_test']) if (typeof f[field] !== 'string' || !f[field]) throw new Error(`Missing ${f.id}.${field}`)
   if (f.fixture && !checks[f.fixture]) throw new Error(`Missing fixture implementation: ${f.id}`)
-  if (f.policy_exemptions.length && !(f.id === 'private-incognito' && f.fixture === 'private-incognito-policy' && JSON.stringify(f.policy_exemptions) === JSON.stringify(['private agent only, by owner decision']))) throw new Error(`Policy exemption requires an executable policy assertion: ${f.id}`)
+  policyExemptions(f, manifest, checks)
 }
 for (const check of Object.keys(checks)) if (!manifest.features.some(f => f.fixture === check)) throw new Error(`Undeclared check: ${check}`)
 mkdirSync(reportDir, { recursive: true })
@@ -27,9 +28,10 @@ const rows = []
 writeFileSync(join(reportDir, 'cells.jsonl'), '')
 for (const feature of manifest.features) {
   for (const kind of kinds) {
-    const cell = feature.fixture ? await runCheck(kind, feature.fixture) : {
+    let cell = feature.fixture ? await runCheck(kind, feature.fixture) : {
       feature: feature.id, kind, status: 'fail', reason: `No per-kind ${feature.layer} evidence implemented`, evidence: 'not-run', failure_kind: 'coverage-gap',
     }
+    cell = applyPolicyExemption(cell, feature.policy_exemptions.find(e => e.kind === kind), manifest)
     cell.feature = feature.id
     rows.push(cell)
     writeFileSync(join(reportDir, 'cells.jsonl'), JSON.stringify(cell) + '\n', { flag: 'a' })

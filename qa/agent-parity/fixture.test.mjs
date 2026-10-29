@@ -23,9 +23,12 @@ for (const feature of manifest.features.filter(f => f.fixture)) {
     test(`${feature.id} / ${kind}`, () => {
       const cell = report.cells.find(c => c.feature === feature.id && c.kind === kind)
       assert.ok(cell, 'missing cell')
-      const privateOnly = feature.id === 'private-incognito' && feature.fixture === 'private-incognito-policy'
-      assert.equal(cell.status, privateOnly ? 'policy-exempt' : 'pass', cell.reason)
-      if (privateOnly) assert.equal(cell.reason, 'private agent only, by owner decision')
+      const exemption = feature.policy_exemptions.find(e => e.kind === kind)
+      assert.equal(cell.status, exemption ? 'policy-exempt' : 'pass', cell.reason)
+      if (exemption) {
+        assert.equal(cell.policy, exemption.policy)
+        assert.notEqual(cell.evidence, 'not-run', 'exemptions must execute their per-kind fixture')
+      }
     })
   }
 }
@@ -38,10 +41,7 @@ test('matrix includes every declared feature and kind exactly once', () => {
   assert.equal(new Set(ids).size, ids.length)
   assert.equal(report.cells.length, manifest.features.length * manifest.runtime_kinds.length)
   assert.equal(report.summary.pass + report.summary.fail + report.summary['policy-exempt'], report.cells.length)
-  // Only the named owner decision is exempt, backed by an executable 409
-  // refusal assertion for each standard runtime kind. No other gap is waived.
-  assert.deepEqual(report.cells.filter(c => c.status === 'policy-exempt').map(c => [c.feature, c.kind]),
-    manifest.runtime_kinds.map(kind => ['private-incognito', kind]))
-  assert.equal(report.summary['policy-exempt'], manifest.runtime_kinds.length)
+  const exemptions = manifest.features.flatMap(f => f.policy_exemptions.map(e => [f.id, e.kind]))
+  assert.deepEqual(report.cells.filter(c => c.status === 'policy-exempt').map(c => [c.feature, c.kind]), exemptions)
   assert.equal(result.status, 0, 'the executable matrix must finish without failed fixtures')
 })

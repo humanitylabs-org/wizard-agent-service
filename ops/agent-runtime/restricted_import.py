@@ -58,7 +58,7 @@ class StagingRuntime:
         reown(self.directory / 'home', os.getuid())
 
 
-def helper(home, code, *, uid=rt.AGENT_UID, privileged=False, data=None):
+def helper(home, code, *, uid=rt.AGENT_UID, privileged=False, data=None, timeout=120):
     name = 'wizard-import-helper-' + secrets.token_hex(6)
     args = ['run', '--rm', '-i', '--name', name, '--network', 'none', '--read-only',
             '--user', f'{uid}:{uid}', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
@@ -67,24 +67,20 @@ def helper(home, code, *, uid=rt.AGENT_UID, privileged=False, data=None):
     if privileged:
         args += ['--cap-add', 'CHOWN', '--cap-add', 'FOWNER', '--cap-add', 'DAC_OVERRIDE']
     try:
-        return rt.docker([*args, rt.SIDECAR_IMAGE, '-c', code], input_text=json.dumps(data) if data is not None else None, timeout=120)
+        return rt.docker([*args, rt.SIDECAR_IMAGE, '-c', code], input_text=json.dumps(data) if data is not None else None, timeout=timeout)
     except BaseException:
         rt.docker(['rm', '-f', name], timeout=30, check=False)
         raise
 
 
-def reown(home, uid):
-    # No imported code, no following links, no file contents read. Same inode.
-    helper(home, '''import os,stat
-root='/opt/data'
-uid=int(__import__('sys').stdin.read())
-for base, dirs, names in os.walk(root, followlinks=False):
- for name in dirs+names:
-  p=os.path.join(base,name)
-  os.chown(p,uid,uid,follow_symlinks=False)
-os.chown(root,uid,uid)
-os.chmod(root,0o700)
-''', uid=0, privileged=True, data=uid)
+def reown(home, uid, *, dry_run=False):
+    # One constrained helper, no per-entry subprocess or giant metadata list.
+    # Matching UID/GID is a persistent checkpoint, so death needs no rollback
+    # before retrying. The agent remains stopped/admission-blocked throughout.
+    code = Path(__file__).with_name('import_tree.py').read_text()
+    result = helper(home, code, uid=0, privileged=True,
+                    data={'uid': uid, 'dry_run': dry_run}, timeout=1800)
+    return json.loads(result.stdout)
 
 
 def relocate(source, target):
@@ -269,29 +265,69 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
         h.require(all(type(g) is int and g > 0 and g in writable_groups for g in groups), 'import_mount_group_not_granted')
         h.dump(target / 'import-runtime.json', {'services': {'agent': {'volumes': mounts, 'group_add': [str(g) for g in groups], 'environment': {'HOME': '/opt/data', 'HERMES_HOME': '/opt/data'}}}})
         checkpoint(h, path, journal, 'prepared')
-        reown(home, rt.AGENT_UID)
-        helper(home, 'import os; assert os.getuid()==10000; assert os.stat("/opt/data").st_uid==10000; os.chmod("/opt/data",0o700)')
-        checkpoint(h, path, journal, 'sealed')
-        # Directory rename preserves all DB inodes; the old empty reserved home
-        # never contains imported bytes under the host owner's UID.
+        return finish(h, path, journal, d, record, started)
+
+
+def finish(h, path, journal, d, record, started):
+    plan, agent_id = journal['plan'], journal['id']
+    target = Path(journal['root']) / 'agents' / agent_id
+    stage = path.parent / 'stage/agents' / agent_id
+    home = stage / 'home'
+    journal['ownership'] = reown(home, rt.AGENT_UID)
+    helper(home, 'import os; assert os.getuid()==10000; assert os.stat("/opt/data").st_uid==10000; os.chmod("/opt/data",0o700)')
+    checkpoint(h, path, journal, 'sealed')
+    # Directory rename preserves all DB inodes; the old empty reserved home
+    # never contains imported bytes under the host owner's UID.
+    if (target / 'home').exists():
+        h.require(not (target / 'home').is_symlink(), 'ownership_target_symlink')
         (target / 'home').rmdir()
-        relocate(home, target / 'home')
-        checkpoint(h, path, journal, 'placed')
-        record['imported'] = {'schema': 1, 'format': 'hermes', 'history_visibility': 'standard-owner-visible',
-                              'auto_app_grants': False, 'denied_apps': ['privacycom', 'privacy-com', 'privacy.com']}
-        record['runtime'].pop('admission')
-        record['runtime']['image'] = plan['image']
-        record['grants'] = {'heavy': plan.get('grants', {}).get('heavy', False)}
-        h.dump(target / 'import-journal.json', {'restricted_import': True, 'journal': str(path)})
-        h.dump(target / 'agent.json', record)
-        checkpoint(h, path, journal, 'admitted')
-        d.start(record)
-        # No published TCP port: health goes through this agent's ingress Unix socket.
-        health(h, d, record, d.agents.secret(agent_id, 'runtime.key'))
-        h.dump(target / 'service-state.json', {'desired': 'running', 'started_at': int(time.time() * 1000)})
-        journal.update(state='applied', apply_seconds=round(time.monotonic() - started, 3))
-        checkpoint(h, path, journal, 'running')
+    relocate(home, target / 'home')
+    checkpoint(h, path, journal, 'placed')
+    record['imported'] = {'schema': 1, 'format': 'hermes', 'history_visibility': 'standard-owner-visible',
+                          'auto_app_grants': False, 'denied_apps': ['privacycom', 'privacy-com', 'privacy.com']}
+    record['runtime'].pop('admission')
+    record['runtime']['image'] = plan['image']
+    record['grants'] = {'heavy': plan.get('grants', {}).get('heavy', False)}
+    h.dump(target / 'import-journal.json', {'restricted_import': True, 'journal': str(path)})
+    h.dump(target / 'agent.json', record)
+    checkpoint(h, path, journal, 'admitted')
+    d.start(record)
+    # No published TCP port: health goes through this agent's ingress Unix socket.
+    health(h, d, record, d.agents.secret(agent_id, 'runtime.key'))
+    h.dump(target / 'service-state.json', {'desired': 'running', 'started_at': int(time.time() * 1000)})
+    journal.update(state='applied', apply_seconds=round(time.monotonic() - started, 3))
+    checkpoint(h, path, journal, 'running')
     return {'id': agent_id, 'journal': str(path), 'apply_seconds': journal['apply_seconds']}
+
+
+def resume(h, journal_path, *, dry_run=False):
+    """Resume only interrupted ownership sealing; other crash windows use undo.
+
+    Never operate on an admitted/running home. Admission and both locks fence
+    runtime starts; the exact prepared staging tree is the helper's only mount.
+    """
+    started = time.monotonic()
+    path = Path(journal_path).absolute()
+    h.assert_owner(path)
+    journal = json.loads(path.read_text())
+    h.require(journal.get('restricted_import') is True and h.ID_RE.fullmatch(journal['id']), 'journal_invalid')
+    root = Path(journal['root'])
+    h.require(path == root / 'imports' / journal['id'] / 'journal.json', 'journal_location')
+    h.validate_plan(journal['plan'], root)
+    h.require(journal.get('state') == 'preparing' and journal.get('step') in {'prepared', 'sealed'}, 'ownership_resume_requires_prepared')
+    target = root / 'agents' / journal['id']
+    home = path.parent / 'stage/agents' / journal['id'] / 'home'
+    with lock(target):
+        d = driver(h, root, journal['plan'])
+        record = d.agents.read(journal['id'])
+        h.require(rt.restricted(record) and record['runtime'].get('admission') == 'importing', 'reservation_not_restricted')
+        h.require(home.exists() and not home.is_symlink(), 'ownership_staging_missing')
+        if dry_run:
+            return reown(home, rt.AGENT_UID, dry_run=True)
+        # /run may have been lost during a host restart. This recreates only
+        # the reserved socket directories, never starts/imports a runtime.
+        prepare_socket(h, journal['plan'], journal['id'])
+        return finish(h, path, journal, d, record, started)
 
 
 def lifecycle(h, path, action):
