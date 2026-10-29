@@ -86,6 +86,8 @@ export function readUiPreferences(path) {
 export function updateUiPreferences(path, patch) {
   validateUiPreferences(patch)
   const stored = readStored(path) || {}
+  // Full writes (an older shell's PUT snapshot) are held to the one-Space rule too.
+  if (Object.hasOwn(patch, 'spaces')) patch = { ...patch, spaces: oneSpaceEach(patch.spaces, sanitizeUiPreferences(stored).spaces) }
   return writePreferences(path, stored, { ...stored, ...patch }, patch)
 }
 
@@ -97,12 +99,45 @@ export function updateUiPreferences(path, patch) {
 //   {op:'add', key:'spaces', item:{id,name,threads,createdAt,agent?}}  no-op when that id exists
 //   {op:'remove', key:'spaces', item:<space id>}
 //   {op:'add'|'remove', key:'spaces/<id>/threads', item:<thread id>}  no-op when the Space is gone
+// A thread belongs to at most one Space of its agent (James, 29 Oct 2026: "A message should only be in one space").
+// Adding it to a Space (or creating a Space with it) moves it there: the same write drops it from that agent's
+// other Spaces, so no device, agent tool or old client can leave it in two.
 //   {op:'set', key:'spaces/<id>/name', item:<name>}
 const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
 // Operands are checked even when they change nothing (removing an absent item), so malformed ops are always a 400.
 const SUBJECT = v => typeof v === 'string' && v.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(v)
 const listItem = { pinnedChats: v => typeof v === 'string' && THREAD_ID.test(v), subjectOrder: SUBJECT }
 const badOps = () => { throw Object.assign(new Error('invalid_preferences'), { status: 400 }) }
+const ownerOf = s => s.agent || 'hermes'
+// The one-Space rule, shared by every writer: `target` keeps (or gains) these threads, the agent's other Spaces lose them.
+export function fileInOneSpace(spaces, target, threads) {
+  const agent = ownerOf(target), moving = new Set(threads)
+  return spaces.map(s => s.id === target.id ? { ...s, threads: [...new Set([...s.threads, ...threads])] }
+    : ownerOf(s) === agent && s.threads.some(t => moving.has(t)) ? { ...s, threads: s.threads.filter(t => !moving.has(t)) } : s)
+}
+// Full snapshots may carry unresolved legacy duplicates. Preserve those memberships (including
+// explicit removals), rather than choosing a keeper by array order. One newly joined Space is an
+// old add-only client's move; several new targets are ambiguous and reject the whole write.
+export function oneSpaceEach(spaces, before = []) {
+  const memberships = list => {
+    const groups = new Map()
+    for (const s of list) for (const t of s.threads) {
+      const key = `${ownerOf(s)}\n${t}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push({ space: s, thread: t })
+    }
+    return groups
+  }
+  const had = memberships(before), moves = []
+  for (const [key, group] of memberships(spaces)) {
+    if (group.length < 2) continue
+    const old = new Set((had.get(key) || []).map(m => m.space.id))
+    const fresh = group.filter(m => !old.has(m.space.id))
+    if (fresh.length > 1) badOps()
+    if (fresh.length === 1) moves.push(fresh[0])
+  }
+  return moves.reduce((next, { space, thread }) => fileInOneSpace(next, space, [thread]), spaces)
+}
 export function applyUiPreferenceOps(prefs, ops) {
   if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()
   const next = { ...prefs }
@@ -118,15 +153,17 @@ export function applyUiPreferenceOps(prefs, ops) {
       } else if ((op === 'add' || op === 'remove') && str) next[key] = op === 'add' ? (list.includes(item) ? list : list.concat(item)) : list.filter(s => s !== item)
       else badOps()
     } else if (key === 'spaces') {
-      if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = next.spaces.concat(item) }
+      if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = fileInOneSpace(next.spaces.concat(item), item, item.threads) }
       else if (op === 'remove' && typeof item === 'string' && SPACE_ID.test(item)) next.spaces = next.spaces.filter(s => s.id !== item)
       else badOps()
     } else if (sub) {
       const [, id, field] = sub
       // Checked here too: a Space deleted meanwhile makes the operation a no-op, never a way past validation.
       if (field === 'threads' ? !((op === 'add' || op === 'remove') && typeof item === 'string' && THREAD_ID.test(item)) : !(op === 'set' && text(item, 60))) badOps()
-      next.spaces = next.spaces.map(s => s.id !== id ? s : field === 'name' ? { ...s, name: item }
-        : { ...s, threads: op === 'add' ? (s.threads.includes(item) ? s.threads : s.threads.concat(item)) : s.threads.filter(t => t !== item) })
+      const target = next.spaces.find(s => s.id === id)
+      if (!target) continue
+      next.spaces = field === 'threads' && op === 'add' ? fileInOneSpace(next.spaces, target, [item])
+        : next.spaces.map(s => s.id !== id ? s : field === 'name' ? { ...s, name: item } : { ...s, threads: s.threads.filter(t => t !== item) })
     } else badOps()
   }
   return next
