@@ -11,4 +11,4 @@ if [ "${1:-}" = recovery-home ]; then
   shift
   exec uv run --no-project --with 'PyYAML>=6.0.2,<7' --with 'python-dotenv>=1,<2' python "$here/recovery_home.py" "$@"
 fi
-exec uv run --no-project --with 'PyYAML>=6.0.2,<7' python "$here/hermes_import.py" "$@"
+exec uv run --no-project --with 'PyYAML>=6.0.2,<7' --with 'python-dotenv>=1,<2' python "$here/hermes_import.py" "$@"

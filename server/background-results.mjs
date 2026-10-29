@@ -85,7 +85,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     return [...unique.values()]
   }
   const admitted = key => queue()?.byIdempotencyKey('direct', key)
-  const isBusy = id => busy(id) || (queue()?.latestProjections([id]) || []).some(row => ACTIVE.has(row.status))
+  const isBusy = id => busy(id) || ACTIVE.has(queue()?.latestStatus(id))
   const consumed = (rows, delegationId, at, messageId, sourceKind = 'transcript') => rows.some(row => {
     if (delegationId && row.role === 'user' && textOf(row).includes(`${RECEIPT_PREFIX}${delegationId}\n`)) return true
     if (delegationId && Number(row.timestamp) > at && (row.role === 'tool' || row.role === 'assistant' && row.tool_calls?.length)) {

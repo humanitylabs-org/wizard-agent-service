@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
-import { STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 export const checks = {
   ...serverChecks,
@@ -63,7 +63,8 @@ export const checks = {
     const init = post({ session_id: 'wizard_parity', input: 'One synthetic send' }); init.headers['Idempotency-Key'] = 'parity-one-send'
     const a = await s.request('/v1/runs', init), b = await s.request('/v1/runs', init)
     assert.equal(a.status, 202); assert.equal(b.status, 202)
-    assert.equal((await a.json()).run_id, (await b.json()).run_id)
+    s.runId = (await a.json()).run_id
+    assert.equal(s.runId, (await b.json()).run_id)
     assert.equal(b.headers.get('idempotency-replayed'), 'true')
   },
   'steer': async s => {
@@ -96,6 +97,21 @@ export const checks = {
   'retry-input': async s => {
     const r = await s.request('/api/sessions/wizard_parity?view=detail'); assert.equal(r.status, 200)
     assert.equal((await r.json()).session.wizard_retry_input, 'One synthetic send')
+    // Real service + authorized profile/container/restricted transport; no runtime-history fallback.
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: '⚠️ Provider authentication failed: synthetic expired sign-in', usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } })
+    s.sessions.get('wizard_parity').messages = []
+    await s.restart()
+    const detail = await (await s.request('/api/sessions/wizard_parity?view=detail')).json()
+    const saved = detail.session || detail
+    assert.equal(saved.status, 'failed'); assert.equal(saved.wizard_retry_run_id, s.runId)
+    assert.equal(saved.wizard_retry_input, 'One synthetic send')
+    const retry = () => s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'not authoritative', wizard_retry_run_id: saved.wizard_retry_run_id, model: 'fixture-model', provider: 'anthropic', require_model_lock: true }))
+    const responses = await Promise.all([retry(), retry()])
+    for (const response of responses) assert.equal(response.status, 202, await response.clone().text())
+    const [a, b] = await Promise.all(responses.map(r => r.json())); assert.equal(a.run_id, b.run_id)
+    const writes = s.seen.filter(r => r.method === 'POST' && (r.path.endsWith('/v1/runs') || r.path.endsWith('/chat/stream')))
+    assert.equal(writes.length, 2); assert.equal(writes.at(-1).body.input || writes.at(-1).body.message, 'One synthetic send')
+    assert.equal(writes.at(-1).body.wizard_retry_run_id, undefined)
   },
   'session-archive': async s => {
     for (const archived of [true, false]) {
@@ -149,8 +165,8 @@ export const checks = {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Two desk layouts are ready for the owner to choose.' }))
     assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1)
-    assert.ok(sent.body.instructions.includes(STATUS_INSTRUCTIONS), 'the complete shared status contract reaches the runtime')
-    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR', 'The reply itself ends with the same ask in plain words.']) {
+    assert.ok(sent.body.instructions.includes(STATUS_PROTOCOL_INSTRUCTIONS), 'the shared status protocol reaches the runtime')
+    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR']) {
       assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
     }
     assert.ok(!sent.body.instructions.includes('under 90 characters'))
@@ -185,7 +201,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : {})
+  const s = await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : feature === 'app-job-routing' ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)

@@ -1,6 +1,6 @@
 import { parseStatus } from './thread-status.mjs'
 
-export const REPORTER_INSTRUCTIONS = `Reporter format (overrides the general finish-report format for this scheduled reply):
+export const REPORTER_INSTRUCTIONS = `Reporter format (overrides the owner’s Summary or Concise reply guidance for this scheduled reply):
 First line: the point, in bold, as one plain sentence.
 Then only labels that have something to say: **What happened:** (1–3 sentences), **What you need to do:** (one action, only if needed), **Still open:** (at most 2 bullets).
 At most 120 words excluding the status line. Plain words: no PR, issue or version numbers, branch, job or file names; no team jargon (lane, gate, waive, receipt, cutover, soak, parity, unblock).

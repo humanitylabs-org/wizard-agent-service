@@ -56,3 +56,15 @@ test('slim rows keep the routed agent id instead of relabelling them as the main
   assert.equal(slimRow({ id: 'p1', agent: 'philosopher', title: 'x', last_active: '2026-10-25T00:00:00Z' }).agent, 'philosopher');
   assert.equal(slimRow({ id: 'm1', title: 'y', last_active: '2026-10-25T00:00:00Z' }).agent, 'hermes');
 });
+test('the owner\'s Auto-archive choice decides which aged threads leave the list (Never keeps every unfinished one)',async()=>{
+ // 20-day-old threads: half explicitly archived (Done), half only aged.
+ const never=selectWindow(rows,{now,archiveDays:0});
+ assert.equal(never.archive_total,65); assert.equal(never.rows.length,65+50); // all 65 aged-only threads stay in the list
+ assert(never.rows.some(s=>s.id==='s129')); // even the oldest aged one, which a one-week window dropped
+ assert.equal(selectWindow(rows,{now,archiveDays:30}).archive_total,65);
+ assert.equal(selectWindow(rows,{now,archiveDays:14}).archive_total,130);
+ assert.equal(selectWindow(rows,{now,archiveDays:'junk'}).archive_total,130); // invalid -> one week default
+ let days=7; const page=createListWindows({now:()=>now,archiveDays:()=>days}),params=new URLSearchParams({window:'archive-50',view:'list',limit:'100'});
+ assert.equal((await page({params,scope:'main',load:async()=>rows})).archive_total,130);
+ days=0; assert.equal((await page({params,scope:'main',load:async()=>rows})).archive_total,65);
+});

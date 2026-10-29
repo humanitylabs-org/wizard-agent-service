@@ -240,7 +240,10 @@ def provider_accounts(provider, read=None, fetch=None):
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
     # No full response cache: additions/removals are visible on every request.
+    # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
+    # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
     return {'provider': provider, 'name': _NAMES[provider], 'owner': 'hermes',
+            'identity': {'emailHash': 'sha256-16'},
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
             'management': {'contract': 'wizard.account-management/1', 'status': 'available',

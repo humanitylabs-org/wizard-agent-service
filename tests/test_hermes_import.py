@@ -123,10 +123,9 @@ class ImportTests(unittest.TestCase):
         plan = self.plan()
         for entry in plan['credentials']:
             if entry['kind'] == 'config-field': entry['approved'] = True
-        result = self.apply(m.approve(plan))
-        imported = m.load_yaml((self.wizard / 'agents/fixture-agent/home/config.yaml').read_text())
-        self.assertNotIn('WIZARD_HEAVY_TOKEN', imported.get('env', {}))
-        self.undo(result)
+        with self.assertRaisesRegex(m.ImportFailure, 'inline_credentials_require_secret_store'):
+            self.apply(m.approve(plan))
+        self.assertFalse((self.wizard / 'agents').exists())
         self.assertEqual(m.load_yaml((self.home / 'config.yaml').read_text()), config)
 
     def test_corrupt_backup_fails_before_any_rollback_mutation(self):

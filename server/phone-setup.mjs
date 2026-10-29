@@ -82,6 +82,9 @@ export function statusOrigin(status) {
   return dns ? validTailnetOrigin(`https://${dns}`) : ''
 }
 
+// ops/private-access/wizard-private-access owner_peers() caps its list at this many peers.
+const HELPER_PEER_LIMIT = 32
+
 function isPhone(peer) {
   return MOBILE_OS.has(String(peer?.os || '').toLowerCase())
 }
@@ -236,6 +239,15 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       try {
         recordServing(current)
       } catch (e) { error = error || e?.code || 'settings_unavailable' }
+    }
+    // A phone removed from the tailnet (Tailscale's admin) can't reach Wizard any more. Once no phone is left, forget
+    // that one was seen: Setup says connected again only after a phone opens Wizard again, the same proof as the
+    // first time (an offline phone is still on the tailnet and still counts). The private-access helper returns at most
+    // HELPER_PEER_LIMIT peers (online first, then by name), so a full list may hide an offline phone: only a shorter,
+    // complete list proves no phone is left. Environment-pinned access (WIZARD_TAILNET_ORIGIN/LOGIN) records visits
+    // outside this helper's enrollment, so its peer list proves nothing about that phone: keep the visit.
+    if (!accessPinned && current?.backend_state === 'Running' && Array.isArray(current.peers) && current.peers.length < HELPER_PEER_LIMIT && !current.peers.some(isPhone) && settings().setup.phone_seen_at) {
+      try { markSetup('phone_seen_at', '') } catch (e) { error = error || e?.code || 'settings_unavailable' }
     }
     return view(current, error)
   }

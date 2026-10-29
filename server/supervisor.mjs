@@ -175,7 +175,7 @@ export class Supervisor {
   }
   build(args, caller) {
     const review = this.requireReview(caller)
-    const b = { id: uid('build'), title: text(args.title, 60, 'title'), brief: text(args.brief, 32000, 'brief'), thread: uid('wizard_builder') }
+    const b = { id: uid('build'), created_at: this.now(), title: text(args.title, 60, 'title'), brief: text(args.brief, 32000, 'brief'), thread: uid('wizard_builder') }
     this.transaction(() => {
       this.db.prepare('INSERT INTO builds VALUES(?,?,?,?,?)').run(b.id, review.id, b.thread, 'running', JSON.stringify(b))
       this.enqueue(`supervisor-build:${b.id}`, { thread: b.thread, title: builderThreadTitle(b.title), createThread: true,
