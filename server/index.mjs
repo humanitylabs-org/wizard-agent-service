@@ -130,6 +130,12 @@ server = createWizardServer({
   supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
+  // Host-only, opt-in: never infer host authority from an agent's Hermes home.
+  systemJobsStatePath: process.env.WIZARD_SYSTEM_JOBS_STATE_PATH || '',
+  systemJobsHermesHome: process.env.WIZARD_SYSTEM_JOBS_IMPORT_HOME || '',
+  systemJobsSocketPath: process.env.WIZARD_SYSTEM_JOBS_SOCKET || '',
+  systemJobsUnitDir: process.env.WIZARD_SYSTEM_JOBS_UNIT_DIR || '',
+  systemJobsEnabled: process.env.WIZARD_SYSTEM_JOBS === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
   providerAccessRecovery: process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),

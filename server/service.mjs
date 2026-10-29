@@ -72,6 +72,7 @@ import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
 import { acquireServiceLeases } from './store-migration.mjs'
+import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } from './system-jobs.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
@@ -2149,8 +2150,10 @@ export function scheduleNotifier({ bridge, appsJsonPath }) {
     return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
   }
   return {
-    available: (agent = GATEWAY_MAIN_AGENT) => pick(agent)?.status === 'running',
+    // 'main' is the portable spelling (scheduler jobs, host system jobs); the bridge knows the main agent as hermes.
+    available: (agent = GATEWAY_MAIN_AGENT) => pick(agent === 'main' ? GATEWAY_MAIN_AGENT : agent)?.status === 'running',
     send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
+      agent = agent === 'main' ? GATEWAY_MAIN_AGENT : agent
       const app = pick(agent)
       if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
       const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, agent)
@@ -2502,7 +2505,7 @@ export function speechText(value) {
 
 export function createWizardServer(options = {}) {
   // Authority directories fail as before; the optional upload lease is acquired only when enabled.
-  const paths = ['supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
+  const paths = ['systemJobsStatePath', 'supervisorStatePath', 'schedulerStatePath', 'runQueueStatePath', 'heavyStatePath', 'threadTitleStatePath',
     'threadStatusBackfillPath', 'subjectsPath', 'threadSeenStatePath', 'threadDispositionStatePath',
     'dismissedFailureStatePath', 'operatorWorkerStatePath', 'voiceRecoveryManifestPath'].map(key => options[key]).filter(Boolean)
   const ownedStatePath = ownedWorkStatePathOf(options)
@@ -4636,6 +4639,31 @@ function buildWizardServer(options, lifetime) {
     deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  const hostJobsActive = options.systemJobsEnabled === true
+  if (hostJobsActive && (!options.systemJobsStatePath || !options.systemJobsUnitDir || !options.systemJobsSocketPath)) throw new Error('Host jobs require explicit state, unit and socket paths')
+  // Host execution needs the one owner credential no local caller can imitate (principals.mjs: proxy_proof).
+  if (hostJobsActive && !options.ownerProof) throw new Error('Host jobs require an owner proof (WIZARD_OWNER_PROOF_FILE)')
+  const systemJobs = options.systemJobsStatePath ? new SystemJobs({
+    statePath: resolve(String(options.systemJobsStatePath)),
+    hermesHome: options.systemJobsHermesHome || '',
+    timers: options.systemJobsTimers ?? (hostJobsActive ? new SystemdJobTimers({ unitDir: options.systemJobsUnitDir, socketPath: options.systemJobsSocketPath }) : null),
+    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+  }) : null
+  if (systemJobs) {
+    let socket = null, alertTimer = null
+    lifetime.own(async () => {
+      if (alertTimer) clearInterval(alertTimer)
+      if (socket) await new Promise(resolveClose => socket.close(resolveClose))
+      await systemJobs.close()
+    })
+    if (hostJobsActive) {
+      socket = systemJobsSocket(systemJobs, options.systemJobsSocketPath)
+      socket.on('error', () => { console.error('[system-jobs] host trigger unavailable'); server.close() })
+      systemJobs.reconcile()
+      alertTimer = setInterval(() => { void systemJobs.flushAlerts().catch(() => console.error('[system-jobs] notification pending')) }, 30_000)
+      alertTimer.unref()
+    }
+  }
   const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
     canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
@@ -5488,6 +5516,22 @@ function buildWizardServer(options, lifetime) {
           response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
           response.end(body)
         }
+        return
+      }
+      if (url.pathname === '/wizard/v1/system-jobs' || url.pathname.startsWith('/wizard/v1/system-jobs/')) {
+        // Host execution is never an agent capability, including main/recovery agent credentials.
+        // Only the owner proof counts: a credential-less box caller (BOX_OWNER) or a header-based verifier can be
+        // imitated by any local process, including an agent that omits its token.
+        if (principal.kind !== 'owner' || principal.via !== 'proxy_proof' || isAgentIngress(request)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.method !== 'GET') {
+          const refusal = setupWriteRefusal(request, tailnetIngress)
+          if (refusal) { sendJson(response, refusal, { error: 'same_origin_json_required' }); return }
+        }
+        await handleSystemJobsApi(request, response, url, { jobs: systemJobs, sendJson, readBody: async req => {
+          try { return JSON.parse((await readBoundedBody(req, 128 * 1024)).toString('utf8')) }
+          catch { throw Object.assign(new Error('Invalid system job body'), { status: 400 }) }
+        } })
         return
       }
       if (url.pathname === '/wizard/v1/schedules' || url.pathname.startsWith('/wizard/v1/schedules/')) {
