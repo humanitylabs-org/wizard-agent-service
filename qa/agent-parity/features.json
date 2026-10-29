@@ -431,12 +431,13 @@
       "id": "media-contract",
       "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
       "layer": "server",
-      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering.",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB, cache/images placement) and the status-line contract. This alone does not prove media rendering.",
       "source_refs": [
         "server/chat-presentation.mjs"
       ],
       "reference_tests": [
-        "tests/markdown-hint.test.ts"
+        "tests/markdown-hint.test.ts",
+        "tests/owner-file-handoff.test.ts"
       ],
       "fixture": "media-contract",
       "policy_exemptions": []

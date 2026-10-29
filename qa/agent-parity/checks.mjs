@@ -190,6 +190,8 @@ export const checks = {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic media request' })); assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('MEDIA:/absolute/path'), 'every agent must know how Wizard renders delivery media')
+    for (const piece of ['PDF', 'up to 256 MB', 'the 5 MB limit is for images only', 'copy it into your own cache/images first', 'non-image files are not intercepted'])
+      assert.ok(sent.instructions.includes(piece), `every agent kind is told the file-card contract: ${piece}`)
     assert.ok(sent.instructions.includes('WIZARD_STATUS_V1'))
   },
 }
