@@ -41,6 +41,16 @@
   ],
   "features": [
     {
+      "id": "holographic-fact-memory",
+      "description": "Stock local fact_store and prefetch recall survive process/container restart in each runtime's own Hermes home without crossing agent/profile homes.",
+      "layer": "runtime",
+      "how_to_test": "Run tests/holographic_container_proof.py on an isolated Docker worker. Real stock gateway containers model main-home, named-profile, managed-container and restricted-home scopes; the stock memory initializer must inject fact_store/fact_feedback, add/search/prefetch a canary, restart only its disposable gateway and recall again for every kind. Restricted proof also backs up via native SQLite-safe backup, imports into a second home, applies Wizard import wiring, and recalls. This is stock runtime home/tool behavior, not live Wizard routing or model adherence. Never use existing private agents or owner homes. The Holographic memory workflow saves the per-kind JSON results; an empty report or failed command fails CI.",
+      "source_refs": ["server/agents.mjs", "ops/agent-runtime/hermes_import.py"],
+      "reference_tests": ["tests/holographic-memory.test.ts", "tests/holographic_container_proof.py", "tests/test_hermes_import.py", "tests/managed-harness-upgrade.test.ts"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
       "layer": "server",

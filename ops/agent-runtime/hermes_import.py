@@ -352,7 +352,7 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
                         'profiles_archived': profile_roots,
                         'ownership_source_dry_run': ownership_count,
                         'sessions': sessions, 'state_db_bytes': next((n for r, n, _ in rows if r == 'state.db'), 0),
-                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'builtin'),
+                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'holographic'),
                         'skills': sum(p.startswith('skills/') and p.endswith('/SKILL.md') for p in paths),
                         'model': {k: v for k, v in (cfg.get('model') or {}).items() if k in {'provider', 'default'}},
                         'plugins': sorted({p.split('/')[1] for p in paths if p.startswith('plugins/') and len(p.split('/')) > 2}),
@@ -643,6 +643,50 @@ def managed_path(home, relative):
     return path
 
 
+def configure_memory(cfg, plan):
+    """Default to stock local facts; keep explicit alternative providers intact.
+
+    Rebase only this provider's own-home paths. An outside DB cannot be carried
+    implicitly: refusing it is safer than starting with an empty replacement.
+    No database bytes are opened or rewritten by configuration wiring.
+    """
+    memory = cfg.setdefault('memory', {})
+    require(isinstance(memory, dict), 'memory_config_invalid')
+    memory.setdefault('provider', 'holographic')
+    if memory['provider'] != 'holographic':
+        return
+    plugins = cfg['plugins']
+    plugins['enabled'] = list(dict.fromkeys([*plugins['enabled'], 'holographic']))
+    # Imported API allowlists can otherwise activate the provider but hide all
+    # of its tools. Hermes gates external provider schemas on the memory toolset.
+    api_tools = (cfg.get('platform_toolsets') or {}).get('api_server')
+    if isinstance(api_tools, list) and 'memory' not in api_tools:
+        api_tools.append('memory')
+    settings = plugins.setdefault('hermes-memory-store', {})
+    require(isinstance(settings, dict), 'memory_config_invalid')
+    path = settings.get('db_path') or '$HERMES_HOME/memory_store.db'
+    require(isinstance(path, str), 'memory_path_invalid')
+    # Support portable placeholders plus absolute paths under the source home
+    # (a normal Hermes setup), including a second restricted-admission wire().
+    relative = None
+    for root in ('$HERMES_HOME', '${HERMES_HOME}', '~/.hermes',
+                 str(plan['source']).rstrip('/'), str(logical_home(plan)).rstrip('/')):
+        if path.startswith(root + '/'):
+            relative = path[len(root) + 1:]
+            break
+    if relative is None and not path.startswith(('/', '~', '$')):
+        relative = path
+    require(relative and '..' not in Path(relative).parts and not Path(relative).is_absolute()
+            and '$' not in relative, 'memory_path_outside_home')
+    assert isinstance(relative, str)  # require() above raises for None
+    parts = Path(relative).parts
+    require(parts and not excluded(relative) and parts[0] not in {'profiles', 'hooks'}
+            and parts[:2] != ('data', 'apps')
+            and (parts[0] != 'plugins' or (len(parts) > 2 and parts[1] in plan.get('approved_plugins', []))),
+            'memory_path_not_portable')
+    settings['db_path'] = '$HERMES_HOME/' + relative
+
+
 def wire(home, plan, api_key, gateway_key):
     """Only passive data enters a paused rehearsal; originals are journalled by apply."""
     home = Path(home)
@@ -684,6 +728,7 @@ def wire(home, plan, api_key, gateway_key):
         cfg['platform_toolsets'] = platforms
     if isinstance(memory_plugin, dict):
         cfg['plugins']['hermes-memory-store'] = memory_plugin
+    configure_memory(cfg, plan)
     (home / 'config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
     os.chmod(home / 'config.yaml', 0o600)
     env_path = home / '.env'
