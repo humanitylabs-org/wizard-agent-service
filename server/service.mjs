@@ -1,5 +1,5 @@
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
@@ -49,6 +49,9 @@ import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, re
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
+import { createAppsViewsRoutes } from './wizard-apps-views.mjs'
+import { createAppLifecycleRoutes, localOwnerAccess } from './app-lifecycle.mjs'
+import { createAgentAppActions } from './agent-app-actions.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
@@ -79,6 +82,8 @@ import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
+import { createMaintenanceLease, localRuntimeActivity, maintenanceReason } from './maintenance.mjs'
+import { controlBoundary, machineCapabilityPath } from './control-boundary.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -365,7 +370,8 @@ export function supportsJoinedDelegation(payload) {
     && capability.modes.includes('join')
 }
 
-const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
+// Stock Hermes import retains CLI/TUI source and ids; these are interactive human chats too.
+const HUMAN_SESSION_SOURCES = new Set(['cli', 'tui', 'webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
@@ -983,7 +989,8 @@ function safeFile(value, trusted = false) {
 
 function safeAttachment(value) {
   const file = safeFile(value)
-  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256 }
+  return { id: file.id, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+    ...(typeof value?.agent === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(value.agent) ? { agent: value.agent } : {}) }
 }
 
 export function createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots }) {
@@ -2605,6 +2612,15 @@ function buildWizardServer(options, lifetime) {
       fetchImpl, writeSkills: !gatewayOnly && options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
       jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
+      // The owner's agent installs catalogue apps through the same App Manager bridge the Store uses.
+      appActions: options.appManagerUrl && options.appManagerToken ? createAgentAppActions({
+        managerUrl: options.appManagerUrl, managerToken: options.appManagerToken, managerHosts: options.appManagerHosts || [],
+        fetchImpl: options.appManagerFetch ?? fetchImpl, ...(options.appIndexUrl ? { indexBase: options.appIndexUrl } : {}),
+        ...(options.appIndexFetch ? { indexFetch: options.appIndexFetch } : {}),
+        log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
+      }) : null,
+      ...(options.bridgeToolWaitMs !== undefined ? { toolWaitMs: options.bridgeToolWaitMs } : {}),
+      ...(options.bridgeInstallBudgetMs !== undefined ? { installBudgetMs: options.bridgeInstallBudgetMs } : {}),
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
@@ -3442,6 +3458,20 @@ function buildWizardServer(options, lifetime) {
   }
 
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
+  const maintenance = createMaintenanceLease({
+    path: options.maintenanceStatePath || (runQueueStatePath ? `${runQueueStatePath}.maintenance` : ''),
+    barrier: options.maintenanceBarrier || agentRuntime?.maintenance || null,
+    externalPath: options.maintenanceExternalPath || '',
+    activity: async () => {
+      const rows = [{ id: MAIN_AGENT_ID, ...localRuntimeActivity(hermesStatePath) }]
+      for (const agent of agents?.list() || []) {
+        if (agent.id === MAIN_AGENT_ID) continue
+        // Missing/stopped/unreachable is not proof of zero work. Every local home must be readable.
+        rows.push({ id: agent.id, ...localRuntimeActivity(join(agents.agentsDir, agent.id, 'home', 'state.db')) })
+      }
+      return rows
+    },
+  })
   let runQueue = null
   let heavyWork = null
   // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
@@ -3498,6 +3528,7 @@ function buildWizardServer(options, lifetime) {
       canonicalSessionCache.expiresAt = 0
     }
     const queueHermesAdmission = async (record) => {
+      if (maintenance.blocked()) throw Object.assign(new Error('maintenance_active'), { status: 503 })
       if ((record.agent_id ?? MAIN_AGENT_ID) !== MAIN_AGENT_ID) throw Object.assign(new Error('Agent-qualified job belongs to a different executor'), { status: 410 })
       if (agents?.read(record.agent_id ?? MAIN_AGENT_ID)?.role === 'recovery' && !record.recoveryAuthorized) throw Object.assign(new Error('Recovery agent requires explicit owner admission'), { status: 410 })
       let queuedBody = Buffer.from(record.body, 'utf8')
@@ -3627,7 +3658,7 @@ function buildWizardServer(options, lifetime) {
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
       activeSessionIds: activeSessionReader,
-      canDispatch: dispatchHealthReader,
+      canDispatch: () => !maintenance.blocked() && dispatchHealthReader(),
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
@@ -4340,6 +4371,7 @@ function buildWizardServer(options, lifetime) {
       .some(r => r.sessionId === sessionId && ACTIVE_RUN_STATUSES.has(r.status))
   }
   const admitHelperContinuation = async (sessionId, input, key, continuation) => {
+    if (maintenance.blocked()) throw Object.assign(new Error('maintenance_active'), { status: 503 })
     if (agents?.read(MAIN_AGENT_ID)?.role === 'recovery') throw Object.assign(new Error('Recovery agent is not automatic'), { status: 410 })
     // Only the manual Continue route may write a background-recovery continuation (see queueHermesAdmission).
     if (continuation?.kind === BACKGROUND_RECOVERY_KIND) throw Object.assign(new Error('Stale helper request'), { status: 410 })
@@ -4821,6 +4853,36 @@ function buildWizardServer(options, lifetime) {
   }
 
   const standardRetrievalRate = new Map()
+  const appOwners = (options.appOwnerLogins || []).map((login) => String(login).trim().toLowerCase()).filter(Boolean)
+  const trustedProxyIps = options.appTrustedProxyIps || []
+  // A trusted gateway peer is only ever an owner by a named login: refuse to start with one and no owner list.
+  if (!baseRequireAccess && trustedProxyIps.length && !appOwners.length) throw new Error('WIZARD_APP_TRUSTED_PROXY_IPS needs WIZARD_APP_OWNER_LOGINS')
+  // Without Cloudflare Access (a Wizard OS box or container) the same owner rule guards every control route.
+  const boxOwner = (req) => localOwnerAccess(req, appOwners, trustedProxyIps)
+    || (!appOwners.length && ownerLike(principalOf(req)) && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress) && !req.headers.forwarded && !req.headers['x-forwarded-for'] && !req.headers['x-forwarded-host'])
+  // The box-owner rule (Host fence + owner identity on every control route) is opt-in: a box that names its owner
+  // logins or serves a separate apps origin (Mac guest, fresh mode). Existing installs keep the previous none-mode
+  // behaviour until their installer has written that identity, so an upgrade never locks the owner out.
+  const ownerRule = options.ownerRule ?? (appOwners.length > 0 || Boolean(options.appsOrigin))
+  const ownerAccess = options.appLifecycleAccess ?? (baseRequireAccess ? (req) => accessVerified(req, baseAccessVerifier) : boxOwner)
+  const appsViews = createAppsViewsRoutes({ appsJsonPath, indexBase: options.appIndexUrl, fetchImpl: options.appIndexFetch, access: ownerAccess })
+  const appRouteOptions = {
+    appsJsonPath, managerUrl: options.appManagerUrl || '', managerToken: options.appManagerToken || '',
+    access: ownerAccess, fetchImpl: options.appManagerFetch ?? fetchImpl, refresh: () => bridge?.refresh(),
+    allowedHosts: options.allowedHosts || [], appsOrigin: options.appsOrigin || '', upstreamHosts: options.appUpstreamHosts || [], managerHosts: options.appManagerHosts || [],
+    reservedPorts: options.appReservedPorts || [],
+    controlOrigins: [readSettings(settingsPath).settings?.network?.base_url || '', ...(baseAccessVerifier?.controlOrigins || [])],
+  }
+  const appLifecycle = createAppLifecycleRoutes(appRouteOptions)
+  // Only the configured isolated app origin may frame into the shell. It never
+  // gains connect-src/native/control authority; the apps listener remains app-only.
+  const appFrameSources = ["'self'", ...(options.appsOrigin ? [new URL(options.appsOrigin).origin] : [])].join(' ')
+  // The apps origin: a second listener that serves installed app documents and nothing else (index.mjs binds it).
+  const appsOnly = createAppLifecycleRoutes({ ...appRouteOptions, role: 'apps' })
+  const appsHandler = async (request, response) => {
+    try { await appsOnly(request, response, new URL(request.url ?? '/', 'http://wizard.local')) }
+    catch { if (!response.headersSent) { response.writeHead(500); response.end() } }
+  }
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
     const requestDone = lifetime.request()
@@ -4844,6 +4906,38 @@ function buildWizardServer(options, lifetime) {
       }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname) && !(url.pathname === '/wizard/v1/settings' && request.method === 'PUT')) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      // Standalone Store reads canonical Service routes. No writable or arbitrary-upstream alias.
+      const storePrefix = `${uxPrefix}store-data/`
+      if (url.pathname.startsWith(storePrefix)) {
+        const route = url.pathname.slice(storePrefix.length)
+        if (!['GET', 'HEAD'].includes(request.method) || !/^(?:wizard\/v1\/index\/(?:search|tags|apps\/[a-z0-9/_-]+)|api\/apps\/installed|api\/marketplace\/apps\/[a-z0-9:%_-]+\/image)$/u.test(route)) { sendJson(response, 404, { error: 'not_found' }); return }
+        url.pathname = '/' + route
+      }
+      if (!requireAccess && !url.pathname.startsWith('/wizard/v1/setup') && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !isAgentIngress(request)
+        && !controlBoundary(request, { allowedHosts: options.allowedHosts || [], controlOrigins: [...appRouteOptions.controlOrigins, ...(url.pathname === '/wizard/helper-continue' ? (options.helperContinueOrigins || []) : [])],
+          selfOrigin, appsOrigin: options.appsOrigin || '', strictHost: ownerRule })) {
+        sendJson(response, 403, { error: 'same_origin_required' }); return
+      }
+      // Token routes (the agent gateway, its context) and health check their own callers; everything else is the
+      // owner's. Containers on the box (installed apps, other services) get no sessions/runs/files authority here.
+      if (ownerRule && !tailnetIngress && !requireAccess && !options.appLifecycleAccess && url.pathname !== '/wizard/health' && !machineCapabilityPath(url.pathname) && !internalCall(request) && !isAgentIngress(request) && !boxOwner(request)) {
+        sendJson(response, 403, { error: 'access_required' }); return
+      }
+      if (url.pathname === '/wizard/v1/maintenance') {
+        if (!boxOwner(request) || (requireAccess && !await accessVerified(request, accessVerifier)) || !['POST', 'DELETE'].includes(request.method)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        const body = parseJsonBody(await readBoundedBody(request, 1024))
+        try {
+          if (request.method === 'POST') { const lease = await maintenance.acquire(body.token); sendJson(response, 201, { ok: true, token: lease.token, agents: lease.agents }) }
+          else { await maintenance.release(body.token); sendJson(response, 200, { ok: true }) }
+        } catch (e) { const error = String(e.message || 'maintenance_unavailable'); sendJson(response, 409, { error, message: maintenanceReason(error) }) }
+        return
+      }
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        const leave = maintenance.enter()
+        response.once('finish', leave); response.once('close', leave)
+      }
+      if (await appsViews(request, response, url)) return
+      if (await appLifecycle(request, response, url)) return
       if (tailnetIngress) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
@@ -4998,9 +5092,11 @@ function buildWizardServer(options, lifetime) {
               const input = parseJsonBody(await readBoundedBody(request, 16 * 1024))
               // A destination (the Files app) places the finished file in the user-files root: in the
               // given folder, or Inbox/<YYYY-MM-DD> in the owner's time zone when no folder is given.
-              let targetKey = 'files'
+              const routed = await resolveShareAgent(input.agent || '')
+              let targetKey = routed.target
               const destination = parseDestination(input?.destination)
               if (destination) {
+                if (routed.agent !== MAIN_SHARE_AGENT) throw new UploadError(409, 'private_destination_forbidden')
                 if (!userFiles) throw new UploadError(409, 'destination_unavailable')
                 if (destination.folder) userFiles.checkFolder(destination.folder)
                 targetKey = userFiles.targetKey({ folder: destination.folder, timeZone: ownerTimeZone() })
@@ -5008,6 +5104,13 @@ function buildWizardServer(options, lifetime) {
               const { record, replayed } = await uploads.createUpload(input, { targetKey })
               sendJson(response, 201, uploads.publicUpload(record), { 'Idempotency-Replayed': String(replayed) })
               return
+            }
+            if (parts.length >= 2 && UPLOAD_ID.test(parts[1])) {
+              const record = await uploads.getUpload(parts[1])
+              const expected = record.target.startsWith('agent:') ? record.target.slice(6) : 'hermes'
+              const agent = url.searchParams.get('agent') || (record.share_id ? expected : 'hermes')
+              if (agent !== expected) throw new UploadError(409, 'upload_agent_mismatch')
+              await resolveShareAgent(agent)
             }
             if (parts.length >= 2 && !UPLOAD_ID.test(parts[1])) { sendJson(response, 404, { error: 'not_found' }); return }
             if (parts.length >= 2) await assertUploadVisible(parts[1])
@@ -5257,6 +5360,7 @@ function buildWizardServer(options, lifetime) {
           settings: publicSettings, settingsSource: source,
           capabilities: {
             voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
+            app_installation: Boolean(options.appManagerUrl && options.appManagerToken),
             resumable_uploads: Boolean(uploads), upload_destinations: Boolean(uploads && userFiles),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
           },
@@ -5349,10 +5453,10 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {
         if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
-        // An agent's own gateway token gets that agent's apps (#58); the owner and the main token get the main agent's.
+        // An agent token grants only that agent's context; otherwise retain the Mac owner boundary.
         const tokenAgent = bridge.agentFor(request)
         if (gatewayOnly && !containerAgent(request)) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (!tokenAgent && requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!tokenAgent && !(requireAccess ? await accessVerified(request, accessVerifier) : (!ownerRule || boxOwner(request)))) { sendJson(response, 403, { error: 'access_required' }); return }
         const harness = url.searchParams.get('harness') === 'generic' ? 'generic' : 'hermes'
         const context = await bridge.kernel({ harness, ...(tokenAgent ? { agent: tokenAgent } : {}) })
         if (url.searchParams.get('format') === 'json' || /application\/json/u.test(String(request.headers.accept || ''))) sendJson(response, 200, context)
@@ -5627,7 +5731,7 @@ function buildWizardServer(options, lifetime) {
       }
 
       const fileContentMatch = url.pathname.match(/^\/wizard\/files\/([A-Za-z0-9._:-]+)\/content$/)
-      if (fileContentMatch && ['GET', 'HEAD'].includes(request.method ?? '')) {
+      if (fileContentMatch && !fileContentMatch[1].startsWith('af_') && ['GET', 'HEAD'].includes(request.method ?? '')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const id = fileContentMatch[1]
         if (mediaFiles) {
@@ -5685,9 +5789,49 @@ function buildWizardServer(options, lifetime) {
         return
       }
 
+      const privateContent = url.pathname.match(/^\/wizard\/files\/(af_[0-9a-f]{32})\/content$/u)
+      if (privateContent && ['GET', 'HEAD'].includes(request.method)) {
+        if (!shareRouting) throw new UploadError(404, 'file_not_found')
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const { agent, file } = shareRouting.locateFile(privateContent[1], url.searchParams.get('agent') || '')
+        const root = realpathSync(join(agents.agentsDir, agent, 'home'))
+        const path = realpathSync(join(root, file.path))
+        if (!path.startsWith(root + sep)) throw new UploadError(409, 'file_agent_mismatch')
+        const handle = await open(path, 'r')
+        try {
+          // Verify before sending headers, but yield between bounded reads (including HEAD).
+          // Reuse the open descriptor for GET so a path replacement cannot change the file served.
+          const hash = createHash('sha256'), chunk = Buffer.alloc(1024 * 1024)
+          let length = 0
+          while (true) {
+            const { bytesRead } = await handle.read(chunk, 0, chunk.length, length)
+            if (!bytesRead) break
+            hash.update(chunk.subarray(0, bytesRead)); length += bytesRead
+            if (length > file.bytes) throw new UploadError(409, 'file_changed')
+          }
+          if (length !== file.bytes || hash.digest('hex') !== file.sha256) throw new UploadError(409, 'file_changed')
+          response.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': length, 'Content-Disposition': contentDisposition(file.filename), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+          if (request.method === 'HEAD') response.end()
+          else await pipeline(createReadStream(path, { fd: handle.fd, autoClose: false, start: 0 }), response)
+        } finally { await handle.close() }
+        return
+      }
       if (url.pathname === '/wizard/files/upload' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/octet-stream')) { sendJson(response, 415, { error: 'bytes_required' }); return }
+        const uploadAgent = url.searchParams.get('agent') || 'hermes'
+        const routed = await resolveShareAgent(uploadAgent)
+        if (routed.agent !== MAIN_SHARE_AGENT) {
+          if (!uploads) throw new UploadError(503, 'service_unavailable')
+          const bytes = Number(request.headers['content-length'])
+          const input = { client_upload_id: String(request.headers['x-wizard-upload-id'] || `web-${randomUUID()}`),
+            filename: request.headers['x-wizard-filename'], mime: request.headers['x-wizard-mime'], bytes }
+          const { record } = await uploads.createUpload(input, { targetKey: routed.target })
+          if (record.offset !== 0) throw new UploadError(409, 'use_resumable_upload')
+          await uploads.patchUpload(record.id, 0, request)
+          const complete = await uploads.completeUpload(record.id)
+          sendJson(response, 201, { file: uploads.publicUpload(complete).file }); return
+        }
         const filename = safeHeader(request.headers['x-wizard-filename'], 'uploaded-file', 240).replaceAll('/', '_').replaceAll('\\', '_')
         const mimeType = safeHeader(request.headers['x-wizard-mime'], 'application/octet-stream', 160)
         const data = await readBoundedBody(request, WIZARD_FILE_UPLOAD_LIMIT)
@@ -5960,6 +6104,21 @@ function buildWizardServer(options, lifetime) {
             if (request.method === 'POST' && mutation) {
               const pair = agents.runThread?.(agentResolution.agentId, mutation[1])
               if (pair) heavyWork?.stopAgentSession(pair.agent_id, pair.session_id, mutation[2] === 'stop')
+            }
+            if (request.method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) && agentResolution.body) {
+              const value = JSON.parse(agentResolution.body.toString('utf8'))
+              if (Array.isArray(value.wizard_file_ids) && value.wizard_file_ids.some(id => typeof id === 'string' && id.startsWith('af_'))) {
+                if (principalOf(request).kind !== 'owner') throw new UploadError(403, 'owner_required')
+                await resolveShareAgent(agentResolution.agentId, { delivering: true })
+                if (inputContainsMarker(value.input)) throw new UploadError(400, 'reserved_file_marker')
+                const files = shareRouting.filesForAgent(agentResolution.agentId, value.wizard_file_ids).map(({ file }) => ({
+                  id: file.id, agent: agentResolution.agentId, filename: file.filename, mime: file.mime, bytes: file.bytes, sha256: file.sha256,
+                  trusted_path: `/opt/data/${file.path}`, localPath: join(agents.agentsDir, agentResolution.agentId, 'home', file.path),
+                }))
+                value.input = appendFileMarker(value.input || '', files, true)
+                delete value.wizard_file_ids
+                agentResolution.body = Buffer.from(JSON.stringify(value))
+              }
             }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
@@ -6423,10 +6582,10 @@ function buildWizardServer(options, lifetime) {
         if (!file.startsWith(`${uxDir}${sep}`) || !existsSync(file) || !(await stat(file)).isFile()) { sendJson(response, 404, { error: 'not_found' }); return }
         const details = await stat(file)
         // Wizard UX plays recorded audio and shows blob: images (voice, attachments), so its pages
-        // get the shell's own policy rather than the legacy client's.
+        // get the shell's own media policy; only nested app documents can be framed, never the outer shell.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src ${appFrameSources}; frame-ancestors 'none'`,
           'X-Robots-Tag': 'noindex, nofollow',
         }
         // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
@@ -6470,7 +6629,7 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, error.payload)
         return
       }
-      if (error instanceof AgentError && !response.headersSent) {
+      if ((error instanceof AgentError || error instanceof UploadError) && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
       }
@@ -6566,6 +6725,7 @@ function buildWizardServer(options, lifetime) {
     listCacheTimer.unref?.()
     server.on('close', () => clearInterval(listCacheTimer))
   }
+  server.appsHandler = appsHandler
   return server
 }
 

@@ -1,6 +1,7 @@
 import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
+import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
@@ -32,6 +33,7 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host ===
 }
 
 const port = Number(process.env.WIZARD_PORT || 8787)
+const list = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean)
 // Who may use the service: 'tailscale' (Tailscale Serve identity, the Wizard OS default), 'cloudflare'
 // (Cloudflare Access JWTs) or 'none' (box-only, e.g. behind a gateway that checks identity itself).
 // Unset keeps the earlier behaviour: tailscale when WIZARD_TAILNET_ORIGIN is set, else WIZARD_REQUIRE_CF_ACCESS.
@@ -153,6 +155,20 @@ server = createWizardServer({
   joinedDelegation,
   settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  appManagerUrl: process.env.WIZARD_APP_MANAGER_URL || '',
+  appIndexUrl: process.env.WIZARD_APP_INDEX_URL || undefined,
+  appManagerToken: process.env.WIZARD_APP_MANAGER_TOKEN || '',
+  // Installed apps: trusted Host names (DNS-rebinding fence), the separate apps origin, the hosts app upstreams may
+  // use (a container Service names its host gateway) and, optionally, the tailnet logins that count as the owner.
+  allowedHosts: list(process.env.WIZARD_ALLOWED_HOSTS),
+  appsOrigin: process.env.WIZARD_APPS_ORIGIN || '',
+  appUpstreamHosts: list(process.env.WIZARD_APP_UPSTREAM_HOSTS),
+  appOwnerLogins: list(process.env.WIZARD_APP_OWNER_LOGINS),
+  // Force the box-owner rule on (1) or off (0); unset: on once owner logins or an apps origin are configured.
+  ...(['0', '1'].includes(process.env.WIZARD_OWNER_RULE) ? { ownerRule: process.env.WIZARD_OWNER_RULE === '1' } : {}),
+  appTrustedProxyIps: list(process.env.WIZARD_APP_TRUSTED_PROXY_IPS),
+  appManagerHosts: list(process.env.WIZARD_APP_MANAGER_HOSTS),
+  appReservedPorts: [port, Number(process.env.WIZARD_APPS_PORT || 0)].filter(Boolean),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
@@ -222,6 +238,7 @@ server = createWizardServer({
   ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
   ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),
   agentRuntimeUrl: process.env.WIZARD_AGENT_RUNTIME_URL || '',
+  maintenanceExternalPath: process.env.WIZARD_MAINTENANCE_LEASE_PATH || '',
   agentRuntimeToken: process.env.WIZARD_AGENT_RUNTIME_TOKEN || secretFile(process.env.WIZARD_AGENT_RUNTIME_TOKEN_FILE),
   agentDeliveryToken: process.env.WIZARD_AGENT_DELIVERY_TOKEN || secretFile(process.env.WIZARD_AGENT_DELIVERY_TOKEN_FILE),
   agentUpstreamMode: process.env.WIZARD_AGENT_UPSTREAM === 'network' ? 'network' : 'host',
@@ -239,4 +256,13 @@ await server.agentSocketsReady
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
 if (tailnetPort) {
   createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
+}
+// The apps origin listener (serve it on its own HTTPS port, e.g. `tailscale serve --https=8444`): app documents only.
+const appsPort = Number(process.env.WIZARD_APPS_PORT || 0)
+if (appsPort) {
+  if (!process.env.WIZARD_APPS_ORIGIN) {
+    process.stderr.write('WIZARD_APPS_PORT needs WIZARD_APPS_ORIGIN (the public origin that reaches it).\n')
+    process.exit(1)
+  }
+  createServer(server.appsHandler).listen(appsPort, host, () => process.stdout.write(`Wizard apps origin listening on ${host}:${appsPort}\n`))
 }

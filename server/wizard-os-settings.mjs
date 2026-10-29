@@ -241,7 +241,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
     // Agents are not apps (spec/AGENTS.md): an agent's container never gets a launcher tile; it lives in Agents.
     if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
     const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
-      : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
+      : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url
+      : app.view && typeof app.view.open === 'string' && SAFE_URL.test(app.view.open) ? app.view.open : ''
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),

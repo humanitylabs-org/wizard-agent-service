@@ -52,8 +52,9 @@ it('intercept records owner session metadata and still forwards the exact body a
     expect(s.seen.at(-1).headers['content-type']).toBe('application/json')
     expect(s.seen.at(-1).headers['x-wizard-owner-proof']).toBeUndefined()
   }
-  await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: 'https://wizard.example.test' }))
-  expect(s.seen.at(-1).headers.origin).toBe('https://wizard.example.test')
+  // A browser posts same-origin (control boundary); that Origin is forwarded unchanged.
+  await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: s.base }))
+  expect(s.seen.at(-1).headers.origin).toBe(s.base)
   const response = await fetch(`${s.base}/wizard/v1/devices`, { headers: owner })
   expect(response.status).toBe(200)
   expect((await response.json()).devices).toEqual([expect.objectContaining({ model: session.model, report_count: 4 })])
@@ -125,9 +126,13 @@ it('a box diagnostics receiver gets the report instead of the shell, with its Or
   }))
   const s = await stack({ diagnosticsOrigin: receiver })
   const body = JSON.stringify({ session })
-  const response = await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: 'https://wizard.example.test' }))
+  const response = await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: s.base }))
   expect(response.status).toBe(200)
-  expect(got).toEqual([{ url: '/wizard-os-home/api/diagnostics/scroll-capture', body, origin: 'https://wizard.example.test' }])
+  expect(got).toEqual([{ url: '/wizard-os-home/api/diagnostics/scroll-capture', body, origin: s.base }])
+  // A cross-site page cannot push a report through the owner's box.
+  const cross = await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(body, { ...owner, origin: 'https://evil.example.test' }))
+  expect(cross.status).toBe(403)
+  expect(got).toHaveLength(1)
   expect(s.seen).toEqual([])
   expect((await (await fetch(`${s.base}/wizard/v1/devices`, { headers: owner })).json()).devices).toHaveLength(1)
 })

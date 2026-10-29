@@ -1436,6 +1436,10 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     return reply
   }
   return {
+    maintenance: {
+      acquire: token => call('POST', '/maintenance/acquire', { token }),
+      release: token => call('POST', '/maintenance/release', { token }),
+    },
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),

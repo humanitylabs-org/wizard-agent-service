@@ -336,12 +336,14 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
+  appActions = null, toolWaitMs = 45_000, installBudgetMs = 90_000,
   agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null,
 }) {
   const shared = sharedAgentTools(agents, log)
   let mtime = null
   let apps = []
   const toolCache = new Map() // app id -> { tools, at }
+  const listReserve = Math.min(2 * timeoutMs, installBudgetMs / 4) // an initialize + tools/list past a deadline
   const clients = new Map()
   const sessions = new Map() // session id -> { streams: Set<response> }
 
@@ -425,10 +427,31 @@ export function createAgentBridge({
   }
 
   function metaTool() {
+    if (!appActions?.configured) {
+      return {
+        name: META_TOOL,
+        description: '[Wizard OS] List the apps installed on this box: what job each does, whether it is running, and its tool names. Use for "what apps do I have?" or "what can you do here?".',
+        inputSchema: { type: 'object', properties: {} },
+      }
+    }
     return {
       name: META_TOOL,
-      description: '[Wizard OS] List the apps installed on this box: what job each does, whether it is running, and its tool names. Use for "what apps do I have?" or "what can you do here?".',
-      inputSchema: { type: 'object', properties: {} },
+      description: '[Wizard OS] The owner\'s Wizard apps on this box. action "installed" (default): what is installed, the job each does, running or not, its tool names; use for "what apps do I have?". '
+        + 'action "search" with query: apps in the Wizard app catalogue for a job no installed app does. '
+        + 'action "install" with app (a catalogue id): install that app on the owner\'s box when the owner wants its job done; answers when it is running, with its tools, or after about 90 s that it is still in progress (call install again to keep waiting on the same operation). '
+        + 'action "call" with tool (<app>__<tool>) and arguments: run an installed app\'s tool that is not in your tool list yet.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['installed', 'search', 'install', 'call'], description: 'Default "installed".' },
+          query: { type: 'string', maxLength: 200, description: 'search: the job or app in a few words.' },
+          app: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,63}$', description: 'install: the app id from search.' },
+          form: { type: 'object', description: 'install, optional: install-form values the app asks for.', additionalProperties: { type: ['string', 'number', 'boolean'] } },
+          operation_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{16,128}$', description: 'install, optional: the key an earlier unconfirmed or in-progress install answered with. Omit it otherwise; while an install is unconfirmed only that key is accepted.' },
+          tool: { type: 'string', description: 'call: the tool name, <app>__<tool>.' },
+          arguments: { type: 'object', description: 'call: the tool\'s arguments.' },
+        },
+      },
     }
   }
 
@@ -447,16 +470,127 @@ export function createAgentBridge({
     return out
   }
 
-  async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
+  const ok = (text) => ({ content: [{ type: 'text', text }] })
+  const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
+  const findMore = appActions?.configured ? `For a job no installed app does, call ${META_TOOL} with {"action": "search", "query": "<the job>"}, then {"action": "install", "app": "<id>"}.` : 'The owner can add some with `wam search` and `wam install <id>`.'
+
+  async function installedList(agentId = GATEWAY_MAIN_AGENT) {
     const names = await toolNames(agentId)
     const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
-    return { content: [{ type: 'text', text: lines.length ? `Installed apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
+    return ok(lines.length ? `Installed Wizard apps:\n${lines.join('\n')}${appActions?.configured ? `\n${findMore}` : ''}` : `No apps with tools are installed yet. ${findMore}`)
   }
 
-  const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
+  /** Every installed app's status, tools or not (search marks what is already here). */
+  function installedStatus() {
+    const out = {}
+    for (const a of Array.isArray(readJson(appsJsonPath)?.apps) ? readJson(appsJsonPath).apps : []) if (typeof a?.id === 'string') out[a.id] = clean(a.status, 24) || 'installed'
+    return out
+  }
 
-  async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT) {
+  async function search(query) {
+    const found = await appActions.catalogue(clean(query, 200))
+    if (found.error) return failure('The Wizard app catalogue did not answer; try again shortly.')
+    const here = installedStatus()
+    const offer = found.apps.filter((a) => !a.system)
+    if (!offer.length) return ok(`The Wizard app catalogue has no app for "${clean(query, 200)}".`)
+    const lines = offer.map((a) => `- ${a.name} (${a.id}): ${a.summary} Jobs: ${a.jobs.map(jobWords).join(', ') || 'other'}.${a.uses.length ? ` Needs: ${a.uses.join(', ')}.` : ''} ${here[a.id] ? `Installed, ${here[a.id]}.` : 'Not installed.'}${a.test_catalogue ? ' (test catalogue entry)' : ''}`)
+    return ok(`Wizard app catalogue${query ? ` for "${clean(query, 200)}"` : ''}:\n${lines.join('\n')}\nInstall one with ${META_TOOL} {"action": "install", "app": "<id>"}.`)
+  }
+
+  /**
+   * After an install: the app's tools once its MCP server answers; clients re-list when they first do. Stops by
+   * `until` (the install's response budget, less one tool-list round trip: listReserve). `toolless`: apps.json lists the app with
+   * no MCP endpoint, a known screen-only app.
+   */
+  async function newTools(id, until = Infinity) {
+    const deadline = Math.min(Date.now() + toolWaitMs, until - listReserve)
+    for (;;) {
+      onChange()
+      const app = apps.find((a) => a.id === id)
+      if (!app && installedStatus()[id]) return { app: null, tools: [], toolless: true }
+      if (app) {
+        toolCache.delete(id)
+        const tools = await appTools(app)
+        if (tools.length) {
+          notifyChanged()
+          if (writeSkills && osHome) collectTools().then((all) => writePointerSkills(osHome, apps, { harness, tools: all })).catch(() => {})
+          return { app, tools }
+        }
+      }
+      if (Date.now() >= deadline) return { app, tools: [] }
+      await new Promise((r) => setTimeout(r, 1500))
+    }
+  }
+
+  async function install(args, ctx) {
+    // One budget for the whole answer (catalogue, status, the operation and tool discovery), below MCP clients' own
+    // tool-call timeouts. The operation itself is never cut short; a later call joins it.
+    const until = Date.now() + installBudgetMs
+    const r = await appActions.install(args, { ...ctx, waitMs: installBudgetMs - listReserve })
+    const e = r.entry
+    const label = e ? `${e.name} (${e.id})` : clean(String(args?.app ?? ''), 64)
+    if (r.ok) {
+      const { app, tools, toolless } = await newTools(e.id, until)
+      const head = r.already ? `${label} is already installed and running.` : `${r.action === 'start' ? 'Started' : 'Installed'} ${label}; it is running.`
+      if (toolless) return ok(`${head} It has no tools for you; it is used through its own screen.`)
+      if (!app) return ok(`${head} Its tools are not confirmed yet: it has not appeared in this box's app list. Do not tell the owner it has no tools; call ${META_TOOL} in a moment to see them.`)
+      if (!tools.length) return ok(`${head} Its tools are not answering yet; call ${META_TOOL} in a moment to see them.`)
+      const rows = tools.map((t) => `- ${agentToolName(app.prefix, t.name, harness)}${t.description ? `: ${clean(String(t.description).split(/(?<=[.!?])\s/u)[0], 100)}` : ''}`)
+      return ok(`${head} Its tools on the \`${MCP_SERVER_NAME}\` MCP server:\n${rows.join('\n')}\nCall the one the owner's request needs now. If it is not in your tool list yet, call ${META_TOOL} with {"action": "call", "tool": "${app.prefix}__<tool>", "arguments": {...}}.`)
+    }
+    const how = r.action === 'start' ? 'start' : 'install'
+    const said = {
+      gateway_token_required: 'Installing apps needs the owner\'s agent gateway token; nothing was installed.',
+      app_manager_not_configured: 'The app installer is not connected to this box\'s Agent Service, so apps cannot be installed from here. Tell the owner (`wam doctor`).',
+      invalid_app: 'Pass the app id as "app", exactly as search shows it (lowercase letters, digits and dashes); nothing was installed.',
+      invalid_form: 'The form values must be a flat object of short strings, numbers or booleans; nothing was installed.',
+      invalid_operation_key: 'operation_key must be exactly the key an earlier answer gave (16-128 letters, digits, _ or -); nothing was installed.',
+      operation_key_mismatch: `An unconfirmed ${how} of ${label} is held under operation_key ${r.key}; a different key was given, so nothing was sent. Call again with that key, or without operation_key.`,
+      operation_pending: `An unconfirmed install of ${label} with other form values is still held (operation_key ${r.key}); nothing new was sent. Call again with the same values, or tell the owner the installer needs a check (\`wam doctor\`).`,
+      catalogue_unavailable: 'The Wizard app catalogue did not answer; nothing was installed. Try again shortly.',
+      not_in_catalogue: `No app with id "${label}" is in the Wizard app catalogue; nothing was installed. Find one with ${META_TOOL} action "search".`,
+      system_app: `${label} is part of Wizard itself (shell, Agent Service or agent); the owner manages it, not the agent. Nothing was installed.`,
+      app_manager_unavailable: 'The app installer did not answer; nothing was installed. Tell the owner (`wam doctor`).',
+      app_busy: `${label} is busy (${r.status}) right now; nothing new was started. Check again with ${META_TOOL}.`,
+      dependencies_required: `${label} needs ${r.missing?.length ? `these apps installed first: ${r.missing.join(', ')}` : 'other apps installed first'}. Nothing was installed. Install each with ${META_TOOL} action "install", then ${label} again.`,
+      lifecycle_failed: `The app installer tried to ${how} ${label} and it failed. Tell the owner it did not work; the Store and \`wam doctor\` show why.`,
+      not_running: `${label} was installed but is ${r.status}, not running. Tell the owner (\`wam doctor\`).`,
+    }
+    const id = e?.id || clean(String(args?.app ?? ''), 64)
+    if (r.error === 'in_progress') {
+      return failure(`The ${how} of ${label} is still running on the box; it is not finished after ${Math.round(installBudgetMs / 1000)} s, so its outcome is NOT confirmed yet. `
+        + `Do not tell the owner it worked or failed; tell them it is still ${how === 'start' ? 'starting' : 'installing'}. `
+        + `Call ${META_TOOL} {"action": "install", "app": "${id}"${r.key ? `, "operation_key": "${r.key}"` : ''}} again in a minute: it joins that same operation and reports its outcome; it never installs twice.`)
+    }
+    if (r.uncertain) {
+      return failure(`The ${how} of ${label} was sent, but its outcome is NOT confirmed (${r.error}). Do not tell the owner it worked. `
+        + `Call ${META_TOOL} {"action": "install", "app": "${id}"} again in a minute: it reuses operation_key ${r.key}, so it cannot install twice. If it stays unconfirmed, tell the owner the installer needs a check (\`wam doctor\`).`)
+    }
+    return failure(said[r.error] || `Could not ${how} ${label} (${r.error}). Tell the owner (\`wam doctor\`).`)
+  }
+
+  async function wizardApps(args = {}, ctx = {}) {
+    const agentId = ctx.agentId ?? GATEWAY_MAIN_AGENT
+    const action = args?.action ?? 'installed'
+    if (action === 'installed') return installedList(agentId)
+    // Secondary/private agents may call granted tools but never install globally.
+    if (agentId !== GATEWAY_MAIN_AGENT && action !== 'call') return failure('Only the main owner agent may manage installed apps.')
+    if (!appActions?.configured) return failure(`This box only lists installed apps here. ${findMore}`)
+    if (action === 'search') return search(typeof args.query === 'string' ? args.query : '')
+    if (action === 'install') return install(args, ctx)
+    if (action === 'call') {
+      const name = typeof args.tool === 'string' ? args.tool.replace(new RegExp(`^mcp__${MCP_SERVER_NAME}__`, 'u'), '') : ''
+      if (!name || name === META_TOOL) return failure('Give tool as <app>__<tool>, an installed app\'s tool.')
+      return callTool(name, args.arguments, ctx)
+    }
+    return failure(`Unknown action. Use "installed", "search", "install" or "call".`)
+  }
+
+  async function callTool(name, args, ctx = {}) {
+    // Internal callers still pass the agent id directly; never silently treat one as the owner.
+    if (typeof ctx === 'string') ctx = { agentId: ctx }
     refresh()
+    const agentId = ctx.agentId ?? GATEWAY_MAIN_AGENT
     const started = Date.now()
     const sharedResult = shared.call(name, args, agentId)
     if (sharedResult) return sharedResult
@@ -466,8 +600,9 @@ export function createAgentBridge({
       return builtin
     }
     if (name === META_TOOL) {
-      const r = await wizardApps(agentId)
-      log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
+      const action = clean(String(args?.action ?? 'installed'), 20)
+      const r = await wizardApps(args && typeof args === 'object' ? args : {}, ctx)
+      log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, action, ms: Date.now() - started, ok: !r.isError }))
       return r
     }
     // An app this agent may not use is answered exactly like an app that is not installed (#58).
@@ -479,7 +614,7 @@ export function createAgentBridge({
     }
     let result
     let ok = false
-    if (app.status !== 'running') result = failure(`${app.name} is installed but ${app.status}. Tell the owner; \`wam doctor\` shows why.`)
+    if (app.status !== 'running') result = failure(`${app.name} is installed but ${app.status}. ${appActions?.configured ? `${META_TOOL} {"action": "install", "app": "${app.id}"} starts it; else tell` : 'Tell'} the owner; \`wam doctor\` shows why.`)
     else {
       const c = client(app)
       const saved = c.timeoutMs
@@ -539,7 +674,7 @@ export function createAgentBridge({
       }
       if (method === 'ping') return reply({})
       if (method === 'tools/list') return reply({ tools: await listTools(agentId) })
-      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId))
+      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, { authenticated: true, agentId }))
       if (method === 'resources/list') return reply({ resources: [] })
       if (method === 'prompts/list') return reply({ prompts: [] })
       return error(-32601, `method not found: ${clean(method, 60)}`)
