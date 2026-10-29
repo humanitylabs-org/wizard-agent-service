@@ -23,7 +23,8 @@ exec sh
 
 class MachinesTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wm-", dir=os.environ.get("TMPDIR")))
+        # A short root: AF_UNIX socket paths are limited to 107 bytes, and CI/agent TMPDIRs can be long.
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm-", dir="/tmp" if os.path.isdir("/tmp") else None))
         self.root = self.tmp / "m"
         self.ssh = self.tmp / "ssh"
         self.ssh.write_text(FAKE_SSH.replace("@LOG@", str(self.tmp / "argv")))
@@ -139,6 +140,15 @@ class DriverOverrideTest(unittest.TestCase):
         self.assertEqual(vol, [{"type": "bind", "source": str(tmp / "machines" / "sockets" / "a1"),
                                 "target": "/run/wizard-machines", "read_only": True}])
         self.assertEqual((tmp / "machines").stat().st_mode & 0o777, 0o700)
+
+
+
+class SocketPathTest(unittest.TestCase):
+    def test_too_long_socket_path_is_a_clear_error(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm-", dir="/tmp" if os.path.isdir("/tmp") else None))
+        relay = machines.Relay(tmp / ("x" * 90) / "m", peer_uid=os.getuid())
+        with self.assertRaisesRegex(ValueError, "socket path too long"):
+            relay.listen("alice")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,9 @@ class Denied(Exception):
     pass
 
 
+SOCKET_PATH_MAX = 107   # AF_UNIX sun_path is 108 bytes on Linux, including the terminating NUL
+
+
 def require(ok, code):
     if not ok:
         raise Denied(code)
@@ -218,6 +221,9 @@ class Relay:
         os.chmod(tmp, 0o755)
         os.replace(tmp, client)
         path = d / "machines.sock"
+        if len(os.fsencode(str(path))) > SOCKET_PATH_MAX:
+            raise ValueError(f"socket path too long ({len(os.fsencode(str(path)))} > {SOCKET_PATH_MAX} bytes): "
+                             f"{path}; use a shorter WIZARD_MACHINES_ROOT")
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -349,7 +355,8 @@ class Relay:
             try:
                 self.reconcile()
             except Exception as e:
-                print(f"machines: reconcile failed: {type(e).__name__}", file=sys.stderr, flush=True)
+                detail = f": {e}" if isinstance(e, ValueError) else ""
+                print(f"machines: reconcile failed: {type(e).__name__}{detail}", file=sys.stderr, flush=True)
             self.stopping.wait(2)
 
 
