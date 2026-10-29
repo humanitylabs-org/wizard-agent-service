@@ -2,7 +2,7 @@
 // Every writer is held to it: owner PATCH (phone and desktop share it), Space creation, agent Spaces tools and
 // automatic status filing, and full PUT snapshots from older shells. Moving never touches another agent's Spaces, and status filing never refiles a chat.
 import { afterEach, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -82,8 +82,85 @@ it('a full PUT (older shell snapshot) cannot leave a chat in two Spaces of one a
   out = await (await put([space('a', ['keep', 'other']), space('b', ['other', 't1']), space('phil', ['t1'], 'philosopher')])).json()
   expect(members(out.spaces)).toEqual({ a: ['keep', 'other'], b: ['t1'], phil: ['t1'] })
   expect(members(readUiPreferences(join(d, 'ui-preferences.json')).spaces)).toEqual({ a: ['keep', 'other'], b: ['t1'], phil: ['t1'] })
-  // A duplicate that was already stored (no newly joined Space) stays only in the first listed Space.
-  writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ spaces: [space('a', ['dup']), space('b', ['dup'])] }))
-  out = await (await put([space('a', ['dup']), space('b', ['dup'])])).json()
-  expect(members(out.spaces)).toEqual({ a: ['dup'], b: [] })
+})
+
+const put = (u: string, body: any) => fetch(u, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+const legacy = (d: string) => {
+  const spaces = [space('a', ['dup', 'other']), space('b', ['dup']), space('c'), space('phil', ['dup'], 'philosopher')]
+  writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ compact: true, future: { kept: true }, spaces }) + '\n')
+  return spaces
+}
+
+it('an unrelated full PUT, rename or reorder preserves unresolved legacy duplicates and other stored keys', async () => {
+  const d = home(), spaces = legacy(d), u = await start(d)
+  const reordered = [spaces[1], { ...spaces[0], name: 'Renamed' }, spaces[3], spaces[2]]
+  expect((await put(u, { spaces: reordered, readyOrder: 'oldest' })).status).toBe(200)
+  expect((await (await fetch(u)).json()).spaces).toEqual(reordered)
+  expect(JSON.parse(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).future).toEqual({ kept: true })
+  expect((await put(u, { compact: false })).status).toBe(200)
+  await new Promise<void>(r => servers.pop().close(r))
+  expect((await (await fetch(await start(d))).json()).spaces).toEqual(reordered)
+})
+
+it('an unambiguous full-PUT move resolves only the chosen legacy chat, not unrelated duplicates', async () => {
+  const d = home(), spaces = legacy(d), u = await start(d)
+  spaces[1].threads.push('other') // unchanged legacy duplicate below must survive another chat moving
+  writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ spaces }))
+  spaces[2].threads.push('dup')
+  const r = await put(u, { spaces }); expect(r.status).toBe(200)
+  expect(members((await r.json()).spaces)).toEqual({ a: ['other'], b: ['other'], c: ['dup'], phil: ['dup'] })
+})
+
+it('an explicit full-PUT removal or keeper choice resolves a legacy duplicate without adding membership', async () => {
+  for (const keeper of ['a', 'b', null]) {
+    const d = home(), spaces = legacy(d), u = await start(d)
+    const selected = spaces.map(s => s.id !== keeper && (s.id === 'a' || s.id === 'b') ? { ...s, threads: s.threads.filter(t => t !== 'dup') } : s)
+    expect((await put(u, { spaces: selected })).status).toBe(200)
+    expect((await (await fetch(u)).json()).spaces).toEqual(selected)
+  }
+})
+
+it('a new duplicate or multiple new targets rejects the whole PUT atomically, independent of array order', async () => {
+  for (const existing of [false, true]) for (const reverse of [false, true]) {
+    const d = home(), spaces = legacy(d), file = join(d, 'ui-preferences.json'), before = readFileSync(file, 'utf8'), u = await start(d)
+    const thread = existing ? 'dup' : 'new-chat'
+    const proposed = [...spaces, space('d', [thread])].map(s => s.id === 'c' ? { ...s, threads: [thread] } : s)
+    const r = await put(u, { compact: false, spaces: reverse ? proposed.reverse() : proposed })
+    expect(r.status).toBe(400); expect(await r.json()).toMatchObject({ error: 'invalid_preferences' })
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  }
+})
+
+it('changing a Space owner cannot grandfather duplicate memberships under its old owner', async () => {
+  const d = home(), file = join(d, 'ui-preferences.json')
+  const spaces = [space('a', ['x'], 'philosopher'), space('b', ['x'], 'philosopher')]
+  writeFileSync(file, JSON.stringify({ spaces })); const before = readFileSync(file, 'utf8'), u = await start(d)
+  expect((await put(u, { spaces: spaces.map(s => ({ ...s, agent: 'hermes' })) })).status).toBe(400)
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it('omitted and explicit hermes owners are the same, while separate agents may keep the same chat id', async () => {
+  const d = home(), u = await start(d)
+  expect((await put(u, { spaces: [space('a', ['x']), space('b', ['x'], 'hermes')] })).status).toBe(400)
+  const spaces = [space('a', ['x']), space('b', ['x'], 'philosopher')]
+  expect((await put(u, { spaces })).status).toBe(200)
+  expect((await (await fetch(u)).json()).spaces).toEqual(spaces)
+})
+
+it('automatic status filing preserves unresolved legacy owner choices while filing a different unfiled chat', () => {
+  const d = home(), spaces = legacy(d), path = join(d, 'ui-preferences.json'), filing = createSpaceFiling(path)
+  expect(filing.apply('hermes', 'dup', { space: 'c' })).toBe(false)
+  expect(filing.apply('hermes', 'fresh', { space: 'c' })).toBe(true)
+  expect(members(readUiPreferences(path).spaces)).toEqual({ ...members(spaces), c: ['fresh'] })
+})
+
+it('owner PATCH explicitly selects a legacy keeper or removes one membership without bulk reconciliation', async () => {
+  const d = home(); legacy(d); const u = await start(d)
+  let r = await patch(u, [{ op: 'add', key: 'spaces/b/threads', item: 'dup' }])
+  expect(r.status).toBe(200)
+  expect(members((await r.json()).spaces)).toEqual({ a: ['other'], b: ['dup'], c: [], phil: ['dup'] })
+  legacy(d)
+  r = await patch(u, [{ op: 'remove', key: 'spaces/a/threads', item: 'dup' }])
+  expect(r.status).toBe(200)
+  expect(members((await r.json()).spaces)).toEqual({ a: ['other'], b: ['dup'], c: [], phil: ['dup'] })
 })
