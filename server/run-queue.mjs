@@ -386,8 +386,8 @@ export class DurableRunQueue {
     return null
   }
 
-  _rows(where = '1=1') {
-    return this.database.prepare(`SELECT * FROM wizard_run_queue WHERE ${where} ORDER BY CASE WHEN retry_order_at>0 THEN retry_order_at ELSE created_at END, CASE WHEN retry_source_id<>'' THEN retry_source_id ELSE public_run_id END, public_run_id`).all().map((row) => this._record(row))
+  _rows(where = '1=1', ...params) {
+    return this.database.prepare(`SELECT * FROM wizard_run_queue WHERE ${where} ORDER BY CASE WHEN retry_order_at>0 THEN retry_order_at ELSE created_at END, CASE WHEN retry_source_id<>'' THEN retry_source_id ELSE public_run_id END, public_run_id`).all(...params).map((row) => this._record(row))
   }
 
   _update(publicRunId, changes) {
@@ -700,7 +700,13 @@ export class DurableRunQueue {
 
   async _resumeDiagnosedSignIns() {
     if (!this.providerSignInReady) return
-    for (const source of this._rows("status='failed' AND runtime='direct' AND provider_recovery_attempted=0")) {
+    // Exclude expired failures through the existing covering FIFO index before
+    // SELECT * hydrates saved requests. Filtering them inside the loop rereads
+    // every historical failure's attachment-bearing body on each queue tick.
+    for (const source of this._rows(`public_run_id IN (
+      SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+      WHERE status='failed' AND created_at>?
+    ) AND runtime='direct' AND provider_recovery_attempted=0`, nowSeconds() - this.providerAccessWindowSeconds)) {
       const diagnosis = failureProjection(source).reconnect
       if (!diagnosis || this._ownerStopped(source) || this.savedRetry(source.sessionId)?.publicRunId !== source.publicRunId
           || source.createdAt + this.providerAccessWindowSeconds <= nowSeconds()) continue
