@@ -79,7 +79,10 @@ for (const affinity of ['INTEGER', 'TEXT', '']) {
   test(`triggering-user winner matches original retention and ties (affinity ${affinity || 'none'})`, () => {
     const f = fixture({ affinity })
     try {
-      f.put('user', 1, 'Owner', null); f.put('assistant', 2, 'Answer', '1')
+      // Node binds Numbers as doubles: TEXT needs '1'/'0', but no affinity must keep numeric storage.
+      f.put('user', 1, 'Owner', null); f.put('assistant', 2, 'Answer', affinity === 'TEXT' ? '1' : 1)
+      assert.equal(f.db.prepare("SELECT count(*) AS n FROM messages WHERE content='Answer' AND active=1").get().n, 1,
+        'fixture setup: seed assistant must match active=1')
       const { query } = capture(f)
       // Includes NULL-active authority, rewound history, compacted history, invalid states,
       // text-affinity edge cases, equal timestamps, foreign sessions and future requests.
@@ -93,7 +96,9 @@ for (const affinity of ['INTEGER', 'TEXT', '']) {
       for (const through of [0, 1, 2, 10, 11, 15, 30, 1000]) {
         assert.deepEqual(lookup(f, query, through), oracle(f, through), `cutoff ${through}`)
       }
-      f.put('user', 100, 'Earlier tie', null); f.put('user', 100, 'Later tie', '0', 1)
+      f.put('user', 100, 'Earlier tie', null); f.put('user', 100, 'Later tie', affinity === 'TEXT' ? '0' : 0, 1)
+      assert.equal(f.db.prepare("SELECT count(*) AS n FROM messages WHERE content='Later tie' AND active=0 AND compacted=1").get().n, 1,
+        'fixture setup: Later tie must match active=0 AND compacted=1')
       assert.equal(lookup(f, query, 100)?.content, 'Later tie')
       // A separate connection's changes must be visible immediately, with no cached truth.
       const external = new DatabaseSync(f.path)
