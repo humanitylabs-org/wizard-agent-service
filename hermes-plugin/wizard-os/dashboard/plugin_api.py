@@ -144,6 +144,22 @@ def get_chatgpt_usage():
     return value
 
 
+@router.get('/provider-accounts/{provider}/app-status')
+def get_app_owned_status(provider: str, response: Response):
+    """Authenticated consumer readback, not sign-in or credential-pool management."""
+    response.headers['Cache-Control'] = 'no-store'
+    if provider != 'claude':
+        raise HTTPException(404, 'Unknown app-owned consumer')
+    spec = spec_from_file_location('wizard_app_owned_login', Path(__file__).with_name('app_owned_login.py'))
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.claude_status()
+    except Exception:
+        raise HTTPException(503, 'App-owned consumer is unavailable') from None
+
+
 @router.get('/provider-accounts/{provider}')
 def get_provider_accounts(provider: str):
     if provider not in _accounts.PROVIDERS:
