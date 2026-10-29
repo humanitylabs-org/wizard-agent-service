@@ -1436,6 +1436,9 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     return reply
   }
   return {
+    incognitoStart: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/start`, payload),
+    incognitoStop: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/stop`, payload),
+    incognitoLease: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/lease`, payload),
     apply: (id) => call('POST', `/agents/${encodeURIComponent(id)}/apply`),
     start: (id) => call('POST', `/agents/${encodeURIComponent(id)}/start`),
     stop: (id) => call('POST', `/agents/${encodeURIComponent(id)}/stop`),
