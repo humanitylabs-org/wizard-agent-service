@@ -4029,8 +4029,14 @@ function buildWizardServer(options, lifetime) {
               ])
           // Evidence is shared only within this synchronous projection phase. A new
           // batch/phase gets a fresh reader; no transcript answer survives a revision.
-          let followUps = new Map()
+          let followUps = new Map(), followUpRevision = null
           const nonHoldingFor = id => {
+            // Another Hermes process may append even while this JS phase is
+            // synchronous. Reused evidence must still match canonical revision;
+            // an unreadable revision disables reuse rather than guessing.
+            const revision = readHermesListRevision(hermesStatePath)
+            if (revision === null) return readNonHoldingFollowUps(hermesStatePath, id)
+            if (revision !== followUpRevision) { followUps.clear(); followUpRevision = revision }
             if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
             return followUps.get(id)
           }
