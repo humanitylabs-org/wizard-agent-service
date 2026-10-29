@@ -76,12 +76,12 @@
     },
     {
       "id": "provider-signin-recovery",
-      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route.",
+      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route; a stale picker retry on another model is refused, not misacknowledged or duplicated.",
       "layer": "server",
       "fixture": "provider-signin-recovery",
       "how_to_test": "Fail a real HTTP admission with a controlled zero-token sign-in error, observe unavailable then ready, and assert one same-model source-preserving resend on main, host-profile, container and restricted queues.",
       "source_refs": ["server/run-queue.mjs", "server/routed-run-queue.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "tests/provider-saved-retry-route-race.node.mjs", "qa/agent-parity/server-checks.mjs"],
       "policy_exemptions": []
     },
     {
