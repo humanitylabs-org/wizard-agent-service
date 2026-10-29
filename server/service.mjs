@@ -6134,7 +6134,15 @@ function buildWizardServer(options, lifetime) {
             if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
             const { wizard_retry_run_id: sourceId, ...validation } = requested
             directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
-            const retried = await runQueue.retrySaved(sourceId, requested.session_id, requested)
+            let retried
+            try { retried = await runQueue.retrySaved(sourceId, requested.session_id, requested) }
+            catch (error) {
+              // A local saved-route conflict is not an upstream outage. Keep the
+              // explicit precondition visible, without exposing arbitrary errors.
+              if (error?.status !== 412) throw error
+              sendJson(response, 412, { error: { code: 'saved_retry_route_changed', message: error.message } })
+              return
+            }
             threadDispositionStore.clearSession('direct', requested.session_id)
             sendQueuedRun(response, 202, retried.record, { 'Idempotency-Replayed': String(retried.replayed) })
             return
