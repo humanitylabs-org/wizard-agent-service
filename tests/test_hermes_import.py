@@ -165,6 +165,34 @@ class ImportTests(unittest.TestCase):
                         self.undo({'journal': str(journal)})
                 plan = m.approve(dict(self.plan(), host_shared_paths=['scripts', 'state/host']))
 
+    def test_host_shared_writer_anchored_in_moved_home_refused(self):
+        # Codex P1 on #255: a shared-subtree writer whose cwd or open directory is in the moved part of
+        # the home would resolve relative/openat writes into the agent's home after the rename.
+        import subprocess
+        plan = self.host_fixture()
+        selected = m.host_shared_paths(plan)
+        script = ('import os,sys,time; os.chdir(sys.argv[1]); f=open(sys.argv[2],"a"); '
+                  'd=os.open(sys.argv[3],os.O_RDONLY|os.O_DIRECTORY) if sys.argv[3] else None; print("ready",flush=True); time.sleep(30)')
+        cases = [(self.home, '', True), (self.home / 'memories', '', True), (Path('/'), str(self.home), True),
+                 (self.home / 'data/apps/inbox', '', False), (Path('/'), str(self.home / 'scripts'), False), (Path('/'), '', False)]
+        (self.home / 'memories').mkdir(exist_ok=True)
+        for cwd, directory, blocked in cases:
+            with self.subTest(cwd=str(cwd), directory=directory):
+                child = subprocess.Popen([sys.executable, '-c', script, str(cwd), str(self.home / 'data/apps/inbox/data'), directory],
+                                         stdout=subprocess.PIPE, text=True)
+                try:
+                    assert child.stdout is not None
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    if blocked:
+                        with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                            self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                    else:
+                        self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                finally:
+                    child.terminate(); child.wait()
+                    if child.stdout is not None:
+                        child.stdout.close()
+
     def test_host_shared_undo_crash_between_renames_exact_tree(self):
         plan = self.host_fixture()
         before = self.tree_identity()

@@ -781,18 +781,35 @@ def assert_no_writers(source, *, host_shared=(), _pids=None):
         try:
             if proc.stat().st_uid != os.getuid():
                 continue
+            # A host process admitted for writing under a shared subtree must not also be anchored
+            # (cwd or an open directory) in the moved part of the home: after the rename its
+            # relative/openat writes would land in the agent's home.
+            shared_writer, anchored = False, False
+            try:
+                cwd = os.readlink(proc / 'cwd') + '/'
+                anchored = cwd.startswith(root) and not under_shared(cwd[len(root):].rstrip('/'), host_shared)
+            except FileNotFoundError:
+                pass
             for fd in (proc / 'fd').iterdir():
                 try:
-                    target = os.readlink(fd)
-                    if target.startswith(root) and not under_shared(target[len(root):].removesuffix(' (deleted)'), host_shared):
-                        info = (proc / 'fdinfo' / fd.name).read_text()
-                        match = re.search(r'^flags:\s+(\d+)', info, re.M)
-                        require(match is not None, 'source_writer_census_denied')
-                        assert match is not None
-                        flags = int(match[1], 8)
-                        require((flags & os.O_ACCMODE) == os.O_RDONLY, 'source_has_writers')
+                    target = os.readlink(fd).removesuffix(' (deleted)') + '/'
+                    if not target.startswith(root):
+                        continue
+                    relative = target[len(root):].rstrip('/')
+                    info = (proc / 'fdinfo' / fd.name).read_text()
+                    match = re.search(r'^flags:\s+(\d+)', info, re.M)
+                    require(match is not None, 'source_writer_census_denied')
+                    assert match is not None
+                    flags = int(match[1], 8)
+                    if under_shared(relative, host_shared):
+                        shared_writer = shared_writer or (flags & os.O_ACCMODE) != os.O_RDONLY
+                        continue
+                    if stat.S_ISDIR(os.stat(fd).st_mode):
+                        anchored = True
+                    require((flags & os.O_ACCMODE) == os.O_RDONLY, 'source_has_writers')
                 except FileNotFoundError:
                     continue
+            require(not (shared_writer and anchored), 'source_has_writers')
         except FileNotFoundError:
             continue
         except PermissionError:
