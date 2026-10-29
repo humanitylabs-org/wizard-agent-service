@@ -20,6 +20,7 @@ import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MA
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
+import { ownerApprovalFromTool } from './owner-approval-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
@@ -1496,6 +1497,8 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     }
     projected.content = role === 'tool' ? '' : message.content ?? message.text ?? message.output ?? ''
     if (role === 'tool') {
+      const approval = ownerApprovalFromTool(sourceMessage.content)
+      if (approval) projected.owner_approval = approval
       const toolName = safeHistoryText(message.tool_name, 80).replace(/^functions\./, '')
       const plan = PLAN_TOOLS.has(toolName) ? historyPlan(message.content) : null
       const question = toolName === 'clarify' ? historyQuestion({}, message.content) : null
@@ -6368,10 +6371,22 @@ function buildWizardServer(options, lifetime) {
               signal: controller.signal,
             })
         const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
+        // Error responses are untrusted too: never publish agent-owned active
+        // content on the owner origin. Only the events route may return SSE.
+        const mime = contentType.split(';', 1)[0].trim().toLowerCase()
+        const bodiless = [204, 205, 304].includes(upstream.status)
+        if (!bodiless && mime !== 'application/json' && !(request.method === 'GET' && /\/events$/.test(upstreamPath) && mime === 'text/event-stream')) {
+          await upstream.body?.cancel().catch(() => {})
+          response.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'" })
+          response.end(JSON.stringify({ error: 'invalid_upstream_media_type' }))
+          return
+        }
         const responseHeaders = {
           'Content-Type': contentType,
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
         }
         const replayed = upstream.headers.get('idempotency-replayed')
         if (replayed) responseHeaders['Idempotency-Replayed'] = replayed
