@@ -412,9 +412,13 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     }
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
-  lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
+  lines.push('memory:', '  provider: holographic', '  memory_enabled: true', '  user_profile_enabled: true')
   if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)
   if (agent.memory?.notes_chars) lines.push(`  memory_char_limit: ${agent.memory.notes_chars}`)
+  // Stock Hermes ships this provider in the pinned runtime image. Keep state in
+  // this agent's persisted home, never the image layer or the Service's home.
+  lines.push('plugins:', '  enabled: [holographic, wizard-supervisor-tools]', '  hermes-memory-store:',
+    '    db_path: "$HERMES_HOME/memory_store.db"', '    auto_extract: false')
   return `${lines.join('\n')}\n`
 }
 
