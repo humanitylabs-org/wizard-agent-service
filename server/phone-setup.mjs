@@ -8,7 +8,9 @@
 //   signin       the owner must open auth_url and sign in to Tailscale
 //   https        signed in; Serve is not on yet (https_enable_url, when present, turns HTTPS on for the tailnet)
 //   serving      https://<this box>.<tailnet>.ts.net/ answers through Tailscale Serve
-//   phone_seen   the owner's phone reached it (or an iOS/Android device of the owner is online)
+//   phone_seen   the owner's phone opened Wizard through the address (a verified owner request from a phone).
+//                A phone that is merely online on the tailnet is not connected: it may not have the Wizard app or
+//                address yet, so it is only listed in `phones`.
 //
 // Once serving, it records the address and owner in Wizard OS settings (network.base_url, network.aliases,
 // access.tailscale) through updateSettings, so tailnet-access.mjs authorizes the owner's phone without a
@@ -79,6 +81,9 @@ export function statusOrigin(status) {
   const dns = typeof status?.dns_name === 'string' ? status.dns_name.replace(/\.$/u, '').toLowerCase() : ''
   return dns ? validTailnetOrigin(`https://${dns}`) : ''
 }
+
+// ops/private-access/wizard-private-access owner_peers() caps its list at this many peers.
+const HELPER_PEER_LIMIT = 32
 
 function isPhone(peer) {
   return MOBILE_OS.has(String(peer?.os || '').toLowerCase())
@@ -233,12 +238,16 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
     if (current?.backend_state === 'Running' && current.serve?.on && statusOrigin(current) && settings().setup.phone_started_at) {
       try {
         recordServing(current)
-        const saved = settings()
-        if (!saved.setup.phone_seen_at && saved.access.tailscale.origin
-          && (Array.isArray(current.peers) ? current.peers : []).some((peer) => isPhone(peer) && peer.online === true)) {
-          markSetup('phone_seen_at', nowIso(now))
-        }
       } catch (e) { error = error || e?.code || 'settings_unavailable' }
+    }
+    // A phone removed from the tailnet (Tailscale's admin) can't reach Wizard any more. Once no phone is left, forget
+    // that one was seen: Setup says connected again only after a phone opens Wizard again, the same proof as the
+    // first time (an offline phone is still on the tailnet and still counts). The private-access helper returns at most
+    // HELPER_PEER_LIMIT peers (online first, then by name), so a full list may hide an offline phone: only a shorter,
+    // complete list proves no phone is left. Environment-pinned access (WIZARD_TAILNET_ORIGIN/LOGIN) records visits
+    // outside this helper's enrollment, so its peer list proves nothing about that phone: keep the visit.
+    if (!accessPinned && current?.backend_state === 'Running' && Array.isArray(current.peers) && current.peers.length < HELPER_PEER_LIMIT && !current.peers.some(isPhone) && settings().setup.phone_seen_at) {
+      try { markSetup('phone_seen_at', '') } catch (e) { error = error || e?.code || 'settings_unavailable' }
     }
     return view(current, error)
   }

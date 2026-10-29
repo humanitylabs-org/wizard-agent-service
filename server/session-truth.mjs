@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs'
+import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-write.mjs'
 import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate } from './delegation-receipts.mjs'
+import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
+import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -14,6 +16,7 @@ const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hi
 export const RECOVERY_REQUEST_MARKER = '[Owner requested recovery of this interrupted Helm card.]'
 export const LEGACY_RECOVERY_REQUEST_MARKER = '[James requested recovery of this interrupted Helm card.]'
 const INTERNAL_USER_PREFIXES = [
+  AGENT_TO_AGENT_PREFIX,
   SCHEDULE_INPUT,
   '[System: Your previous response contained only internal reasoning and never produced a ',
   '[System: Continue now. Execute the required tool calls ',
@@ -49,7 +52,7 @@ function openReadOnly(path) {
 export function visibleUserRequest(content, displayKind) {
   const text = typeof content === 'string' ? content.trim() : ''
   const kind = String(displayKind || '')
-  if (!text || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
+  if (!isHumanRequest({ role: 'user', content: text, display_kind: kind }) || text === EMPTY_TOOL_RESPONSE_NUDGE || USER_EVENT_KINDS.has(kind) || kind.startsWith('process_wakeup')) return false
   return !/^\[IMPORTANT: \d+ background processes completed for this session\./.test(text) && !INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix))
 }
 
@@ -267,7 +270,18 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         AND trim(COALESCE(content, '')) <> ''
       ORDER BY timestamp DESC${tieOrder}
     `)
+    // Separate active/inactive seeks preserve the (session,active,timestamp) index.
+    // An OR here sorts/materializes obsolete bodies before the early-stop iterator.
+    const inactiveRequests = db.prepare(`SELECT content,display_kind,timestamp FROM messages
+      WHERE session_id=? AND active=0 AND ${messageColumns.has('compacted') ? 'compacted=1' : '0'} AND role='user' AND timestamp>?
+      ORDER BY timestamp DESC${tieOrder}`)
     const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    // Select the newest timestamp before reading its body; inactive machine inputs
+    // still determine whether this assistant reply was an automated continuation.
+    const retained = retainedMessagesWhere(messageColumns)
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND ${retained}
+      AND timestamp=(SELECT MAX(timestamp) FROM messages WHERE session_id=? AND role='user' AND ${retained} AND timestamp<=?)
+      ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
     const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
@@ -295,6 +309,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
+        if (row.role === 'assistant' && isAgentToAgentRequest(triggeringUser.get(id, id, timestamp)?.content)) continue
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
         const provenanceAssistant = visibleProvenanceReply(row)
@@ -319,6 +334,17 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         }
         if (current.lastUserAt && current.lastAssistantAt) break
       }
+      // Retained genuine requests remain authoritative even outside model context.
+      // Seek them separately so active history still stops before obsolete bodies.
+      for (const row of inactiveRequests.iterate(id,current.lastUserAt)) {
+        if (!visibleUserRequest(row.content,row.display_kind)) continue
+        current.lastUserAt = Number(row.timestamp) || 0
+        current.requestPreview = row.content.trim()
+        current.activityAt = Math.max(current.activityAt,current.lastUserAt)
+        if (current.lastUserAt >= current.lastAssistantAt) delete current.status
+        if (current.lastUserAt > provenanceAt) delete current.appId
+        break
+      }
       // Provenance alone follows compression. Leave existing status/activity semantics intact.
       const tip = provenanceTip(id)
       if (tip !== id) {
@@ -340,24 +366,28 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // result is saved but the agent has not answered yet, the thread is still working for the owner: the
     // "I've delegated this" reply is progress, not something to act on. Capped at 6 h so a lost helper
     // cannot pin a thread in Working forever.
+    const followUps = new Map()
+    const isFollowUp = (id, handle) => {
+      if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(path, id))
+      return followUps.get(id).has(handle)
+    }
     try {
       const helperRows = db.prepare(`
-        SELECT origin_session_id AS id, COUNT(*) AS n
+        SELECT origin_session_id AS id, delegation_id
         FROM async_delegations
         WHERE state IN ('running', 'stalling', 'finalizing') AND dispatched_at > ?
           AND origin_session_id IN (${placeholders})
-        GROUP BY origin_session_id
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current && !ownerGate(db, String(row.id))) current.helpersRunning = Number(row.n) || 0
+        if (current && !isFollowUp(String(row.id), row.delegation_id) && !ownerGate(db, String(row.id))) current.helpersRunning = (current.helpersRunning || 0) + 1
       }
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
     // Read delivery receipts independently of the latest transcript row and execution state.
     for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
       const current = truth.get(receipt.sessionId)
-      if (current) current.helperResultUnanswered = true
+      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId)) current.helperResultUnanswered = true
     }
     try {
       const newestRow = db.prepare(`
@@ -370,7 +400,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
           && Number(row.timestamp) > nowSeconds - 6 * 3600 && !ownerGate(db, id)
-          && !(delegationId && receiptConsumed(db, id, delegationId))) current.helperResultUnanswered = true
+          && !(delegationId && (receiptConsumed(db, id, delegationId) || isFollowUp(id, delegationId)))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = db.prepare(`

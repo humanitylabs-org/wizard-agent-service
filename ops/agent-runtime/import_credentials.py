@@ -19,14 +19,39 @@ def dotenv(text):
     return dict(dotenv_values(stream=io.StringIO(text), interpolate=False))
 
 
-INLINE_SECRET = re.compile(r'(?:^|_)(api_key|access_token|refresh_token|token|secret|password|client_secret|authorization)$', re.I)
+INLINE_SECRET = re.compile(r'(?:^|[_-])(?:api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|client[_-]?secret|authorization)$', re.I)
+CONFIG_PATH = re.compile(r'^[.#]?config\.(?:ya?ml|json|toml)(?:[._~#-].*)?$', re.I)
+ENV_REFERENCE = re.compile(r'^\$\{[A-Za-z_][A-Za-z0-9_]*\}$')
+
+
+def config_path(path):
+    return CONFIG_PATH.fullmatch(PurePosixPath(path).name) is not None
+
+
+def config_value(path, text):
+    # Parser diagnostics often contain source lines (and thus secret values).
+    # Only a symbolic error may cross the importer boundary.
+    try:
+        name = PurePosixPath(path).name.lstrip('.#')
+        if re.match(r'^config\.json(?:[._~#-]|$)', name, re.I):
+            return json.loads(text)
+        if re.match(r'^config\.toml(?:[._~#-]|$)', name, re.I):
+            import tomllib
+            return tomllib.loads(text)
+        return yaml.safe_load(text) or {}
+    except (ValueError, yaml.YAMLError):
+        raise ValueError('credential_config_invalid') from None
+
+
+def inline_value(value):
+    return value not in (None, '') and not (isinstance(value, str) and ENV_REFERENCE.fullmatch(value))
 
 
 def config_items(value, prefix=()):
     if isinstance(value, dict):
         for key, child in value.items():
             path = (*prefix, str(key))
-            if (INLINE_SECRET.search(str(key)) or FORBIDDEN_ENV.match(str(key))) and child not in (None, ''):
+            if (INLINE_SECRET.search(str(key)) or FORBIDDEN_ENV.match(str(key))) and inline_value(child):
                 yield '/'.join(path)
             else:
                 yield from config_items(child, path)
@@ -39,7 +64,7 @@ def filter_config(value, plan, prefix=()):
     if isinstance(value, dict):
         return {k: filter_config(v, plan, (*prefix, str(k))) for k, v in value.items()
                 if not FORBIDDEN_ENV.match(str(k)) and (
-                    not INLINE_SECRET.search(str(k)) or
+                    not INLINE_SECRET.search(str(k)) or not inline_value(v) or
                     selected(plan, 'config.yaml', 'config-field', '/'.join((*prefix, str(k)))))}
     if isinstance(value, list):
         return [filter_config(v, plan, (*prefix, str(i))) for i, v in enumerate(value)]
@@ -50,8 +75,8 @@ def inventory(entries, read):
     result = []
     for path in sorted(entries):
         name = PurePosixPath(path).name
-        if path == 'config.yaml':
-            for item in config_items(yaml.safe_load(read(path)) or {}):
+        if config_path(path):
+            for item in config_items(config_value(path, read(path))):
                 result.append({'path': path, 'kind': 'config-field', 'item': item, 'approved': False})
         elif name == '.env' or name.startswith('.env.'):
             for key in sorted(dotenv(read(path))):

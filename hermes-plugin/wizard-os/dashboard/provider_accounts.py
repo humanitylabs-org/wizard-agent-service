@@ -57,6 +57,82 @@ def _iso(value):
     return value.isoformat()
 
 
+_CLAUDE_TIERS = {'default_claude_max_20x': 'Max 20x', 'default_claude_max_5x': 'Max 5x', 'default_claude_pro': 'Pro'}
+_CLAUDE_SUBSCRIPTIONS = {'max': 'Max', 'pro': 'Pro', 'team': 'Team', 'enterprise': 'Enterprise', 'free': 'Free'}
+_CLAUDE_WINDOWS = (('five_hour', 'Session'), ('seven_day', 'All models · weekly'),
+                   ('seven_day_opus', 'Opus · weekly'), ('seven_day_sonnet', 'Sonnet · weekly'))
+
+
+class _NoRedirect(__import__('urllib.request').request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise OSError('redirect refused')
+
+
+def _anthropic_get(path, token):
+    import urllib.request
+    req = urllib.request.Request('https://api.anthropic.com/api/oauth/' + path, method='GET', headers={
+        'Authorization': 'Bearer ' + token, 'Accept': 'application/json',
+        'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/2.1.0'})
+    with urllib.request.build_opener(_NoRedirect).open(req, timeout=15) as res:
+        data = json.loads(res.read(1 << 20).decode('utf-8'))
+    return data if isinstance(data, dict) else {}
+
+
+def _pct_row(id_, label, used, resets):
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+        return None
+    used = min(100, max(0, used))
+    when = None
+    if isinstance(resets, str) and resets.strip():
+        try:
+            from datetime import datetime
+            when = _iso(datetime.fromisoformat(resets.strip().replace('Z', '+00:00')))
+        except ValueError:
+            when = None
+    return {'id': id_, 'label': label, 'usedPercent': round(used, 1),
+            'remainingPercent': math.floor(100 - used), 'resetsAt': when}
+
+
+def _anthropic_quota(token):
+    """Claude usage the way Claude Code reads it: `limits[].percent` or `utilization` are already
+    percentages (0-100). Stock account_usage scales values <= 1 as fractions, so 1% read as 100%."""
+    from datetime import datetime
+    payload = _anthropic_get('usage', token)
+    rows = []
+    for i, entry in enumerate(payload.get('limits') or []):
+        if not isinstance(entry, dict):
+            continue
+        model = str(((entry.get('scope') or {}).get('model') or {}).get('display_name') or '').strip()[:40]
+        kind = str(entry.get('kind') or '').strip()[:40]
+        label = {'session': (model + ' · session') if model else 'Session', 'weekly_all': 'All models · weekly',
+                 'weekly_scoped': (model + ' · weekly') if model else 'Scoped · weekly'}.get(kind, model or kind or 'Limit')
+        row = _pct_row('%s:%s' % (kind or 'limit', model or entry.get('group') or i), _text(label, 'Limit'),
+                       entry.get('percent'), entry.get('resets_at'))
+        if row:
+            rows.append(row)
+    if not rows:
+        for key, label in _CLAUDE_WINDOWS:
+            window = payload.get(key)
+            if isinstance(window, dict):
+                row = _pct_row(key, label, window.get('utilization'), window.get('resets_at'))
+                if row:
+                    rows.append(row)
+    plan = email = None
+    try:
+        prof = _anthropic_get('profile', token)
+        raw = str((prof.get('account') or {}).get('email') or '').strip()
+        # The pattern already bounds the length; keep the exact address so emailHash matches the app's own hash.
+        email = raw if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
+        org = prof.get('organization') or {}
+        kind = str(org.get('organization_type') or '').strip().lower()
+        kind = kind[len('claude_'):] if kind.startswith('claude_') else kind
+        plan = _CLAUDE_TIERS.get(str(org.get('rate_limit_tier') or '')) or _CLAUDE_SUBSCRIPTIONS.get(kind)
+    except Exception:
+        pass  # A missing label never breaks usage.
+    usage = {'fetchedAt': _iso(datetime.now(timezone.utc)), 'limits': rows, 'paid': None} if rows else None
+    return plan, usage, email
+
+
 def _quota(provider, row, fetch):
     token = row.get('access_token') or ''
     # Empty tokens must never fall through to the singleton/account selector.
@@ -67,6 +143,19 @@ def _quota(provider, row, fetch):
         cached = _CACHE.get(key)
     if cached and time.monotonic() - cached[0] < 60:
         return cached[1]
+    if provider == 'anthropic':
+        try:
+            plan, usage, email = _anthropic_quota(token)
+            value = (plan, usage)
+            with _LOCK:
+                _CACHE[('email',) + key[1:]] = email
+        except Exception:
+            value = (None, None)  # Do not leak provider exception bodies or tokens.
+        with _LOCK:
+            if len(_CACHE) > 256:
+                _CACHE.clear()
+            _CACHE[key] = (time.monotonic(), value)
+        return value
     try:
         # Fixed canonical endpoint: never send credentials to store-controlled URLs.
         snap = fetch(provider, api_key=token, read_only=True,
@@ -120,10 +209,26 @@ def provider_accounts(provider, read=None, fetch=None):
         plan, usage = _quota(slug, row, fetch)
         auth = claims.get('https://api.openai.com/auth') or {}
         profile = claims.get('https://api.openai.com/profile') or {}
-        email = _masked(profile.get('email') or claims.get('email') or row.get('label'))
+        raw = profile.get('email') or claims.get('email')
+        if not raw and slug == 'anthropic' and row.get('access_token'):
+            with _LOCK:
+                raw = _CACHE.get(('email', hashlib.sha256(row['access_token'].encode()).hexdigest()))
+        email = _masked(raw or row.get('label'))
+        extra = {}
+        # A short one-way hash of the exact email lets the connection app tell "the same account" apart from two
+        # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
+        # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
+        # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
+        exact = str(raw or '').strip().lower()
+        if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
+            extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
         state = str(row.get('last_status') or 'ready')
         state = state if state in {'ready', 'ok', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
-        return {'id': key, 'name': _text(row.get('label'), _NAMES[provider] + ' subscription'),
+        if slug == 'anthropic' and all(str(r.get('source', '')) == 'claude_code' for r, _ in aliases):
+            # Hermes' mirror of the host Claude Code login: the Claude app already shows that login
+            # (with its usage) as its own row, so it folds this pool grant into that row.
+            extra['mirror'] = 'claude-code'
+        return {**extra, 'id': key, 'name': _text(row.get('label'), _NAMES[provider] + ' subscription'),
                 'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
                 'status': state, 'usage': usage, 'credentialCount': len(aliases),
                 'usageStatus': 'ok' if usage else 'unavailable',
@@ -135,7 +240,10 @@ def provider_accounts(provider, read=None, fetch=None):
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
     # No full response cache: additions/removals are visible on every request.
+    # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
+    # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
     return {'provider': provider, 'name': _NAMES[provider], 'owner': 'hermes',
+            'identity': {'emailHash': 'sha256-16'},
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
             'management': {'contract': 'wizard.account-management/1', 'status': 'available',

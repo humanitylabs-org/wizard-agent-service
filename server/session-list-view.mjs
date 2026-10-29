@@ -36,7 +36,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
   function reconnectRow(v) {
     const app = v && typeof v === 'object' && v.kind === 'provider_signed_out' ? RECONNECT[v.provider] : null;
     if (!app || v.app_id !== app[0]) return null;
-    return { provider: v.provider, appId: app[0], name: app[1], installed: v.installed !== false,
+    return { provider: v.provider, appId: app[0], name: app[1], runId: String(v.run_id || ''), installed: v.installed !== false,
       appStatus: ['connected', 'signed_out', 'expired'].includes(v.app_status) ? v.app_status : 'unknown' };
   }
   const ATTN = new Set(['needs_you', 'check', 'done', 'fyi']);
@@ -70,6 +70,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       title: String(item.title || item.name || 'Untitled chat'),
       source: item.source || '',
       status,
+      queueReason: item.queue_reason === 'provider_access' ? 'provider_access' : '',
       safeError: typeof item.wizard_safe_error === 'string' ? item.wizard_safe_error : '',
       // Provider sign-in expired: the connection app that fixes it (provider-reconnect.mjs).
       reconnect: reconnectRow(item.wizard_reconnect),

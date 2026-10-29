@@ -3,8 +3,8 @@ import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServe
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { readSettings, wizardOsHome } from './wizard-os-settings.mjs'
-import { readFileSync } from 'node:fs'
+import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
+import { existsSync, readFileSync } from 'node:fs'
 
 const secretFile = (path) => {
   if (!path) return ''
@@ -65,6 +65,13 @@ const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL 
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
 const settingsPath = process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json')
+// Detect previous Wizard use before createWizardServer creates any stores. A stock Hermes
+// may already exist on a genuinely new Wizard install; its private history is never read.
+initializeResponseStyle(settingsPath, { existingInstall: [
+  settingsPath,
+  process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/run-queue.sqlite3'),
+  process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/thread-seen.json'),
+].some(path => existsSync(path)) })
 // The Serve listener: Tailscale Serve (https://<box>.<tailnet>.ts.net/) forwards here, and only here. Every
 // request on it is verified as the owner's tailnet identity, whatever WIZARD_AUTH_MODE says about the
 // box-local listener above. Unset: no tailnet listener (computer-only use).
@@ -120,9 +127,11 @@ server = createWizardServer({
   runKeeperSocket: defaultKeeperSocket(process.env, homedir()),
   runQueueStatePath: process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(process.env.HERMES_HOME || resolve(homedir(), '.hermes'), 'state', 'wizard-mobile', 'run-queue.sqlite3'),
   schedulerStatePath: process.env.WIZARD_SCHEDULER_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'schedules.sqlite3'),
+  supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
+  providerAccessRecovery: process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
@@ -130,19 +139,14 @@ server = createWizardServer({
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   agentHeavy: process.env.WIZARD_AGENT_HEAVY || 'off',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
-  heavyWorker: {
-    host: process.env.WIZARD_BUILD_HOST || process.env.WIZARD_HEAVY_SSH_HOST,
-    script: process.env.WIZARD_HEAVY_REMOTE_SCRIPT,
-    root: process.env.WIZARD_HEAVY_REMOTE_ROOT,
-    lock: process.env.WIZARD_HEAVY_REMOTE_LOCK,
-    python: process.env.WIZARD_HEAVY_REMOTE_PYTHON || '/opt/homebrew/bin/python3',
-  },
+
   requireAccess,
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
   ...(tailnetVerifier ? { tailnetVerifier } : {}),
   tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  diagnosticsOrigin: process.env.WIZARD_DIAGNOSTICS_ORIGIN || '',
   privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
   tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
@@ -183,6 +187,7 @@ server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  devicesStatePath: process.env.WIZARD_DEVICES_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'devices.json'),
   // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
   skinsStateDir: process.env.WIZARD_SKINS_STATE_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'skins'),
@@ -209,6 +214,10 @@ server = createWizardServer({
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
+  // Automatic owned-open-work nudges started extra replies in threads whose work was already running
+  // elsewhere (owner, 27 Oct 2026: "multiple replies in many threads instead of just one good reply").
+  // Off unless explicitly enabled; the prompt rule alone carries the contract.
+  ownedOpenWork: process.env.WIZARD_OWNED_OPEN_WORK === 'on',
   // Agents (spec/AGENTS.md): folders under <WIZARD_OS_HOME>/agents; containers via the host agent-runtime helper.
   ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
   ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),
