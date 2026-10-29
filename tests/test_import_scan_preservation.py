@@ -15,6 +15,8 @@ import hermes_import as h
 
 
 class ScanPreservationTests(unittest.TestCase):
+    maxDiff = None  # Keep exact sidecar names visible in the old-head negative.
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
