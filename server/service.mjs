@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
+import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
@@ -2224,7 +2225,7 @@ const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encod
 
 // Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
 // cookies or credentials), and only content headers come back; redirects must stay on this origin.
-function proxyShellStatic(request, response, shellOrigin, url) {
+function proxyShellStatic(request, response, shellOrigin, url, body) {
   return new Promise((resolvePromise) => {
     // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
     const target = new URL(shellOrigin)
@@ -2232,6 +2233,12 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     target.search = url.search
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    if (body !== undefined) {
+      // The forwarded POST keeps its Origin so a same-origin receiver can still check it.
+      if (typeof request.headers.origin === 'string') headers.origin = request.headers.origin
+      headers['content-type'] = request.headers['content-type'] || 'application/json'
+      headers['content-length'] = String(body.length)
+    }
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
@@ -2243,7 +2250,7 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     })
     upstream.setTimeout(30000, () => upstream.destroy(new Error('timeout')))
     upstream.on('error', () => { if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' }); else response.destroy(); resolvePromise() })
-    upstream.end()
+    upstream.end(body)
   })
 }
 
@@ -2519,6 +2526,7 @@ function buildWizardServer(options, lifetime) {
   const tailnetVerifier = typeof options.tailnetVerifier === 'function' && options.tailnetVerifier.fromRequest ? options.tailnetVerifier : null
   // Wizard shell (wizard-ux) static files for phones on the tailnet listener: GET/HEAD only, after verification.
   const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
+  const diagnosticsOrigin = options.diagnosticsOrigin ? confinedUpstream(options.diagnosticsOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -2575,6 +2583,9 @@ function buildWizardServer(options, lifetime) {
   // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
   const gatewayOnly = options.agentBridge === 'gateway'
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
+  const devices = createDevices({ statePath: options.devicesStatePath || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'devices.json') : ''), now: options.devicesNow ?? Date.now })
+  const deviceTools = devicesTool({ devices, now: options.devicesNow ?? Date.now })
+  lifetime.own(() => { try { devices.flush() } catch { /* optional metadata must not block shutdown */ } })
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
@@ -2583,8 +2594,8 @@ function buildWizardServer(options, lifetime) {
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -4842,6 +4853,21 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
+      if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        const body = await readBoundedBody(request, 256 * 1024)
+        try { devices.record(JSON.parse(body.toString('utf8'))?.session) } catch { /* recording must never break diagnostics */ }
+        // A box may keep its own diagnostics receiver (WIZARD_DIAGNOSTICS_ORIGIN); otherwise the shell answers as before.
+        const receiver = diagnosticsOrigin || tailnetShellOrigin
+        if (receiver) await proxyShellStatic(request, response, receiver, url, body)
+        else sendJson(response, 404, { error: 'not_found' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/devices' && request.method === 'GET') {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        sendJson(response, 200, { devices: devices.list() }); return
       }
       if (url.pathname === '/wizard/standard-chats/mcp') {
         if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
