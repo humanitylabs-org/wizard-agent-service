@@ -152,6 +152,7 @@ server = createWizardServer({
   accessVerifier,
   ...(tailnetVerifier ? { tailnetVerifier } : {}),
   tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  diagnosticsOrigin: process.env.WIZARD_DIAGNOSTICS_ORIGIN || '',
   privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
   tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
@@ -192,6 +193,7 @@ server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  devicesStatePath: process.env.WIZARD_DEVICES_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'devices.json'),
   // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
   skinsStateDir: process.env.WIZARD_SKINS_STATE_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'skins'),

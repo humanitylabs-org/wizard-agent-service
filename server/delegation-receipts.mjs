@@ -12,15 +12,19 @@ export const isHumanRequest = row => row.role === 'user' && Boolean(String(row.c
   && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind)
   && !String(row.display_kind || '').startsWith('process_wakeup')
   && !/^(?:Your previous turn indicated a tool call|You just executed tool calls but returned an empty response|Workline browser QA found a concrete regression)/u.test(String(row.content || '').trim())
+// Inactive compaction history is retained; rewound/deleted turns are not.
+// Older schemas without compacted must never grant inactive rows authority.
+export const retainedMessagesWhere = columns => !columns.has('active') ? '1'
+  : `(COALESCE(active,1)=1${columns.has('compacted') ? ' OR (active=0 AND compacted=1)' : ''})`
 const internal = internalHelperMessage
 
 export function currentOwnerResult(db, sessionId) {
   const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
   // Compaction changes model context, not the owner's request/answer boundary.
-  // Retained inactive rows remain authoritative for gates and supersession.
+  // Only compacted inactive rows remain authoritative for gates and supersession.
   const kind = columns.has('display_kind') ? ', display_kind' : ''
   const rows = db.prepare(`SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
-    AND role IN ('user','assistant') AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
+    AND ${retainedMessagesWhere(columns)} AND role IN ('user','assistant') AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
   let assistant, userAt=0, inspected=0
   for (const row of rows) {
     inspected++
@@ -76,7 +80,7 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
 export function ownerMovedOn(db, sessionId, completedAt) {
   const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
   const rows = db.prepare(`SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
-    AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
+    AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
   return rows.length>512 || rows.some(row => isHumanRequest({ ...row, role: 'user' }))
 }
 // Automatic resumption is for the turn that was waiting on the helper; after two hours it is stale.
