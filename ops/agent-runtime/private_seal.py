@@ -117,7 +117,6 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000, key_source='
     search['command'][search['command'].index('--bind') + 1] = str(seal[3])
     search['environment'] = dict(provider['environment'])
     search['restart'] = 'no'
-    # Search shares only the inference namespace (never the agent namespace).
     services[edge_name] = {
         'image': EDGE_IMAGE,
         'networks': {seal_name: {'ipv4_address': str(seal[4])},
@@ -141,18 +140,29 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000, key_source='
         # (holding the Service-owned key) can reach its plaintext listeners.
         provider['networks'] = {keyed_name: {'ipv4_address': str(keyed[2])}, egress_name: {'ipv4_address': str(egress[2])}}
         command[command.index('--bind') + 1] = str(keyed[2])
-        search['command'][search['command'].index('--bind') + 1] = str(keyed[2])
+        # During down/force-recreate a service: reference can retain the OLD
+        # provider's namespace. Dependencies cannot repair that dead reference.
+        # The key-held candidate uses independent proxy namespaces, both without
+        # an uplink; the legacy non-injected renderer remains byte-compatible.
+        search.pop('network_mode', None)
+        search['networks'] = {keyed_name: {'ipv4_address': str(keyed[4])},
+                              egress_name: {'ipv4_address': str(egress[4])}}
+        search['command'][search['command'].index('--bind') + 1] = str(keyed[4])
+        search['extra_hosts'] = dict(provider['extra_hosts'])
+        search['dns'] = ['127.0.0.1']
+        search['depends_on'] = [edge_name]
         services[main + '-key'] = {
             'image': KEY_IMAGE, 'entrypoint': ['python', '/app/provider-key-injector.py'],
             'networks': {seal_name: {'ipv4_address': str(seal[3]), 'aliases': [proxy]},
                          keyed_name: {'ipv4_address': str(keyed[3])}},
             'environment': {'LISTEN_IP': str(seal[3]), 'UPSTREAM_IP': str(keyed[2]),
-                            'PORTS': json.dumps([3301, 3302]), 'KEY_FILE': KEY_TARGET},
+                            'PORTS': json.dumps([3301, 3302]), 'KEY_FILE': KEY_TARGET,
+                            'UPSTREAM_IPS': json.dumps({'3301': str(keyed[2]), '3302': str(keyed[4])})},
             'volumes': [f'{key_source}:{KEY_TARGET}:ro'],
             'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
             # Same owner as the Service key file (0600/0400); no other reader.
             'user': f'{key_uid}:{key_gid}', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
-            'logging': {'driver': 'none'}, 'depends_on': [proxy],
+            'logging': {'driver': 'none'}, 'depends_on': [proxy, main + '-search'],
         }
         client.setdefault('depends_on', [])
         if isinstance(client['depends_on'], list) and main + '-key' not in client['depends_on']:

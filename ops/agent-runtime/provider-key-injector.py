@@ -13,6 +13,7 @@ client of the official attestation proxies on a separate internal network.
 """
 import asyncio
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -146,15 +147,32 @@ def handler(upstream_ip, port, key_file, connect_timeout=CONNECT_TIMEOUT):
     return handle
 
 
+def upstream_routes(ports, default, overrides):
+    """Fixed local numeric destinations only, one explicit route per listener.
+
+    Configuration is Service-owned, never selected from a request or agent DNS.
+    Keep the legacy single-IP environment compatible for existing candidates.
+    """
+    if not isinstance(overrides, dict) or set(overrides) - {str(p) for p in ports}:
+        raise ValueError('upstream_routes')
+    routes = {p: str(ipaddress.IPv4Address(overrides.get(str(p), default))) for p in ports}
+    if any(not ipaddress.ip_address(ip).is_private or ipaddress.ip_address(ip).is_loopback
+           or ipaddress.ip_address(ip).is_unspecified or ipaddress.ip_address(ip).is_multicast
+           for ip in routes.values()):
+        raise ValueError('upstream_routes')
+    return routes
+
+
 async def main():
     listen, upstream = os.environ['LISTEN_IP'], os.environ['UPSTREAM_IP']
     key_file = os.environ.get('KEY_FILE', '/run/provider-key/key')
     read_key(key_file)   # fail at start rather than accept requests unkeyed
     ports = [int(p) for p in json.loads(os.environ.get('PORTS', '[3301]'))]
+    routes = upstream_routes(ports, upstream, json.loads(os.environ.get('UPSTREAM_IPS', '{}')))
     bound = float(os.environ.get('CONNECT_TIMEOUT', CONNECT_TIMEOUT))
     if not 0 < bound <= 4:
         raise ValueError('connect_timeout')   # never configurable past the 5 s fail-closed bound
-    servers = [await asyncio.start_server(handler(upstream, p, key_file, bound), listen, p, limit=MAX_HEAD * 2)
+    servers = [await asyncio.start_server(handler(routes[p], p, key_file, bound), listen, p, limit=MAX_HEAD * 2)
                for p in ports]
     await asyncio.gather(*(s.serve_forever() for s in servers))
 

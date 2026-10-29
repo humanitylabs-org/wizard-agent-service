@@ -55,7 +55,16 @@ class KeyLocationComposeTests(unittest.TestCase):
         self.assertEqual(key['networks']['agent-synthetic-seal']['aliases'], ['agent-synthetic-tinfoil'])
         self.assertEqual(proxy['command'][proxy['command'].index('--bind') + 1], '10.248.91.2')
         search = s['agent-synthetic-search']['command']
-        self.assertEqual(search[search.index('--bind') + 1], '10.248.91.2')
+        self.assertEqual(search[search.index('--bind') + 1], '10.248.91.4')
+        search_service = s['agent-synthetic-search']
+        self.assertNotIn('network_mode', search_service)
+        self.assertEqual(search_service['networks'], {'agent-synthetic-keyed': {'ipv4_address':'10.248.91.4'},
+                                                      'agent-synthetic-provider': {'ipv4_address':'10.247.91.4'}})
+        self.assertEqual(search_service['extra_hosts'], proxy['extra_hosts'])
+        self.assertEqual(search_service['dns'], ['127.0.0.1'])
+        self.assertEqual(search_service['depends_on'], ['agent-synthetic-edge'])
+        self.assertEqual(key['depends_on'], ['agent-synthetic-tinfoil','agent-synthetic-search'])
+        self.assertEqual(json.loads(key['environment']['UPSTREAM_IPS']), {'3301':'10.248.91.2','3302':'10.248.91.4'})
         self.assertEqual(key['environment']['UPSTREAM_IP'], '10.248.91.2')
         self.assertTrue(doc['networks']['agent-synthetic-keyed']['internal'])
         # The Service's own key file, read-only, only in the injector, as its owner. No copy.

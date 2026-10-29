@@ -33,11 +33,14 @@ from wam.runtipi import Runtipi
 from incognito_runtime import PYTHON
 from private_seal_round11_setup import unique_images, stock_config, stock_launch, stock_sessions_ready, manager_layout
 from private_seal_round11_protocol import nested_docker_argv, manager_health_ready, queues_ready, catalog_build_context
+from private_seal_round11_followup import PHASES, phase_record, safe_proxy_errors, IMAGE_PROBE
 PREFLIGHT = sys.argv[1:] == ['--preflight-only']
 MANAGER_ONLY = sys.argv[1:] == ['--manager-only']
 if sys.argv[1:] and not (PREFLIGHT or MANAGER_ONLY): raise SystemExit('unknown_round11_argument')
-OUT = ROOT / ('qa/round11d-manager' if MANAGER_ONLY else 'qa/round11c-preflight' if PREFLIGHT else 'qa/round11c')
-WORK = ROOT / ('work-round11d-manager' if MANAGER_ONLY else 'work-round11c-preflight' if PREFLIGHT else 'work-round11c')
+FOLLOWUP = os.environ.get('R11_MANAGER_FOLLOWUP', 'round11d')
+assert FOLLOWUP in ('round11d', 'round11e')
+OUT = ROOT / ('qa/'+FOLLOWUP+'-manager' if MANAGER_ONLY else 'qa/round11c-preflight' if PREFLIGHT else 'qa/round11c')
+WORK = ROOT / ('work-'+FOLLOWUP+'-manager' if MANAGER_ONLY else 'work-round11c-preflight' if PREFLIGHT else 'work-round11c')
 OWNER = 'wizard.qa.round11=' + os.environ['R11_SOURCE_HEAD'][:12]
 DAEMON = 'wizard-app-manager:grants-fix-fead192e9fb2-amd64'
 DAEMON_ID = 'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
@@ -234,6 +237,10 @@ def manager_phase():
     # Installed-lifecycle fixture does not start a harness or send owner prompts.
     client = doc['services'][app]
     client.update(entrypoint=[PYTHON], command=['-c', 'import time;time.sleep(3000)'], healthcheck={'disable': True})
+    # Bounded logging ONLY on disposable proxies, no owner prompts/keys.
+    # Retain allowlisted categories, never raw output. Production stays none.
+    for name in (app+'-tinfoil', app+'-search'):
+        doc['services'][name]['logging']={'driver':'json-file','options':{'max-size':'128k','max-file':'1'}}
     catalog = state / 'catalog'; pkg = catalog / 'apps' / app; pkg.mkdir(parents=True)
     def catalog_version(version, recipe_version=None):
         doc['services'][app]['environment']['SYNTHETIC_RECIPE_VERSION'] = str(recipe_version or version)
@@ -276,6 +283,7 @@ def manager_phase():
         attached = {r['Config']['Labels']['com.docker.compose.service']: {n[len(project)+1:] if n.startswith(project+'_') else '!'+n for n in r['NetworkSettings']['Networks']} for r in rows}
         violations = seal.runtime_violations(doc, attached)
         result = {'step': step, 'networks': {k: sorted(v) for k, v in attached.items()}, 'violations': violations,
+                  'container_ids':{r['Config']['Labels']['com.docker.compose.service']:r['Id'] for r in rows},
                   'home_sha256': hashlib.sha256((home/'history.txt').read_bytes()).hexdigest(), 'running_services': len(rows),
                   'key_sha256':hashlib.sha256(keyfile.read_bytes()).hexdigest(),
                   'recipe_versions':[[v for v in r['Config'].get('Env',[]) if v.startswith('SYNTHETIC_RECIPE_VERSION=')] for r in rows if r['Config']['Labels']['com.docker.compose.service']==app]}
@@ -288,84 +296,118 @@ def manager_phase():
         return (not violations and result['home_sha256']==original_home_hash and result['key_sha256']==original_key_hash
                 and result['recipe_versions']==[[expected_recipe]] and result['override_enabled']
                 and result['override_sha256']==hashlib.sha256(expected_override.rstrip('\n').encode()).hexdigest())
-    rt.install(urn); status({'running'}); life['install'] = inspect('install')
-    # A real image-content request through the actual attested Tinfoil path,
-    # carrying an INVALID GENERATED key. Auth rejection is not vision success.
-    source_id = nd('ps','-q','--filter','label=com.docker.compose.project='+project,
-                   '--filter','label=com.docker.compose.service='+app).stdout.strip()
-    image_probe = '''import json,urllib.request,urllib.error,time,hashlib
-v=json.loads(input());docs={}
-for port in (3301,3302):
- end=time.monotonic()+150
- while time.monotonic()<end:
-  try:
-   d=json.load(urllib.request.urlopen('http://agent-synthetic-tinfoil:'+str(port)+'/verification-document',timeout=5))
-   if d.get('securityVerified') is True:docs[str(port)]={k:d.get(k) for k in ('securityVerified','configRepo','releaseDigest')};break
-  except (OSError,ValueError):pass
-  time.sleep(2)
- if str(port) not in docs:raise RuntimeError('attestation_readiness_deadline')
-raw=json.dumps(v).encode();r=urllib.request.Request('http://agent-synthetic-tinfoil:3301/v1/chat/completions',raw,{'Content-Type':'application/json'})
-try:h=urllib.request.urlopen(r,timeout=60)
-except urllib.error.HTTPError as e:h=e
-print(json.dumps({'attestation':docs,'http_status':h.status,'request_sha256':hashlib.sha256(raw).hexdigest(),'image_content_sent':True,'auth_key_is_generated_invalid_fixture':True,'vision_semantic_success':False}))
-'''
-    try:
-        probe = nd('exec','-i',source_id,PYTHON,'-c',image_probe,data=json.dumps(synthetic_image_request('glm-5-3')),timeout=390)
-        life['tinfoil_image_request'] = json.loads(probe.stdout)
-        receipt['checks']['attested_tinfoil_image_content_request_auth_rejected'] = life['tinfoil_image_request']['http_status'] in (401,403)
-    except Exception as exc:
-        life['tinfoil_image_request'] = {'error_class':type(exc).__name__,'vision_semantic_success':False}
-        receipt['checks']['attested_tinfoil_image_content_request_auth_rejected'] = False
-    save('installed-manager.json',life)
-    rt.restart(urn); status({'running'}); life['restart'] = inspect('restart')
-    # Actual app-manager process restart, not a Compose-only reenactment.
-    nd('restart', 'runtipi'); wait(manager_ready, 180)
-    wait(lambda: isinstance(rt.req('GET', '/apps/installed').get('installed'),list), 60)
-    rt.stop(urn); status({'stopped'}); rt.start(urn); status({'running'}); life['daemon_restart_start'] = inspect('daemon_restart_start')
-    catalog_version(2); pull_catalog_version(2)
-    rt.req('PUT', f'/user-config/{urn}', {'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
-    rt.update(urn, perform_backup=False); status({'running'}); life['catalog_update'] = inspect('catalog_update')
-    rt.stop(urn); status({'stopped'})
-    rt.req('POST', f'/user-config/{urn}/disable', {})
-    life['disabled_readback'] = rt.req('GET', f'/user-config/{urn}')['isEnabled'] is False
-    # Measure the exact driver readback guard without opening the global admission gate.
-    driver = object.__new__(ar.RuntipiDriver); driver.agents = agents; driver.image = STOCK; driver.proxy_image = ar.DEFAULT_PROXY_IMAGE
-    driver.urn = lambda _: urn; driver._sealed_doc = lambda _: doc
-    try:
-        driver._sealed_override(agent, rt); life['driver_refuses_disabled_override'] = False
-    except ar.RuntimeFailure as exc:
-        life['driver_refuses_disabled_override'] = exc.code == 'sealed_override_unverified'
-    # This direct lifecycle endpoint is the UI bypass. Synthetic-only observation,
-    # with no prompts and no valid provider key; never a proposed live operation.
-    try:
-        rt.start(urn); status({'running', 'stopped', 'failed'})
-    except Exception as exc:
-        life['disabled_start_note'] = 'A generic startup error is not evidence of a security-policy refusal; inspect containers even after an API error.'
-        life['disabled_start_error_class'] = type(exc).__name__
-    try:
-        life['disabled_direct_start_stayed_sealed'] = inspect('disabled_direct_start')
-        last = life['steps'][-1]
-        extra_client_networks = set(last['networks'].get(app, [])) - set(doc['services'][app].get('networks', {}))
-        life['override_disable_security_vulnerability_demonstrated'] = bool(extra_client_networks)
-        life['disabled_client_extra_networks'] = sorted(extra_client_networks)
-        if extra_client_networks:
-            receipt['security_vulnerability'] = 'Selected unchanged manager starts synthetic client with seal override disabled on extra forbidden networks; driver guard does not protect direct lifecycle.'
-    except Exception as exc:
-        life['disabled_direct_start_stayed_sealed'] = False
-        life['disabled_inspection_error_class'] = type(exc).__name__
-    save('installed-manager.json', life)
-    rt.stop(urn); status({'stopped'})
-    rt.req('POST', f'/user-config/{urn}/enable', {})
-    assert rt.req('GET', f'/user-config/{urn}')['isEnabled'] is True
-    # Fresh forward-version rollback envelope carries recipe v1. This does not
-    # pretend that Runtipi supports a catalog-version downgrade or backup restore.
-    catalog_version(3, recipe_version=1); pull_catalog_version(3)
-    rt.req('PUT', f'/user-config/{urn}', {'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
-    rt.update(urn, perform_backup=False); status({'running'})
-    life['rollback'] = inspect('rollback')
-    receipt['checks']['real_manager_installed_lifecycle'] = all(life.get(k) is True for k in ('install','restart','daemon_restart_start','catalog_update','rollback'))
-    receipt['checks']['disabled_user_config_cannot_bypass_seal'] = life['disabled_readback'] and life['driver_refuses_disabled_override'] and life['disabled_direct_start_stayed_sealed']
-    save('installed-manager.json', life)
+    def diagnostics(step):
+        # Exact synthetic project metadata only. Never inspect env/binds/owner data.
+        ids = nd('ps','-aq','--filter','label=com.docker.compose.project='+project).stdout.split()
+        rows = json.loads(nd('inspect',*ids).stdout) if ids else []
+        safe = []
+        errors = {}
+        for row in rows:
+            svc = row['Config']['Labels']['com.docker.compose.service']
+            safe.append({'service':svc,'id':row['Id'],'pid':row['State']['Pid'],
+                         'status':row['State']['Status'],'exit_code':row['State']['ExitCode'],
+                         'network_mode':row['HostConfig']['NetworkMode'],
+                         'sandbox_id':row['NetworkSettings'].get('SandboxID'),
+                         'networks':sorted(row['NetworkSettings']['Networks'])})
+            if svc in (app+'-tinfoil',app+'-search'):
+                log=nd('logs','--tail','80',row['Id'],check=False,timeout=15)
+                errors[svc]=safe_proxy_errors(log.stdout+log.stderr)
+        manager_log=nd('logs','--tail','80','runtipi',check=False,timeout=15)
+        save('diagnostic-'+step+'.json',{'synthetic_only':True,'containers':safe,
+             'safe_proxy_error_categories':errors,
+             'safe_manager_error_categories':safe_proxy_errors(manager_log.stdout+manager_log.stderr)})
+
+    def persist(): save('installed-manager.json',life)
+    life['phase_results'] = {}
+    life['required_phases'] = list(PHASES)
+    persist()
+    def phase(name, fn): return phase_record(life,name,fn,persist,diagnostics)
+    def install():
+        rt.install(urn); status({'running'}); return inspect('install')
+    phase('install',install)
+
+    def restart():
+        # This remains the actual requested installed-manager restart endpoint.
+        # No stop/start fallback may satisfy or overwrite its result.
+        before=life['steps'][-1].get('container_ids',{}) if life['steps'] else {}
+        rt.restart(urn); status({'running'}); sealed=inspect('restart')
+        after=life['steps'][-1]['container_ids']
+        life['restart_all_services_recreated']=bool(before) and set(before)==set(after) and all(before[n]!=after[n] for n in before)
+        return sealed and life['restart_all_services_recreated']
+    phase('restart',restart)
+
+    def daemon_restart_start():
+        nd('restart','runtipi'); wait(manager_ready,180)
+        wait(lambda:isinstance(rt.req('GET','/apps/installed').get('installed'),list),60)
+        # Separate named recovery measurement, never used to pass restart above.
+        rt.stop(urn); status({'stopped'}); rt.start(urn); status({'running'})
+        return inspect('daemon_restart_start')
+    phase('daemon_restart_start',daemon_restart_start)
+
+    def catalog_update():
+        catalog_version(2); pull_catalog_version(2)
+        rt.req('PUT',f'/user-config/{urn}',{'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
+        rt.update(urn,perform_backup=False); status({'running'})
+        return inspect('catalog_update')
+    phase('catalog_update',catalog_update)
+
+    def disabled_negative():
+        rt.stop(urn); status({'stopped'})
+        rt.req('POST',f'/user-config/{urn}/disable',{})
+        life['disabled_readback']=rt.req('GET',f'/user-config/{urn}')['isEnabled'] is False
+        driver=object.__new__(ar.RuntipiDriver); driver.agents=agents; driver.image=STOCK; driver.proxy_image=ar.DEFAULT_PROXY_IMAGE
+        driver.urn=lambda _:urn; driver._sealed_doc=lambda _:doc
+        try:
+            driver._sealed_override(agent,rt); life['driver_refuses_disabled_override']=False
+        except ar.RuntimeFailure as exc:
+            life['driver_refuses_disabled_override']=exc.code=='sealed_override_unverified'
+        try:
+            rt.start(urn); status({'running','stopped','failed'})
+        except Exception as exc:
+            life['disabled_start_error_class']=type(exc).__name__
+        life['disabled_direct_start_stayed_sealed']=inspect('disabled_direct_start')
+        last=life['steps'][-1]
+        extra=set(last['networks'].get(app,[]))-set(doc['services'][app].get('networks',{}))
+        life['disabled_client_extra_networks']=sorted(extra)
+        life['override_disable_security_vulnerability_demonstrated']=bool(extra)
+        if extra:
+            receipt['security_vulnerability']='Selected unchanged manager starts synthetic client with seal override disabled on extra forbidden networks; driver guard does not protect direct lifecycle.'
+        # This selected daemon has NO mandatory seal-policy enforcement point.
+        # Running/sealed checks or generic dependency errors are not its proof.
+        life['mandatory_manager_fail_closed_guarantee']=False
+        life['mandatory_manager_guard_owner_gate']='Requires reviewed manager lifecycle-owned mandatory seal, not a post-start watchdog.'
+        return False
+    phase('disabled_user_config_negative',disabled_negative)
+
+    def rollback():
+        # Always attempt re-enable/rollback even if negative or update failed.
+        rt.stop(urn); status({'stopped'})
+        rt.req('POST',f'/user-config/{urn}/enable',{})
+        assert rt.req('GET',f'/user-config/{urn}')['isEnabled'] is True
+        catalog_version(3,recipe_version=1); pull_catalog_version(3)
+        rt.req('PUT',f'/user-config/{urn}',{'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
+        rt.update(urn,perform_backup=False); status({'running'})
+        return inspect('rollback')
+    phase('rollback',rollback)
+
+    def image_request():
+        source_id=nd('ps','-q','--filter','label=com.docker.compose.project='+project,
+                     '--filter','label=com.docker.compose.service='+app).stdout.strip()
+        if not source_id: raise RuntimeError('synthetic_client_not_running')
+        probe=nd('exec','-i',source_id,PYTHON,'-c',IMAGE_PROBE,
+                 data=json.dumps(synthetic_image_request('glm-5-3')),timeout=300)
+        value=json.loads(probe.stdout)
+        life['tinfoil_image_request_detail']=value
+        docs=value.get('attestation',{})
+        return (set(docs)=={'3301','3302'} and all(d['securityVerified'] is True for d in docs.values())
+                and value.get('image_content_sent') is True and value.get('http_status') in (401,403))
+    phase('tinfoil_image_request',image_request)
+    receipt['checks']['attested_tinfoil_image_content_request_auth_rejected']=life['tinfoil_image_request']
+    receipt['checks']['real_manager_installed_lifecycle']=all(life.get(k) is True for k in ('install','restart','daemon_restart_start','catalog_update','rollback'))
+    receipt['checks']['disabled_user_config_cannot_bypass_seal']=life['disabled_user_config_negative']
+    life['failed_phases']=[n for n,v in life['phase_results'].items() if v['status']!='passed']
+    life['not_executed_phases']=[n for n in PHASES if n not in life['phase_results']]
+    persist()
 
 
 def stock_phase():

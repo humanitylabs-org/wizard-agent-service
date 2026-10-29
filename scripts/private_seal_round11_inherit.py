@@ -23,7 +23,7 @@ def function_closure(source):
     return {name:functions[name] for name in STOCK_FUNCTIONS}
 
 
-def validate_inheritance(root):
+def validate_inheritance(root, approved_deltas=None):
     root = Path(root)
     old = root / 'inherited/round11c'
     inventory = json.loads((old/'SHA256.json').read_text())
@@ -42,9 +42,30 @@ def validate_inheritance(root):
     # Broad unchanged-source/dependency closure: EVERY old staged file except
     # the deliberately repaired manager monolith. Includes all production code,
     # WAM dependencies, package files, image archive and original gateway tests.
+    approved_deltas = approved_deltas or {}
+    expected_deltas = {'ops/agent-runtime/private_seal.py',
+                       'ops/agent-runtime/provider-key-injector.py',
+                       'ops/agent-runtime/test_provider_key_seal.py'}
+    if approved_deltas:
+        assert set(approved_deltas) == expected_deltas, 'unexpected_production_delta'
+        for name, expected in approved_deltas.items():
+            assert digest(root/name)==expected, 'approved_delta_drift:'+name
+            original=root/'inherited/round11d/source'/name
+            assert digest(original)==previous['files'][name], 'original_delta_source_drift:'+name
+        # Old stock, gateway/socket/edge code remains unchanged. The two repaired
+        # functions and new fixed route parser require FRESH focused regressions
+        # and installed lifecycle; do not reuse an old renderer/injector verdict.
+        for name, excluded in (('ops/agent-runtime/private_seal.py',{'apply'}),
+                               ('ops/agent-runtime/provider-key-injector.py',{'main','upstream_routes'})):
+            def stable(path):
+                tree=ast.parse(path.read_text())
+                tree.body=[n for n in tree.body if not (isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in excluded)
+                           and not (isinstance(n,ast.Import) and len(n.names)==1 and n.names[0].name=='ipaddress')]
+                return ast.dump(tree,include_attributes=False)
+            assert stable(root/name)==stable(root/'inherited/round11d/source'/name), 'unrelated_source_drift:'+name
     closure = {}
     for name, expected in previous['files'].items():
-        if name == CHANGED: continue
+        if name == CHANGED or name in approved_deltas: continue
         path = (root/name).resolve()
         assert path.is_relative_to(root.resolve()) and digest(path) == expected, 'dependency_drift:' + name
         closure[name] = expected
@@ -70,4 +91,5 @@ def validate_inheritance(root):
     return {'scope':'Inherited synthetic fixture evidence only; not attested real inference or terminal provider failure.',
             'source_head':OLD_SOURCE,'worker_log_sha256':OLD_LOG,'control_receipt_sha256':OLD_CONTROL,
             'runtime_receipt_sha256':OLD_RUNTIME,'dependency_hashes':closure,'unchanged_stock_functions':list(STOCK_FUNCTIONS),
-            'checks':checks,'reports':reports,'images':control['images']}
+            'checks':checks,'reports':reports,'images':control['images'],
+            'fresh_regressions_required_for_source_deltas':approved_deltas}
