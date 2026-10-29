@@ -32,10 +32,12 @@ from test_private_seal import fixture
 from wam.runtipi import Runtipi
 from incognito_runtime import PYTHON
 from private_seal_round11_setup import unique_images, stock_config, stock_launch, stock_sessions_ready, manager_layout
+from private_seal_round11_protocol import nested_docker_argv, manager_health_ready, queues_ready, catalog_build_context
 PREFLIGHT = sys.argv[1:] == ['--preflight-only']
-if sys.argv[1:] and not PREFLIGHT: raise SystemExit('unknown_round11_argument')
-OUT = ROOT / ('qa/round11c-preflight' if PREFLIGHT else 'qa/round11c')
-WORK = ROOT / ('work-round11c-preflight' if PREFLIGHT else 'work-round11c')
+MANAGER_ONLY = sys.argv[1:] == ['--manager-only']
+if sys.argv[1:] and not (PREFLIGHT or MANAGER_ONLY): raise SystemExit('unknown_round11_argument')
+OUT = ROOT / ('qa/round11d-manager' if MANAGER_ONLY else 'qa/round11c-preflight' if PREFLIGHT else 'qa/round11c')
+WORK = ROOT / ('work-round11d-manager' if MANAGER_ONLY else 'work-round11c-preflight' if PREFLIGHT else 'work-round11c')
 OWNER = 'wizard.qa.round11=' + os.environ['R11_SOURCE_HEAD'][:12]
 DAEMON = 'wizard-app-manager:grants-fix-fead192e9fb2-amd64'
 DAEMON_ID = 'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
@@ -71,7 +73,7 @@ def save(name, value):
 
 
 def docker(*args, **kw): return run(['docker', *args], **kw)
-def nd(*args, **kw): return docker('exec', DIND, 'docker', *args, **kw)
+def nd(*args, **kw): return run(nested_docker_argv(DIND, list(args), kw.get('data')), **kw)
 
 
 def wait(fn, seconds=120):
@@ -147,6 +149,11 @@ def manager_phase():
        '-e', 'POSTGRES_PASSWORD=synthetic-password', 'postgres:14')
     nd('run', '-d', '--name', 'runtipi-queue', *shared, '-e', 'RABBITMQ_DEFAULT_USER=tipi',
        '-e', 'RABBITMQ_DEFAULT_PASS=synthetic-password', 'rabbitmq:4-alpine')
+    # The selected daemon only retries initial queue failure a bounded number
+    # of times. Ready its real dependencies before starting the immutable image.
+    wait(lambda: nd('exec','runtipi-db','pg_isready','-U','tipi','-d','tipi',check=False).returncode == 0, 90)
+    wait(lambda: nd('exec','runtipi-queue','rabbitmq-diagnostics','-q','check_running',check=False).returncode == 0
+         and nd('exec','runtipi-queue','rabbitmq-diagnostics','-q','check_port_connectivity',check=False).returncode == 0, 120)
     directories, mounts, app_data_parent = manager_layout(state)
     for directory in directories:
         (state / directory).mkdir(mode=0o755)
@@ -155,9 +162,13 @@ def manager_phase():
     run(['git', 'init', '-q', catalog]); (catalog / '.keep').write_text('Synthetic catalogue.\n')
     run(['git', '-C', catalog, 'add', '-A'])
     run(['git', '-C', catalog, '-c', 'user.name=Synthetic QA', '-c', 'user.email=qa@example.invalid', 'commit', '-qm', 'empty synthetic catalogue'])
-    run(['git', '-C', catalog, 'update-server-info'])
-    nd('run', '-d', '--name', 'r11-catalog', *shared, '-v', f'{state}:/www:ro', 'python:3.12-slim',
-       'python3', '-m', 'http.server', '8080', '--directory', '/www')
+    catalog_image = os.environ.get('R11_CATALOG_IMAGE', 'round11-synthetic-catalog:' + os.environ['R11_SOURCE_HEAD'][:12])
+    if 'R11_CATALOG_IMAGE' not in os.environ:
+        context = catalog_build_context(ROOT, OUT/'catalog-build')
+        docker('build','--pull=false','-t',catalog_image,str(context),timeout=600)
+    import_image(catalog_image)
+    nd('run', '-d', '--name', 'r11-catalog', *shared, '-v', f'{state}:/www:ro',
+       catalog_image)
     jwt_secret = secrets.token_hex(32)
     SECRET_VALUES.append(jwt_secret)
     env = dict(POSTGRES_HOST='runtipi-db', POSTGRES_DBNAME='tipi', POSTGRES_USERNAME='tipi', POSTGRES_PASSWORD='synthetic-password',
@@ -184,18 +195,26 @@ def manager_phase():
                    data=json.dumps({'path': path, 'method': method, 'body': body, 'token': cli_token(jwt_secret)}), timeout=timeout + 10)
             return json.loads(p.stdout)
     nd('run', '-d', '--name', 'r11-api', *shared, 'python:3.12-slim', 'python3', '-c', 'import time;time.sleep(3000)')
+    transport_probe = nd('exec','-i','r11-api','python3','-c','import json;print(json.dumps(json.loads(input())))',data='{"synthetic_stdin_roundtrip":true}')
+    assert json.loads(transport_probe.stdout) == {'synthetic_stdin_roundtrip':True}
+    receipt['checks']['nested_stdin_roundtrip'] = True
     def manager_ready():
         status = json.loads(nd('inspect', '--format', '{{json .State}}', 'runtipi').stdout)
         if not status.get('Running'): raise AssertionError('synthetic_manager_exited_before_readiness')
-        return nd('exec', 'r11-api', 'python3', '-c', "import urllib.request;urllib.request.urlopen('http://runtipi:3000/api/health',timeout=3)", check=False).returncode == 0
-    wait(manager_ready, 90)
+        p = nd('exec', 'r11-api', 'python3', '-c', "import urllib.request,json;print(urllib.request.urlopen('http://runtipi:3000/api/health',timeout=3).read().decode())", check=False)
+        if p.returncode or not manager_health_ready(json.loads(p.stdout)): return False
+        q = nd('exec', 'runtipi-queue', 'rabbitmqctl', '-q', 'list_queues', 'name', 'consumers', '--formatter', 'json')
+        return queues_ready(json.loads(q.stdout))
+    wait(manager_ready, 120)
     # /cache is mandatory in the selected daemon (CacheService uses node:sqlite).
     cache_probe = nd('exec', 'runtipi', 'node', '--input-type=module', '-e',
         "import fs from 'node:fs';import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/cache/cache.sqlite');const tables=d.prepare(\"SELECT name FROM sqlite_master WHERE type='table'\").all().map(r=>r.name);d.close();console.log(JSON.stringify({uid:process.getuid(),cache_uid:fs.statSync('/cache').uid,cache_mode:fs.statSync('/cache').mode&511,tables,app_data_parent:process.env.RUNTIPI_APP_DATA_PATH}))")
     cache_info = json.loads(cache_probe.stdout)
     assert 'keyv' in cache_info['tables'] and cache_info['app_data_parent'] == str(state)
     assert cache_info['uid'] == 0 and cache_info['cache_uid'] == os.getuid() and cache_info['cache_mode'] == 0o755
-    save('manager-setup.json', {'cache':cache_info,'mounts':[[str(s),t] for s,t in mounts], 'health_ready':True})
+    save('manager-setup.json', {'cache':cache_info,'mounts':[[str(s),t] for s,t in mounts],
+                              'health_ready':True,'queue_health_up':True,'all_queue_consumers_ready':True,
+                              'database_ready_before_daemon':True,'rabbitmq_ready_before_daemon':True})
     receipt['checks']['manager_setup_ready'] = True
     if PREFLIGHT: return
     # Fresh synthetic operator only; never read or copy a real login.
@@ -223,13 +242,25 @@ def manager_phase():
         (pkg / 'metadata').mkdir(exist_ok=True); (pkg / 'metadata/description.md').write_text('Synthetic fixture only.\n')
         run(['git', '-C', catalog, 'add', '-A'])
         run(['git', '-C', catalog, '-c', 'user.name=Synthetic QA', '-c', 'user.email=qa@example.invalid', 'commit', '-qm', f'fixture {version}'])
-        run(['git', '-C', catalog, 'update-server-info'])
+
     run(['git', 'init', '-q', catalog]); catalog_version(1)
     url = 'http://r11-catalog:8080/catalog/.git'
     store = next((s['slug'] for s in rt.stores() if s.get('url') == url), None)
     if store is None: store = rt.ensure_store('r11synthetic', url)['slug']
     urn = f'{app}:{store}'; project = f'{app}_{store}'
-    rt.pull()
+    catalog_proofs = []
+    def pull_catalog_version(version):
+        pulled = rt.pull()
+        assert pulled.get('success') is True, 'synthetic_catalog_pull_not_successful'
+        # Canonical discovery plus exact cloned bytes prove smart HTTP update,
+        # not just a health response or a store row.
+        wait(lambda: (rt.app(urn).get('metadata') or {}).get('latestVersion') == 1100 + version, 60)
+        cloned = state/'repos'/store/'apps'/app/'docker-compose.yml'
+        assert cloned.read_bytes() == (pkg/'docker-compose.yml').read_bytes(), 'synthetic_catalog_clone_bytes_mismatch'
+        catalog_proofs.append({'version':version,'compose_sha256':hashlib.sha256(cloned.read_bytes()).hexdigest()})
+        save('manager-store-protocol.json',{'transport':'real Git smart HTTP upload-pack','cloned_versions':catalog_proofs})
+    pull_catalog_version(1)
+    receipt['checks']['manager_store_protocol_ready'] = True
     override = seal.runtipi_override(doc, urn)
     rt.req('PUT', f'/user-config/{urn}', {'dockerCompose': override, 'appEnv': ''})
     assert rt.req('GET', f'/user-config/{urn}')['isEnabled'] is True
@@ -250,13 +281,13 @@ def manager_phase():
                   'recipe_versions':[[v for v in r['Config'].get('Env',[]) if v.startswith('SYNTHETIC_RECIPE_VERSION=')] for r in rows if r['Config']['Labels']['com.docker.compose.service']==app]}
         config = rt.req('GET', f'/user-config/{urn}')
         result['override_enabled'] = config.get('isEnabled') is True
-        result['override_sha256'] = hashlib.sha256((config.get('dockerCompose') or '').encode()).hexdigest()
+        result['override_sha256'] = hashlib.sha256((config.get('dockerCompose') or '').rstrip('\n').encode()).hexdigest()
         expected_override = seal.runtipi_override(doc,urn)
         expected_recipe = 'SYNTHETIC_RECIPE_VERSION=' + doc['services'][app]['environment']['SYNTHETIC_RECIPE_VERSION']
         life['steps'].append(result); save('installed-manager.json', life)
         return (not violations and result['home_sha256']==original_home_hash and result['key_sha256']==original_key_hash
                 and result['recipe_versions']==[[expected_recipe]] and result['override_enabled']
-                and result['override_sha256']==hashlib.sha256(expected_override.encode()).hexdigest())
+                and result['override_sha256']==hashlib.sha256(expected_override.rstrip('\n').encode()).hexdigest())
     rt.install(urn); status({'running'}); life['install'] = inspect('install')
     # A real image-content request through the actual attested Tinfoil path,
     # carrying an INVALID GENERATED key. Auth rejection is not vision success.
@@ -281,16 +312,17 @@ print(json.dumps({'attestation':docs,'http_status':h.status,'request_sha256':has
     try:
         probe = nd('exec','-i',source_id,PYTHON,'-c',image_probe,data=json.dumps(synthetic_image_request('glm-5-3')),timeout=390)
         life['tinfoil_image_request'] = json.loads(probe.stdout)
-        receipt['checks']['attested_tinfoil_image_content_request_auth_rejected'] = life['tinfoil_image_request']['http_status'] in (400,401,403,422)
+        receipt['checks']['attested_tinfoil_image_content_request_auth_rejected'] = life['tinfoil_image_request']['http_status'] in (401,403)
     except Exception as exc:
         life['tinfoil_image_request'] = {'error_class':type(exc).__name__,'vision_semantic_success':False}
         receipt['checks']['attested_tinfoil_image_content_request_auth_rejected'] = False
     save('installed-manager.json',life)
     rt.restart(urn); status({'running'}); life['restart'] = inspect('restart')
     # Actual app-manager process restart, not a Compose-only reenactment.
-    nd('restart', 'runtipi'); wait(lambda: rt.req('GET', '/apps/installed'), 180)
+    nd('restart', 'runtipi'); wait(manager_ready, 180)
+    wait(lambda: isinstance(rt.req('GET', '/apps/installed').get('installed'),list), 60)
     rt.stop(urn); status({'stopped'}); rt.start(urn); status({'running'}); life['daemon_restart_start'] = inspect('daemon_restart_start')
-    catalog_version(2); rt.pull()
+    catalog_version(2); pull_catalog_version(2)
     rt.req('PUT', f'/user-config/{urn}', {'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
     rt.update(urn, perform_backup=False); status({'running'}); life['catalog_update'] = inspect('catalog_update')
     rt.stop(urn); status({'stopped'})
@@ -307,19 +339,27 @@ print(json.dumps({'attestation':docs,'http_status':h.status,'request_sha256':has
     # with no prompts and no valid provider key; never a proposed live operation.
     try:
         rt.start(urn); status({'running', 'stopped', 'failed'})
-        life['disabled_direct_start_stayed_sealed'] = inspect('disabled_direct_start')
     except Exception as exc:
-        ids = nd('ps', '-q', '--filter', 'label=com.docker.compose.project=' + project).stdout.split()
-        life['disabled_direct_start_stayed_sealed'] = False
-        life['disabled_start_running_container_count'] = len(ids)
-        life['disabled_start_note'] = 'A generic startup error is not evidence of a security-policy refusal.'
+        life['disabled_start_note'] = 'A generic startup error is not evidence of a security-policy refusal; inspect containers even after an API error.'
         life['disabled_start_error_class'] = type(exc).__name__
+    try:
+        life['disabled_direct_start_stayed_sealed'] = inspect('disabled_direct_start')
+        last = life['steps'][-1]
+        extra_client_networks = set(last['networks'].get(app, [])) - set(doc['services'][app].get('networks', {}))
+        life['override_disable_security_vulnerability_demonstrated'] = bool(extra_client_networks)
+        life['disabled_client_extra_networks'] = sorted(extra_client_networks)
+        if extra_client_networks:
+            receipt['security_vulnerability'] = 'Selected unchanged manager starts synthetic client with seal override disabled on extra forbidden networks; driver guard does not protect direct lifecycle.'
+    except Exception as exc:
+        life['disabled_direct_start_stayed_sealed'] = False
+        life['disabled_inspection_error_class'] = type(exc).__name__
+    save('installed-manager.json', life)
     rt.stop(urn); status({'stopped'})
     rt.req('POST', f'/user-config/{urn}/enable', {})
     assert rt.req('GET', f'/user-config/{urn}')['isEnabled'] is True
     # Fresh forward-version rollback envelope carries recipe v1. This does not
     # pretend that Runtipi supports a catalog-version downgrade or backup restore.
-    catalog_version(3, recipe_version=1); rt.pull()
+    catalog_version(3, recipe_version=1); pull_catalog_version(3)
     rt.req('PUT', f'/user-config/{urn}', {'dockerCompose':seal.runtipi_override(doc,urn),'appEnv':''})
     rt.update(urn, perform_backup=False); status({'running'})
     life['rollback'] = inspect('rollback')
@@ -421,13 +461,16 @@ def main():
     OUT.mkdir(parents=True); WORK.mkdir()
     try:
         # Focused startup only has no prompts, lifecycle operations or inference.
-        for name, fn in [('stock', stock_phase), ('manager', manager_phase)]:
+        for name, fn in ([('manager', manager_phase)] if MANAGER_ONLY else [('stock', stock_phase), ('manager', manager_phase)]):
             try: fn()
             except Exception as exc:
                 receipt.setdefault('errors', {})[name] = {'class':type(exc).__name__, 'reason':str(exc)[:240]}
                 if name == 'manager' and DIND in owned:
-                    log = nd('logs','--tail','50','runtipi',check=False)
-                    save('manager-error.json', {'error':receipt['errors'][name], 'synthetic_daemon_log_tail':(log.stdout+log.stderr)[-6000:]})
+                    logs = {}
+                    for service in ('runtipi','r11-catalog','runtipi-queue','runtipi-db'):
+                        log = nd('logs','--tail','50',service,check=False)
+                        logs[service] = (log.stdout+log.stderr)[-6000:]
+                    save('manager-error.json', {'error':receipt['errors'][name], 'synthetic_log_tails':logs})
         receipt['phase'] = 'complete'
     finally:
         # Every resource here is owned by this runner. No prune, no unrelated VM.
@@ -436,7 +479,8 @@ def main():
         remaining = docker('ps','-aq','--filter','label='+OWNER).stdout.split()
         receipt['leftover_containers'] = len(remaining)
         receipt['checks']['owned_resources_cleaned'] = not remaining
-        needed = ['stock_setup_ready','manager_setup_ready','owned_resources_cleaned'] if PREFLIGHT else ['real_manager_installed_lifecycle','disabled_user_config_cannot_bypass_seal',
+        needed = ['manager_setup_ready','manager_store_protocol_ready','real_manager_installed_lifecycle','disabled_user_config_cannot_bypass_seal',
+                  'attested_tinfoil_image_content_request_auth_rejected','owned_resources_cleaned'] if MANAGER_ONLY else ['stock_setup_ready','manager_setup_ready','owned_resources_cleaned'] if PREFLIGHT else ['real_manager_installed_lifecycle','disabled_user_config_cannot_bypass_seal',
                   'stock_stopped_provider_no_completion','stock_provider_recovery_completed',
                   'synthetic_image_content_request','attested_tinfoil_image_content_request_auth_rejected','owned_resources_cleaned']
         unmet = [k for k in needed if receipt['checks'].get(k) is not True]
