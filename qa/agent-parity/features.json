@@ -845,6 +845,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "app-item-reply",
+      "description": "Reply to selected text from an installed Wizard app in an unsent chat",
+      "layer": "ux",
+      "how_to_test": "From a main and from a routed-agent Chats window, Reply to selected text in an installed Wizard app (e.g. Morning Report); verify an unsent MAIN-agent draft with an empty composer, a reply key namespaced by the attached app frame (never the payload), no session/run call until he sends, and the item framed as quoted untrusted reference DATA on send.",
+      "source_refs": [
+        "wizard-ux/web/core/app-services.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/app-context-draft.test.mjs",
+        "wizard-ux/tests/context-draft-lifecycle.test.mjs",
+        "wizard-ux/tests/notification-reply-send.test.mjs",
+        "wizard-ux/qa-app-context-draft.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "back-contract",
       "description": "Open thread and overlay, press Back once per layer",
       "layer": "ux",
