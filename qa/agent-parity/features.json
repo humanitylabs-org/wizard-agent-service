@@ -612,6 +612,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "sent-media-snapshot",
+      "description": "A file an agent sends is a snapshot: rewriting the source later never changes an earlier chat message",
+      "layer": "server",
+      "how_to_test": "Run the wizard-os media hook with each runtime's own home on a scratch file, store the rewritten reply, serve the attachment, rewrite the source in place and assert the served bytes are unchanged.",
+      "source_refs": [
+        "hermes-plugin/wizard-os/media.py",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/test_wizard_os_media_plugin.py"
+      ],
+      "fixture": "sent-media-snapshot",
+      "policy_exemptions": []
+    },
+    {
       "id": "download-links",
       "description": "Download assistant and user attachments through authenticated public URLs; the owner's browser caches attachments for good and revalidates owner files",
       "layer": "server",
