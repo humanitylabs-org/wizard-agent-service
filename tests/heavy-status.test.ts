@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -75,7 +75,10 @@ it('old finished heavy jobs never pull threads back into Working', async () => {
         expect(job.notice_delivered_at).toBeUndefined()
         expect(job.delivery_backfill).toBeUndefined()
         expect(heavyResultOwed(job)).toBe(true)
-        expect(guardHeavyStatus(status, { sessionId: job.sessionId, jobs: queue.rows() }).state).toBe('fyi')
+        // The result remains owed; attention is independent of background lifecycle.
+        expect(guardHeavyStatus(status, { sessionId: job.sessionId, jobs: queue.rows() })).toBe(status)
+        const check = { ...status, state: 'check' }
+        expect(guardHeavyStatus(check, { sessionId: job.sessionId, jobs: queue.rows() }).state).toBe('fyi')
       }
       expect(queue.pendingNotices('hermes', 'running').map((job: any) => job.job_id)).toEqual(['active_running'])
     }
@@ -131,6 +134,49 @@ it('completion guard has no age expiry, preserves metadata and leaves owner ques
   expect(guardHeavyStatus(status, { sessionId: 's', jobs: [{ ...job, resume: 'superseded', notice_delivered_at: Date.now() }] })).toBe(status)
   expect(guardHeavyStatus(status, { sessionId: 's', jobs: [{ ...job, completion_delivered_at: Date.now(), continuation_invalidated: true }] })).toBe(status)
 })
+
+it.each(kinds)('heavy delivery immediately restores the unchanged check reply: %s', async kind => {
+  const root = mkdtempSync(join(tmpdir(), 'heavy-refresh-')), heavyStatePath = join(root, 'heavy.db')
+  const s = await scene(kind, { heavyStatePath, heavyToken: 'synthetic-heavy-refresh-token-000000000', heavyPollIntervalMs: 3_600_000,
+    heavyTransport: async () => { throw Error('fixture must not contact a worker') } })
+  const db = new DatabaseSync(heavyStatePath), id = 'wizard_heavy_refresh', now = Date.now()
+  // Keep the reply, cache signature and wall clock unchanged through every ledger
+  // transition. Waiting for the old one-second row cache would hide this defect.
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+  const attention = { state: 'check', ask: 'The button is live. Say if the layout feels right', subject: 'Parity QA' }
+  s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Heavy refresh', created_at: now / 1000 - 60,
+    messages: [{ role: 'assistant', timestamp: now / 1000 - 10,
+      content: `Ready\n[WIZARD_STATUS_V1]${JSON.stringify(attention)}[/WIZARD_STATUS_V1]` }] })
+  const save = (over: any) => {
+    const job = { job_id: 'heavy_refresh', sessionId: id, agent_id: s.id, state: 'running', created_at: now, ...over }
+    db.prepare('INSERT OR REPLACE INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
+      .run(job.job_id, id, 'origin', 'key', 'hash', JSON.stringify(job), job.agent_id)
+  }
+  const list = async () => {
+    const response = await s.request('/api/sessions?limit=100')
+    expect(response.status).toBe(200)
+    return (await response.json()).data.find((row: any) => row.id === id)
+  }
+  const ready = async () => {
+    const row = await list()
+    expect(row.wizard_attention).toEqual(attention)
+    expect(row.status).not.toBe('running')
+    expect(row.wizard_waiting_on).toBeUndefined()
+    expect(row.wizard_background).toBeUndefined()
+  }
+  try {
+    for (const pending of [{ state: 'running' }, { state: 'failed', resume: 'superseded' }]) {
+      save(pending)
+      expect(await list()).toMatchObject({ status: 'running', wizard_attention: { state: 'fyi' } })
+      save({ state: 'completed', resume: 'sent', completion_delivered_at: now })
+      await ready()
+    }
+    save({ agent_id: 'other-agent' })
+    await ready()
+    db.prepare('DELETE FROM heavy_jobs WHERE id=?').run('heavy_refresh')
+    await ready()
+  } finally { clock.mockRestore(); db.close(); await s.close(); rmSync(root, { recursive: true, force: true }) }
+}, 30_000)
 
 it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %s', async kind => {
   const root = mkdtempSync(join(tmpdir(), 'heavy-status-')), heavyStatePath = join(root, 'heavy.db')

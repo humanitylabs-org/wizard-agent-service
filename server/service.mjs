@@ -4028,6 +4028,9 @@ function buildWizardServer(options, lifetime) {
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          // Heavy delivery can change without a new reply. Use one fresh ledger snapshot
+          // for this batch, never the age-cached rows used only to discover hot threads.
+          const heavyJobs = heavyWork?.queue.rows() ?? []
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
@@ -4036,7 +4039,7 @@ function buildWizardServer(options, lifetime) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
               const followUps = new Map()
-              const holdingJobs = heavyJobRows().filter(job => {
+              const holdingJobs = heavyJobs.filter(job => {
                 const id = job.sessionId ?? job.session_id
                 if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
                 if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
@@ -4072,7 +4075,7 @@ function buildWizardServer(options, lifetime) {
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
               const nonHolding = readNonHoldingFollowUps(hermesStatePath, session.id)
-              const holdingJobs = heavyJobRows().filter(job => !nonHolding.has(job.job_id ?? job.id))
+              const holdingJobs = heavyJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
               if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
