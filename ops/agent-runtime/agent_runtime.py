@@ -174,11 +174,23 @@ class Agents:
         except OSError:
             raise RuntimeFailure("agent_not_prepared", 409) from None
         lines = [line for line in lines if not line.startswith("TINFOIL_API_KEY=")]
+        import private_seal
+        try:
+            injected = private_seal.enabled(agent) and private_seal.key_injected(agent)
+            scoped_gateway = private_seal.enabled(agent) and private_seal.gateway(agent)
+        except ValueError:
+            raise RuntimeFailure("private_network_policy_invalid", 409) from None
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             key = self.tinfoil_key()
             if not key:
                 raise RuntimeFailure("provider_not_configured", 503)
+            if injected:
+                # Service-owned migration: the bearer leaves the Hermes home;
+                # only the injector reads the Service's own key file (no copy).
+                key = private_seal.PLACEHOLDER_KEY
             lines.append(f"TINFOIL_API_KEY={key}")
+        if scoped_gateway:
+            self.write_gateway_hash(agent)
         tmp = env_path.with_name(f".env.tmp-{os.getpid()}")
         try:
             tmp.write_text("\n".join(lines) + "\n")
@@ -187,6 +199,40 @@ class Agents:
         os.chmod(tmp, 0o600)
         tmp.replace(env_path)
 
+
+    def _owned_file(self, directory: Path, name: str, text: str, owner: Path) -> None:
+        """Atomic 0400 file in a 0700 Service directory, owned like the home (the reader's uid)."""
+        st = owner.stat()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeFailure("provider_key_dir_unsafe", 409)
+        tmp = directory / f".{name}.tmp-{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, (text + "\n").encode())
+        finally:
+            os.close(fd)
+        try:
+            if (st.st_uid, st.st_gid) != (os.getuid(), os.getgid()):
+                os.chown(tmp, st.st_uid, st.st_gid)
+                os.chown(directory, st.st_uid, st.st_gid)
+            os.chmod(tmp, 0o400)
+            tmp.replace(directory / name)
+        except PermissionError:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeFailure("provider_key_owner_mismatch", 409) from None
+
+    def key_source(self) -> str:
+        return str(Path(self.tinfoil_key_file).resolve()) if self.tinfoil_key_file else ""
+
+    def write_gateway_hash(self, agent: dict) -> None:
+        token = self.secret(agent["id"], "gateway.key")
+        if not token:
+            raise RuntimeFailure("agent_gateway_key_missing", 409)
+        home = self.managed(agent["id"]) if restricted(agent) else self.home(agent["id"])
+        self._owned_file(self.root / agent["id"] / "gateway-edge", "token.sha256",
+                         hashlib.sha256(token.encode()).hexdigest(), home)
 
     def secret(self, agent_id: str, name: str) -> str:
         try:
@@ -249,7 +295,8 @@ def wants_private_search(agent: dict) -> bool:
     return agent.get("privacy") == "private" and (agent.get("model") or {}).get("provider") == "tinfoil"
 
 
-def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
+def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool,
+                key_source: str = "") -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
     main, proxy = service_names(agent)
@@ -289,6 +336,13 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     doc = {"services": services, "x-runtipi": {"schema_version": 2, "overrides": []}}
     if doc_volumes:
         doc["volumes"] = doc_volumes
+    import private_seal
+    try:
+        doc = private_seal.apply(doc, agent, ports=ports, home_source=home_source, uid=uid, gid=gid, key_source=key_source)
+    except ValueError as error:
+        if str(error) == "provider_not_configured":
+            raise RuntimeFailure("provider_not_configured", 503) from None
+        raise RuntimeFailure("private_network_policy_invalid", 409) from None
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
 
 
@@ -352,7 +406,7 @@ class ComposeDriver:
         path = self.agents.root / agent["id"] / "runtime" / "docker-compose.yml"
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text(compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=str(home),
-                                    uid=st.st_uid, gid=st.st_gid, ports=True))
+                                    uid=st.st_uid, gid=st.st_gid, ports=True, key_source=self.agents.key_source()))
         return path
 
     def apply(self, agent: dict) -> dict:
@@ -656,7 +710,8 @@ class RuntipiDriver:
         (pkg / "wizard.md").write_text(wizard_md(agent))
         (pkg / "runtipi" / "config.json").write_text(config_doc(agent, version=agent.get("runtime", {}).get("version") or "0.1.0"))
         (pkg / "runtipi" / "docker-compose.yml").write_text(
-            compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=stock_home, uid=1000, gid=1000, ports=False))
+            compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=stock_home, uid=1000, gid=1000, ports=False,
+                        key_source=self.agents.key_source()))
         git = ["git", "-C", str(pkg), "-c", "user.name=Wizard OS", "-c", "user.email=agents@wizard.local"]
         if not (pkg / ".git").exists():
             subprocess.run(["git", "init", "-q", str(pkg)], check=True)
@@ -664,7 +719,61 @@ class RuntipiDriver:
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", f"agent {agent['id']} package"], check=True, capture_output=True)
         return pkg
 
+    def _require_network_admitted(self, agent: dict) -> None:
+        import private_seal
+        if private_seal.enabled(agent) and not private_seal.RUNTIPI_ADMITTED:
+            # A materialized legacy recipe adds the shared Runtipi network.
+            # Fail before key provisioning/start until installed replacement is
+            # rehearsed (round 10 runner) and the evidence admits it.
+            raise RuntimeFailure("private_sealed_recipe_not_admitted", 409)
+
+    def _sealed_doc(self, agent: dict) -> dict:
+        stock_home = f"${{ROOT_FOLDER_HOST}}/app-data/wizard-os/agents/{agent['id']}/home"
+        return json.loads(compose_doc(agent, image=self.image, proxy_image=self.proxy_image,
+                                      home_source=stock_home, uid=1000, gid=1000, ports=False,
+                                      key_source=self.agents.key_source()))
+
+    def _sealed_override(self, agent: dict, rt) -> None:
+        """Final owner override replaces every sealed service; exact readback or refuse."""
+        import private_seal
+        text = private_seal.runtipi_override(self._sealed_doc(agent), self.urn(agent))
+        before = rt.req("GET", f"/user-config/{self.urn(agent)}")
+        old = (before.get("dockerCompose") or "").strip()
+        if old and not old.startswith(private_seal.RUNTIPI_MARK):
+            raise RuntimeFailure("sealed_override_conflict")  # never erase an owner's own override
+        env = (before.get("appEnv") or "").rstrip("\n")
+        rt.req("PUT", f"/user-config/{self.urn(agent)}", {"dockerCompose": text, "appEnv": env + "\n" if env else ""})
+        after = rt.req("GET", f"/user-config/{self.urn(agent)}")
+        if (after.get("dockerCompose") or "").rstrip("\n") != text.rstrip("\n") or after.get("isEnabled") is not True:
+            # Disabled user config would drop the seal and re-add Runtipi's bridges.
+            raise RuntimeFailure("sealed_override_unverified")
+
+    def _verify_sealed(self, agent: dict) -> None:
+        """After every Runtipi start: running networks must equal the sealed document, else stop."""
+        import private_seal
+        if not private_seal.enabled(agent):
+            return
+        doc = self._sealed_doc(agent)
+        project = self.project(agent["id"])
+        ids = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}"], timeout=60).stdout.split()
+        attached = {}
+        if ids:
+            rows = docker(["inspect", "--format", '{{index .Config.Labels "com.docker.compose.service"}} {{json .NetworkSettings.Networks}}', *ids], timeout=60).stdout
+            for row in rows.splitlines():
+                service, _, nets = row.partition(" ")
+                attached[service] = {name[len(project) + 1:] if name.startswith(project + "_") else "!" + name
+                                     for name in json.loads(nets or "{}")}
+        problems = private_seal.runtime_violations(doc, attached)
+        if problems:
+            sys.stderr.write(f"[agent-runtime] sealed runtime mismatch, stopping: {problems[:6]}\n")
+            self.stop(agent)
+            raise RuntimeFailure("sealed_runtime_unverified", 409)
+
     def _override(self, agent: dict, rt) -> None:
+        self._require_network_admitted(agent)
+        import private_seal
+        if private_seal.enabled(agent):
+            return self._sealed_override(agent, rt)
         doc = {"services": {}}
         main, _ = service_names(agent)
         if self.home_mount == "alongside":
@@ -782,6 +891,7 @@ class RuntipiDriver:
         return agent["runtime"]["app_id"] in self.cli.installed_ids(rt)
 
     def apply(self, agent: dict) -> dict:
+        self._require_network_admitted(agent)
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
         self._override(agent, rt)
@@ -793,17 +903,21 @@ class RuntipiDriver:
                 raise RuntimeFailure("install_refused") from None
             if result.get("status") == "stopped":
                 return self.start(agent)
+            self._verify_sealed(agent)
             return {"ok": True, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
         self.stop(agent)
         return self.start(agent)
 
     def start(self, agent: dict) -> dict:
+        self._require_network_admitted(agent)
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
+        self._override(agent, rt)  # re-verify the owner override before every start
         rt.req("POST", f"/app-lifecycle/{self.urn(agent)}/start", {}, timeout=300)
         status = rt.wait_status(self.urn(agent), {"running"}, timeout=600)
         if status != "running":
             raise RuntimeFailure(f"start_{status}"[:60])
+        self._verify_sealed(agent)
         return {"ok": True, "status": status}
 
     def stop(self, agent: dict) -> dict:

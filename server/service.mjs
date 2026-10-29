@@ -4285,7 +4285,7 @@ function buildWizardServer(options, lifetime) {
     internalCall,
     agentForToken: (supplied) => agents?.agentForGatewayToken(supplied) ?? '',
     mainAgentId: MAIN_AGENT_ID,
-    agentRestricted: (agentId) => Boolean(agents?.agentRestricted?.(agentId)),
+    agentRestricted: (agentId) => Boolean(agents?.agentSocketBound?.(agentId)),
   })
   // Only the dedicated Serve listener may use the enrolled owner identity without proxy proof.
   const tailnetPrincipals = createPrincipalResolver({ requireAccess: true, accessVerified: (request) => accessVerified(request, tailnetVerifier) })
@@ -5853,7 +5853,7 @@ function buildWizardServer(options, lifetime) {
   if (agents) {
     agentSockets = createAgentSocketGateway({ agentsDir, ingress: id => createAgentIngress(server, id) })
     // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
-    server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
+    server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentSocketBound(agent.id)).map(agent => agentSockets.ensure(agent.id)))
     void server.agentSocketsReady.catch(() => undefined)
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()

@@ -1,0 +1,316 @@
+{
+  "agent_calls": {
+    "agent_presents_other_bearer": {
+      "bytes": 45,
+      "error": "agent_must_not_hold_provider_key",
+      "header_names": [
+        "connection",
+        "content-length",
+        "content-type"
+      ],
+      "key_echoed": false,
+      "marker_echoed": false,
+      "ms": 5,
+      "status": 401
+    },
+    "agent_presents_provider_key": {
+      "bytes": 45,
+      "error": "agent_must_not_hold_provider_key",
+      "header_names": [
+        "connection",
+        "content-length",
+        "content-type"
+      ],
+      "key_echoed": false,
+      "marker_echoed": false,
+      "ms": 6,
+      "status": 401
+    },
+    "agent_to_internet_ip": "refused:OSError",
+    "agent_to_official_proxy_direct": "refused:OSError",
+    "placeholder_inference": {
+      "bytes": 107,
+      "error": "dict",
+      "header_names": [
+        "connection",
+        "content-type",
+        "date",
+        "ehbp-response-nonce",
+        "tinfoil-enclave",
+        "tinfoil-pt",
+        "transfer-encoding"
+      ],
+      "key_echoed": false,
+      "marker_echoed": false,
+      "ms": 645,
+      "status": 401
+    },
+    "placeholder_search_mcp": {
+      "bytes": 121,
+      "error": "dict",
+      "header_names": [
+        "connection",
+        "content-type",
+        "date",
+        "ehbp-response-nonce",
+        "tinfoil-pt",
+        "transfer-encoding"
+      ],
+      "key_echoed": false,
+      "marker_echoed": false,
+      "ms": 624,
+      "status": 401
+    }
+  },
+  "attestation_via_injector": {
+    "3301": {
+      "configRepo": "tinfoilsh/confidential-model-router",
+      "enclaveHost": "inference.tinfoil.sh",
+      "releaseTag": "v0.0.168",
+      "securityVerified": true,
+      "steps_ok": null
+    },
+    "3302": {
+      "configRepo": "tinfoilsh/confidential-websearch",
+      "enclaveHost": "websearch.tinfoil.sh",
+      "releaseTag": "v0.5.16",
+      "securityVerified": true,
+      "steps_ok": null
+    }
+  },
+  "checks": {
+    "both_attested_via_injector": true,
+    "other_agents_cannot_reach_seal": true,
+    "other_sealed_agent_cannot_reach_host_api": true,
+    "runtipi_lifecycle_passed": false
+  },
+  "compose_binary": "Docker Compose version v2.40.0",
+  "compose_binary_sha256": "bd5835ccbbf06a42dcb5294c65e34a4634b34447afb9ed6fc7adf18a000e0f99",
+  "images": {
+    "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2": "sha256:06833b65195fc0dbe7cd136705da29defe42e2474eff2391e66ab00db3744476 [\"ghcr.io/humanitylabs-org/hermes-agent@sha256:e8ad921a23c7a2144b9c89902cb16908b68020fcd4f301bf8a2dbe2da75f3f5f\"]",
+    "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3": "sha256:cbfababef82676898b0700a5f4895479a92468e99671156cb41fd7d685ee60e2 [\"ghcr.io/tinfoilsh/tinfoil-proxy@sha256:90584b70ed0636b08f6bee4657f947854b1dabe1842acbbcae8466019b559c9c\"]",
+    "wizard-private-network-edge:round10": "sha256:addb490087e631d792889d583708690234827bdb75fedeaf8966b1c588c0847d []",
+    "wizard-private-network-edge:round9": "sha256:8e4792766774507ec1fb92fd8baa7d9db4cda201a5ef151313920c753ecd01ed []"
+  },
+  "leftover_containers": 0,
+  "live_touched": false,
+  "other_agent_isolation": {
+    "other_sealed_agent": {
+      "agent_api": "refused:OSError",
+      "host_published_api": "refused:OSError",
+      "injector": "refused:OSError",
+      "official_proxy": "refused:OSError"
+    },
+    "standard_agent_bridge": {
+      "agent_api": "refused:TimeoutError",
+      "host_published_api": "refused:ConnectionRefusedError",
+      "injector": "refused:TimeoutError",
+      "official_proxy": "refused:TimeoutError"
+    }
+  },
+  "phase": "complete",
+  "real_provider_key_used": false,
+  "six_privacy_checks": {
+    "a_relay_ehbp_capture": {
+      "evidence": "/srv/work/incog-seal-r10/qa/round10/a-capture.json",
+      "keyed_interface": {
+        "http_requests": 2,
+        "key_in_authorization": true,
+        "marker_seen": true,
+        "placeholder_seen": false
+      },
+      "provider_answered_status": 401,
+      "provider_interface": {
+        "http_requests": 2,
+        "marker_seen": true,
+        "placeholder_seen": false,
+        "synthetic_key_seen": true,
+        "tls_app_records": 8,
+        "tls_client_hello_sni": []
+      },
+      "scope": "Raw AF_PACKET capture in the official proxy network namespace. Keyed internal hop: plaintext HTTP from the Service injector carrying the injected bearer. Provider hop to the edge/enclave: TLS only; marker, synthetic key and placeholder absent from every byte. EHBP body framing rides inside that TLS and is not independently decrypted (no TLS key log in tinfoil-go v0.15).",
+      "status": "failed"
+    },
+    "d_provider_key_location": {
+      "agent_with_key_refused": {
+        "bytes": 45,
+        "error": "agent_must_not_hold_provider_key",
+        "header_names": [
+          "connection",
+          "content-length",
+          "content-type"
+        ],
+        "key_echoed": false,
+        "marker_echoed": false,
+        "ms": 6,
+        "status": 401
+      },
+      "inside_agent": {
+        "env_has_tinfoil_var": false,
+        "key_hits_inside_agent": []
+      },
+      "key_dir_mounted_in": [
+        "r10seal-agent-synthetic-key-1"
+      ],
+      "key_in_container_config": {
+        "r10seal-agent-synthetic-1": false,
+        "r10seal-agent-synthetic-edge-1": false,
+        "r10seal-agent-synthetic-key-1": false,
+        "r10seal-agent-synthetic-search-1": false,
+        "r10seal-agent-synthetic-tinfoil-1": false
+      },
+      "method": "Service-owned SYNTHETIC migration (Agents.add_provider_keys, provider_key_location=provider): bearer removed from the Hermes home; the injector alone mounts the Service key file read-only (no per-agent copy). Agents-tree backup tar scanned before/after; forced rollback and re-migration with synthetic history/identity hashes. Agent scanned from inside (home, /tmp, process environments); every container env/mount inspected. Old pre-migration backups still hold the bearer: live retirement needs provider-key rotation.",
+      "migration": {
+        "home_env_has_placeholder": true,
+        "home_env_has_synthetic_key": false,
+        "home_env_other_lines_kept": true,
+        "identity_preserved": true,
+        "post_migration_backup": {
+          "agents_tree_tar_bytes": 30720,
+          "key_in_agents_tree_backup": false
+        },
+        "pre_migration_backup_held_key": true,
+        "remigrated": {
+          "backup": {
+            "agents_tree_tar_bytes": 30720,
+            "key_in_agents_tree_backup": false
+          },
+          "home_env_has_synthetic_key": false,
+          "identity_preserved": true
+        },
+        "rollback": {
+          "home_env_has_synthetic_key": true,
+          "identity_preserved": true,
+          "ms": 0
+        },
+        "service_key_mode": "0o600",
+        "service_key_outside_agents_tree": true
+      },
+      "placeholder_reached_provider": true,
+      "status": "passed"
+    },
+    "e_stopped_provider_fail_closed": {
+      "after_restore": {
+        "inference_after_restore": {
+          "bytes": 33,
+          "error": "provider_unavailable",
+          "header_names": [
+            "connection",
+            "content-length",
+            "content-type"
+          ],
+          "key_echoed": false,
+          "marker_echoed": false,
+          "ms": 8,
+          "status": 502
+        }
+      },
+      "bound_ms": 5000,
+      "scope": "Transport layer: with the official proxy stopped the injector answers 502 provider_unavailable within the bound; no alternative route (edge CONNECT from agent is still denied by the edge allowlist). Stock-Hermes run classification is NOT re-measured here: round 9B observed stock Hermes still retrying during the bounded window, then cancelled explicitly. Retrying is not reported as terminal failure.",
+      "status": "failed",
+      "while_stopped": {
+        "edge_connect_from_agent": "refused:ConnectionRefusedError",
+        "inference_after_removal": {
+          "bytes": 33,
+          "error": "provider_unavailable",
+          "header_names": [
+            "connection",
+            "content-length",
+            "content-type"
+          ],
+          "key_echoed": false,
+          "marker_echoed": false,
+          "ms": 3087,
+          "status": 502
+        },
+        "inference_while_stopped": {
+          "bytes": 33,
+          "error": "provider_unavailable",
+          "header_names": [
+            "connection",
+            "content-length",
+            "content-type"
+          ],
+          "key_echoed": false,
+          "marker_echoed": false,
+          "ms": 10017,
+          "status": 502
+        },
+        "search_while_stopped": {
+          "bytes": 33,
+          "error": "provider_unavailable",
+          "header_names": [
+            "connection",
+            "content-length",
+            "content-type"
+          ],
+          "key_echoed": false,
+          "marker_echoed": false,
+          "ms": 3084,
+          "status": 502
+        }
+      }
+    },
+    "f_provider_logs_data_codeword_scan": {
+      "containers": {
+        "r10seal-agent-synthetic-1": {
+          "changed_paths": 3,
+          "changed_paths_with_marker_or_key": [],
+          "key_in_logs": false,
+          "log_bytes": 0,
+          "log_unreadable_driver_none": false,
+          "marker_in_logs": false
+        },
+        "r10seal-agent-synthetic-edge-1": {
+          "changed_paths": 0,
+          "changed_paths_with_marker_or_key": [],
+          "key_in_logs": false,
+          "log_bytes": 79,
+          "log_unreadable_driver_none": true,
+          "marker_in_logs": false
+        },
+        "r10seal-agent-synthetic-key-1": {
+          "changed_paths": 3,
+          "changed_paths_with_marker_or_key": [
+            "/run",
+            "/run/provider-key",
+            "/run/provider-key/key"
+          ],
+          "key_in_logs": false,
+          "log_bytes": 79,
+          "log_unreadable_driver_none": true,
+          "marker_in_logs": false
+        },
+        "r10seal-agent-synthetic-search-1": {
+          "changed_paths": 2,
+          "changed_paths_with_marker_or_key": [],
+          "key_in_logs": false,
+          "log_bytes": 1168,
+          "log_unreadable_driver_none": false,
+          "marker_in_logs": false
+        },
+        "r10seal-agent-synthetic-tinfoil-1": {
+          "changed_paths": 2,
+          "changed_paths_with_marker_or_key": [],
+          "key_in_logs": false,
+          "log_bytes": 1171,
+          "log_unreadable_driver_none": false,
+          "marker_in_logs": false
+        }
+      },
+      "host_mount_hits_outside_key_file": [],
+      "project_volumes": [],
+      "scope": "Every project container: stdout/stderr logs, every added/changed filesystem path (docker diff + docker cp), the synthetic agents root (home, provider-key, gateway dirs) and project volumes, for the run marker and the synthetic key. The Service-owned key file and its source are the only expected key locations.",
+      "status": "failed"
+    }
+  },
+  "source_head": "3bec9d07a7700508c2e5da0127a13f012c6c8b7d",
+  "synthetic_only": true,
+  "timings_ms": {
+    "a_provider_removed": 49,
+    "a_provider_restore": 464,
+    "a_provider_stop": 268,
+    "a_service_key_migration": 0,
+    "a_up": 1474
+  }
+}
