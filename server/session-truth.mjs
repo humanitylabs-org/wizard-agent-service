@@ -236,6 +236,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       lastAssistantAt: 0,
       activityAt: 0,
       requestPreview: '',
+      replies: [],
       active: false,
     })
     // Hermes' session API omits provider. A thread's exact model lock is the only
@@ -323,6 +324,9 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
           current.lastUserAt = timestamp
           current.requestPreview = row.content.trim()
         }
+        // Row order proves this reply follows the latest user even when the
+        // provider stores both in the same timestamp tick.
+        if (visibleAssistant && !current.lastUserAt) current.replies.unshift({ timestamp, status: parseStatus(row.content), afterUser: true })
         if (!current.lastAssistantAt && visibleAssistant) {
           current.lastAssistantAt = timestamp
           // The agent's own status line on its latest reply, while no newer request follows it.
@@ -380,7 +384,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       `).all(nowSeconds - 6 * 3600, ...ids)
       for (const row of helperRows) {
         const current = truth.get(String(row.id || ''))
-        if (current && !isFollowUp(String(row.id), row.delegation_id) && !ownerGate(db, String(row.id))) current.helpersRunning = (current.helpersRunning || 0) + 1
+        if (current && !isFollowUp(String(row.id), row.delegation_id)) current.helpersRunning = (current.helpersRunning || 0) + 1
       }
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.

@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
+import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
@@ -53,7 +54,7 @@ import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
-import { pendingHeavyJobs, withoutOwnerGates } from './heavy-wait.mjs'
+import { pendingHeavyJobs } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
@@ -155,7 +156,7 @@ This is a same-profile private-Operator experience pilot. Describe it accurately
 // the Own reply style leaves them out so the owner's existing agent keeps its own habits.
 const WIZARD_CLIENT_INTRO = 'You are serving the user through Wizard, a first-party mobile client for their Hermes Agent.'
 const WIZARD_STYLE_INTRO = 'Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require.'
-const WIZARD_CLIENT_FACTS = `Wizard renders Markdown. Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients, and Wizard renders it, so use code fences, lists, tables and headings wherever they help. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
+const WIZARD_CLIENT_FACTS = `Wizard renders Markdown (code fences, lists, tables, headings). Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients. Whether and how much to format is up to your own persona. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
 const WIZARD_OUTCOME_OWNERSHIP = 'The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.'
 const WIZARD_FINISH_SHAPE = 'Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.'
 
@@ -1401,6 +1402,9 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
   const latestAssistant = visible.find((message) => message.role === 'assistant') ?? null
   const status = latest?.role === 'assistant' ? latest.status ?? null : null
   const appId = latest?.role === 'assistant' ? latest.appId ?? null : null
+  const userIndex = visible.findIndex(m => m.role === 'user')
+  const replies = visible.flatMap((m, index) => m.role === 'assistant'
+    ? [{ timestamp: m.created_at, status: m.status ?? null, afterUser: userIndex < 0 || index < userIndex }] : []).reverse()
   if (latest) { delete latest.status; delete latest.appId }
   return {
     latest,
@@ -1409,6 +1413,7 @@ export function latestVisibleSessionMessages(payload, operator = false, completi
     status,
     appId,
     latestAssistantAt: latestAssistant?.created_at ?? null,
+    replies,
   }
 }
 
@@ -2133,20 +2138,22 @@ function setupWriteRefusal(request, tailnetIngress) {
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 // The notifications slot for scheduled jobs with `deliver: notification`: the slot's default app from apps.json
 // (else the only running provider), called through the agent bridge's ordinary app tool route (`notify`).
+// Availability and send use the same authority: the job's own agent and only the apps that agent may use, so a
+// provider that agent cannot reach (a private agent, an unbound app) means a thread fallback, never a hidden loss.
 export function scheduleNotifier({ bridge, appsJsonPath }) {
-  const pick = () => {
-    const providers = bridge.apps().filter(app => app.jobs.includes('notifications'))
+  const pick = (agent) => {
+    const providers = bridge.apps(agent).filter(app => app.jobs.includes('notifications'))
     let chosen = ''
     try { chosen = String(JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.slots?.notifications?.default || '') } catch { /* no slot record */ }
     const running = providers.filter(app => app.status === 'running')
     return providers.find(app => app.id === chosen) || (running.length === 1 ? running[0] : null)
   }
   return {
-    available: () => pick()?.status === 'running',
-    send: async ({ title, message }) => {
-      const app = pick()
+    available: (agent = GATEWAY_MAIN_AGENT) => pick(agent)?.status === 'running',
+    send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
+      const app = pick(agent)
       if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
-      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, GATEWAY_MAIN_AGENT)
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, agent)
       if (!result || result.isError) throw new Error('notify failed')
       return { app: app.id }
     },
@@ -2745,6 +2752,17 @@ function buildWizardServer(options, lifetime) {
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    projectOpenAsk: (agent, row, replies, lastUserAt) => {
+      const home = routedAgentMedia(agent)?.home
+      const path = home ? join(home, 'state.db') : ''
+      const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
+      truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' })?.state === 'fyi'
+      truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
+      return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
+        lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
+        background: threadBackground(truth), heavyPending: !!truth.heavyPending })
+    },
     acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     clientViewContext,
@@ -4026,12 +4044,12 @@ function buildWizardServer(options, lifetime) {
                 if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
                 return !followUps.get(id).has(job.job_id ?? job.id)
               })
-              for (const [id] of withoutOwnerGates(hermesStatePath, pendingHeavyJobs(holdingJobs, listedSessionIds))) {
+              for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
           }
-          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds)) {
+          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true })) {
             const t = sessionTruth.get(id); if (t) t.supervisorPending = true
           }
           result = filterSessionList(
@@ -4051,6 +4069,25 @@ function buildWizardServer(options, lifetime) {
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
           result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
+          if (!operator) {
+            const payload = JSON.parse(result.toString('utf8'))
+            for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
+              const truth = sessionTruth.get(session.id) ?? {}
+              if (heavyStatus('hermes', session.id, { state: 'done', ask: 'pending' })?.state === 'fyi') truth.heavyPending = true
+              const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
+              const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
+              let replies = useTruth ? truth.replies : messages?.replies
+              // Preserve one-off pre-marker classifications of the latest reply.
+              if (replies?.length && !replies.at(-1).status && session.wizard_attention) {
+                replies = [...replies.slice(0, -1), { ...replies.at(-1), status: session.wizard_attention }]
+              }
+              if (!replies) return session
+              return projectOpenAskSession(session, { replies,
+                lastUserAt: Math.max(replyEpoch(truth?.lastUserAt), replyEpoch(messages?.lastUser?.created_at)),
+                background: threadBackground(truth), heavyPending: !!truth?.heavyPending })
+            })
+            result = Buffer.from(JSON.stringify(payload))
+          }
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
     return result
   }
@@ -4586,6 +4623,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
@@ -6165,7 +6203,15 @@ function buildWizardServer(options, lifetime) {
             if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
             const { wizard_retry_run_id: sourceId, ...validation } = requested
             directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
-            const retried = await runQueue.retrySaved(sourceId, requested.session_id, requested)
+            let retried
+            try { retried = await runQueue.retrySaved(sourceId, requested.session_id, requested) }
+            catch (error) {
+              // A local saved-route conflict is not an upstream outage. Keep the
+              // explicit precondition visible, without exposing arbitrary errors.
+              if (error?.status !== 412) throw error
+              sendJson(response, 412, { error: { code: 'saved_retry_route_changed', message: error.message } })
+              return
+            }
             threadDispositionStore.clearSession('direct', requested.session_id)
             sendQueuedRun(response, 202, retried.record, { 'Idempotency-Replayed': String(retried.replayed) })
             return
