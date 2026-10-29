@@ -182,6 +182,9 @@ export async function scene(kind, serverOptions = {}) {
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
+  // A feature fixture may seed its own app/agent choices and state paths once,
+  // after the common runtime exists but before the real Service starts.
+  if (typeof serverOptions === 'function') serverOptions = serverOptions({ root, id, folder, osHome })
   let wizard, base
   const start = async () => {
     const priorScheduler = process.env.WIZARD_SCHEDULER
@@ -194,7 +197,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner,
+  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {

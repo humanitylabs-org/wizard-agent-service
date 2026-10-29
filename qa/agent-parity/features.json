@@ -1117,6 +1117,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "scheduler-notifications",
+      "description": "Scheduled notifications preserve silent output, agent app authority and thread visibility",
+      "layer": "server",
+      "how_to_test": "Run a notification schedule through the real Service and each runtime route with a bound notifications MCP app (main is denied in routed cases). Assert the scheduler's internal read retains the silent answer, owner proof plus the raw header still scrubs it, the app receives one notify as the job agent, and the agent's thread is hidden. Remove the app grant and run again: the same thread is unhidden, fallback is recorded and no notification is sent. Restricted uses a mode-0600 Unix ingress; host-profile uses /p/parity-profile.",
+      "source_refs": ["server/scheduler.mjs", "server/service.mjs", "server/agents-http.mjs", "server/agent-bridge.mjs"],
+      "reference_tests": ["tests/scheduler-notify-parity.test.ts", "qa/agent-parity/scheduler-notify.mjs"],
+      "fixture": "scheduler-notifications",
+      "policy_exemptions": []
+    },
+    {
       "id": "reminders-and-tips",
       "description": "Set a reminder and opt in to the five-day tips from a chat",
       "layer": "runtime",
