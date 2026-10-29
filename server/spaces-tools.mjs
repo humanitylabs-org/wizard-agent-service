@@ -9,7 +9,7 @@ const ids = { type: 'array', items: { type: 'string' }, maxItems: 500 }
 const definitions = [
   ['spaces_list', 'List only your own Spaces (id, name, count).', schema()],
   ['spaces_create', 'Create an empty Space for yourself when the owner asks. Reuses an existing same-name Space.', schema({ name: { type: 'string', minLength: 1, maxLength: 60 } }, ['name'])],
-  ...['add', 'remove'].map(op => [`spaces_${op}`, `${op === 'add' ? 'Move' : 'Remove'} your own canonical thread IDs ${op === 'add' ? 'into' : 'from'} your own Space. ${op === 'add' ? 'A thread is in one Space at a time: this removes it from your other Spaces. ' : ''}Idempotent.`, schema({ space_id: sid, thread_ids: ids }, ['space_id', 'thread_ids'])]),
+  ...['add', 'remove'].map(op => [`spaces_${op}`, `${op === 'add' ? 'Add' : 'Remove'} your own canonical thread IDs ${op === 'add' ? 'into' : 'from'} your own Space. ${op === 'add' ? 'A thread is in one Space at a time: this removes it from your other Spaces. ' : ''}Idempotent.`, schema({ space_id: sid, thread_ids: ids }, ['space_id', 'thread_ids'])]),
   ['spaces_delete', 'Delete your own Space only when asked; never deletes threads.', schema({ space_id: sid }, ['space_id'])],
   ['spaces_search_threads', 'Search your own thread metadata (IDs, titles, subjects), including archived threads. No message content or other agents. Page with offset; empty query lists candidates.', schema({ query: { type: 'string', maxLength: 200 }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 } })],
 ].map(([name, description, inputSchema]) => ({ name, description: `[Wizard Spaces] ${description}`, inputSchema }))
