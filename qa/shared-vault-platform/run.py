@@ -20,12 +20,27 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
 sys.path.insert(0, str(SOURCE / 'ops/agent-runtime'))
 import agent_runtime as ar
+from staging_support import capture_failure, sanitize, validate_socket_paths
+
+COMMAND_SECRETS = []
+COMMAND_FAILURES = []
 
 
 def run(argv, *, cwd=None, data=None, timeout=1800):
-    p = subprocess.run([str(a) for a in argv], cwd=cwd, input=data, capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run([str(a) for a in argv], cwd=cwd, input=data, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as failure:
+        # TimeoutExpired's default message includes argv (possibly -e authority).
+        def text(value): return value.decode('utf8', errors='replace') if isinstance(value, bytes) else (value or '')
+        COMMAND_FAILURES.append({'command': Path(argv[0]).name, 'timeout': True,
+            'stderr': sanitize(text(failure.stderr), COMMAND_SECRETS), 'stdout': sanitize(text(failure.stdout), COMMAND_SECRETS)})
+        raise RuntimeError(f'worker command timed out: {Path(argv[0]).name}') from None
     if p.returncode:
-        raise RuntimeError(f'worker command failed: {argv[0]} ({p.returncode}): {p.stderr[-2000:]}')
+        COMMAND_FAILURES.append({'command': Path(argv[0]).name, 'exit_code': p.returncode,
+            'stderr': sanitize(p.stderr, COMMAND_SECRETS), 'stdout': sanitize(p.stdout, COMMAND_SECRETS)})
+        # Container/process diagnostics are sanitized and retained before teardown.
+        # Never put arbitrary command stderr (which can contain authority) in the job log.
+        raise RuntimeError(f'worker command failed: {argv[0]} ({p.returncode})')
     return p.stdout
 
 
@@ -34,8 +49,9 @@ def put(path, value, mode=0o600):
     path.write_text(json.dumps(value) if not isinstance(value, str) else value); path.chmod(mode)
 
 
-def wait(check, label):
+def wait(check, label, watch=None):
     for _ in range(120):
+        if watch: watch()
         try:
             if check(): return
         except (OSError, ValueError, subprocess.SubprocessError): pass
@@ -56,6 +72,9 @@ def main():
         raise SystemExit('Fresh isolated /srv/work source/output and nonroot Forum operator required')
     if any(os.environ.get(k) for k in ('BW_SESSION', 'BW_CLIENTSECRET', 'CLAUDE_CODE_OAUTH_TOKEN')):
         raise SystemExit('No inherited provider authority permitted')
+    # Source directories may carry a full SHA, but Unix socket output roots must
+    # stay short. Fail before any image build or fixture resource is created.
+    validate_socket_paths(root)
     if args.vault_sha != json.loads((HERE/'dependencies.json').read_text())['vaultCommit']:
         raise SystemExit('Unreviewed or superseded app dependency: update the explicit source lock first')
     for source, sha in ((SOURCE, args.source_sha), (vault, args.vault_sha)):
@@ -64,7 +83,8 @@ def main():
     root.mkdir(mode=0o700)
     stamp = secrets.token_hex(5); prefix = 'svstage-' + stamp
     image = prefix + ':service'
-    names = []; proxy = None; drivers = []
+    COMMAND_SECRETS.clear(); COMMAND_FAILURES.clear()
+    names = []; proxy = None; drivers = []; diagnostic_secrets = COMMAND_SECRETS
     try:
         run(['docker', 'build', '-t', image, SOURCE])
         # Fail fast on the previously failing positive login/task, using the exact
@@ -94,6 +114,7 @@ def main():
         proof = secrets.token_urlsafe(48); session = secrets.token_urlsafe(48)
         owner = 'synthetic-owner-token-only-for-tests-000'
         tokens = {'agent-a': 'synthetic-agent-token-only-for-tests-000', 'agent-b': 'synthetic-other-token-only-for-tests-000'}
+        diagnostic_secrets += [proof, session, owner, *tokens.values()]
         put(root/'service-private/proof', proof); put(root/'service-private/session', session); put(root/'service-private/token', owner)
         for suffix, principal in [('a','agent-a'),('b','agent-b')]:
             folder = root / ('edge-' + suffix)
@@ -131,26 +152,34 @@ def main():
                      'permissions':{'preset':'private','files':'own','outside_tools':[],'wizard_apps':[],'agent_apps':[],'other_agents':'none','shared_with_agents':False},
                      'runtime':{'kind':'container','isolation':'restricted','app_id':prefix+'-'+name,'port':18650+index,
                                 'network':{'uplink':pairs[index-1][0],'sandbox':pairs[index-1][1]}}}
-            put(folder/'agent.json', agent); put(folder/'runtime.key', secrets.token_urlsafe(36)); put(folder/'gateway.key', secrets.token_urlsafe(36))
+            runtime_key, gateway_key = secrets.token_urlsafe(36), secrets.token_urlsafe(36)
+            diagnostic_secrets += [runtime_key, gateway_key]
+            put(folder/'agent.json', agent); put(folder/'runtime.key', runtime_key); put(folder/'gateway.key', gateway_key)
             put(folder/'managed/.env', 'API_SERVER_ENABLED=true\n'); put(folder/'managed/config.yaml', 'model:\n  provider: openrouter\n  default: fixture-only\n')
             (folder/'home').mkdir(mode=0o700); agents.append(agent)
         run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost',
              '-keyout',root/'service-private/key.pem','-out',root/'service-private/cert.pem'])
         proxy = subprocess.Popen(['node', str(HERE/'owner-session.mjs'), str(root)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        wait(lambda: (root/'proxy-ready.json').exists(), 'owner session')
+        def proxy_alive():
+            if proxy.poll() is not None: raise RuntimeError('owner session process exited before readiness')
+        wait(lambda: (root/'proxy-ready.json').exists(), 'owner session', watch=proxy_alive)
         origin = json.loads((root/'proxy-ready.json').read_text())['origin']
         put(root/'service-private/owner.json', {'publicOrigin':origin,'brokerOrigin':'http://127.0.0.1:8799','ownerTokenFile':str(root/'service-private/token')})
         service = prefix + '-service'; names.append(service)
         mounts = [v for d in ('agents','os','service-private') for v in ('-v',f'{root/d}:{root/d}')]
         run(['docker','run','-d','--name',service,'--network','container:'+broker,'--user',f'{os.geteuid()}:{os.getegid()}',*common,*mounts,
              '-v',f'{HERE}/service.mjs:/app/qa/shared-vault-platform/service.mjs:ro','-e',f'SV_STAGE_ROOT={root}',image,'node','/app/qa/shared-vault-platform/service.mjs'])
+        def service_alive():
+            if run(['docker','inspect','--format','{{.State.Running}}',service]).strip() != 'true':
+                raise RuntimeError('Service process exited before readiness; see failure-diagnostics.json')
         for suffix in ('a','b'):
             folder = root/('edge-'+suffix); name=prefix+'-edge-'+suffix; names.append(name)
             run(['docker','run','-d','--name',name,'--network','container:'+broker,'--user','10003:10000',*common,
                  '-v',f'{vault}:/fixture/vault:ro','-v',f'{folder}/private:{folder}/private:ro','-v',f'{folder}/public:{folder}/public',
                  '-e',f'SHARED_VAULT_EDGE_CONFIG={folder}/private/config.json','--entrypoint','python3',image,'/fixture/vault/app/agent_edge.py'])
-        wait(lambda: all((root/('edge-'+s)/'public/agent.sock').exists() for s in ('a','b')), 'application sockets')
-        wait(lambda: all((root/'agents'/a['id']/'gateway/gateway.sock').exists() for a in agents), 'Service agent sockets')
+        wait(lambda: all((root/('edge-'+s)/'public/agent.sock').exists() for s in ('a','b')), 'application sockets', watch=service_alive)
+        wait(lambda: all((root/'agents'/a['id']/'gateway/gateway.sock').exists() for a in agents), 'Service agent sockets', watch=service_alive)
+        wait(lambda: (root/'service-private/service.sock').exists(), 'Service owner listener', watch=service_alive)
         grants = {'schema':1,'agents':{a['id']:{'app':'shared-vault','socket':str(root/('edge-'+s)/'public/agent.sock'),'broker_uid':10002,'edge_uid':10003,'agent_uid':10000} for a,s in zip(agents,('a','b'))}}
         put(root/'service-private/grants.json',grants)
         # Use the CURRENT socket runtime stack; fixture overlay only removes egress.
@@ -174,6 +203,7 @@ def main():
         def phase(name, revoked=False):
             run(['node',HERE/'browser.mjs',root,name],cwd=HERE)
             handles=json.loads((root/'handles.json').read_text())
+            diagnostic_secrets.extend(handles.values())
             for agent in agents:
                 cid=ar.container_for(driver.project(agent['id']),'agent')
                 driver.verify_app_socket_runtime(agent,grants['agents'][agent['id']])
@@ -201,13 +231,23 @@ def main():
         run(['docker','run','--rm','--network','none','--read-only','--user','0:0','--cap-drop','ALL','--cap-add','DAC_OVERRIDE','--security-opt','no-new-privileges:true',*init_mounts,'--entrypoint','python3',image,'-c',unlink])
         run(['docker','start',broker,prefix+'-edge-a',prefix+'-edge-b',service])
         wait(lambda: all((root/('edge-'+s)/'public/agent.sock').exists() for s in ('a','b')), 'restarted application sockets')
-        wait(lambda: (root/'service-private/service.sock').exists(), 'service restart')
+        wait(lambda: (root/'service-private/service.sock').exists(), 'service restart', watch=service_alive)
         for driver,agent in drivers: driver.start(agent)
         phase('restart'); phase('revoke')
         for driver,agent in drivers: driver.start(agent)
         phase('revoked',True)
         put(root/'result.json', {'passed':True,'synthetic_only':True,'provider_consent':False,'useful_login_task_end_to_end':False,
             'wam_install_lifecycle':False,'production_activation':False,'note':'Owner grant/revoke and isolated installed-runtime tools only; useful private browser task remains a separate acceptance gate.'})
+    except BaseException as failure:
+        # Snapshot only this run's State + bounded sanitized logs BEFORE destroying
+        # containers. Preserve the original exception even if diagnostics fail.
+        try:
+            path = capture_failure(root, names, [driver.project(agent['id']) for driver, agent in drivers],
+                                   proxy, diagnostic_secrets, failure, commands=COMMAND_FAILURES)
+            print('Sanitized failure diagnostics: ' + str(path), file=sys.stderr)
+        except Exception as diagnostic_failure:
+            print('Failure diagnostics unavailable: ' + type(diagnostic_failure).__name__, file=sys.stderr)
+        raise
     finally:
         for driver,agent in reversed(drivers):
             try: driver._compose(agent,'down','-v','--remove-orphans',timeout=180)
