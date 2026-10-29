@@ -11,7 +11,7 @@ try {
   const env = { ...process.env, HOME: join(root, 'home'), HERMES_HOME: join(root, 'hermes'),
     WIZARD_OS_HOME: join(root, 'wizard'), TMPDIR: join(root, 'tmp'), PYTHONDONTWRITEBYTECODE: '1' }
   const tests = [resolve('tests/test_import_tree.py'), resolve('tests/test_hermes_lock.py'), resolve('tests/test_hermes_import.py'), resolve('tests/test_restricted_import.py'), resolve('tests/test_hermes_recovery.py'),
-    resolve('tests/test_restricted_rehearsal.py'), resolve('tests/test_agent_heavy_plugin.py'), resolve('tests/test_heavy_worker_sandbox.py')]
+    resolve('tests/test_restricted_rehearsal.py'), resolve('tests/test_agent_heavy_plugin.py'), resolve('tests/test_heavy_worker_sandbox.py'), resolve('tests/test_machines.py')]
   const python = process.env.WIZARD_IMPORT_PYTHON
   const uv = !python && spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0
   for (const test of tests) {
