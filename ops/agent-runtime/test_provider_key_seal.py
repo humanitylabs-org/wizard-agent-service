@@ -135,6 +135,66 @@ class ServiceOwnedMigrationTests(unittest.TestCase):
         self.assertEqual(list((self.tmp / 'elsewhere').iterdir()), [])
 
 
+class RuntipiSealedRecipeTests(unittest.TestCase):
+    def driver(self, state):
+        from unittest.mock import Mock
+        driver = object.__new__(ar.RuntipiDriver)
+        driver.image, driver.proxy_image, driver.home_mount = 'stock-hermes', ar.DEFAULT_PROXY_IMAGE, 'stock'
+        def req(method, path, payload=None):
+            if method == 'PUT':
+                state.update(payload)
+            return dict(state)
+        rt = Mock(); rt.req.side_effect = req
+        return driver, rt
+
+    def test_gate_stays_closed_until_evidence_admits(self):
+        self.assertFalse(seal.RUNTIPI_ADMITTED)
+        driver, rt = self.driver({})
+        with self.assertRaises(ar.RuntimeFailure) as caught: driver._override(fixture(), rt)
+        self.assertEqual(caught.exception.code, 'private_sealed_recipe_not_admitted')
+        rt.req.assert_not_called()
+
+    def admitted(self):
+        from unittest.mock import patch
+        return patch.object(seal, 'RUNTIPI_ADMITTED', True)
+
+    def test_override_replaces_every_service_and_reads_back_exactly(self):
+        state = {'dockerCompose': None, 'appEnv': 'KEEP=1\n', 'isEnabled': True}
+        driver, rt = self.driver(state)
+        with self.admitted(): driver._override(fixture(), rt)
+        text = state['dockerCompose']
+        self.assertTrue(text.startswith(seal.RUNTIPI_MARK))
+        doc = driver._sealed_doc(fixture())
+        for name in doc['services']:
+            self.assertIn(f'  "{name}": !override ', text)
+        self.assertIn('"runtipi.appurn": "agent-synthetic:wizardapps"', text)
+        self.assertNotIn('tipi_main_network', text); self.assertNotIn('APP_PORT', text)
+        self.assertNotIn(SYNTHETIC_KEY, text); self.assertNotIn('TINFOIL_API_KEY', text)
+        self.assertEqual(state['appEnv'], 'KEEP=1\n')
+        with self.admitted(): driver._override(fixture(), rt)   # restart/upgrade: idempotent
+        self.assertEqual(state['dockerCompose'], text)
+
+    def test_owner_override_or_disabled_user_config_refuses(self):
+        driver, rt = self.driver({'dockerCompose': 'services: {mine: {}}\n', 'appEnv': '', 'isEnabled': True})
+        with self.admitted(), self.assertRaises(ar.RuntimeFailure) as caught: driver._override(fixture(), rt)
+        self.assertEqual(caught.exception.code, 'sealed_override_conflict')
+        driver, rt = self.driver({'dockerCompose': None, 'appEnv': '', 'isEnabled': False})
+        with self.admitted(), self.assertRaises(ar.RuntimeFailure) as caught: driver._override(fixture(), rt)
+        self.assertEqual(caught.exception.code, 'sealed_override_unverified')
+
+    def test_runtime_violations_flag_runtipi_bridges(self):
+        doc = compose(fixture())
+        good = {n: set((s.get('networks') or {}).keys()) for n, s in doc['services'].items()}
+        self.assertEqual(seal.runtime_violations(doc, good), [])
+        bad = copy.deepcopy(good); bad['agent-synthetic'].add('!runtipi_tipi_main_network')
+        self.assertTrue(seal.runtime_violations(doc, bad))
+        missing = copy.deepcopy(good); del missing['agent-synthetic-key']
+        self.assertEqual(seal.runtime_violations(doc, missing), ['agent-synthetic-key:missing'])
+
+    def test_unsealed_policy_cannot_render_an_override(self):
+        with self.assertRaises(ValueError): seal.runtipi_override({'services': {}, 'networks': {}}, 'x:y')
+
+
 class InjectorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='r10-inj-'))

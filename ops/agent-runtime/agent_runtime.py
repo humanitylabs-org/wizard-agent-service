@@ -732,13 +732,58 @@ class RuntipiDriver:
 
     def _require_network_admitted(self, agent: dict) -> None:
         import private_seal
-        if private_seal.enabled(agent):
+        if private_seal.enabled(agent) and not private_seal.RUNTIPI_ADMITTED:
             # A materialized legacy recipe adds the shared Runtipi network.
-            # Fail before key provisioning/start until installed replacement is rehearsed.
+            # Fail before key provisioning/start until installed replacement is
+            # rehearsed (round 10 runner) and the evidence admits it.
             raise RuntimeFailure("private_sealed_recipe_not_admitted", 409)
+
+    def _sealed_doc(self, agent: dict) -> dict:
+        stock_home = f"${{ROOT_FOLDER_HOST}}/app-data/wizard-os/agents/{agent['id']}/home"
+        return json.loads(compose_doc(agent, image=self.image, proxy_image=self.proxy_image,
+                                      home_source=stock_home, uid=1000, gid=1000, ports=False))
+
+    def _sealed_override(self, agent: dict, rt) -> None:
+        """Final owner override replaces every sealed service; exact readback or refuse."""
+        import private_seal
+        text = private_seal.runtipi_override(self._sealed_doc(agent), self.urn(agent))
+        before = rt.req("GET", f"/user-config/{self.urn(agent)}")
+        old = (before.get("dockerCompose") or "").strip()
+        if old and not old.startswith(private_seal.RUNTIPI_MARK):
+            raise RuntimeFailure("sealed_override_conflict")  # never erase an owner's own override
+        env = (before.get("appEnv") or "").rstrip("\n")
+        rt.req("PUT", f"/user-config/{self.urn(agent)}", {"dockerCompose": text, "appEnv": env + "\n" if env else ""})
+        after = rt.req("GET", f"/user-config/{self.urn(agent)}")
+        if (after.get("dockerCompose") or "").rstrip("\n") != text.rstrip("\n") or after.get("isEnabled") is not True:
+            # Disabled user config would drop the seal and re-add Runtipi's bridges.
+            raise RuntimeFailure("sealed_override_unverified")
+
+    def _verify_sealed(self, agent: dict) -> None:
+        """After every Runtipi start: running networks must equal the sealed document, else stop."""
+        import private_seal
+        if not private_seal.enabled(agent):
+            return
+        doc = self._sealed_doc(agent)
+        project = self.project(agent["id"])
+        ids = docker(["ps", "-q", "--filter", f"label=com.docker.compose.project={project}"], timeout=60).stdout.split()
+        attached = {}
+        if ids:
+            rows = docker(["inspect", "--format", '{{index .Config.Labels "com.docker.compose.service"}} {{json .NetworkSettings.Networks}}', *ids], timeout=60).stdout
+            for row in rows.splitlines():
+                service, _, nets = row.partition(" ")
+                attached[service] = {name[len(project) + 1:] if name.startswith(project + "_") else "!" + name
+                                     for name in json.loads(nets or "{}")}
+        problems = private_seal.runtime_violations(doc, attached)
+        if problems:
+            sys.stderr.write(f"[agent-runtime] sealed runtime mismatch, stopping: {problems[:6]}\n")
+            self.stop(agent)
+            raise RuntimeFailure("sealed_runtime_unverified", 409)
 
     def _override(self, agent: dict, rt) -> None:
         self._require_network_admitted(agent)
+        import private_seal
+        if private_seal.enabled(agent):
+            return self._sealed_override(agent, rt)
         doc = {"services": {}}
         main, _ = service_names(agent)
         if self.home_mount == "alongside":
@@ -868,6 +913,7 @@ class RuntipiDriver:
                 raise RuntimeFailure("install_refused") from None
             if result.get("status") == "stopped":
                 return self.start(agent)
+            self._verify_sealed(agent)
             return {"ok": True, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
         self.stop(agent)
         return self.start(agent)
@@ -876,10 +922,12 @@ class RuntipiDriver:
         self._require_network_admitted(agent)
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
+        self._override(agent, rt)  # re-verify the owner override before every start
         rt.req("POST", f"/app-lifecycle/{self.urn(agent)}/start", {}, timeout=300)
         status = rt.wait_status(self.urn(agent), {"running"}, timeout=600)
         if status != "running":
             raise RuntimeFailure(f"start_{status}"[:60])
+        self._verify_sealed(agent)
         return {"ok": True, "status": status}
 
     def stop(self, agent: dict) -> dict:

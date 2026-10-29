@@ -153,9 +153,9 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
                             'EDGE_INGRESS_SOCKET': '/run/edge-ingress/ingress.sock',
                             'EDGE_AGENT_HOST': str(seal[2])},
             'volumes': [f'{root}/gateway:/run/agent-gateway', f'{root}/gateway-edge:/run/edge:ro'],
-            'tmpfs': ['/run/edge-ingress:uid=1000,gid=1000,mode=0700'],
+            'tmpfs': [f'/run/edge-ingress:uid={int(uid)},gid={int(gid)},mode=0700'],
             'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
-            'user': '1000:1000', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
+            'user': f'{int(uid)}:{int(gid)}', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
         }
     for name, subnet in internal:
         doc.setdefault('networks', {})[name] = {
@@ -166,3 +166,55 @@ def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
         }
     doc['networks'][uplink_name] = {'internal': False, 'enable_ipv6': False}
     return doc
+
+
+# ---- installed Runtipi recipe (round 10) ----
+# Runtipi's generator (app-manager bundle getDockerCompose/buildService) adds
+# every service of a multi-service app to a NON-internal per-app bridge, the
+# main service to the shared runtipi_tipi_main_network, may publish APP_PORT,
+# and the legacy-format conversion keeps only fields it knows. The owner
+# user-config file is the last `-f`. It replaces each sealed service wholesale
+# with Compose's `!override` tag (docker-compose >= 2.24.4; Runtipi bundles
+# 2.40.0), so the final definition is exactly the reviewed seal.
+# Stays False until the round-10 installed-recipe runner evidence admits it.
+RUNTIPI_ADMITTED = False
+RUNTIPI_MARK = '# wizard: tinfoil-sealed-v1 owner override; do not edit'
+
+
+def runtipi_override(doc, urn):
+    """YAML text (JSON flow nodes) for Runtipi's user-config docker-compose.yml.
+
+    Keeps Runtipi's own ownership labels (status/lifecycle find the app by
+    them); drops its bridges, published port and Traefik exposure.
+    """
+    if not any(n.get('labels', {}).get(LABEL) == POLICY for n in doc.get('networks', {}).values()):
+        raise ValueError('private_network_policy_invalid')
+    lines = [RUNTIPI_MARK, 'services:']
+    for name, service in sorted(doc['services'].items()):
+        service = {**service, 'labels': {**(service.get('labels') or {}), 'runtipi.managed': 'true', 'runtipi.appurn': urn}}
+        lines.append(f'  {json.dumps(name)}: !override {json.dumps(service, sort_keys=True)}')
+    lines.append('networks:')
+    for name, network in sorted(doc['networks'].items()):
+        lines.append(f'  {json.dumps(name)}: {json.dumps(network, sort_keys=True)}')
+    return '\n'.join(lines) + '\n'
+
+
+def runtime_violations(doc, attached):
+    """Compare running containers' networks with the sealed document.
+
+    attached: {service: set(network names as Compose created them)} with the
+    project prefix removed. Any extra network (Runtipi app bridge, main
+    network) or missing service is a violation; callers stop the app.
+    """
+    problems = []
+    for name, service in doc['services'].items():
+        want = set((service.get('networks') or {}).keys())
+        have = attached.get(name)
+        if have is None:
+            problems.append(f'{name}:missing')
+        elif have != want:
+            problems.append(f'{name}:networks:{sorted(have - want)}:{sorted(want - have)}')
+    for name in attached:
+        if name not in doc['services']:
+            problems.append(f'{name}:unexpected_service')
+    return problems
