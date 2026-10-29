@@ -1,9 +1,9 @@
 // Round 10: the sealed private runtime's scoped app gateway (synthetic Mizel), wizard-os spec/AGENTS.md 5-6.
 // The sealed agent reaches /wizard/mcp only through its own Unix socket (edge sidecar); its token is refused on TCP.
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
@@ -15,12 +15,17 @@ const servers: Server[] = []
 const exec = promisify(execFile)
 const dockerGateways = new Map<string, string>()
 const dockerCleanup: string[][] = []
+const fixtureDirs: string[] = []
 afterEach(async () => {
   dockerGateways.clear()
   for (const args of dockerCleanup.splice(0).reverse()) await exec('docker', args).catch(() => {})
 })
 async function containerGateway(socket: string, token: string, dir: string) {
   if (process.env.R11_DOCKER_GATEWAY !== '1') return
+  // Docker -v silently creates a missing source directory. Never turn a failed
+  // Service bootstrap into an edge 502 by mounting that empty directory.
+  expect(Buffer.byteLength(socket), 'host Unix socket path exceeds Service limit').toBeLessThanOrEqual(103)
+  expect(lstatSync(socket).isSocket(), 'Service must bind before the edge starts').toBe(true)
   const name = `r11-gateway-${process.pid}`
   const image = process.env.R11_GATEWAY_IMAGE || 'restricted-agent-sidecars:round11'
   const owner = `wizard.qa.round11=${(process.env.R11_SOURCE_HEAD || 'local').slice(0, 12)}`
@@ -31,7 +36,7 @@ async function containerGateway(socket: string, token: string, dir: string) {
   await exec('docker', ['run', '-d', '--name', name, '--label', owner, '--network', name, '--network-alias', 'edge',
     '--user', `${uid}:${gid}`, '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none',
     '--tmpfs', `/run/edge-ingress:uid=${uid},gid=${gid},mode=0700`,
-    '-v', `${join(dir, 'agents', socket.split('/agents/')[1].split('/')[0], 'gateway')}:/run/agent-gateway:rw`,
+    '-v', `${dirname(socket)}:/run/agent-gateway:rw`,
     '-e', 'EDGE_INGRESS_SOCKET=/run/edge-ingress/ingress.sock',
     '-e', `EDGE_TOKEN_SHA256=${createHash('sha256').update(token).digest('hex')}`, image, 'python3', '/srv/edge.py'])
   dockerCleanup.push(['rm', '-f', name])
@@ -41,7 +46,10 @@ async function containerGateway(socket: string, token: string, dir: string) {
   dockerCleanup.push(['rm', '-f', client])
   dockerGateways.set(socket, client)
 }
-afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) } })
+afterEach(async () => {
+  for (const s of servers.splice(0)) { s.closeAllConnections?.(); await new Promise((r) => s.close(() => r(undefined))) }
+  for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
 async function readBody(req: IncomingMessage) { let raw = ''; for await (const c of req) raw += c; return raw ? JSON.parse(raw) : undefined }
 
 async function fakeApp(tool: string, marker: string) {
@@ -112,17 +120,21 @@ describe('sealed private agent scoped gateway (synthetic Mizel + Recorder)', () 
     const notes = await fakeApp('note_add', 'SYNTHETIC-NOTES')
     const recorder = await fakeApp('search_recordings', 'SYNTHETIC-RECORDER-R10')
     const dir = mkdtempSync(join(tmpdir(), 'r10-sealed-gw-'))
+    fixtureDirs.push(dir)
+    expect(Buffer.byteLength(join(dir, 'agents', 'sealed', 'gateway', 'gateway.sock')), 'short TMPDIR required').toBeLessThanOrEqual(103)
     mkdirSync(join(dir, 'agents'), { recursive: true })
     writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [appEntry('mizel', mizel.url), appEntry('notes', notes.url), appEntry('recorder', recorder.url)] }))
     const upstream = createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(req.url === '/api/model/options' ? { providers: [] } : { data: [] })) })
     servers.push(upstream)
     const up = await listen(upstream) as import('node:net').AddressInfo
-    const runtime = { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }) }
+    const applied: string[] = []
+    const runtime = { apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }) }
     const svc = createWizardServer({ upstreamOrigin: `http://127.0.0.1:${up.port}`, hermesKey: 'fixture-key', requireAccess: false,
       appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir, agentRuntime: runtime,
       followThrough: false, agentBasePort: 47850, mcpToken: 'main-gw-fixture', bridgeWatchMs: 0, bridgeWriteSkills: false,
       agentGatewayUrl: 'http://wizard-agent-service:8923/wizard/mcp', bridgeLog: () => {} })
     servers.push(svc)
+    await svc.agentSocketsReady
     const address = await listen(svc) as import('node:net').AddressInfo
     const base = `http://127.0.0.1:${address.port}`
     const json = (body: unknown, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -130,16 +142,21 @@ describe('sealed private agent scoped gateway (synthetic Mizel + Recorder)', () 
     const id = created.agent.id
     const file = join(dir, 'agents', id, 'agent.json')
     const stored = JSON.parse(readFileSync(file, 'utf8')); stored.runtime = { ...stored.runtime, ...SEALED }; writeFileSync(file, JSON.stringify(stored))
+    const appliesBeforePatch = applied.length
     // The owner ticks Mizel for this agent; the update rewrites the harness and prepares its socket.
     const ticked = await fetch(`${base}/wizard/v1/agents/${id}`, json({ permissions: { wizard_apps: ['mizel', 'recorder'] } }, 'PATCH'))
     expect(ticked.status).toBe(200)
+    const updated = await ticked.json()
+    expect(applied.length, `socket bootstrap prevented runtime.apply: ${JSON.stringify(updated)}`).toBe(appliesBeforePatch + 1)
     const home = join(dir, 'agents', id, 'home')
     expect(readFileSync(join(home, 'config.yaml'), 'utf8')).toContain('http://edge:8923/wizard/mcp')
     expect(readFileSync(join(home, 'config.yaml'), 'utf8')).not.toContain('wizard-agent-service')
     expect(readFileSync(join(home, '.env'), 'utf8')).not.toMatch(/TINFOIL_API_KEY/)
     const token = readFileSync(join(dir, 'agents', id, 'gateway.key'), 'utf8').trim()
     const socket = join(dir, 'agents', id, 'gateway', 'gateway.sock')
-    for (let i = 0; i < 50; i++) { try { readFileSync(socket); } catch (e: any) { if (e.code !== 'ENOENT') break } await new Promise((r) => setTimeout(r, 20)) }
+    expect(lstatSync(socket).isSocket()).toBe(true)
+    expect(lstatSync(socket).uid).toBe(process.getuid!())
+    expect(lstatSync(socket).mode & 0o777).toBe(0o600)
     await containerGateway(socket, token, dir)
     const listed = await socketMcp(socket, token, 'tools/list')
     expect(listed.status).toBe(200)

@@ -31,9 +31,11 @@ seal.KEY_IMAGE = os.environ['R11_KEY_IMAGE']
 from test_private_seal import fixture
 from wam.runtipi import Runtipi
 from incognito_runtime import PYTHON
-from private_seal_round11_setup import unique_images, stock_config, STOCK_BOOT, stock_sessions_ready
-OUT = ROOT / 'qa/round11b'
-WORK = ROOT / 'work-round11b'
+from private_seal_round11_setup import unique_images, stock_config, stock_launch, stock_sessions_ready, manager_layout
+PREFLIGHT = sys.argv[1:] == ['--preflight-only']
+if sys.argv[1:] and not PREFLIGHT: raise SystemExit('unknown_round11_argument')
+OUT = ROOT / ('qa/round11c-preflight' if PREFLIGHT else 'qa/round11c')
+WORK = ROOT / ('work-round11c-preflight' if PREFLIGHT else 'work-round11c')
 OWNER = 'wizard.qa.round11=' + os.environ['R11_SOURCE_HEAD'][:12]
 DAEMON = 'wizard-app-manager:grants-fix-fead192e9fb2-amd64'
 DAEMON_ID = 'sha256:908ba820e904091ddd38402404fdde212ca2f14b61b33c621dfe134d635f8ce9'
@@ -43,7 +45,7 @@ DIND = 'r11-disposable-engine'
 KEY = 'SYNTHETIC-R11-' + secrets.token_hex(24)
 APIKEY = 'synthetic-api-' + secrets.token_hex(24)
 SECRET_VALUES = [KEY, APIKEY]
-receipt = {'schema': 1, 'synthetic_only': True, 'live_touched': False,
+receipt = {'schema': 1, 'synthetic_only': True, 'live_touched': False, 'preflight_only':PREFLIGHT,
            'source_head': os.environ['R11_SOURCE_HEAD'], 'phase': 'setup', 'checks': {},
            'not_claimed': ['live migration', 'credential rotation / old-backup retirement',
                            'decrypted EHBP framing', 'Tinfoil multimodal semantic success',
@@ -130,7 +132,8 @@ def manager_phase():
               ['--privileged', '-e', 'DOCKER_TLS_CERTDIR=', '-v', f'{ROOT}:{ROOT}',
                '-v', f'{engine}:/var/lib/docker'])
     wait(lambda: nd('info', check=False).returncode == 0, 90)
-    for image in unique_images((DAEMON, STOCK, ar.DEFAULT_PROXY_IMAGE, seal.EDGE_IMAGE, seal.KEY_IMAGE, 'python:3.12-slim')):
+    images = (DAEMON, 'python:3.12-slim') if PREFLIGHT else (DAEMON, STOCK, ar.DEFAULT_PROXY_IMAGE, seal.EDGE_IMAGE, seal.KEY_IMAGE, 'python:3.12-slim')
+    for image in unique_images(images):
         import_image(image)
         # Runtipi may `down --rmi all` during install/update; retain exact imported
         # images so that no unpublished daemon or scratch edge is pulled by tag.
@@ -144,8 +147,10 @@ def manager_phase():
        '-e', 'POSTGRES_PASSWORD=synthetic-password', 'postgres:14')
     nd('run', '-d', '--name', 'runtipi-queue', *shared, '-e', 'RABBITMQ_DEFAULT_USER=tipi',
        '-e', 'RABBITMQ_DEFAULT_PASS=synthetic-password', 'rabbitmq:4-alpine')
-    for directory in ('state', 'apps', 'repos', 'logs', 'user-config', 'traefik', 'backups', 'app-data', 'catalog'):
-        (state / directory).mkdir()
+    directories, mounts, app_data_parent = manager_layout(state)
+    for directory in directories:
+        (state / directory).mkdir(mode=0o755)
+        (state / directory).chmod(0o755)
     catalog = state / 'catalog'
     run(['git', 'init', '-q', catalog]); (catalog / '.keep').write_text('Synthetic catalogue.\n')
     run(['git', '-C', catalog, 'add', '-A'])
@@ -159,7 +164,7 @@ def manager_phase():
                POSTGRES_PORT='5432', RABBITMQ_HOST='runtipi-queue', RABBITMQ_USERNAME='tipi', RABBITMQ_PASSWORD='synthetic-password',
                ARCHITECTURE='amd64', INTERNAL_IP='127.0.0.1', TIPI_VERSION='v4.10.2', JWT_SECRET=jwt_secret,
                APPS_REPO_ID='r11synthetic', APPS_REPO_URL='http://r11-catalog:8080/catalog/.git', DOMAIN='synthetic.invalid',
-               LOCAL_DOMAIN='synthetic.local', DNS_IP='9.9.9.9', RUNTIPI_APP_DATA_PATH=str(state / 'app-data'),
+               LOCAL_DOMAIN='synthetic.local', DNS_IP='9.9.9.9', RUNTIPI_APP_DATA_PATH=app_data_parent,
                RUNTIPI_FORWARD_AUTH_URL='http://runtipi:3000/api/auth/traefik', DEMO_MODE='false', GUEST_DASHBOARD='false',
                ALLOW_ERROR_MONITORING='false', ALLOW_AUTO_THEMES='false', PERSIST_TRAEFIK_CONFIG='true', TZ='UTC',
                ROOT_FOLDER_HOST=str(state), NGINX_PORT='80', NGINX_PORT_SSL='443', ADVANCED_SETTINGS='true',
@@ -167,9 +172,9 @@ def manager_phase():
                NODE_ENV='production', LOG_LEVEL='warn')
     (state / '.env').write_text(''.join(f'{k}={v}\n' for k, v in env.items())); (state / '.env').chmod(0o600)
     (state / 'docker-compose.yml').write_text('services: {}\n')
-    nd('run', '-d', '--name', 'runtipi', *shared, '--env-file', state / '.env',
-       '-v', f'{state}:/data', '-v', f'{state / "app-data"}:/app-data',
-       '-v', '/var/run/docker.sock:/var/run/docker.sock', '-p', '127.0.0.1:3000:3000', DAEMON)
+    mount_flags = [item for source, target in mounts for item in ('-v', f'{source}:{target}')]
+    nd('run', '-d', '--name', 'runtipi', *shared, '--env-file', state / '.env', *mount_flags,
+       '-v', '/var/run/docker.sock:/var/run/docker.sock:ro', '-p', '127.0.0.1:3000:3000', DAEMON)
     # All authenticated HTTP is executed inside the nested engine namespace.
     class NestedRuntipi(Runtipi):
         def req(self, method, path, body=None, timeout=60):
@@ -179,7 +184,20 @@ def manager_phase():
                    data=json.dumps({'path': path, 'method': method, 'body': body, 'token': cli_token(jwt_secret)}), timeout=timeout + 10)
             return json.loads(p.stdout)
     nd('run', '-d', '--name', 'r11-api', *shared, 'python:3.12-slim', 'python3', '-c', 'import time;time.sleep(3000)')
-    wait(lambda: nd('exec', 'r11-api', 'python3', '-c', "import urllib.request;urllib.request.urlopen('http://runtipi:3000/api/health',timeout=3)", check=False).returncode == 0, 180)
+    def manager_ready():
+        status = json.loads(nd('inspect', '--format', '{{json .State}}', 'runtipi').stdout)
+        if not status.get('Running'): raise AssertionError('synthetic_manager_exited_before_readiness')
+        return nd('exec', 'r11-api', 'python3', '-c', "import urllib.request;urllib.request.urlopen('http://runtipi:3000/api/health',timeout=3)", check=False).returncode == 0
+    wait(manager_ready, 90)
+    # /cache is mandatory in the selected daemon (CacheService uses node:sqlite).
+    cache_probe = nd('exec', 'runtipi', 'node', '--input-type=module', '-e',
+        "import fs from 'node:fs';import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/cache/cache.sqlite');const tables=d.prepare(\"SELECT name FROM sqlite_master WHERE type='table'\").all().map(r=>r.name);d.close();console.log(JSON.stringify({uid:process.getuid(),cache_uid:fs.statSync('/cache').uid,cache_mode:fs.statSync('/cache').mode&511,tables,app_data_parent:process.env.RUNTIPI_APP_DATA_PATH}))")
+    cache_info = json.loads(cache_probe.stdout)
+    assert 'keyv' in cache_info['tables'] and cache_info['app_data_parent'] == str(state)
+    assert cache_info['uid'] == 0 and cache_info['cache_uid'] == os.getuid() and cache_info['cache_mode'] == 0o755
+    save('manager-setup.json', {'cache':cache_info,'mounts':[[str(s),t] for s,t in mounts], 'health_ready':True})
+    receipt['checks']['manager_setup_ready'] = True
+    if PREFLIGHT: return
     # Fresh synthetic operator only; never read or copy a real login.
     synthetic_password = secrets.token_urlsafe(32); SECRET_VALUES.append(synthetic_password)
     nd('exec', '-i', 'r11-api', 'python3', '-c', "import json,urllib.request;urllib.request.urlopen(urllib.request.Request('http://runtipi:3000/api/auth/register',input().encode(),{'Content-Type':'application/json'}),timeout=30)",
@@ -323,10 +341,8 @@ def stock_phase():
     mock = ROOT / 'scripts/ci/round11-openai-fixture.py'
     flags = ['--network', net, '--network-alias', 'provider', '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none', '-v', f'{mock}:/fixture.py:ro', '-v', f'{state}:/state']
     container('r11-stock-provider', 'python:3.12-slim', ['python3', '/fixture.py'], flags)
-    container('r11-stock-client', STOCK, ['-c', STOCK_BOOT], ['--network', net, '--read-only', '--tmpfs', '/tmp', '--log-driver', 'none',
-        '--workdir', '/opt/data', '--entrypoint', PYTHON, '-v', f'{home}:/opt/data',
-        '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-e', 'HERMES_WORKDIR=/opt/data',
-        '-e', 'API_SERVER_ENABLED=true', '-e', 'API_SERVER_HOST=0.0.0.0', '-e', 'API_SERVER_PORT=8642', '-e', 'API_SERVER_KEY=' + APIKEY])
+    args, flags = stock_launch(home, PYTHON, net, APIKEY, os.getuid(), os.getgid())
+    container('r11-stock-client', STOCK, args, flags)
     def api(path, value=None):
         code = "import json,urllib.request;v=json.loads(input());r=urllib.request.Request('http://127.0.0.1:8642'+v['path'],None if v['value'] is None else json.dumps(v['value']).encode(),{'Authorization':'Bearer '+v['key'],'Content-Type':'application/json'});h=urllib.request.urlopen(r,timeout=10);print(h.read().decode())"
         return json.loads(docker('exec', '-i', 'r11-stock-client', PYTHON, '-c', code,
@@ -345,13 +361,19 @@ def stock_phase():
             startup['last_api_error'] = {'class':type(exc).__name__, 'reason':str(exc)[:160]}
             return False
     try:
-        wait(ready, 120)
+        wait(ready, 90)
     finally:
         preflight = home / 'synthetic-preflight.json'
         log = home / 'synthetic-startup.log'
         startup['preflight'] = json.loads(preflight.read_text()) if preflight.exists() else None
         startup['startup_tail'] = log.read_text(errors='replace')[-6000:] if log.exists() else 'startup_output_absent'
         save('stock-startup.json', startup)
+    boot = startup['preflight']
+    assert isinstance(boot, dict), 'synthetic_stock_boot_assertions_missing'
+    assert boot.get('uid') == boot.get('home_uid') == boot.get('config_uid') == os.getuid() != 0
+    assert boot.get('gid') == os.getgid() != 0 and boot.get('pid') != 1 and boot.get('root_bypass') is False
+    receipt['checks']['stock_setup_ready'] = True
+    if PREFLIGHT: return
     sid = 'synthetic-r11-' + secrets.token_hex(8); api('/api/sessions', {'id':sid})
     terminal = {'failed','completed','cancelled'}
     def wait_run(run_id, seconds):
@@ -398,7 +420,7 @@ def main():
     if OUT.exists() or WORK.exists(): raise SystemExit('refuse_existing_round11_evidence_or_work')
     OUT.mkdir(parents=True); WORK.mkdir()
     try:
-        # Run all independent phases even if one gate fails; preserve bounded failure.
+        # Focused startup only has no prompts, lifecycle operations or inference.
         for name, fn in [('stock', stock_phase), ('manager', manager_phase)]:
             try: fn()
             except Exception as exc:
@@ -414,7 +436,7 @@ def main():
         remaining = docker('ps','-aq','--filter','label='+OWNER).stdout.split()
         receipt['leftover_containers'] = len(remaining)
         receipt['checks']['owned_resources_cleaned'] = not remaining
-        needed = ['real_manager_installed_lifecycle','disabled_user_config_cannot_bypass_seal',
+        needed = ['stock_setup_ready','manager_setup_ready','owned_resources_cleaned'] if PREFLIGHT else ['real_manager_installed_lifecycle','disabled_user_config_cannot_bypass_seal',
                   'stock_stopped_provider_no_completion','stock_provider_recovery_completed',
                   'synthetic_image_content_request','attested_tinfoil_image_content_request_auth_rejected','owned_resources_cleaned']
         unmet = [k for k in needed if receipt['checks'].get(k) is not True]
