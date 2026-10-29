@@ -11,6 +11,7 @@
 import { constants, opendirSync, openSync, closeSync, fstatSync, lstatSync, realpathSync, readSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { dirname, join, resolve, sep } from 'node:path'
+import { isPrivateApp } from './agents.mjs'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
@@ -64,8 +65,9 @@ export function bridgeApps(registry, { mcpAddress = 'url' } = {}) {
       status: clean(app.status, 24) || 'unknown', jobs: provides.filter((p) => !SKIP_PROVIDES.has(p)),
       url, address: url.replace(/^(https?:\/\/[^/]+).*$/u, '$1'), transport: clean(mcp?.transport, 40) || 'streamable-http',
       skill: typeof app.skill === 'string' && app.skill && !app.skill.includes('..') ? app.skill : '',
-      // `privacy: private` apps stay unnamed to an agent that may not use them (#58/#59 seal)
-      ...(app.privacy === 'private' ? { private: true } : {}),
+      // private apps (tagged, or recognised by their private-data slots, as the registry decides) stay unnamed to an
+      // agent that may not use them (#58/#59 seal)
+      ...(isPrivateApp(app) ? { private: true } : {}),
     })
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))

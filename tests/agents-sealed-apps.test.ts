@@ -483,6 +483,13 @@ describe('per-agent access switches (Connections → Agents, Miguel 29 Oct 2026)
     expect(refused.json.result.content[0].text).toContain('No installed app has a tool called diary__write')
     expect(refused.json.result.content[0].text).not.toContain('not allowed')
     expect(diary.calls).toEqual([])
+    // an app installed before the tag, private by the slot it provides (Mizel's meeting-transcripts), is sealed too
+    const mizel = await fakeApp('transcripts')
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false), { ...appEntry('mizel', mizel.url), provides: ['meeting-transcripts'] }])
+    const hidden = await mcp(base, MAIN_TOKEN, 'tools/call', { name: 'mizel__transcripts', arguments: {} })
+    expect(hidden.json.result.content[0].text).toContain('No installed app has a tool called mizel__transcripts')
+    expect(hidden.json.result.content[0].text).not.toContain('not allowed')
+    expect(mizel.calls).toEqual([])
   })
 
   it('a new standard agent starts with every installed standard app on; private apps and private agents keep their rule', async () => {
