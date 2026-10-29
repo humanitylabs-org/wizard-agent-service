@@ -18,6 +18,8 @@ services:
       WIZARD_MEDIA_ROOT: /media
       WIZARD_MEDIA_AGENT_ROOT: /media
       WIZARD_APPS_JSON_PATH: /wizard-os/apps.json
+      # Covered by the existing /wizard-os read-only mount; host `wam phone-sync` is the only writer.
+      WIZARD_PHONE_FEED_DIR: /wizard-os/phone
       WIZARD_APPS_MCP_ADDRESS: internal
       WIZARD_APPS_SKILLS_INLINE: "1"
       # The one Wizard scheduler (docs/scheduler.md): reminders and the onboarding tips. It only runs jobs the
