@@ -86,6 +86,8 @@ export function readUiPreferences(path) {
 export function updateUiPreferences(path, patch) {
   validateUiPreferences(patch)
   const stored = readStored(path) || {}
+  // Full writes (an older shell's PUT snapshot) are held to the one-Space rule too.
+  if (Object.hasOwn(patch, 'spaces')) patch = { ...patch, spaces: oneSpaceEach(patch.spaces, sanitizeUiPreferences(stored).spaces) }
   return writePreferences(path, stored, { ...stored, ...patch }, patch)
 }
 
@@ -112,6 +114,17 @@ export function fileInOneSpace(spaces, target, threads) {
   const agent = ownerOf(target), moving = new Set(threads)
   return spaces.map(s => s.id === target.id ? { ...s, threads: [...new Set([...s.threads, ...threads])] }
     : ownerOf(s) === agent && s.threads.some(t => moving.has(t)) ? { ...s, threads: s.threads.filter(t => !moving.has(t)) } : s)
+}
+// A full list naming a thread in several Spaces of one agent keeps it in exactly one: the Space it newly
+// joined in this write (a move made by an add-only client), else the first stored one.
+export function oneSpaceEach(spaces, before = []) {
+  const had = new Set(before.flatMap(s => s.threads.map(t => `${s.id}\n${t}`))), keep = new Map()
+  for (const s of spaces) for (const t of s.threads) {
+    const k = `${ownerOf(s)}\n${t}`, fresh = !had.has(`${s.id}\n${t}`)
+    if (!keep.has(k) || (fresh && !keep.get(k).fresh)) keep.set(k, { id: s.id, fresh })
+  }
+  return spaces.map(s => s.threads.every(t => keep.get(`${ownerOf(s)}\n${t}`).id === s.id) ? s
+    : { ...s, threads: s.threads.filter(t => keep.get(`${ownerOf(s)}\n${t}`).id === s.id) })
 }
 export function applyUiPreferenceOps(prefs, ops) {
   if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()

@@ -1,8 +1,8 @@
 // A chat is in at most one Space of its agent (James, 29 Oct 2026: "A message should only be in one space").
 // Every writer is held to it: owner PATCH (phone and desktop share it), Space creation, agent Spaces tools and
-// automatic status filing. Moving never touches another agent's Spaces, and status filing never refiles a chat.
+// automatic status filing, and full PUT snapshots from older shells. Moving never touches another agent's Spaces, and status filing never refiles a chat.
 import { afterEach, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -70,4 +70,20 @@ it('agent Spaces tools move a chat between the caller’s own Spaces only', asyn
   const r = await tools.call('spaces_add', { space_id: 'p2', thread_ids: ['x'] }, 'philosopher')
   expect(r.isError).toBeFalsy()
   expect(members(readUiPreferences(path).spaces)).toEqual({ p1: [], p2: ['x'], main: ['x'] })
+})
+
+it('a full PUT (older shell snapshot) cannot leave a chat in two Spaces of one agent', async () => {
+  const d = home(); seed(d); const u = await start(d)
+  const put = (spaces: any[]) => fetch(u, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ spaces }) })
+  // Add-only client: t1 newly joined b, still listed in a -> it moved to b.
+  let out = await (await put([space('a', ['t1', 'keep']), space('b', ['other', 't1']), space('phil', ['t1'], 'philosopher')])).json()
+  expect(members(out.spaces)).toEqual({ a: ['keep'], b: ['other', 't1'], phil: ['t1'] })
+  // `other` newly joined a: it moved there out of b; another agent's Space is never touched.
+  out = await (await put([space('a', ['keep', 'other']), space('b', ['other', 't1']), space('phil', ['t1'], 'philosopher')])).json()
+  expect(members(out.spaces)).toEqual({ a: ['keep', 'other'], b: ['t1'], phil: ['t1'] })
+  expect(members(readUiPreferences(join(d, 'ui-preferences.json')).spaces)).toEqual({ a: ['keep', 'other'], b: ['t1'], phil: ['t1'] })
+  // A duplicate that was already stored (no newly joined Space) stays only in the first listed Space.
+  writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ spaces: [space('a', ['dup']), space('b', ['dup'])] }))
+  out = await (await put([space('a', ['dup']), space('b', ['dup'])])).json()
+  expect(members(out.spaces)).toEqual({ a: ['dup'], b: [] })
 })
