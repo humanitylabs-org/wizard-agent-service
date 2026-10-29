@@ -62,6 +62,8 @@ function routeOf(payload, body) {
 export function classifyProviderSignOut(payload, body = null) {
   if (!payload || typeof payload !== 'object' || payload.status !== 'failed') return null
   const text = [textOf(payload.error), textOf(payload.output), textOf(payload.final_response)].join('\n').slice(0, 8000)
+  const known = reconnectOf(payload.wizard_reconnect)
+  if (known) return known
   if (!text.trim()) return null
   if (CLAUDE_SIGNALS.some((re) => re.test(text))) return RECONNECT_APPS.claude
   if (CHATGPT_SIGNALS.some((re) => re.test(text))) return RECONNECT_APPS.chatgpt
@@ -74,8 +76,8 @@ export function classifyProviderSignOut(payload, body = null) {
 
 export function reconnectMessage(app, installed = true) {
   return installed
-    ? `${app.name} is signed out. Open ${app.name} to reconnect, then tap Retry.`
-    : `${app.name} is signed out. Get the ${app.name} app to reconnect, then tap Retry.`
+    ? `${app.name} sign-in expired`
+    : `${app.name} sign-in expired`
 }
 
 /** Annotate a failed run payload in place-free fashion: safe_error + wizard_reconnect, or unchanged. */
@@ -116,6 +118,7 @@ export function decorateReconnect(rows, { installedApps = [], usage = null } = {
       provider: app.provider,
       app_id: app.appId,
       app_name: app.name,
+      run_id: row.wizard_reconnect.run_id || '',
       installed: isInstalled,
       app_status: !reading ? 'unknown' : (code === 'signed_out' || code === 'expired') ? code : reading.status === 'ok' ? 'connected' : 'unknown',
     }
