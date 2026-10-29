@@ -6,7 +6,7 @@ import { withoutOwnerGates } from './heavy-wait.mjs'
 import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 
 export const SUPERVISOR_WAIT_CAP_SECONDS = 12 * 3600
-export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = Date.now(), { includeOwnerGates = false } = {}) {
+export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = Date.now(), { includeOwnerGates = false, nonHoldingFor = id => readNonHoldingFollowUps(hermesPath, id) } = {}) {
   const waits = new Map(), wanted = [...new Set(ids)]
   if (!supervisorPath || !hermesPath || !wanted.length) return waits
   let db, hermes
@@ -17,13 +17,13 @@ export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = 
       WHERE r.state='open' AND b.state IN ('running','ended') AND r.thread IN (${wanted.map(() => '?').join(',')})`).all(...wanted)
     if (!builds.length) return waits
     const start = hermes.prepare('SELECT started_at FROM sessions WHERE id=?')
-    const parents = readHermesSessionTruth(hermesPath, wanted, now / 1000)
+    const parents = readHermesSessionTruth(hermesPath, wanted, now / 1000, { nonHoldingFor })
     const children = new Map()
     const threads = [...new Set(builds.map(b => b.thread))]
     for (let at = 0; at < threads.length; at += 100) for (const [id, truth] of readHermesSessionTruth(hermesPath, threads.slice(at, at + 100), now / 1000)) children.set(id, truth)
     const followUps = new Map()
     for (const build of builds) {
-      if (!followUps.has(build.parent)) followUps.set(build.parent, readNonHoldingFollowUps(hermesPath, build.parent))
+      if (!followUps.has(build.parent)) followUps.set(build.parent, nonHoldingFor(build.parent))
       if (followUps.get(build.parent).has(build.id) || followUps.get(build.parent).has(build.thread)) continue
       let data; try { data = JSON.parse(build.data) } catch { continue }
       // Legacy build rows predate created_at. Never renew their cap from read time.

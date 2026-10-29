@@ -16,7 +16,7 @@ import { createDevices, devicesTool } from './devices.mjs'
 import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps, projectListSlices } from './session-list-cache.mjs'
 import { projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -4027,30 +4027,35 @@ function buildWizardServer(options, lifetime) {
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          // Evidence is shared only within this synchronous projection phase. A new
+          // batch/phase gets a fresh reader; no transcript answer survives a revision.
+          let followUps = new Map()
+          const nonHoldingFor = id => {
+            if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+            return followUps.get(id)
+          }
+          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds, Date.now() / 1000, { nonHoldingFor })
           // Heavy delivery can change without a new reply. Use one fresh ledger snapshot
           // for this batch, never the age-cached rows used only to discover hot threads.
           const heavyJobs = heavyWork?.queue.rows() ?? []
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { nonHoldingFor, activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
-              const followUps = new Map()
               const holdingJobs = heavyJobs.filter(job => {
                 const id = job.sessionId ?? job.session_id
                 if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
-                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
-                return !followUps.get(id).has(job.job_id ?? job.id)
+                return !nonHoldingFor(id).has(job.job_id ?? job.id)
               })
               for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
               }
             } catch { /* heavy queue unreadable: no wait projection */ }
           }
-          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true })) {
+          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true, nonHoldingFor })) {
             const t = sessionTruth.get(id); if (t) t.supervisorPending = true
           }
           result = filterSessionList(
@@ -4071,11 +4076,15 @@ function buildWizardServer(options, lifetime) {
           }
           result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
           if (!operator) {
+            // Async enrichment above can span a canonical write. Never reuse its
+            // earlier evidence for the final attention projection.
+            followUps = new Map()
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
-              const nonHolding = readNonHoldingFollowUps(hermesStatePath, session.id)
-              const holdingJobs = heavyJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
+              const ownJobs = heavyJobs.filter(job => (job.agent_id ?? 'hermes') === 'hermes' && (job.sessionId ?? job.session_id) === session.id)
+              const nonHolding = ownJobs.length ? nonHoldingFor(session.id) : new Set()
+              const holdingJobs = ownJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
               if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
@@ -4129,8 +4138,9 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectBatch = async (sessions, firstPage) =>
+    const projectSlice = async (sessions, firstPage) =>
       JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    const projectBatch = (sessions, firstPage) => projectListSlices(sessions, projectSlice, firstPage)
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
@@ -4181,7 +4191,8 @@ function buildWizardServer(options, lifetime) {
     // A disabled cache keeps checking: it was serving the full rebuild on every poll forever, which
     // saturated the service (Chats list 12 s, a thread open ~5 s). A clean check that compared real
     // cached rows turns it back on.
-    const check = async () => {
+    let checking = null
+    const checkCore = async () => {
       if (!canonicalSessionReader || configured === 'off') return null
       const started = performance.now()
       const all = await humanSessions()
@@ -4206,6 +4217,9 @@ function buildWizardServer(options, lifetime) {
       }
       return { faults, differences }
     }
+    // Timer and diagnostic callers join the same self-check. Slow checks must
+    // not multiply full transcript projections on the shared HTTP loop.
+    const check = () => checking ?? (checking = checkCore().finally(() => { checking = null }))
     return {
       mode: () => (disabled ? 'off' : configured),
       touch: () => { localRevision++ },

@@ -953,6 +953,8 @@
       ],
       "reference_tests": [
         "tests/chats-views.test.ts",
+        "tests/ready-thread-speed.node.mjs",
+        "wizard-ux/tests/ready-thread-speed.test.mjs",
         "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
