@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
 import hermes_lock
 import import_tree
+import history_schema
 
 SCHEMA = 1
 IMAGE = hermes_lock.load()['runtime_image']
@@ -470,6 +471,58 @@ class DockerRuntime:
         self.plan, self.directory, self.id = plan, Path(directory), agent_id
         self.name = 'agent-' + agent_id
 
+    def history_schema_version(self):
+        # No source/config/credential mounts and no gateway/model startup. Probe
+        # this exact approved image in a fresh disposable, networkless home.
+        name = 'wizard-import-schema-' + secrets.token_hex(6)
+        code = ('import json,sqlite3; from hermes_state import SessionDB; '
+                'db=SessionDB("/opt/data/state.db"); '
+                'c=sqlite3.connect("/opt/data/state.db"); '
+                'print(json.dumps(c.execute("SELECT version FROM schema_version").fetchall())); '
+                'c.close(); db.close()')
+        try:
+            out = run(['docker', 'run', '--rm', '--name', name, '--network', 'none', '--read-only',
+                       '--user', '10000:10000', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                       '--pids-limit', '64', '--memory', '512m',
+                       '--tmpfs', '/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000',
+                       '--tmpfs', '/tmp:rw,nosuid,nodev,size=32m,mode=1777',
+                       '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-e', 'PYTHONDONTWRITEBYTECODE=1',
+                       '--entrypoint', '/opt/hermes/.venv/bin/python', self.plan['image'], '-c', code], timeout=120)
+            try:
+                rows = json.loads(out)
+            except (ValueError, TypeError):
+                raise ImportFailure('runtime_history_schema_unknown') from None
+            require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list)
+                    and len(rows[0]) == 1 and type(rows[0][0]) is int and rows[0][0] > 0,
+                    'runtime_history_schema_unknown')
+            return rows[0][0]
+        finally:
+            # An interrupted Docker client does not prove its container stopped.
+            if run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}']).strip():
+                run(['docker', 'rm', '-f', '-v', name])
+            require(not run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$',
+                             '--format', '{{.Names}}']).strip(), 'history_schema_probe_cleanup_failed')
+
+    def check_history(self, home):
+        try:
+            return history_schema.require_supported(home, self.history_schema_version())
+        except history_schema.HistorySchemaFailure as exc:
+            raise ImportFailure(str(exc)) from None
+
+    def check_archive_history(self, archive):
+        entries = archive_entries(archive)
+        for _, rel, size in entries:
+            require(rel not in {'state.db-wal', 'state.db-journal'} or not size,
+                    'history_schema_checkpoint_required')
+        database = next((name for name, rel, _ in entries if rel == 'state.db'), None)
+        if database is not None:
+            # Archives already contain a detached snapshot. Read metadata only
+            # before the stock import CLI can initialize or rewrite that history.
+            with tempfile.TemporaryDirectory(prefix='wizard-history-schema-') as tmp:
+                with zipfile.ZipFile(archive) as z, z.open(database) as src, open(Path(tmp) / 'state.db', 'wb') as dst:
+                    shutil.copyfileobj(src, dst, 1024**2)
+                self.check_history(tmp)
+
     def preflight(self):
         require(not run(['docker', 'ps', '-a', '--filter', 'name=^/' + self.name + '$', '--format', '{{.Names}}']).strip(), 'container_exists')
         run(['docker', 'image', 'inspect', self.plan['image'], '--format', '{{.Id}}'])
@@ -887,6 +940,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                     dump(journal_path, journal)
                     run(['systemctl', '--user', 'stop', unit])
             assert_no_writers(source)
+            if hasattr(runtime, 'check_history'):
+                runtime.check_history(source)  # BEFORE rename, wiring, chown or SessionDB open
             journal['state'] = 'moving'
             journal['home_inode'] = source.stat().st_ino
             dump(journal_path, journal)
@@ -901,6 +956,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
             safe_zip = directory / 'transport.zip'
             entries = archive_entries(source)
             require(shutil.disk_usage(directory).free > sum(n for _, _, n in entries) * 3 + 256 * 1024**2, 'disk_reserve')
+            if hasattr(runtime, 'check_archive_history'):
+                runtime.check_archive_history(source)  # BEFORE filtering sidecars or stock CLI
             with zipfile.ZipFile(source) as z, zipfile.ZipFile(safe_zip, 'w', compression=zipfile.ZIP_DEFLATED) as out:
                 for name, rel, _ in entries:
                     if not excluded(rel):
