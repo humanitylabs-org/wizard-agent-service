@@ -2753,7 +2753,7 @@ function buildWizardServer(options, lifetime) {
       const path = home ? join(home, 'state.db') : ''
       const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
       truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'check', ask: 'pending' })?.state === 'fyi'
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' })?.state === 'fyi'
       truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
@@ -4069,7 +4069,7 @@ function buildWizardServer(options, lifetime) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
-              if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' })?.state === 'fyi') truth.heavyPending = true
+              if (heavyStatus('hermes', session.id, { state: 'done', ask: 'pending' })?.state === 'fyi') truth.heavyPending = true
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
               let replies = useTruth ? truth.replies : messages?.replies
