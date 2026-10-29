@@ -4600,6 +4600,8 @@ function buildWizardServer(options, lifetime) {
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
   const hostJobsActive = options.systemJobsEnabled === true
   if (hostJobsActive && (!options.systemJobsStatePath || !options.systemJobsUnitDir || !options.systemJobsSocketPath)) throw new Error('Host jobs require explicit state, unit and socket paths')
+  // Host execution needs the one owner credential no local caller can imitate (principals.mjs: proxy_proof).
+  if (hostJobsActive && !options.ownerProof) throw new Error('Host jobs require an owner proof (WIZARD_OWNER_PROOF_FILE)')
   const systemJobs = options.systemJobsStatePath ? new SystemJobs({
     statePath: resolve(String(options.systemJobsStatePath)),
     hermesHome: options.systemJobsHermesHome || '',
@@ -5390,7 +5392,9 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/system-jobs' || url.pathname.startsWith('/wizard/v1/system-jobs/')) {
         // Host execution is never an agent capability, including main/recovery agent credentials.
-        if (principal.kind !== 'owner' || isAgentIngress(request)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        // Only the owner proof counts: a credential-less box caller (BOX_OWNER) or a header-based verifier can be
+        // imitated by any local process, including an agent that omits its token.
+        if (principal.kind !== 'owner' || principal.via !== 'proxy_proof' || isAgentIngress(request)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.method !== 'GET') {
           const refusal = setupWriteRefusal(request, tailnetIngress)

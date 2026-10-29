@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -195,6 +195,48 @@ describe('host system jobs', () => {
     jobs.edit(j.id, { enabled: true }); await expect(triggerSystemJob(path, j.id)).rejects.toThrow(/refused/)
     clock += 300000; await triggerSystemJob(path, j.id); await settle(jobs)
     expect(jobs.list()[0].lastRun.outcome).toBe('succeeded')
+  })
+})
+
+describe('host system jobs: review regressions', () => {
+  it('never runs host commands for a credential-less caller (no owner proof configured)', async () => {
+    const marker = join(root, 'ran')
+    const service = createWizardServer({ distDir: root, agents: false, requireAccess: false,
+      systemJobsStatePath: join(root, 'open.sqlite'), systemJobsTimers: { apply: () => {} } })
+    servers.push(service); const origin = `http://127.0.0.1:${(await listen(service)).port}`
+    const post = (path: string, body: any, method = 'POST') => fetch(`${origin}/wizard/v1/system-jobs${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await post('', input({ command: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] }))).status).toBe(403)
+    expect((await fetch(`${origin}/wizard/v1/system-jobs`)).status).toBe(403)
+    expect(existsSync(marker)).toBe(false)
+    expect(() => createWizardServer({ distDir: root, agents: false, requireAccess: false, systemJobsEnabled: true,
+      systemJobsStatePath: join(root, 'host.sqlite'), systemJobsUnitDir: join(root, 'units'), systemJobsSocketPath: join(root, 'ipc', 's.sock') })).toThrow(/owner proof/)
+  })
+  it('never chmods a shared socket directory or deletes a regular file at the socket path', () => {
+    const jobs = store()
+    const shared = join(root, 'shared'); mkdirSync(shared, { mode: 0o755 }); chmodSync(shared, 0o755)
+    expect(() => systemJobsSocket(jobs, join(shared, 'host.sock'))).toThrow(/private/)
+    expect(statSync(shared).mode & 0o777).toBe(0o755)
+    const priv = join(root, 'priv'); mkdirSync(priv, { mode: 0o700 }); chmodSync(priv, 0o700)
+    const file = join(priv, 'host.sock'); writeFileSync(file, 'keep me')
+    expect(() => systemJobsSocket(jobs, file)).toThrow(/non-socket/)
+    expect(readFileSync(file, 'utf8')).toBe('keep me')
+  })
+  it('a permanently rejected alert does not block later alerts', async () => {
+    const sent: any[] = []
+    const notifier = { send: async (note: any) => { if (note.title === 'Poison') throw new Error('rejected'); sent.push(note) } }
+    const jobs = store({ notifier })
+    const ok = jobs.create(input({ notify: 'output', command: [process.execPath, '-e', 'console.log("Poison\\nAlways rejected")'] }))
+    const bad = jobs.create(input({ name: 'Broken', command: [process.execPath, '-e', 'process.exit(3)'] }))
+    jobs.edit(ok.id, { enabled: true }); jobs.run(ok.id); await settle(jobs)
+    jobs.edit(bad.id, { enabled: true }); jobs.run(bad.id); await settle(jobs)
+    await jobs.flushAlerts()
+    expect(sent.map(n => n.title)).toEqual(['Scheduled maintenance needs attention'])
+  })
+  it('imports only an absolute python interpreter', () => {
+    const home = join(root, 'source'); mkdirSync(join(home, 'scripts'), { recursive: true }); writeFileSync(join(home, 'scripts', 'backup.py'), '')
+    fixture([source({ script: 'backup.py', interpreter: '/bin/sh' }), source({ id: 'py_ok', script: 'backup.py', interpreter: '/usr/bin/python3' })])
+    const results = store().importHermes({ dryRun: true, timezone: 'UTC' }).results
+    expect(results.map((r: any) => r.status)).toEqual(['rejected', 'would import disabled'])
   })
 })
 

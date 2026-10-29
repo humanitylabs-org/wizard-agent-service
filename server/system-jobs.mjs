@@ -1,8 +1,8 @@
 // Host-only deterministic work. No Hermes runtime, prompt, transcript or cron writer.
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, execFileSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
@@ -174,7 +174,7 @@ export class SystemJobs {
           // Ordinary output is never forwarded; only explicitly opted-in, bounded successful output has a note.
           await this.notifier.send({ agent: 'main', key: `system-job:${row.id}`, ...(row.note ? JSON.parse(row.note) : { title: 'Scheduled maintenance needs attention', message: 'Scheduled maintenance did not finish. Check the System jobs list before running it again.' }) })
           this.db.prepare('UPDATE system_job_runs SET alert=2 WHERE id=?').run(row.id)
-        } catch { break } // durable, no aging-out; a temporarily unavailable app is not a lost alert.
+        } catch { continue } // durable, no aging-out; one rejected alert never blocks later ones.
       }
     } finally { this.alerting = false }
   }
@@ -200,7 +200,8 @@ export class SystemJobs {
         const s = row.schedule
         const when = s?.kind === 'cron' ? { cron: s.expr } : s?.kind === 'interval' ? { every: s.minutes } : s?.kind === 'once' ? { once: s.run_at } : null
         const script = resolveHermesScript(row.script, this.hermesHome)
-        if (row.interpreter && (!isAbsolute(row.interpreter) || /[\x00\r\n]/.test(row.interpreter))) throw fail('Review the interpreter')
+        // Same rule as the agent scheduler import: an explicit interpreter is an absolute python binary, nothing else.
+        if (row.interpreter && (!isAbsolute(row.interpreter) || /[\x00\r\n]/.test(row.interpreter) || !/^python(?:[0-9]+(?:\.[0-9]+)*)?$/i.test(basename(row.interpreter)))) throw fail('Review the interpreter')
         const command = /\.(sh|bash)$/i.test(script) ? ['/bin/bash', script] : [row.interpreter || 'python3', script]
         const input = validate({ name: row.name || row.id, when, timezone, command, cwd: row.workdir || dirname(script) }, this.now())
         return { ...base, status: dryRun ? 'would import disabled' : 'imported disabled', ...(dryRun ? { definition: input } : { id: this.create(input, source).id }) }
@@ -238,9 +239,18 @@ export function executeSystemCommand(job, signal) {
 // The containing directory must NOT be mounted into an agent container.
 export function systemJobsSocket(jobs, socketPath) {
   if (!isAbsolute(socketPath) || socketPath.length > 100) throw fail('Choose a short absolute host socket path')
-  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 }); chmodSync(dirname(socketPath), 0o700)
+  // Never repair someone else's directory: create a private one, or require an existing one to already be private.
+  const dir = dirname(socketPath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const info = lstatSync(dir)
+  if (!info.isDirectory() || (info.mode & 0o077) || (typeof process.getuid === 'function' && info.uid !== process.getuid())) throw fail('The host socket directory must be a private (0700) directory owned by the service user')
   const release = acquireLease(`${socketPath}.writer.sqlite`)
-  try { rmSync(socketPath, { force: true }) } catch (error) { release(); throw error }
+  // Only a stale socket is removed; any other file at the path is refused, never deleted.
+  try {
+    const existing = lstatSync(socketPath, { throwIfNoEntry: false })
+    if (existing && !existing.isSocket()) throw fail('Refusing to replace a non-socket file at the host socket path')
+    if (existing) rmSync(socketPath)
+  } catch (error) { release(); throw error }
   // Cleanup is fenced by both registry and IPC leases; another writer's socket is never removed.
   const server = createServer((req, res) => {
     const id = req.url?.match(/^\/run\/([a-zA-Z0-9_-]{1,80})$/)?.[1]

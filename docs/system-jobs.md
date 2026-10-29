@@ -32,7 +32,7 @@ On restart, enabled timers reconcile from the registry; unfinished executions be
 
 ## Owner console and API
 
-Use the ordinary owner ingress, e.g. a loopback service with `WIZARD_OWNER_PROOF` supplied by the deployment secret store. `WIZARD_ORIGIN` selects the service. HTTPS is required except for loopback. Credentials are environment key names only; never put values in command arguments or job definitions.
+Use the ordinary owner ingress with the owner proof: the service reads it from `WIZARD_OWNER_PROOF_FILE` (host mode refuses to start without one, and the system-jobs API accepts only that proof, never a credential-less box caller or an access header), and the CLI sends it from `WIZARD_OWNER_PROOF`, supplied by the deployment secret store. `WIZARD_ORIGIN` selects the service. HTTPS is required except for loopback. Credentials are environment key names only; never put values in command arguments or job definitions.
 
 ```sh
 node scripts/system-jobs.mjs list
