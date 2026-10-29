@@ -9,3 +9,6 @@
 568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/source-manifest.json:generic-api-key:106
 f09e86f477efd5b2908b1fdfb1ba886db75e4213:tests/agents.test.ts:generic-api-key:73
 78067c8c3a7b922d3558878c4d76278760170623:tests/app-bindings.test.ts:generic-api-key:50
+# Reviewed false positive: the fixed synthetic API_SERVER_KEY placeholder written by the round-10 synthetic seal runner (feature/private-seal-round9); not a credential.
+3bec9d07a7700508c2e5da0127a13f012c6c8b7d:scripts/private-seal-round10.py:generic-api-key:78
+3bec9d07a7700508c2e5da0127a13f012c6c8b7d:scripts/private-seal-round10.py:generic-api-key:203
