@@ -14,6 +14,12 @@ LABEL = 'wizard.private-network-policy'
 # sigstore-go's default TUF trust-root mirror is also required for provenance.
 HOSTS = ('atc.tinfoil.sh', 'github-proxy.tinfoil.sh', 'tuf-repo-cdn.sigstore.dev',
          'kds-proxy.tinfoil.sh', 'inference.tinfoil.sh', 'websearch.tinfoil.sh')
+# Provider-only key contract (round 10): Hermes holds this public constant,
+# never the provider bearer. The Service-owned injector replaces it.
+PLACEHOLDER_KEY = 'wizard-sealed-provider-key-held-by-injector'
+KEY_DIR = 'provider-key'          # Service-owned, sibling of the agent home
+GATEWAY_IMAGE = 'restricted-agent-sidecars:local'   # REUSE restricted scoped edge.py
+KEY_IMAGE = 'wizard-private-network-edge:round10'   # same stdlib egress image + injector
 
 
 def enabled(agent):
@@ -28,7 +34,10 @@ def enabled(agent):
 def networks(agent):
     values = agent.get('runtime', {}).get('sealed_networks', {})
     result = []
-    for field, pool in [('agent', '10.246.0.0/16'), ('provider', '10.247.0.0/16')]:
+    fields = [('agent', '10.246.0.0/16'), ('provider', '10.247.0.0/16')]
+    if key_injected(agent):
+        fields.append(('keyed', '10.248.0.0/16'))
+    for field, pool in fields:
         value = ipaddress.ip_network(values.get(field, ''), strict=True)
         if value.version != 4 or value.prefixlen != 28 or not value.subnet_of(ipaddress.ip_network(pool)):
             raise ValueError('private_network_subnet_invalid')
@@ -36,10 +45,33 @@ def networks(agent):
     return result
 
 
-def apply(doc, agent, *, ports):
+def key_injected(agent):
+    """Opt-in provider-only key location; any other value fails closed."""
+    value = agent.get('runtime', {}).get('provider_key_location', '')
+    if value not in ('', 'provider'):
+        raise ValueError('private_network_policy_invalid')
+    return value == 'provider'
+
+
+def gateway(agent):
+    value = agent.get('runtime', {}).get('sealed_gateway', False)
+    if not isinstance(value, bool):
+        raise ValueError('private_network_policy_invalid')
+    return value
+
+
+def key_mount(home_source):
+    """Host directory beside (never inside) the Hermes home."""
+    if not home_source.endswith('/home'):
+        raise ValueError('private_network_policy_invalid')
+    return home_source[:-len('/home')] + '/' + KEY_DIR
+
+
+def apply(doc, agent, *, ports, home_source='', uid=1000, gid=1000):
     if not enabled(agent):
         return doc
-    seal, egress = networks(agent)
+    nets = networks(agent)
+    seal, egress = nets[0], nets[1]
     main = agent['runtime']['app_id']; proxy = main + '-tinfoil'
     services = doc['services']; client = services[main]; provider = services[proxy]
     edge_name = main + '-edge'
@@ -84,7 +116,48 @@ def apply(doc, agent, *, ports):
         'logging': {'driver': 'none'},
     }
     provider.setdefault('depends_on', []).append(edge_name)
-    for name, subnet in [(seal_name, seal), (egress_name, egress)]:
+    internal = [(seal_name, seal), (egress_name, egress)]
+    if key_injected(agent):
+        keyed = nets[2]; keyed_name = main + '-keyed'
+        internal.append((keyed_name, keyed))
+        # Hermes keeps its unchanged URL; the seal alias now names the
+        # injector. The official proxy leaves the seal: only the injector
+        # (holding the Service-owned key) can reach its plaintext listeners.
+        provider['networks'] = {keyed_name: {'ipv4_address': str(keyed[2])}, egress_name: {'ipv4_address': str(egress[2])}}
+        command[command.index('--bind') + 1] = str(keyed[2])
+        search['command'][search['command'].index('--bind') + 1] = str(keyed[2])
+        services[main + '-key'] = {
+            'image': KEY_IMAGE, 'entrypoint': ['python', '/app/provider-key-injector.py'],
+            'networks': {seal_name: {'ipv4_address': str(seal[3]), 'aliases': [proxy]},
+                         keyed_name: {'ipv4_address': str(keyed[3])}},
+            'environment': {'LISTEN_IP': str(seal[3]), 'UPSTREAM_IP': str(keyed[2]),
+                            'PORTS': json.dumps([3301, 3302]), 'KEY_FILE': '/run/provider-key/key'},
+            'volumes': [f'{key_mount(home_source)}:/run/provider-key:ro'],
+            'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
+            # Same owner as the Service-written 0400 key file; no other reader.
+            'user': f'{int(uid)}:{int(gid)}', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
+            'logging': {'driver': 'none'}, 'depends_on': [proxy],
+        }
+        client.setdefault('depends_on', [])
+        if isinstance(client['depends_on'], list) and main + '-key' not in client['depends_on']:
+            client['depends_on'].append(main + '-key')
+    if gateway(agent):
+        # REUSE the restricted scoped edge: token-hash + path allowlist, then
+        # the Service's per-agent Unix socket. No TCP route to the Service.
+        root = key_mount(home_source).rsplit('/', 1)[0]
+        services[main + '-gateway'] = {
+            'image': GATEWAY_IMAGE, 'command': ['python3', '/srv/edge.py'],
+            'networks': {seal_name: {'ipv4_address': str(seal[5]), 'aliases': ['edge']}},
+            'environment': {'EDGE_TOKEN_SHA256_FILE': '/run/edge/token.sha256',
+                            'EDGE_UPSTREAM_SOCKET': '/run/agent-gateway/gateway.sock',
+                            'EDGE_INGRESS_SOCKET': '/run/edge-ingress/ingress.sock',
+                            'EDGE_AGENT_HOST': str(seal[2])},
+            'volumes': [f'{root}/gateway:/run/agent-gateway', f'{root}/gateway-edge:/run/edge:ro'],
+            'tmpfs': ['/run/edge-ingress:uid=1000,gid=1000,mode=0700'],
+            'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
+            'user': '1000:1000', 'pids_limit': 64, 'mem_limit': '64m', 'restart': 'no',
+        }
+    for name, subnet in internal:
         doc.setdefault('networks', {})[name] = {
             'internal': True, 'enable_ipv6': False,
             'driver_opts': {'com.docker.network.bridge.inhibit_ipv4': 'true'},

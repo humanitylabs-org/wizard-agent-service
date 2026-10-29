@@ -174,11 +174,26 @@ class Agents:
         except OSError:
             raise RuntimeFailure("agent_not_prepared", 409) from None
         lines = [line for line in lines if not line.startswith("TINFOIL_API_KEY=")]
+        import private_seal
+        try:
+            injected = private_seal.enabled(agent) and private_seal.key_injected(agent)
+            scoped_gateway = private_seal.enabled(agent) and private_seal.gateway(agent)
+        except ValueError:
+            raise RuntimeFailure("private_network_policy_invalid", 409) from None
         if (agent.get("model") or {}).get("provider") == "tinfoil":
             key = self.tinfoil_key()
             if not key:
                 raise RuntimeFailure("provider_not_configured", 503)
+            if injected:
+                # Service-owned migration: provider key leaves the Hermes home
+                # and lives only beside it for the injector (never printed).
+                self.write_provider_key(agent, key, env_path.parent)
+                key = private_seal.PLACEHOLDER_KEY
+            else:
+                self.retire_provider_key(agent)
             lines.append(f"TINFOIL_API_KEY={key}")
+        if scoped_gateway:
+            self.write_gateway_hash(agent)
         tmp = env_path.with_name(f".env.tmp-{os.getpid()}")
         try:
             tmp.write_text("\n".join(lines) + "\n")
@@ -187,6 +202,52 @@ class Agents:
         os.chmod(tmp, 0o600)
         tmp.replace(env_path)
 
+
+    def _owned_file(self, directory: Path, name: str, text: str, owner: Path) -> None:
+        """Atomic 0400 file in a 0700 Service directory, owned like the home (the reader's uid)."""
+        st = owner.stat()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeFailure("provider_key_dir_unsafe", 409)
+        tmp = directory / f".{name}.tmp-{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, (text + "\n").encode())
+        finally:
+            os.close(fd)
+        try:
+            if (st.st_uid, st.st_gid) != (os.getuid(), os.getgid()):
+                os.chown(tmp, st.st_uid, st.st_gid)
+                os.chown(directory, st.st_uid, st.st_gid)
+            os.chmod(tmp, 0o400)
+            tmp.replace(directory / name)
+        except PermissionError:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeFailure("provider_key_owner_mismatch", 409) from None
+
+    def write_provider_key(self, agent: dict, key: str, home: Path) -> None:
+        import private_seal
+        self._owned_file(self.root / agent["id"] / private_seal.KEY_DIR, "key", key, home)
+
+    def retire_provider_key(self, agent: dict) -> None:
+        """Rollback/legacy path: the injector copy is removed, never left stale."""
+        import private_seal
+        directory = self.root / agent["id"] / private_seal.KEY_DIR
+        if directory.is_symlink():
+            raise RuntimeFailure("provider_key_dir_unsafe", 409)
+        if directory.is_dir():
+            for child in directory.iterdir():
+                child.unlink()
+            directory.rmdir()
+
+    def write_gateway_hash(self, agent: dict) -> None:
+        token = self.secret(agent["id"], "gateway.key")
+        if not token:
+            raise RuntimeFailure("agent_gateway_key_missing", 409)
+        home = self.managed(agent["id"]) if restricted(agent) else self.home(agent["id"])
+        self._owned_file(self.root / agent["id"] / "gateway-edge", "token.sha256",
+                         hashlib.sha256(token.encode()).hexdigest(), home)
 
     def secret(self, agent_id: str, name: str) -> str:
         try:
@@ -291,7 +352,7 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
         doc["volumes"] = doc_volumes
     import private_seal
     try:
-        doc = private_seal.apply(doc, agent, ports=ports)
+        doc = private_seal.apply(doc, agent, ports=ports, home_source=home_source, uid=uid, gid=gid)
     except ValueError:
         raise RuntimeFailure("private_network_policy_invalid", 409) from None
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency

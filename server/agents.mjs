@@ -300,6 +300,10 @@ export function agentAppIds(agent) {
  */
 /** What a restricted agent's harness calls: its edge sidecar, forwarding only to its own Service socket. */
 export const RESTRICTED_GATEWAY_URL = 'http://edge:8923/wizard/mcp'
+export const SEALED_POLICY = 'tinfoil-sealed-v1'
+/** Opt-in only (ops/agent-runtime/private_seal.py): the sealed private runtime's scoped app gateway. */
+export const sealedGateway = (agent) => agent?.privacy === 'private' && agent?.runtime?.network_policy === SEALED_POLICY
+  && agent?.runtime?.sealed_gateway === true
 
 /**
  * The restricted runtime has no Tinfoil attestation sidecar yet, so an agent on Tinfoil cannot run there. Refuse the
@@ -438,8 +442,10 @@ export function createAgentRegistry(options = {}) {
   // sandbox networks and reach the Service only through their edge sidecar, which forwards to the agent-only listener.
   const isolation = options.isolation === 'restricted' ? 'restricted' : ''
   const restricted = (agent) => agent?.runtime?.isolation === 'restricted'
-  const gatewayUrlFor = (agent) => (restricted(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
-  const standardUrlFor = agent => standardChatsEndpoint(gatewayUrlFor(agent),restricted(agent) ? '' : options.standardChatsUrl || '')
+  // Sealed private runtime with the scoped edge: same socket-only app gateway as a restricted agent (no TCP route).
+  const socketBound = (agent) => restricted(agent) || sealedGateway(agent)
+  const gatewayUrlFor = (agent) => (socketBound(agent) ? RESTRICTED_GATEWAY_URL : gatewayUrl)
+  const standardUrlFor = agent => standardChatsEndpoint(gatewayUrlFor(agent),socketBound(agent) ? '' : options.standardChatsUrl || '')
   const assertStandardTransport = agent => { if (agent.permissions.read_standard_chats && !standardUrlFor(agent)) fail(409,'standard_chats_unconfigured','agent.permissions.read_standard_chats') }
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
   const statusCache = new Map()
@@ -771,6 +777,10 @@ export function createAgentRegistry(options = {}) {
   function agentRestricted(id) {
     try { return restricted(read(id)) } catch { return false }
   }
+  // Principal/socket binding: a malformed record fails closed (socket-only), unlike the heavy grant check.
+  function agentSocketBound(id) {
+    try { return socketBound(read(id)) } catch { return true }
+  }
 
   function nextPort() {
     const used = new Set(list().map((agent) => agent.runtime?.port).filter(Number.isInteger))
@@ -887,7 +897,7 @@ export function createAgentRegistry(options = {}) {
     writeServiceState(id, { desired: deferStart ? 'stopped' : 'running', started_at: deferStart ? 0 : now(), last_error: '' })
     if (deferStart) return { agent: read(id), replayed: false }
     try {
-      if (restricted(agent)) await options.beforeRestrictedStart?.(id)
+      if (socketBound(agent)) await options.beforeRestrictedStart?.(id)
       const result = await runtime.apply(id)
       writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
     } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -971,7 +981,7 @@ export function createAgentRegistry(options = {}) {
       invalidateCatalog(id)
       writeServiceState(id, { started_at: now(), last_error: '' })
       try {
-        if (restricted(next)) await options.beforeRestrictedStart?.(id)
+        if (socketBound(next)) await options.beforeRestrictedStart?.(id)
         const result = await runtime.apply(id)
         writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       } catch (error) { writeServiceState(id, { last_error: runtimeError(error) }) }
@@ -1004,7 +1014,7 @@ export function createAgentRegistry(options = {}) {
     const epoch = catalogEpochs.get(id) ?? 0
     let stoppedCensus
     try {
-      if (running && restricted(agent)) await options.beforeRestrictedStart?.(id)
+      if (running && socketBound(agent)) await options.beforeRestrictedStart?.(id)
       const result = await (running ? runtime.start(id) : runtime.stop(id))
       if (running) writeServiceState(id, { last_error: result?.last_error === 'claude_login_missing' ? 'claude_login_missing' : '' })
       if (!running && result?.ok !== false) stoppedCensus = result?.census
@@ -1212,7 +1222,7 @@ export function createAgentRegistry(options = {}) {
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
-    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted,
+    syncApps, allowedApps, appAgents, setAppAgents, agentForGatewayToken, agentRestricted, agentSocketBound,
     grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => publicAgent(agent, await status(agent), defaultAgentId()),
     threadAgent: (agentOrId) => {
