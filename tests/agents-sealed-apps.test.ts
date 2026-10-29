@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { SHARED_AGENT_TOOLS } from '../server/agent-bridge.mjs'
 import { hermesConfigYaml } from '../server/agents.mjs'
 
 const servers: Server[] = []
@@ -89,7 +90,8 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
 }
 
 const json = (body: unknown, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+// Explicitly off: these tests switch standard-chat reading themselves (the default-on rule has its own test).
+const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private', read_standard_chats: false } }
 const STANDARD = (label: string, extra: Record<string, unknown> = {}) => ({ label, harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'standard', ...extra } })
 
 async function create(base: string, body: unknown, port?: number, dir?: string) {
@@ -113,7 +115,7 @@ async function mcp(base: string, token: string, method: string, params: unknown 
   const r = await fetch(`${base}/wizard/mcp`, { method: 'POST', headers: { ...headers, 'Mcp-Session-Id': session }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params }) })
   return { status: r.status, json: await r.json() as any, session }
 }
-const toolNames = async (base: string, token: string) => ((await mcp(base, token, 'tools/list')).json?.result?.tools ?? []).map((t: any) => t.name).sort()
+const toolNames = async (base: string, token: string) => ((await mcp(base, token, 'tools/list')).json?.result?.tools ?? []).map((t: any) => t.name).filter((name: string) => !name.startsWith('spaces_')).sort()
 
 describe('#58 which agents can use an app', () => {
   it('the gateway serves each agent only the apps on its own list; the main agent keeps every app', async () => {
@@ -128,9 +130,9 @@ describe('#58 which agents can use an app', () => {
     // Main agent: standard, every current app ticked (no regression for an existing box).
     const mainAgent = (await (await fetch(`${base}/wizard/v1/agents/hermes`)).json()).agent
     expect(mainAgent).toMatchObject({ privacy: 'standard', permissions: { wizard_apps: ['notes'], agent_apps: ['scanner'] } })
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps'])
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps'])
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps'])
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // A tool outside the agent's list answers like an app that is not installed, and never reaches the app.
     const refused = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'scanner__scan', arguments: {} })
     expect(refused.json.result.isError).toBe(true)
@@ -149,7 +151,7 @@ describe('#58 which agents can use an app', () => {
     expect(ctx.apps).toEqual([])
   })
 
-  it('a new app joins standard agents (main included), never private ones; harness config carries the gateway', async () => {
+  it('a new app joins the main agent only; standard and private agents start unticked; harness config carries the gateway', async () => {
     const notes = await fakeApp('note_add')
     const scanner = await fakeApp('scan')
     const dir = await box({ notes: notes.url, scanner: scanner.url })
@@ -160,29 +162,30 @@ describe('#58 which agents can use an app', () => {
     // The owner narrows the main agent; a stored choice is kept from then on.
     const narrowed = await fetch(`${base}/wizard/v1/agents/hermes`, json({ permissions: { wizard_apps: ['notes'], agent_apps: [] } }, 'PATCH'))
     expect(narrowed.status).toBe(200)
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps'])
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // Install a new app.
     const music = await fakeApp('play')
     writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false), appEntry('music', music.url)])
     const agents = (await (await fetch(`${base}/wizard/v1/agents`)).json()).agents
     const byId = Object.fromEntries(agents.map((a: any) => [a.id, a]))
     expect(byId.hermes.permissions).toMatchObject({ wizard_apps: ['notes', 'music'], agent_apps: [] })
-    expect(byId[helper.id].permissions.wizard_apps).toContain('music')
+    // James, 23 Oct 2026: "the user should have to enable things manually."
+    expect(byId[helper.id].permissions.wizard_apps).not.toContain('music')
     expect(byId.private.permissions).toMatchObject({ wizard_apps: [], agent_apps: [] })
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps'])
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('music__play')
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('music__play')
     // Re-reading does not re-add an app the owner unticked.
     await fetch(`${base}/wizard/v1/agents/${helper.id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))
     const again = (await (await fetch(`${base}/wizard/v1/agents/${helper.id}`)).json()).agent
     expect(again.permissions.wizard_apps).toEqual([])
-    // Harness config: standard agents get the gateway with their own token; a private agent without apps does not.
+    // Every agent gets its own gateway token for Spaces; app permissions stay unticked.
     const helperConfig = readFileSync(join(dir, 'agents', helper.id, 'home', 'config.yaml'), 'utf8')
     expect(helperConfig).toContain('url: "http://wizard-agent-service:8923/wizard/mcp"')
     expect(helperConfig).toContain('Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     expect(readFileSync(join(dir, 'agents', helper.id, 'home', '.env'), 'utf8')).toContain(`WIZARD_MCP_TOKEN=${gatewayKey(dir, helper.id)}`)
     const privConfig = readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')
-    expect(privConfig).toContain('mcp_servers: {}')
-    expect(readFileSync(join(dir, 'agents', 'private', 'home', '.env'), 'utf8')).not.toContain('WIZARD_MCP_TOKEN')
+    expect(privConfig).toContain('/wizard/mcp')
+    expect(readFileSync(join(dir, 'agents', 'private', 'home', '.env'), 'utf8')).toContain('WIZARD_MCP_TOKEN')
     // The main agent's other settings stay read-only here.
     const label = await fetch(`${base}/wizard/v1/agents/hermes`, json({ label: 'x' }, 'PATCH'))
     expect(await label.json()).toMatchObject({ check: 'agent.main' })
@@ -205,12 +208,119 @@ describe('#58 which agents can use an app', () => {
     expect(after.agents.map((a: any) => [a.id, a.enabled])).toEqual([['hermes', false], ['helper', true], ['private', true]])
     const privAgent = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
     expect(privAgent.permissions.wizard_apps).toEqual(['notes'])
-    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps'])
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps'])
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // Ticked from the private agent's side now writes the gateway into its harness config.
     expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
     expect((await fetch(`${base}/wizard/v1/apps/nope/agents`)).status).toBe(404)
     expect(await (await fetch(`${base}/wizard/v1/apps/notes/agents`, json({ agents: ['ghost'] }, 'PUT'))).json()).toMatchObject({ check: 'agent.id' })
+  })
+
+  it('the redaction app (transcript-redaction slot) comes ticked for private agents: at creation and when installed later', async () => {
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const airlock = await fakeApp('airlock_submit')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const applied: string[] = []
+    const base = await start(dir, main, { agentRuntime: {
+      apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }),
+      deliver: async (_id: string, payload: any) => ({ verified: true, session_id: payload.session_id }),
+    } })
+    // An existing private agent, then Airlock is installed: it joins the private agent (and restarts it for the gateway).
+    const priv = await create(base, PRIVATE)
+    expect(priv.permissions).toMatchObject({ wizard_apps: [], agent_apps: [] })
+    applied.length = 0
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('airlock', airlock.url), provides: ['transcript-redaction'] }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const joined = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
+    expect(joined.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
+    expect(applied).toContain('private')
+    expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
+    expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['airlock__airlock_submit', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    // A new private agent starts with Airlock ticked even when the client sends an empty app list; other apps stay off.
+    const second = await create(base, { ...PRIVATE, label: 'Diary', permissions: { preset: 'private', wizard_apps: [], agent_apps: [] } })
+    expect(second.permissions).toMatchObject({ wizard_apps: ['airlock'], agent_apps: [] })
+    // The owner can untick it, and nothing re-adds it.
+    await fetch(`${base}/wizard/v1/agents/${second.id}`, json({ permissions: { wizard_apps: [] } }, 'PATCH'))
+    const music = await fakeApp('play')
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false),
+      { ...appEntry('airlock', airlock.url), provides: ['transcript-redaction'] }, appEntry('music', music.url)])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 50))
+    const after = (await (await fetch(`${base}/wizard/v1/agents/${second.id}`)).json()).agent
+    expect(after.permissions.wizard_apps).toEqual([])
+    expect((await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent.permissions.wizard_apps).toEqual(['airlock'])
+  })
+
+  it('an app tagged privacy: private joins private agents only; untagged Mizel-style slots count as private', async () => {
+    // James, 23 Oct 2026: "Rather than each app needing to declare itself, let's just make an optional one that tags it as private."
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main)
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    const diary = await fakeApp('entry_read')
+    const mizel = await fakeApp('get_transcript')
+    const before = [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false)]
+    writeApps(dir, [...before, { ...appEntry('diary', diary.url), privacy: 'private' }])
+    await fetch(`${base}/wizard/v1/agents`)
+    // No private agent yet: the install sheet is told to offer one, and nobody else gets the app.
+    const sheet = await (await fetch(`${base}/wizard/v1/apps/diary/agents`)).json()
+    expect(sheet).toMatchObject({ privacy: 'private', needs_private_agent: true })
+    expect(sheet.agents.filter((a: any) => a.enabled)).toEqual([])
+    // Setting up the private agent connects it automatically.
+    await create(base, PRIVATE)
+    const after = await (await fetch(`${base}/wizard/v1/apps/diary/agents`)).json()
+    expect(after).toMatchObject({ privacy: 'private', needs_private_agent: false })
+    expect(after.agents.filter((a: any) => a.enabled).map((a: any) => a.id)).toEqual(['private'])
+    // A later app with private-data slots (Mizel, installed before the tag) joins the private agent only.
+    writeApps(dir, [...before, { ...appEntry('diary', diary.url), privacy: 'private' },
+      { ...appEntry('mizel', mizel.url), provides: ['meeting-recording', 'meeting-transcripts'] }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 80))
+    const m = await (await fetch(`${base}/wizard/v1/apps/mizel/agents`)).json()
+    expect(m.privacy).toBe('private')
+    expect(m.agents.filter((a: any) => a.enabled).map((a: any) => a.id)).toEqual(['private'])
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('mizel__get_transcript')
+    // The owner can still choose a non-private agent by ticking it.
+    const put = await fetch(`${base}/wizard/v1/apps/diary/agents`, json({ agents: ['private', helper.id] }, 'PUT'))
+    expect(put.status).toBe(200)
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
+  })
+
+  it('an installed app that later turns private is taken back from the main and standard agents', async () => {
+    const notes = await fakeApp('note_add')
+    const diary = await fakeApp('entry_read')
+    const dir = await box({ notes: notes.url })
+    writeApps(dir, [appEntry('notes', notes.url), appEntry('diary', diary.url)])
+    const main = await fakeHermes('main')
+    const base = await start(dir, main)
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes', 'diary'] }))
+    const priv = await create(base, PRIVATE)
+    expect((await fetch(`${base}/wizard/v1/apps/diary/agents`, json({ agents: ['hermes', helper.id, priv.id] }, 'PUT'))).status).toBe(200)
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
+    expect(await toolNames(base, MAIN_TOKEN)).toContain('diary__entry_read')
+    // An update tags it private: standard grants never covered private data.
+    writeApps(dir, [appEntry('notes', notes.url), { ...appEntry('diary', diary.url), privacy: 'private' }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 80))
+    const sheet = await (await fetch(`${base}/wizard/v1/apps/diary/agents`)).json()
+    expect(sheet.privacy).toBe('private')
+    expect(sheet.agents.filter((a: any) => a.enabled).map((a: any) => a.id)).toEqual([priv.id])
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).not.toContain('diary__entry_read')
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('notes__note_add')
+    expect(await toolNames(base, MAIN_TOKEN)).not.toContain('diary__entry_read')
+    expect(await toolNames(base, gatewayKey(dir, priv.id))).toContain('diary__entry_read')
+    // The owner can tick it again explicitly, and a later sync keeps that choice.
+    expect((await fetch(`${base}/wizard/v1/apps/diary/agents`, json({ agents: [priv.id, helper.id] }, 'PUT'))).status).toBe(200)
+    writeApps(dir, [appEntry('notes', notes.url), { ...appEntry('diary', diary.url), privacy: 'private', version: '2' }])
+    await fetch(`${base}/wizard/v1/agents`)
+    await new Promise((r) => setTimeout(r, 80))
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toContain('diary__entry_read')
   })
 
   it('hermesConfigYaml: no gateway URL configured = no gateway for anyone', () => {
@@ -228,7 +338,7 @@ describe('#59 private agents are sealed', () => {
     const other = await fakeHermes('other', ['wizard_other_1'])
     const base = await start(dir, main)
     await create(base, PRIVATE, priv.port, dir)
-    const reader = await create(base, STANDARD('Reader'))
+    const reader = await create(base, STANDARD('Reader', { other_agents: 'none' }))
     const other2 = await create(base, STANDARD('Other'), other.port, dir)
     return { dir, base, main, priv, reader, other: other2 }
   }
@@ -312,5 +422,25 @@ describe('#59 private agents are sealed', () => {
     await fetch(`${base}/wizard/hermes/api/sessions?agent=${other.id}`)
     const std = await fetch(`${base}/wizard/hermes/api/sessions/wizard_other_1/messages`)
     expect(std.status).toBe(200)
+  })
+})
+
+// James, 23 Oct 2026: "give Philosopher full access to Wisdom" through the #58 tick. The daily box keeps the main
+// agent's runs unchanged (bridge off), which also turned off the gateway every container agent needs. 'gateway'
+// serves container agents their ticked apps and leaves the main agent exactly as 'off' does.
+describe('agentBridge gateway: container agents only', () => {
+  it('a ticked agent gets its apps; the main token, its kernel and its runs get nothing new', async () => {
+    const notes = await fakeApp('note_add')
+    const scanner = await fakeApp('scan')
+    const dir = await box({ notes: notes.url, scanner: scanner.url })
+    const main = await fakeHermes('main')
+    const base = await start(dir, main, { agentBridge: 'gateway' })
+    const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    const allowed = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'notes__note_add', arguments: {} })
+    expect(allowed.json.result.content[0].text).toBe('ran note_add')
+    expect((await mcp(base, MAIN_TOKEN, 'tools/list')).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${MAIN_TOKEN}` } })).status).toBe(404)
+    expect((await fetch(`${base}/wizard/v1/agent-context`, { headers: { Authorization: `Bearer ${gatewayKey(dir, helper.id)}` } })).status).toBe(200)
   })
 })

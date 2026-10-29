@@ -15,6 +15,11 @@ import hermes_import as h
 import restricted_import as r
 
 
+# A full import runs the source writer census (hermes_import.assert_no_writers): /proc/<pid>/fd and F_SETLEASE, Linux
+# only, like the boxes the importer runs on. Elsewhere (macOS) it refuses with FileNotFoundError('/proc') instead.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith('linux'), 'full import needs the Linux /proc writer census')
+
+
 class RestrictedImportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -36,7 +41,7 @@ class RestrictedImportTests(unittest.TestCase):
                 base = Path(mount.split('src=', 1)[1].split(',dst=')[0])
                 (base / '.import-transfer/home').rename(base / 'home')
             return type('Result', (), {'stdout': '', 'returncode': 0})()
-        self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown'), patch.object(r, 'helper'),
+        self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown', return_value={'entries': 1, 'changed': 1}), patch.object(r, 'helper'),
                       patch.object(r.rt.RestrictedDriver, 'start', return_value={'ok': True}),
                       patch.object(r, 'health'), patch.object(r, 'prepare_socket')]
         for p in self.mocks:
@@ -60,6 +65,7 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertEqual(r.reown.call_args_list[-2].args[1], 10000)
         self.assertEqual(r.reown.call_args_list[-1].args[1], os.getuid())
 
+    @LINUX_ONLY
     def test_registry_authority_allocates_pair_and_moves_inode(self):
         for rel in ['data/apps/host/file', 'hermes-agent/venv/bin/python', 'state/host/file']:
             p = self.home / rel
@@ -87,6 +93,7 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertEqual((self.home / 'data/apps/host/file').stat().st_ino, host_inode)
         self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
         self.assertFalse(folder.exists())
+    @LINUX_ONLY
     def test_outer_crash_steps_restore_exact_source(self):
         before = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
         inode = (self.home / 'state.db').stat().st_ino
@@ -101,6 +108,7 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 self.assertFalse((self.root / 'agents/restricted-fixture').exists())
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
+    @LINUX_ONLY
     def test_undo_crash_during_both_sealed_transfer_windows(self):
         before = {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
         inode = (self.home / 'state.db').stat().st_ino
@@ -115,6 +123,7 @@ class RestrictedImportTests(unittest.TestCase):
                 self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
                 shutil.rmtree(self.root / 'imports/restricted-fixture')
 
+    @LINUX_ONLY
     def test_rw_mount_groups_explicit_and_never_root(self):
         workspace = self.owner / 'workspace'
         workspace.mkdir(mode=0o775)
@@ -133,6 +142,7 @@ class RestrictedImportTests(unittest.TestCase):
             h.apply(self.plan, 'restricted-fixture', self.root)
         h.undo(self.root / 'imports/restricted-fixture/journal.json')
 
+    @LINUX_ONLY
     def test_explicit_gh_file_only_and_heavy_grant_survive_admission(self):
         gh = self.owner / '.config/gh'
         gh.mkdir(parents=True)
@@ -153,6 +163,115 @@ class RestrictedImportTests(unittest.TestCase):
         self.assertFalse((folder / 'home/native-home/.ssh').exists())
         h.undo(result['journal'])
         self.assertTrue(hosts.is_file())
+
+    @LINUX_ONLY
+    def test_many_file_home_archives_profiles_detaches_links_and_resumes_seal(self):
+        folder = self.home / 'many'
+        folder.mkdir()
+        for i in range(1000):
+            (folder / str(i)).write_text('synthetic')
+        external = self.owner / 'external'
+        external.write_text('unchanged')
+        os.link(external, self.home / 'external-alias')
+        os.link(self.home / 'config.yaml', self.home / 'config-alias')
+        for bundle in ['profiles', 'profiles-retired']:
+            profile = self.home / bundle / 'old'
+            profile.mkdir(parents=True)
+            (profile / 'config.yaml').write_text('model: {api_key: synthetic-profile-secret}\n')
+            (profile / 'SOUL.md').write_text('archived identity')
+        self.plan = h.scan(self.home, owner_home=self.owner)
+        self.plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp', image='fixture:restricted')
+        h.approve(self.plan)
+        self.assertGreater(self.plan['summary']['ownership_source_dry_run']['entries'], 1000)
+        inode = (self.home / 'state.db').stat().st_ino
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': 'prepared'}), self.assertRaises(SystemExit):
+            h.apply(self.plan, 'restricted-fixture', self.root)
+        stage = journal.parent / 'stage/agents/restricted-fixture'
+        for bundle in ['profiles', 'profiles-retired']:
+            self.assertFalse((stage / 'home' / bundle).exists())
+            self.assertEqual((stage / 'quarantine' / bundle / 'old/config.yaml').read_text(), 'model: {api_key: synthetic-profile-secret}\n')
+        self.assertEqual((stage / 'home/external-alias').stat().st_nlink, 1)
+        self.assertEqual((stage / 'home/config.yaml').stat().st_nlink, 1)
+        self.assertEqual(external.read_text(), 'unchanged')
+        r.rt.RestrictedDriver.start.assert_not_called()
+        before = journal.read_bytes()
+        h.resume(journal, dry_run=True)
+        r.reown.assert_called_with(stage / 'home', 10000, dry_run=True)
+        self.assertEqual(before, journal.read_bytes())
+        r.rt.RestrictedDriver.start.assert_not_called()
+        result = h.resume(journal)
+        folder = self.root / 'agents/restricted-fixture'
+        self.assertEqual((folder / 'home/state.db').stat().st_ino, inode)
+        self.assertEqual(json.loads(journal.read_text())['state'], 'applied')
+        self.assertFalse((folder / 'home/profiles').exists())
+        self.assertFalse((folder / 'home/profiles-retired').exists())
+        with self.assertRaisesRegex(h.ImportFailure, 'ownership_resume_requires_prepared'):
+            h.resume(journal)
+        h.undo(result['journal'])
+        self.assertEqual((self.home / 'profiles/old/SOUL.md').read_text(), 'archived identity')
+        self.assertEqual((self.home / 'state.db').stat().st_ino, inode)
+        self.assertEqual(external.read_text(), 'unchanged')
+
+    @LINUX_ONLY
+    def test_ownership_failure_retains_prepared_reservation_for_resume(self):
+        with patch.object(r, 'reown', side_effect=RuntimeError('interrupted helper')):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted helper'):
+                h.apply(self.plan, 'restricted-fixture', self.root)
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        self.assertEqual(json.loads(journal.read_text())['step'], 'prepared')
+        record = json.loads((self.root / 'agents/restricted-fixture/agent.json').read_text())
+        self.assertEqual(record['runtime']['admission'], 'importing')
+        r.rt.RestrictedDriver.start.assert_not_called()
+        result = h.resume(journal)
+        h.undo(result['journal'])
+        self.assertTrue((self.home / 'state.db').exists())
+
+    @LINUX_ONLY
+    def test_disabled_plugin_and_hooks_credentials_archive_without_blocking(self):
+        for rel in ['plugins/disabled/config.yaml', 'hooks/old/config.yaml']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True)
+            p.write_text('model: {api_key: fake-archived-value}\n')
+        plan = h.scan(self.home, owner_home=self.owner)
+        plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp', image='fixture:restricted')
+        self.assertEqual(plan['summary']['inline_credentials_blocking'], [])
+        plan['approved_plugins'] = ['disabled']
+        h.approve(plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'inline_credentials_require_secret_store'):
+            h.validate_plan(plan, self.root)
+        plan['approved_plugins'] = []
+        h.approve(plan)
+        result = h.apply(plan, 'restricted-fixture', self.root)
+        home = self.root / 'agents/restricted-fixture/home'
+        self.assertFalse((home / 'plugins/disabled').exists())
+        self.assertFalse((home / 'hooks').exists())
+        h.undo(result['journal'])
+        self.assertEqual((self.home / 'hooks/old/config.yaml').read_text(), 'model: {api_key: fake-archived-value}\n')
+
+    @LINUX_ONLY
+    def test_sealed_resume_recreates_socket_preparation_after_restart(self):
+        with patch.dict(os.environ, {'WIZARD_IMPORT_CRASH_AFTER': 'sealed'}), self.assertRaises(SystemExit):
+            h.apply(self.plan, 'restricted-fixture', self.root)
+        journal = self.root / 'imports/restricted-fixture/journal.json'
+        r.prepare_socket.reset_mock()
+        result = h.resume(journal)
+        r.prepare_socket.assert_called_once()
+        self.assertEqual(r.prepare_socket.call_args.args[1:], (self.plan, 'restricted-fixture'))
+        h.undo(result['journal'])
+
+    def test_profiles_refuse_option_is_approval_bound(self):
+        (self.home / 'profiles/old').mkdir(parents=True)
+        plan = h.scan(self.home, owner_home=self.owner, profiles_policy='refuse')
+        plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp')
+        h.approve(plan)
+        with self.assertRaisesRegex(h.ImportFailure, 'profiles_require_archive'):
+            h.validate_plan(plan, self.root)
+        plan['profiles_policy'] = 'archive'
+        with self.assertRaisesRegex(h.ImportFailure, 'plan_not_approved'):
+            h.validate_plan(plan, self.root)
+        with self.assertRaisesRegex(h.ImportFailure, 'profiles_policy_invalid'):
+            h.scan(self.home, owner_home=self.owner, profiles_policy='activate')
 
     def test_heavy_grant_requires_explicit_item_and_approval_hash(self):
         self.plan['grants']['heavy'] = True

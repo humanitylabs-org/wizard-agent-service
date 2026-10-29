@@ -1,0 +1,10 @@
+name: wizard-supervisor-tools
+version: 0.1.0
+description: Report feedback, ask workers and close durable Supervisor reviews.
+provides_tools:
+  - supervisor_report
+  - supervisor_ask
+  - supervisor_answer
+  - supervisor_build
+  - supervisor_lessons
+  - supervisor_close

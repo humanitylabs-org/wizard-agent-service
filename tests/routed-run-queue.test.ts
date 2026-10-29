@@ -26,6 +26,35 @@ test.each(['anthropic', 'tinfoil', 'local'])('routed queue pins the model but ne
   } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a capacity-delayed routed watcher durably restores archive state at actual dispatch', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'routed-watch-'))
+  const agent = { id: 'fixture-agent', model: { provider: 'local', model: 'fixture-model' } }
+  const disposers: Array<() => Promise<void>> = [], calls: any[] = []
+  let firstStatus = 'running', archived = true, sequence = 0
+  const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+    fetchAgent: async (_agent: any, path: string, init: any = {}) => {
+      if (path.startsWith('/api/sessions/') && init.method === 'PATCH') { archived = JSON.parse(init.body).archived; calls.push({ path, archived }); return Response.json({ archived }) }
+      if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model', archived } })
+      if (path === '/v1/runs' && init.method === 'POST') { archived = false; const run_id = `fixture-run-${++sequence}`; calls.push({ path, run_id }); return Response.json({ run_id, status: 'running' }, { status: 202 }) }
+      if (path === '/v1/runs/fixture-run-1') return Response.json({ run_id: 'fixture-run-1', status: firstStatus })
+      return Response.json({ run_id: 'fixture-run-2', status: 'running' })
+    } }
+  try {
+    const queues = createRoutedQueues({ registry, own: (f: any) => disposers.push(f), pollIntervalMs: 0, maxActive: 1 })
+    await queues.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': 'blocking-run' }, body: JSON.stringify({ session_id: 'wizard_blocker', input: 'hold', model: 'fixture-model' }) })
+    archived = true
+    const watcher = await queues.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': 'watcher-run', 'X-Wizard-Schedule-Kind': 'watch', 'X-Wizard-Watcher-Preserve': '1' }, body: JSON.stringify({ session_id: 'wizard_origin', input: 'check', model: 'fixture-model' }) })
+    const watcherId = (await watcher.json()).run_id
+    assert.equal(sequence, 1)
+    assert.equal(archived, true)
+    firstStatus = 'completed'
+    await queues.fetch(agent, `/v1/runs/${watcherId}`)
+    assert.equal(sequence, 2)
+    assert.equal(archived, true)
+    assert.deepEqual(calls.filter(call => 'archived' in call).map(call => call.archived), [true])
+  } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
 test('queue authority remains fixed across admission and restart', async () => {
   const root=mkdtempSync(join(tmpdir(),'routed-authority-'))
   const options={statePath:join(root,'queue.db'),agentId:'fixture-agent',pollIntervalMs:0,launch:async()=>({payload:{status:'running'},upstreamRunId:'fixture-run'}),lookup:async()=>({payload:{status:'running'}})}

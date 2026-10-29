@@ -105,27 +105,29 @@ def _jobs_of(apps: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
-                  files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False) -> str:
+                  files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False, skills_index: bool | None = None) -> str:
     """Twin of agent-bridge.mjs renderKernel: FIXED text, no per-app list unless job_map."""
     apps = apps or []
     hermes = harness == "hermes"
+    pointers = hermes and skills_index is not False
     meta = f"mcp__{MCP_SERVER_NAME}__{META_TOOL}" if hermes else META_TOOL
     name = f"mcp__{MCP_SERVER_NAME}__<app>__<tool>" if hermes else "<app>__<tool>"
     id_note = " (<app> = app id, - as _)"
     text = [
-        "Wizard OS: you are the owner's agent on this box. Installed apps do jobs for the owner.",
-        *(["To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow."] if hermes else []),
+        "Wizard OS: you are the owner's agent on this box. Its apps do jobs for them.",
+        *(["To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.",
+           "Help, reminders, tips: load `wizard-guide`."] if hermes else []),
         f"Files root: {files_root}; app tool paths are relative to it.",
-        "When a request matches a wizard-job-<job> skill in your skills list:" if hermes else "When a request matches a job below:",
-        "1. Load that skill with skill_view for tool names and purposes." if hermes else "1. Use the app named for that job.",
+        "When a request matches a wizard-job-<job> skill in your skills:" if pointers else "When a request matches a job below:",
+        "1. Load it with skill_view for tool names and purposes." if pointers else "1. Use the app named for that job.",
         f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`{id_note}."
         + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
         "3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.",
         "Use the installed app for its job.",
-        f'"What apps do I have?": call `{meta}`. Report unreachable tools (`wam doctor`).',
+        f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
         "Save routing-only app-job skills.",
     ]
-    if job_map or not hermes:
+    if job_map or not pointers:
         rows = [f"- {job_words(job)} -> " + ", ".join(f"{a['name']} (`{agent_tool_name(a['prefix'], '*', harness)}`)" for a in owners)
                 for job, owners in _jobs_of(apps)[:JOB_MAP_LINES]]
         text += ["", "Jobs on this box:", *(rows or ["- (no apps installed yet)"])]
@@ -158,14 +160,15 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
         for a in owners:
             known = [_tool_entry(t) for t in (tools.get(a["id"]) or [])[:8]]
             down = "" if a["status"] == "running" else f" It is {a['status']} right now: tell the owner (`wam doctor`)."
-            lines.append(f"- {a['name']}: pick the tool whose purpose matches the request and call it.{down}")
+            how = (f"load its skill `{a['id']}` with skill_view first (it holds the app's workflow and model rules), "
+                   "then call the tool whose purpose matches the request." if a["skill"]
+                   else "pick the tool whose purpose matches the request and call it.")
+            lines.append(f"- {a['name']}: {how}{down}")
             if known:
                 lines += [f"  - `{agent_tool_name(a['prefix'], n, harness)}`" + (f": {p}" if p else "") for n, p in known]
             else:
                 lines.append(f"  - `{agent_tool_name(a['prefix'], '*', harness)}`")
             lines.append(f"  Its address (for files it serves): {a['address']}")
-            if a["skill"]:
-                lines.append(f"  Its skill `{a['id']}` (skill_view) has details for long or unusual jobs; the tools above come first.")
         tail = " If one is not in your tool list, run it with tool_call and that exact name." if harness == "hermes" else ""
         out[job_skill_name(job)] = "\n".join([
             "---",

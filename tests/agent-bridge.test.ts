@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -95,7 +95,7 @@ describe('agent bridge: kernel', () => {
   it('routes app development to the OS builder before ordinary job routing, including an empty box', () => {
     for (const apps of [[], bridgeApps({ apps: [app('hello-wizard', 1)] })]) {
       const text = renderKernel(apps)
-      expect(text).toContain('To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view')
+      expect(text).toContain('To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view')
       expect(text.indexOf('wizard-builder')).toBeLessThan(text.indexOf('wizard-job-<job>'))
       expect(text).toContain('follow its coding and wam workflow')
       expect(text).toContain('For ordinary app use: Never search the disk')
@@ -116,11 +116,84 @@ describe('agent bridge: kernel', () => {
     const diag = readFileSync(join(dir, 'skills', 'wizard-job-diagnostics', 'SKILL.md'), 'utf8')
     expect(diag).toContain('name: wizard-job-diagnostics')
     expect(diag).toContain('description: Use when the owner asks for diagnostics.')
-    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n  Its skill `hello-wizard` (skill_view)')
+    expect(diag).toContain("- Hello Wizard: load its skill `hello-wizard` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n")
+    expect(diag).not.toContain('come first')
     expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__transcriber__*`')
     expect(existsSync(join(dir, 'skills', '_jobs'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'wizard-job-gone'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true) // app skills untouched
+  })
+
+  it('acceptance: three apps (two share a job, one has none), removal and idempotent re-runs', () => {
+    const dir = box([])
+    const video = app('defleur-video', 3, { name: 'DeFleur Video', provides: ['short-form-video', 'video-editing'] })
+    const clipper = app('clipper', 4, { provides: ['short-form-video'], skill: '' })
+    const notes = app('notes', 5, { provides: [] })
+    const listing = () => readdirSync(join(dir, 'skills')).filter((n) => n.startsWith('wizard-job-')).sort()
+    const read = (name) => readFileSync(join(dir, 'skills', name, 'SKILL.md'), 'utf8')
+    const write = (apps) => { writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps })); return writePointerSkills(dir, bridgeApps({ apps })) }
+
+    // Install all three: one pointer per job; the shared job names both apps; the app with no job gets none.
+    expect(write([video, clipper, notes])).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).toBe([
+      '---',
+      'name: wizard-job-short-form-video',
+      'description: Use when the owner asks for short-form video. The installed Clipper or DeFleur Video app does it; call its tools, never search files.',
+      '---',
+      '',
+      '# short-form video',
+      '',
+      '- Clipper: pick the tool whose purpose matches the request and call it.',
+      '  - `mcp__wizard__clipper__*`',
+      '  Its address (for files it serves): http://127.0.0.1:4',
+      "- DeFleur Video: load its skill `defleur-video` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.",
+      '  - `mcp__wizard__defleur_video__*`',
+      '  Its address (for files it serves): http://127.0.0.1:3',
+      '',
+      'Tools are on the `wizard` MCP server. If one is not in your tool list, run it with tool_call and that exact name. Paths are relative to the owner\'s Files root.',
+      '',
+      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
+      '',
+    ].join('\n'))
+    expect(read('wizard-job-video-editing')).toContain('The installed DeFleur Video app does it')
+    expect(read('wizard-job-video-editing')).not.toContain('Clipper')
+    for (const name of listing()) expect(read(name)).not.toMatch(/notes/iu)
+
+    // Re-running on the same apps.json changes nothing on disk (same bytes, same mtimes).
+    const stat = (name) => statSync(join(dir, 'skills', name, 'SKILL.md')).mtimeMs
+    const before = Object.fromEntries(listing().map((n) => [n, [read(n), stat(n)]]))
+    const later = new Date(Date.now() + 5000)
+    for (const name of listing()) utimesSync(join(dir, 'skills', name, 'SKILL.md'), later, later)
+    const pinned = Object.fromEntries(listing().map((n) => [n, stat(n)]))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    for (const name of listing()) { expect(read(name)).toBe(before[name][0]); expect(stat(name)).toBe(pinned[name]) }
+
+    // Uninstall Clipper: the shared pointer now names only DeFleur Video.
+    write([video, notes])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).not.toContain('Clipper')
+    expect(read('wizard-job-short-form-video')).toContain('The installed DeFleur Video app does it')
+
+    // Uninstall DeFleur Video: both of its pointers disappear; app skills (not ours) stay.
+    expect(write([notes])).toEqual([])
+    expect(listing()).toEqual([])
+    expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true)
+
+    // The Hermes plugin does the same removal when it is the writer (service down).
+    write([video, clipper, notes])
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [clipper] }))
+    const future = new Date(Date.now() + 10000)
+    utimesSync(join(dir, 'apps.json'), future, future)
+    const py = (code) => execFileSync('python3', ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import kernel; from pathlib import Path; ${code}`, dir]).toString().trim()
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe("['wizard-job-short-form-video']")
+    expect(listing()).toEqual(['wizard-job-short-form-video'])
+    expect(read('wizard-job-short-form-video')).toBe(pointerSkills(bridgeApps({ apps: [clipper] }))['wizard-job-short-form-video'])
+    // and is a no-op once its stamp is newer than apps.json
+    const past = new Date(Date.now() - 10000)
+    utimesSync(join(dir, 'apps.json'), past, past)
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe('None')
   })
 
   it('the Python plugin renders the same bytes as the service', () => {
@@ -135,6 +208,11 @@ describe('agent bridge: kernel', () => {
       expect(py("print(kernel.render_kernel(apps), end='')", reg)).toBe(renderKernel(bridgeApps(reg)))
       expect(py("print(kernel.render_kernel(apps, job_map=True), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { jobMap: true }))
       expect(py("print(kernel.render_kernel(apps, 'generic'), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { harness: 'generic' }))
+      // An agent without the main skills index (any non-main agent): no pointer wording, its own jobs inline.
+      const noIndex = renderKernel(bridgeApps(reg), { skillsIndex: false })
+      expect(py("print(kernel.render_kernel(apps, skills_index=False), end='')", reg)).toBe(noIndex)
+      expect(noIndex).not.toContain('wizard-job-<job>')
+      expect(noIndex).toContain('Jobs on this box:')
       expect(JSON.parse(py('print(json.dumps(kernel.pointer_skills(apps)))', reg))).toEqual(pointerSkills(bridgeApps(reg)))
       const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare']]))
       expect(JSON.parse(py(`print(json.dumps(kernel.pointer_skills(apps, tools=${JSON.stringify(JSON.stringify(tools))} and json.loads(${JSON.stringify(JSON.stringify(tools))}))))`, reg))).toEqual(pointerSkills(bridgeApps(reg), { tools }))
@@ -184,8 +262,9 @@ describe('agent bridge: MCP gateway', () => {
     expect(init.json.result.instructions).toContain('wizard-job-<job>')
     const list = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, init.session)
     const names = list.json.result.tools.map((t) => t.name)
-    expect(names).toEqual(['wizard_apps', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
-    expect(list.json.result.tools[1].description).toBe('[Hello Wizard · diagnostics] Current UTC time.')
+    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_devices', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
+    expect(names).toContain('spaces_list')
+    expect(list.json.result.tools.find(t => t.name === 'hello_wizard__wizard_time').description).toBe('[Hello Wizard · diagnostics] Current UTC time.')
     const call = await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_echo', arguments: { text: 'secret-arg' } } }, init.session)
     expect(call.json.result.content[0].text).toBe('ran wizard_echo {"text":"secret-arg"}')
     const meta = await rpc(base, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'wizard_apps', arguments: {} } }, init.session)
@@ -278,8 +357,8 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     expect(seen.at(-1)).toContain('Transcriber')
     // The delta names only the new app. The separate app-provenance catalogue (live 41de73a, every run) lists
     // every installed app id/name as data, so the delta rule is checked on the text before that catalogue.
-    const delta = String(seen.at(-1)).split('Installed Wizard app IDs and names (data):')[0]
+    const delta = String(seen.at(-1)).split('Installed app IDs and names (data):')[0]
     expect(delta).not.toContain('Hello Wizard')
-    expect(seen.at(-1)).toContain('Installed Wizard app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
+    expect(seen.at(-1)).toContain('Installed app IDs and names (data): [{"id":"hello-wizard","name":"Hello Wizard"},{"id":"transcriber","name":"Transcriber"}')
   })
 })

@@ -181,7 +181,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     expect(first).toContain('- video editing -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
     // A stopped app does no job in the kernel/job map. It is still installed, so the separate app-provenance
     // catalogue (live 41de73a) lists its id/name as data; check the kernel text before that catalogue.
-    expect(first.split('Installed Wizard app IDs and names (data):')[0]).not.toContain('Stopped')
+    expect(first.split('Installed app IDs and names (data):')[0]).not.toContain('Stopped')
     expect(first).toContain('{"id":"stopped-app","name":"Stopped"}')
     expect(first).not.toContain('http://127.0.0.1:20002/mcp')
     expect(first).not.toContain(join(dir, 'skills'))
@@ -288,10 +288,10 @@ describe('fast router and delegation mode settings', () => {
     expect(normalizeSettings({ fast_router: { endpoint: 'file:///etc/passwd', key_env: 'lower' } }).fast_router).toMatchObject({ endpoint: '', key_env: '' })
   })
   it('detached instructions replace the join sentence', async () => {
-    const { runInstructions, WIZARD_RUN_INSTRUCTIONS } = await import('../server/service.mjs')
-    expect(runInstructions({ join: true })).toBe(WIZARD_RUN_INSTRUCTIONS)
+    const { runInstructions, OWN_STYLE_RUN_INSTRUCTIONS } = await import('../server/service.mjs')
+    expect(runInstructions({ join: true })).toBe(OWN_STYLE_RUN_INSTRUCTIONS)
     const detached = runInstructions({ join: false })
     expect(detached).not.toContain('Join any delegated work in this run')
-    expect(detached).toContain('Wizard returns their results to you as a follow-up turn')
+    expect(detached).toContain('Wizard brings their results back to you as a follow-up turn')
   })
 })

@@ -288,10 +288,9 @@ class ImportTests(unittest.TestCase):
         plan = self.plan()
         for entry in plan['credentials']:
             if entry['kind'] == 'config-field': entry['approved'] = True
-        result = self.apply(m.approve(plan))
-        imported = m.load_yaml((self.wizard / 'agents/fixture-agent/home/config.yaml').read_text())
-        self.assertNotIn('WIZARD_HEAVY_TOKEN', imported.get('env', {}))
-        self.undo(result)
+        with self.assertRaisesRegex(m.ImportFailure, 'inline_credentials_require_secret_store'):
+            self.apply(m.approve(plan))
+        self.assertFalse((self.wizard / 'agents').exists())
         self.assertEqual(m.load_yaml((self.home / 'config.yaml').read_text()), config)
 
     def test_corrupt_backup_fails_before_any_rollback_mutation(self):
@@ -552,6 +551,7 @@ class ImportTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN="fixture-secret"', (self.home / '.env').read_text())
         self.assertTrue(json.loads((self.home / 'cron/jobs.json').read_text())['jobs'][0]['enabled'])
         self.assertTrue(m.load_yaml((self.home / 'config.yaml').read_text())['gateway']['platforms']['telegram']['enabled'])
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'the writer census reads /proc/<pid>/fd and F_SETLEASE: Linux only')
     def test_live_writable_fd_refuses_move(self):
         # A different process, same owner, holding a writable FD blocks rename even for rehearsal.
         import subprocess, sys

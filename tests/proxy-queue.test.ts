@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen, readActiveHumanSessionIds, WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
+import { createWizardServer, listen, readActiveHumanSessionIds, OWN_STYLE_RUN_INSTRUCTIONS as WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
 import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 
 const servers: ReturnType<typeof createServer>[] = []
@@ -42,6 +42,8 @@ describe('Wizard proxy capacity queue', () => {
     insert.run('wizard_recent', 'api_server', 0, null, 2, now - 10, now - 10, 'Tool running')
     insert.run('wizard-assistant-external', 'api_server', 0, null, 2, now - 10, now - 10, 'Tool running')
     insert.run('idle', 'webui', 0, null, 2, now - 10, now - 10, '')
+    // Helper heartbeat on a parent whose turn ended: waiting, not a live turn.
+    insert.run('wizard_helper_parent', 'api_server', 0, null, 2, now - 10, now - 10, 'delegate_task: subagent running terminal (iteration 4/250)')
     insert.run('child', 'webui', 0, 'leased', 2, now - 10, now - 10, 'Tool running')
     database.prepare('INSERT INTO session_turn_leases VALUES (?, ?)').run('leased', now + 60)
     database.close()
@@ -139,6 +141,7 @@ describe('Wizard proxy capacity queue', () => {
       hermesKey: 'fixture-key',
       requireAccess: false,
       hermesStatePath: statePath,
+      wizardOsHome: directory,
       canonicalSessionReader: () => sessions,
       runQueueStatePath: join(directory, 'queue.sqlite3'),
       runQueueMaxActive: 2,

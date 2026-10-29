@@ -25,7 +25,7 @@ Historical evidence/receipt paths are explicitly exempt, not executable examples
 - **Publishing:** merging to `main` triggers the **publish-image** workflow, which publishes the public image. Confirm the run succeeded. Live boxes run `main`.
 - **Real conversation content** never goes into fixtures, tests or PR text. Use synthetic threads.
 
-<!-- wizard-os-team-rules v2 (19 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
+<!-- wizard-os-team-rules v4 (24 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
 ## Wizard OS team rules (identical in every repo)
 
 Wizard OS is built by James, Jan and Miguel together with their agents. Archimedes commits as `defleur-agents` and Oscar as `oscarhenrycollins`. Every repo belongs to Wizard OS as a whole, and no repo belongs to one person. Make the change that is best for the whole system, and build on each other's work.
@@ -67,9 +67,9 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
   - `priority: 1` (review first), `priority: 2` (review next) and `priority: 3` (when there is time).
   - `needs: james review`: the PR waits for James to accept it or drop it.
   - `preview only`: an experiment that must not be merged.
-  - `from: <where it already runs>`, for example `from: miguel test port`: the change is already in daily use there.
+  - `from: <where it already runs>`, for example `from: miguel test port`: the change is already in daily use there. A box in developer mode (below) uses `from: <owner> dev build`.
 
-  Use the same tiers for issues.
+  Use the same tiers for issues. **Add the label when you open the PR** (`gh pr create --label "tier: ..."`); a PR without one shows as "No tier" on the board below. Agents label every PR they open, and add the missing label when they find one of their own without it.
 - **Open the PR once your first commit is pushed.** Use a draft until it is ready: `gh pr create --base main --draft`.
 - **Keep each PR to one change** that a reader can follow in a few minutes. Split unrelated fixes into separate PRs.
 - **Title:** after the tier prefix, state the outcome in plain words ("Recommended fix: threads open instantly from the on-device cache"), rather than the mechanism.
@@ -80,18 +80,32 @@ Wizard OS is built by James, Jan and Miguel together with their agents. Archimed
   4. **Links:** related issues, the matching PRs in other repos, and the decision or spec this change follows.
 - **If `main` moves while you work,** merge `origin/main` into your branch and re-run the checks.
 
+### Two routes for every change
+
+Every change reaches `main` one of two ways: **propose a fix** (`tier: recommended fix`) or **propose a feature** (any other tier). There is no third "my build" lane. Owners who only want Wizard to look or behave differently use their skin, settings or apps. People who change Wizard itself can run their branch first on a box in **developer mode**, which follows a named branch or fork instead of `latest`/`stable` (DECISIONS #97, wizard-os `releases/README.md`). That box is a test bench; the change still lands as a fix or feature PR.
+
+### Tracking
+
+**The [Wizard OS · PR pipeline](https://github.com/orgs/humanitylabs-org/projects/1) board is the source of truth for where every PR is**, across all repos: Draft → In review → Merged → On Latest → On Stable, or Dropped. wizard-os `tools/pr_board.py` syncs it every 15 minutes from the PRs and the release pointers, so nobody moves cards by hand; keep the tier label right and the board stays right. Check it before asking someone where a change is, and link it in status updates instead of listing PRs.
+
 ### Merging
 
-- **The author merges their own PR** once three things hold:
-  - the required checks are green;
-  - the Verified section reflects real results;
-  - nothing in the PR needs a decision (see the next section).
+DECISIONS #96 (24 Oct 2026). `main` keeps **0 required approvals** and non-strict status checks, so process never blocks work.
 
-  There is no wait for a human approval.
+- **Humans are the only admins:** James (`jdefleur`), Jan (`JanMesaric`) and Miguel (`mistermizel`). Agent accounts (`defleur-agents`, `oscarhenrycollins`) hold Write and sit on `main`'s review-bypass list; they never change branch rules, collaborators or repository settings.
+- **Fixes ship immediately.** A `tier: recommended fix` PR that is not on the high-risk list below merges by its author, human or agent, without waiting for another review, once all of these hold:
+  - a regression test that fails on `main` before the fix and passes after it;
+  - the required checks are green;
+  - every review thread is resolved (Codex or Agent review findings fixed or answered).
+
+  The release carrying it can go to stable the same day (DECISIONS #82).
+- **Everything else needs a review by someone other than its author**, and that reviewer may be an agent (the Agent review workflow or another collaborator's agent). This covers features, maintenance, taste and defaults, and the **high-risk list, fixes included**: security or privacy boundaries, host powers or credentials, migrations or anything that deletes or rewrites owner data, and a release that reaches every install. A high-risk fix still ships the same day; it just gets that review first. Once the review, the required checks and resolved conversations hold, the author's agent merges; no human has to visit GitHub to click merge.
+- **Every PR gets an agent review.** The **Agent review** workflow (`humanitylabs-org/wizard-ux` `tools/pr-agent-review.mjs`) posts one review on each push to a ready PR. It flags taste changed for everyone instead of in your own skin, likely breaking changes, secrets and personal paths or private hosts, and `docs/COMPONENTS.md` reuse problems. Fix every 🔴 before merging; each 🟡 is something the reviewer checks.
+- **The Verified section must reflect real results** before anything merges.
 - **What each tier means for merging:**
-  - **Recommended fixes and maintenance** merge on those conditions.
-  - **Strong suggestions** merge on them too, unless they change something James sees or uses every day. In that case add `needs: james review` and wait.
-  - **Opinionated changes** to the shell's look or UX go into your own skin: wizard-ux `web/skins/<yours>/` plus your `SKINS` entry (see wizard-ux `web/skins/README.md`). A PR that only touches your own skin merges on the conditions above. Never add a Settings toggle or core code for one person's taste.
+  - **Recommended fixes** merge on the fix conditions above.
+  - **Strong suggestions and maintenance** merge after a non-author review, unless they change something James sees or uses every day. In that case add `needs: james review` and wait.
+  - **Opinionated changes** to the shell's look or UX go into your own skin: wizard-ux `web/skins/<yours>/` plus your `SKINS` entry (see wizard-ux `web/skins/README.md`). Never add a Settings toggle or core code for one person's taste.
   - **Making something the default for everyone** (any opinionated change outside your own skin) carries `needs: james review` and waits for James. Bring it once you have used it in your skin, with a preview he can try.
   - **`preview only`** PRs never merge.
 - **Use "Create a merge commit"**, then delete the branch.
@@ -124,10 +138,6 @@ Carry on with other work while you wait.
 
 Anything shipped, tagged or handed to a tester is built only from commits already on GitHub. Release notes name the repo, branch and commit.
 
-### Chat feature parity
-
-Every new or changed chat feature must add/update `qa/agent-parity/features.json` and a behavioral per-kind test (main, host-profile, container, restricted). Shared-helper tests alone do not establish parity. `npm run test:agent-parity` is included in `npm test`, CI and the deploy helper's existing mandatory npm-test gate. Missing server checks fail coverage; policy exemptions require explicit executable policy evidence, never a blanket agent exemption. Browser/live evidence must be distinguished from synthetic HTTP fixtures. Never run QA against an existing private agent or read its sessions/home.
-
 ### Safety
 
 - **Keep secrets and private data out of commits.** That covers keys, tokens, passwords, `.env` files, personal data, real conversation content, owner hostnames and home-directory paths. Put these in config or environment variables. Private repos are still visible to every org member.
@@ -138,3 +148,7 @@ Every new or changed chat feature must add/update `qa/agent-parity/features.json
 
 Pick up work from the open issues in this repo and from wizard-os `docs/WORK_OUTSTANDING.md`. For how the pieces fit together and what is already decided, read wizard-os `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`.
 <!-- /wizard-os-team-rules -->
+
+## Chat feature parity (this repo)
+
+Every new or changed chat feature must add/update `qa/agent-parity/features.json` and a behavioral per-kind test (main, host-profile, container, restricted). Shared-helper tests alone do not establish parity. `npm run test:agent-parity` is included in `npm test`, CI and the deploy helper's existing mandatory npm-test gate. Missing server checks fail coverage; policy exemptions require explicit executable policy evidence, never a blanket agent exemption. Browser/live evidence must be distinguished from synthetic HTTP fixtures. Never run QA against an existing private agent or read its sessions/home.

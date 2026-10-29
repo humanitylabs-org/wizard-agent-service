@@ -1,0 +1,169 @@
+[
+  {
+    "name": "supervisor_report",
+    "description": "Report owner feedback to the Supervisor and continue your own task. Do not implement the process fix. Completion is for Supervisor builders only. Private/siloed agents refuse.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "feedback",
+            "completion"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "what_happened": {
+          "type": "string",
+          "description": "At most 400 words."
+        },
+        "feedback_verbatim": {
+          "type": "string",
+          "description": "Owner's exact words; required for feedback."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "excerpt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "ref"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "proposed_home": {
+          "type": "string"
+        },
+        "client_report_id": {
+          "type": "string",
+          "description": "Stable unique ID for this report. Reuse it on an exact retry only."
+        }
+      },
+      "required": [
+        "title",
+        "what_happened",
+        "client_report_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supervisor_ask",
+    "description": "Ask the originating worker a question at its next turn boundary. Review only; maximum two; timeout after 30 minutes.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supervisor_answer",
+    "description": "Answer a Supervisor question from your own worker thread.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supervisor_build",
+    "description": "Start a fresh builder on the main agent. Review only; use normal authorization and delivery rules.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "brief": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "brief"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supervisor_lessons",
+    "description": "Search prior Supervisor reviews and their durable outcomes before designing a fix.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supervisor_close",
+    "description": "Close this review after independent verification. Posts one plain closing line in the origin thread. needs_you for wider authority.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "shipped",
+            "covered",
+            "needs_you"
+          ]
+        },
+        "home": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "description": "One short plain line: what changed; no internal jargon."
+        },
+        "covered_by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "home",
+        "summary"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

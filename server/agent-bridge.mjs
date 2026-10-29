@@ -8,9 +8,9 @@
 //                   which skills.external_dirs puts into the agent's normal skills index.
 // The Hermes plugin (hermes-plugin/wizard-os) renders the same kernel and pointers in Python;
 // tests/agent-bridge.test.ts keeps the two renderers byte-identical.
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
+import { constants, opendirSync, openSync, closeSync, fstatSync, lstatSync, realpathSync, readSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
@@ -98,26 +98,30 @@ function jobsOf(apps) {
  * `jobMap` adds the fallback job -> app map (max 12 lines); the generic harness, which has no skills index,
  * always gets it.
  */
-export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false } = {}) {
+export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false, skillsIndex } = {}) {
   const hermes = harness === 'hermes'
+  // Only the main agent's skills index holds wizard-job-* pointers (#58). Any other agent on the gateway is told the
+  // jobs directly, limited to the apps on its own list.
+  const pointers = hermes && skillsIndex !== false
   const meta = hermes ? `mcp__${MCP_SERVER_NAME}__${META_TOOL}` : META_TOOL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
   const text = [
-    'Wizard OS: you are the owner\'s agent on this box. Installed apps do jobs for the owner.',
-    ...(hermes ? ['To build, port, redesign or modify a Wizard app, first load `wizard-builder` with skill_view; follow its coding and wam workflow.'] : []),
+    'Wizard OS: you are the owner\'s agent on this box. Its apps do jobs for them.',
+    ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
+      'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
-    hermes
-      ? 'When a request matches a wizard-job-<job> skill in your skills list:'
+    pointers
+      ? 'When a request matches a wizard-job-<job> skill in your skills:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load that skill with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
+    ...(pointers ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
-    `"What apps do I have?": call \`${meta}\`. Report unreachable tools (\`wam doctor\`).`,
+    `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Save routing-only app-job skills.',
   ]
-  if (jobMap || !hermes) {
+  if (jobMap || !pointers) {
     const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
       `- ${jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
     text.push('', 'Jobs on this box:', ...(rows.length ? rows : ['- (no apps installed yet)']))
@@ -163,13 +167,15 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
     const lines = owners.flatMap((a) => {
       const known = (tools[a.id] || []).slice(0, 8).map(toolEntry)
       const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
-      const head = `- ${a.name}: pick the tool whose purpose matches the request and call it.${down}`
+      const how = a.skill
+        ? `load its skill \`${a.id}\` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.`
+        : 'pick the tool whose purpose matches the request and call it.'
+      const head = `- ${a.name}: ${how}${down}`
       const rows = known.length
         ? known.map((t) => `  - \`${agentToolName(a.prefix, t.name, harness)}\`${t.purpose ? `: ${t.purpose}` : ''}`)
         : [`  - \`${agentToolName(a.prefix, '*', harness)}\``]
       const address = [`  Its address (for files it serves): ${a.address}`]
-      const skill = a.skill ? [`  Its skill \`${a.id}\` (skill_view) has details for long or unusual jobs; the tools above come first.`] : []
-      return [head, ...rows, ...address, ...skill]
+      return [head, ...rows, ...address]
     })
     out[jobSkillName(job)] = [
       '---',
@@ -330,8 +336,9 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
-  agentForToken = () => '', appsFor = () => null,
+  agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null,
 }) {
+  const shared = sharedAgentTools(agents, log)
   let mtime = null
   let apps = []
   const toolCache = new Map() // app id -> { tools, at }
@@ -427,7 +434,7 @@ export function createAgentBridge({
 
   async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
-    const out = [metaTool()]
+    const out = [metaTool(), ...(builtins?.list?.(agentId) || []), ...shared.list()]
     const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
     for (const [app, tools] of lists) {
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
@@ -443,7 +450,7 @@ export function createAgentBridge({
   async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
     const names = await toolNames(agentId)
     const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
-    return { content: [{ type: 'text', text: lines.length ? `Installed Wizard apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
+    return { content: [{ type: 'text', text: lines.length ? `Installed apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
   }
 
   const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
@@ -451,6 +458,13 @@ export function createAgentBridge({
   async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const started = Date.now()
+    const sharedResult = shared.call(name, args, agentId)
+    if (sharedResult) return sharedResult
+    const builtin = builtins && await builtins.call(name, args && typeof args === 'object' ? args : {}, agentId)
+    if (builtin) {
+      log(JSON.stringify({ event: 'call', app: 'wizard', tool: clean(String(name), 80), agent: agentId, ms: Date.now() - started, ok: !builtin.isError }))
+      return builtin
+    }
     if (name === META_TOOL) {
       const r = await wizardApps(agentId)
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
@@ -461,7 +475,7 @@ export function createAgentBridge({
     const tool = app ? name.slice(app.prefix.length + 2) : ''
     if (!app || !tool) {
       log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
-      return failure(`No installed Wizard app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
+      return failure(`No installed app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
     }
     let result
     let ok = false
@@ -520,7 +534,7 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap }),
+          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap, skillsIndex: agentId === GATEWAY_MAIN_AGENT && writeSkills && Boolean(osHome) }),
         })
       }
       if (method === 'ping') return reply({})
@@ -647,3 +661,156 @@ export function listJobSkills(osHome) {
   try { return readdirSync(join(osHome, 'skills')).filter((n) => n.startsWith(JOB_SKILL_PREFIX)).sort() } catch { return [] }
 }
 
+// Read-only cross-agent state. Sessions belong to Agent History, not this gateway.
+export const SHARED_AGENT_TOOLS = ['list', 'memory_read', 'skills_list', 'skill_read', 'notes_list', 'notes_read'].map(name => `wizard_agents__${name}`)
+const SHARED_READ_CAP = 64 * 1024
+const SHARED_LIST_CAP = 200
+const stateFailure = code => { throw new Error(code) }
+const safeStateParts = path => {
+  if (typeof path !== 'string' || !path || path.length > 300 || path.includes('\\')) return false
+  return path.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/u.test(part)
+    && !/(?:^|[._ -])(?:env|auth|keys?|credentials?|secrets?|tokens?|passwords?|config|state)(?:[._ -]|$)/iu.test(part))
+}
+
+/** Walk every component without symlinks, then realpath-check against the configured home. */
+function statePath(home, relative) {
+  if (!home || !safeStateParts(relative)) stateFailure('agent.path_refused')
+  const homeStat = lstatSync(home)
+  if (!homeStat.isDirectory() || homeStat.isSymbolicLink()) stateFailure('agent.path_refused')
+  const root = realpathSync(home)
+  let target = root
+  for (const part of relative.split('/')) {
+    target = join(target, part)
+    const st = lstatSync(target)
+    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile()) || (st.isFile() && st.nlink !== 1)) stateFailure('agent.path_refused')
+  }
+  const actual = realpathSync(target)
+  if (!actual.startsWith(`${root}${sep}`)) stateFailure('agent.path_refused')
+  return actual
+}
+
+/** Bounded descriptor reads; special files and hardlinks cannot masquerade as notes. */
+function stateText(home, relative) {
+  const file = statePath(home, relative)
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const st = fstatSync(fd)
+    if (!st.isFile() || st.nlink !== 1) stateFailure('agent.path_refused')
+    if (st.size > SHARED_READ_CAP) stateFailure('agent.too_large')
+    const current = lstatSync(statePath(home, relative))
+    if (current.ino !== st.ino || current.dev !== st.dev) stateFailure('agent.path_refused')
+    const buffer = Buffer.alloc(SHARED_READ_CAP + 1)
+    let size = 0, n
+    while (size <= SHARED_READ_CAP && (n = readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += n
+    if (size > SHARED_READ_CAP) stateFailure('agent.too_large')
+    if (buffer.subarray(0, size).includes(0)) stateFailure('agent.path_refused')
+    return buffer.subarray(0, size).toString('utf8')
+  } finally { closeSync(fd) }
+}
+
+function stateList(home, folder, skills = false) {
+  const entries = []
+  let visited = 0, truncated = false
+  function walk(relative, depth) {
+    if (depth > 10 || visited >= SHARED_LIST_CAP) { truncated = true; return }
+    let dir
+    try { dir = statePath(home, relative) } catch (error) { if (error.code === 'ENOENT') return; throw error }
+    // Read at most the remaining budget, even when the source has millions of entries.
+    const handle = opendirSync(dir)
+    const children = []
+    try {
+      let entry
+      while ((entry = handle.readSync())) {
+        if (children.length >= SHARED_LIST_CAP - visited) { truncated = true; break }
+        children.push(entry)
+      }
+    } finally { handle.closeSync() }
+    children.sort((a, b) => a.name.localeCompare(b.name))
+    for (const child of children) {
+      if (visited++ >= SHARED_LIST_CAP) { truncated = true; break }
+      const path = `${relative}/${child.name}`
+      if (!safeStateParts(path) || child.isSymbolicLink()) continue
+      try {
+        statePath(home, path)
+        if (child.isDirectory()) walk(path, depth + 1)
+        else if (child.isFile() && (skills ? child.name === 'SKILL.md' : /\.(?:md|txt)$/iu.test(child.name))) {
+          entries.push(skills ? path.slice(folder.length + 1, -'/SKILL.md'.length) : path.slice(folder.length + 1))
+        }
+      } catch { /* Never expose unsafe/inaccessible names. */ }
+    }
+  }
+  walk(folder, 0)
+  return { entries, truncated }
+}
+
+/** Registry is lazy because the bridge is created before the registry in service.mjs. */
+export function sharedAgentTools(registry, log = () => {}) {
+  const specs = [
+    ['list', 'List readable agents (id, label, privacy and purpose).', {}],
+    ['memory_read', 'Read another agent\'s always-loaded memory and labelled read-only persona, on demand.', { agent: { type: 'string' } }],
+    ['skills_list', 'List another agent\'s skills; requires search or read.', { agent: { type: 'string' } }],
+    ['skill_read', 'Read a source-labelled skill; adapt before relying on its tools and paths.', { agent: { type: 'string' }, name: { type: 'string' } }],
+    ['notes_list', 'List files in an agent\'s declared owner-visible notes folder.', { agent: { type: 'string' } }],
+    ['notes_read', 'Read a safe text note in an agent\'s declared notes folder.', { agent: { type: 'string' }, path: { type: 'string' } }],
+  ]
+  return {
+    list: () => specs.map(([name, description, properties]) => ({ name: `wizard_agents__${name}`, description: `[Wizard OS] ${description}`, inputSchema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } })),
+    call(name, args, reader) {
+      if (!SHARED_AGENT_TOOLS.includes(name)) return null
+      const kind = name.slice('wizard_agents__'.length)
+      const r = registry()
+      const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] })
+      const audit = (source, scope, ok) => log(JSON.stringify({ event: 'agent_state_read', reader, source, kind, scope, ok }))
+      try {
+        if (!r) stateFailure('agent.unavailable')
+        const sources = r.readableSources(reader) // Always fresh; stored grants never bypass a source seal.
+        if (kind === 'list') {
+          const listed = sources.slice(0, SHARED_LIST_CAP).map(({ source, scope }) => {
+            const agent = r.read(source)
+            audit(source, scope, true)
+            return { id: source, label: agent.label, privacy: agent.privacy, ...(agent.purpose ? { purpose: clean(agent.purpose, 200) } : {}) }
+          })
+          return textResult({ agents: listed, truncated: sources.length > SHARED_LIST_CAP })
+        }
+        if (!args || typeof args.agent !== 'string') stateFailure('agent.invalid_arguments')
+        const granted = sources.find(entry => entry.source === args.agent)
+        const need = kind.endsWith('_list') ? 'search' : 'read'
+        if (!granted || ['none', 'titles', 'search', 'read'].indexOf(granted.scope) < ['none', 'titles', 'search', 'read'].indexOf(need)) stateFailure('agent.read_denied')
+        const source = r.read(args.agent)
+        if (!source || source.privacy !== 'standard' || source.permissions.shared_with_agents !== true) stateFailure('agent.read_denied')
+        const home = r.stateHome(source.id)
+        let result
+        if (kind === 'memory_read') {
+          let total = 0
+          const optional = path => {
+            try {
+              const value = stateText(home, path)
+              total += Buffer.byteLength(value)
+              if (total > SHARED_READ_CAP) stateFailure('agent.too_large')
+              return value
+            } catch (error) { if (error.code === 'ENOENT') return ''; throw error }
+          }
+          result = { memory: optional('memories/MEMORY.md'), user: optional('memories/USER.md'), 'persona (read-only)': optional('SOUL.md') }
+        } else if (kind === 'skills_list') result = stateList(home, 'skills', true)
+        else if (kind === 'skill_read') {
+          if (!safeStateParts(args.name)) stateFailure('agent.path_refused')
+          result = { text: `Written by ${source.id} for the ${source.harness} harness. Tools and paths it names may not exist for you. Adapt it into your own skill before relying on it.\n\n${stateText(home, `skills/${args.name}/SKILL.md`)}` }
+        } else if (!source.notes_dir) {
+          if (kind === 'notes_read') stateFailure('agent.notes_unavailable')
+          result = { entries: [], truncated: false }
+        } else if (kind === 'notes_list') result = stateList(home, source.notes_dir)
+        else {
+          if (!safeStateParts(args.path) || !/\.(?:md|txt)$/iu.test(args.path)) stateFailure('agent.path_refused')
+          result = { text: stateText(home, `${source.notes_dir}/${args.path}`) }
+        }
+        audit(source.id, granted.scope, true)
+        return textResult({ source: { id: source.id, label: source.label, harness: source.harness }, ...result })
+      } catch (error) {
+        // Log no arguments, paths, content or filesystem errors (which may reveal host paths).
+        audit(typeof args?.agent === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(args.agent) ? args.agent : '', '', false)
+        const code = /^agent\.[a-z_]+$/u.test(error.message) ? error.message : 'agent.state_unavailable'
+        return { content: [{ type: 'text', text: code }], isError: true }
+      }
+    },
+  }
+}

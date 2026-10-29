@@ -23,68 +23,217 @@ on:
 permissions:
   contents: read
 
-# Unique run groups retain EVERY merge. The runner + shared flock serialize builds;
-# a shared GitHub concurrency group would silently cancel older pending merges.
+# Same-SHA pushes and dispatches serialize; distinct merge SHAs remain independent.
+# The finalizer serializes the complete check/write of competing release-tag claims.
 concurrency:
-  group: public-image-${{ github.repository }}-${{ github.run_id }}
+  group: public-image-${{ github.repository }}-${{ github.sha }}
   cancel-in-progress: false
+  queue: max
+
+env:
+  IMAGE: ghcr.io/humanitylabs-org/wizard-agent-service
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Publication contract tests
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
 
+  pr-build:
+    name: PR build (${{ matrix.platform }})
+    needs: validate
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: amd64
+          - runner: ubuntu-24.04
+            platform: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Create empty isolated Docker configuration
+        run: install -d -m 700 "$RUNNER_TEMP/docker-config" && printf '%s\n' '{"auths":{}}' > "$RUNNER_TEMP/docker-config/config.json" && printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.platform == 'arm64'
+        with:
+          platforms: arm64
+          cache-image: false
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: true
+          cache-binary: false
+      - name: Build locally without login, push, cache, or artifact
+        run: >-
+          python3 scripts/ci/ghcr_image.py build
+          --image "$IMAGE" --sha "$GITHUB_SHA"
+          --builder "${{ steps.buildx.outputs.name }}" --platform "${{ matrix.platform }}"
+
   publish:
     needs: validate
-    # No PR payload or noncanonical branch ever reaches the self-hosted worker.
     if: >-
       github.repository == 'humanitylabs-org/wizard-agent-service' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: [self-hosted, macOS, ARM64, wizard-ghcr-wizard-agent-service]
-    timeout-minutes: 100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
+      built: ${{ steps.publish.outputs.built }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Create isolated Docker configuration
+        run: install -d -m 700 "$RUNNER_TEMP/docker-config" && printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          clean: true
-      - name: Build and publish immutable multi-platform image
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+          cache-image: false
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: true
+          cache-binary: false
+      - name: Prepare multi-platform image by digest only
         id: publish
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ghcr.io/humanitylabs-org/wizard-agent-service
           RELEASE_TAG: ${{ inputs.release_tag }}
           CONFIRM_TAG: ${{ inputs.confirm_release_tag }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: >-
           python3 scripts/ci/ghcr_image.py publish
           --image "$IMAGE" --sha "$GITHUB_SHA" --branch main
+          --builder "${{ steps.buildx.outputs.name }}"
+          --release "$RELEASE_TAG" --confirm "$CONFIRM_TAG" --expected-sha "$EXPECTED_SHA"
+
+  attest:
+    needs: publish
+    if: >-
+      needs.publish.outputs.built == 'true' &&
+      github.repository == 'humanitylabs-org/wizard-agent-service' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      # actions/attest reads registry credentials only from ~/.docker/config.json and
+      # ignores a relocated config, so this job keeps the default (ephemeral hosted VM) one.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/humanitylabs-org/wizard-agent-service
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Verify canonical signed provenance for the exact source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: >-
+          gh attestation verify "oci://$IMAGE@$DIGEST"
+          --repo "$GITHUB_REPOSITORY" --bundle-from-oci
+          --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-image.yml"
+          --source-ref refs/heads/main --source-digest "$GITHUB_SHA"
+
+  finalize:
+    needs: [publish, attest]
+    concurrency:
+      group: public-release-${{ github.repository }}-${{ inputs.release_tag || github.sha }}
+      cancel-in-progress: false
+      queue: max
+    if: >-
+      !cancelled() &&
+      needs.publish.result == 'success' &&
+      (needs.attest.result == 'success' ||
+       (needs.publish.outputs.built == 'false' && needs.attest.result == 'skipped')) &&
+      github.repository == 'humanitylabs-org/wizard-agent-service' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Create isolated Docker configuration
+        run: install -d -m 700 "$RUNNER_TEMP/docker-config" && printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: true
+          cache-binary: false
+      - name: Finalize write-once SHA and optional version aliases
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CONFIRM_TAG: ${{ inputs.confirm_release_tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: >-
+          python3 scripts/ci/ghcr_image.py finalize
+          --image "$IMAGE" --sha "$GITHUB_SHA" --digest "$DIGEST" --branch main
+          --builder "${{ steps.buildx.outputs.name }}"
           --release "$RELEASE_TAG" --confirm "$CONFIRM_TAG" --expected-sha "$EXPECTED_SHA"
 
   anonymous-pull:
-    needs: publish
-    # Fresh hosted Linux VM: never logged into GHCR, no publisher's Docker state.
+    needs: [publish, finalize]
+    if: >-
+      needs.publish.result == 'success' &&
+      needs.finalize.result == 'success' &&
+      github.repository == 'humanitylabs-org/wizard-agent-service' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Pull digest and every tag for both architectures without credentials
         env:
-          IMAGE: ghcr.io/humanitylabs-org/wizard-agent-service
           DIGEST: ${{ needs.publish.outputs.digest }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: >-

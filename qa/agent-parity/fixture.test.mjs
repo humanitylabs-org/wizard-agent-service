@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const reportDir = mkdtempSync(join(tmpdir(), 'parity-gate-'))
-const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: 90000, env: process.env })
+// This is a serial whole-matrix process budget, not a per-contract latency assertion.
+const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: 180000, env: process.env })
 let report
 try {
   report = JSON.parse(readFileSync(join(reportDir, 'matrix.json'), 'utf8'))
@@ -22,7 +23,12 @@ for (const feature of manifest.features.filter(f => f.fixture)) {
     test(`${feature.id} / ${kind}`, () => {
       const cell = report.cells.find(c => c.feature === feature.id && c.kind === kind)
       assert.ok(cell, 'missing cell')
-      assert.equal(cell.status, 'pass', cell.reason)
+      const exemption = feature.policy_exemptions.find(e => e.kind === kind)
+      assert.equal(cell.status, exemption ? 'policy-exempt' : 'pass', cell.reason)
+      if (exemption) {
+        assert.equal(cell.policy, exemption.policy)
+        assert.notEqual(cell.evidence, 'not-run', 'exemptions must execute their per-kind fixture')
+      }
     })
   }
 }
@@ -35,5 +41,6 @@ test('matrix includes every declared feature and kind exactly once', () => {
   assert.equal(new Set(ids).size, ids.length)
   assert.equal(report.cells.length, manifest.features.length * manifest.runtime_kinds.length)
   assert.equal(report.summary.pass + report.summary.fail + report.summary['policy-exempt'], report.cells.length)
-  assert.equal(report.summary['policy-exempt'], 0, 'these fixtures use allowed grants; no feature is exempt')
+  const exemptions = manifest.features.flatMap(f => f.policy_exemptions.map(e => [f.id, e.kind]))
+  assert.deepEqual(report.cells.filter(c => c.status === 'policy-exempt').map(c => [c.feature, c.kind]), exemptions)
 })

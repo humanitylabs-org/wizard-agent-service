@@ -1,14 +1,16 @@
+import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Scheduler, importHermesSchedules, isSilentResult, isScheduleInput, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
+import { Scheduler, notificationFromOutput, importHermesSchedules, isSilentResult, isScheduleInput, projectFollowUps, resolveWindow, SCHEDULE_INPUT, scheduledRunEvents } from '../server/scheduler.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createWizardServer, listen, latestVisibleSessionMessages, projectWizardMessageHistory } from '../server/service.mjs'
+import { followUpTool } from '../server/follow-ups.mjs'
 import { projectStatusMarkers } from '../server/thread-status.mjs'
 import { readHermesSessionTruth, visibleAssistantReply, visibleUserRequest } from '../server/session-truth.mjs'
 
@@ -272,7 +274,228 @@ describe('schedule last/next run projections', () => {
   })
 })
 
+const plainReport = (sentence: string) => `**${sentence}**\n[WIZARD_STATUS_V1]{"state":"done","ask":"The check finished"}[/WIZARD_STATUS_V1]`
+
+describe('thread-bound one-shot follow-up watchers', () => {
+  it('stays quiet while pending, disables itself on the first visible result, and never runs again', async () => {
+    const calls: any[] = []
+    let run = { status: 'completed', output: '[SILENT]' }
+    const s = scheduler(async (o: any) => { calls.push(o); return { run_id: `watch-${calls.length}` } }, { lookup: async () => run })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait for the export, then deliver it.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(calls).toHaveLength(1)
+    expect(calls[0].body.input).toContain('one-shot follow-up')
+    expect(calls[0].body.input).toContain('respond exactly [SILENT]')
+    expect(s.project(s.get(watch.id))).toMatchObject({ enabled: true, lastRun: { outcome: 'silent' } })
+    run = { status: 'completed', output: plainReport('Export finished.') }
+    clock += 5 * 60_000; await s.tick()
+    expect(calls).toHaveLength(2)
+    expect(s.project(s.get(watch.id))).toMatchObject({ enabled: false, nextRun: null, lastRun: { outcome: 'posted' } })
+    clock += 60 * 60_000; await s.tick()
+    expect(calls).toHaveLength(2)
+  })
+
+  it('treats an owner approval as the terminal visible result and restores the same thread', async () => {
+    const restored: any[] = []
+    const s = scheduler(async () => ({ run_id: 'watch-decision' }), {
+      lookup: async () => ({ status: 'waiting_for_approval', output: '' }),
+      onWatchResult: async (watch: any, run: any) => restored.push({ watch: watch.id, status: run.status }),
+    })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Ask only if the owner must decide.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(restored).toEqual([{ watch: watch.id, status: 'waiting_for_approval' }])
+    expect(s.project(s.get(watch.id))).toMatchObject({ enabled: false, nextRun: null, lastRun: { outcome: 'posted' } })
+  })
+
+  it('retries thread restoration durably across restart without admitting or posting a second check', async () => {
+    const calls: any[] = []
+    let restoreAttempts = 0
+    let restorationAvailable = false
+    const deliver = async (occurrence: any) => { calls.push(occurrence); return { run_id: 'watch-visible' } }
+    const options = {
+      lookup: async () => ({ status: 'completed', output: plainReport('Dependency finished.') }),
+      onWatchResult: async () => {
+        restoreAttempts++
+        if (!restorationAvailable) throw new Error('temporary restoration outage')
+      },
+    }
+    let s = scheduler(deliver, options)
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check dependency.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(calls).toHaveLength(1)
+    expect(restoreAttempts).toBe(1)
+    expect(s.project(s.get(watch.id))).toMatchObject({ enabled: true, lastRun: { outcome: 'restoring', finishedAt: null } })
+    await s.close(); schedulers.splice(schedulers.indexOf(s), 1)
+    restorationAvailable = true
+    s = scheduler(deliver, options)
+    await s.refreshRuns()
+    expect(calls).toHaveLength(1)
+    expect(restoreAttempts).toBe(2)
+    expect(s.project(s.get(watch.id))).toMatchObject({ enabled: false, nextRun: null, lastRun: { outcome: 'posted' } })
+  })
+
+  it('admits no overlapping checks and supports explicit per-thread cancellation', async () => {
+    const calls: any[] = []
+    let status = 'running'
+    const s = scheduler(async (o: any) => { calls.push(o); return { run_id: 'watch-running' } }, { lookup: async () => ({ status }) })
+    const first = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check dependency.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
+    clock += 10 * 60_000; await s.tick()
+    expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
+    clock += 7 * 60 * 60_000; await s.tick()
+    expect(calls.filter(o => o.jobId === first.id)).toHaveLength(1)
+    const other = s.create(job({ kind: 'watch', thread: 'wizard_other', prompt: 'Check another dependency.' }))
+    expect(s.followUps('wizard_origin').map((j: any) => j.id)).toEqual([first.id])
+    expect(s.stopFollowUps('wizard_origin')).toEqual({ stopped: 1 })
+    expect(s.get(first.id).enabled).toBe(false)
+    expect(s.get(other.id).enabled).toBe(true)
+    status = 'completed'; await s.refreshRuns()
+  })
+
+  it('projects only active watchers for the requested agent onto their originating list row', () => {
+    const s = scheduler()
+    const active = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check dependency.', agent: 'main' }))
+    const routed = s.create(job({ kind: 'watch', thread: 'wizard_origin', name: 'Private dependency', prompt: 'Private check.', agent: 'private' }))
+    s.create(job({ kind: 'watch', thread: 'wizard_other', prompt: 'Other dependency.', enabled: false }))
+    s.create(job({ kind: 'run', thread: 'wizard_origin', prompt: 'Recurring report.' }))
+    const input = Buffer.from(JSON.stringify({ data: [{ id: 'wizard_origin' }, { id: 'wizard_other' }] }))
+    const mainRows = JSON.parse(projectFollowUps(input, s, { agent: 'main' }).toString()).data
+    expect(mainRows[0].wizard_follow_up).toMatchObject({ active: true, count: 1, names: [active.name] })
+    expect(mainRows[0].wizard_follow_up.names).not.toContain(routed.name)
+    expect(mainRows[1].wizard_follow_up).toBeUndefined()
+    const routedRows = JSON.parse(projectFollowUps(input, s, { agent: 'private' }).toString()).data
+    expect(routedRows[0].wizard_follow_up).toMatchObject({ active: true, count: 1, names: [routed.name] })
+  })
+
+  it('rejects one-time or threadless watchers', () => {
+    const s = scheduler()
+    expect(() => s.create(job({ kind: 'watch', thread: null }))).toThrow(/thread/)
+    expect(() => s.create(job({ kind: 'watch', thread: 'wizard_origin', when: { once: '2026-10-21T01:00:00Z' } }))).toThrow(/repeating/)
+  })
+})
+
 describe('paused read-only Hermes import', () => {
+  function source(jobs: any[], config?: string) {
+    mkdirSync(join(process.env.HERMES_HOME!, 'cron'), { recursive: true })
+    writeFileSync(join(process.env.HERMES_HOME!, 'cron', 'jobs.json'), JSON.stringify({ jobs }))
+    if (config !== undefined) writeFileSync(join(process.env.HERMES_HOME!, 'config.yaml'), config)
+  }
+  const weekly = (extra: any = {}) => ({ id: 'weekly', name: 'Weekly', schedule: { kind: 'cron', expr: '0 1 * * 1' }, prompt: 'Analyse the collected context.', ...extra })
+
+  it.each([undefined, 'timezone: null\n', 'timezone: "UTC" # source clock\n', 'clock:\n  timezone: Asia/Bangkok\n'])('defaults to source UTC, never the owner clock (%s)', config => {
+    clock = Date.parse('2026-10-24T00:00:00Z')
+    source([weekly()], config)
+    const s = scheduler(undefined, { timezone: 'Asia/Bangkok' })
+    const r = importHermesSchedules(s).results[0]
+    expect(r).toMatchObject({ status: 'would import (paused)', timezone: 'UTC', nextRun: '2026-10-26T01:00:00.000Z', thread: null })
+    expect(r.promptLength).toBe(r.schedule.prompt.length)
+    expect(r.schedule.enabled).toBe(false)
+    expect(s.list()).toEqual([])
+    expect(s.db.prepare('SELECT count(*) AS n FROM schedule_imports').get().n).toBe(0)
+  })
+
+  it('uses top-level YAML timezone, with row timezone taking precedence', () => {
+    source([weekly(), weekly({ id: 'override', timezone: 'UTC' })], '"timezone": "America/New_York" # source\n')
+    const results = importHermesSchedules(scheduler()).results
+    expect(results[0]).toMatchObject({ timezone: 'America/New_York', nextRun: '2026-10-26T05:00:00.000Z' })
+    expect(results[1]).toMatchObject({ timezone: 'UTC', nextRun: '2026-10-26T01:00:00.000Z' })
+  })
+
+  it.each(['timezone: [invalid\n', 'timezone: Not/AZone\n'])('does not silently import in the wrong timezone on invalid source configuration', config => {
+    source([weekly()], config)
+    const s = scheduler()
+    expect(() => importHermesSchedules(s, { dryRun: false })).toThrow('Hermes config unavailable or invalid')
+    expect(s.list()).toEqual([])
+  })
+
+  it.each(['context.py', 'context.sh', 'context.bash', "nested/context's data.py"])('prefixes a quoted absolute pre-run command and appends delivery override (%s)', script => {
+    source([weekly({ script, no_agent: false, prompt: 'Publish through a chat posting tool, then reply exactly [SILENT].' })], 'cron:\n  script_timeout_seconds: 120\n')
+    const s = scheduler()
+    const r = importHermesSchedules(s).results[0]
+    expect(r.status).toBe('would import (paused)')
+    expect(r.schedule.prompt).toMatch(/^Before following the task below, run this exact command first in the terminal/)
+    expect(r.schedule.prompt).toContain(join(process.env.HERMES_HOME!, 'scripts'))
+    expect(r.schedule.prompt).toContain(/\.(sh|bash)$/.test(script) ? 'bash ' : 'python3 ')
+    expect(r.schedule.prompt).toContain('120 seconds')
+    expect(r.schedule.prompt).toContain('full stdout')
+    expect(r.schedule.prompt).toContain('This run happens inside its Wizard chat')
+    expect(r.schedule.prompt).toContain('do not publish through that script or tool')
+    expect(r.schedule.prompt).toContain('Reply [SILENT] only when there is genuinely nothing to report.')
+    expect(r.promptLength).toBe(r.schedule.prompt.length)
+    if (script.includes("'")) expect(r.schedule.prompt).toContain("'\"'\"'")
+  })
+
+  it('keeps configured interpreter and workdir in the pre-run command; pure scripts remain refused with preview fields', () => {
+    const workdir = join(root, 'work'); mkdirSync(workdir)
+    source([weekly({ script: 'context.py', interpreter: join(root, 'venv', 'bin', 'python3'), workdir }), weekly({ id: 'system', no_agent: true, script: 'health.sh' })])
+    const results = importHermesSchedules(scheduler()).results
+    expect(results[0].schedule.prompt).toContain(`cd '${workdir}' && '${join(root, 'venv', 'bin', 'python3')}'`)
+    expect(results[0].schedule.prompt).toContain('3600 seconds')
+    expect(results[0].schedule.prompt).toContain('For the rest of this agent turn')
+    expect(results[0].schedule.prompt).toContain('resolve every relative path against it')
+    expect(results[0].schedule.prompt).toContain('AGENTS.md')
+    expect(results[1]).toEqual({ id: 'system', name: 'Weekly', status: 'not imported: script-only system job (no agent turn) — move to a host timer or Supervisor health check', timezone: 'UTC', nextRun: null, thread: null, promptLength: null })
+  })
+
+  it.each(['../escape.py', '/outside/scripts/context.py', 'bad\u0000.py'])('refuses scripts outside the source scripts directory (%s)', script => {
+    source([weekly({ script })])
+    expect(importHermesSchedules(scheduler()).results[0].status).toBe('not imported: unsupported or invalid job')
+  })
+
+  it('refuses symlink escapes even through a parent of a missing script, and refuses non-Python interpreter overrides', () => {
+    const scripts = join(process.env.HERMES_HOME!, 'scripts'); mkdirSync(scripts)
+    symlinkSync(root, join(scripts, 'outside'))
+    source([weekly({ script: 'outside/missing.py' }), weekly({ id: 'bad-python', script: 'context.py', interpreter: '/bin/bash' })])
+    expect(importHermesSchedules(scheduler()).results.map((r: any) => r.status)).toEqual(['not imported: unsupported or invalid job', 'not imported: unsupported or invalid job'])
+  })
+
+  it('validates the resolved target of an existing Python interpreter symlink', () => {
+    const venv = join(root, 'venv', 'bin'); mkdirSync(venv, { recursive: true })
+    const other = join(root, 'not-python'); writeFileSync(other, 'synthetic executable')
+    const interpreter = join(venv, 'python3'); symlinkSync(other, interpreter)
+    source([weekly({ script: 'context.py', interpreter })])
+    expect(importHermesSchedules(scheduler()).results[0].status).toBe('not imported: unsupported or invalid job')
+  })
+
+  it('includes nullable preview fields for invalid rows without turning empty jobs into delivery-note-only jobs', () => {
+    source([null, weekly({ id: 'bad/id' }), weekly({ id: 'empty', prompt: '' }), weekly({ id: 'invalid-zone', timezone: 'Not/AZone' })])
+    const s = scheduler()
+    const results = importHermesSchedules(s, { dryRun: false }).results
+    expect(results.map((r: any) => r.status)).toEqual(['not imported: invalid job', 'not imported: invalid id', 'not imported: unsupported or invalid job', 'not imported: unsupported or invalid job'])
+    for (const r of results) expect(r).toMatchObject({ nextRun: null, promptLength: null, thread: null })
+    expect(results[0].timezone).toBeNull()
+    expect(s.list()).toEqual([])
+  })
+
+  it('maps validated source ids to existing threads, persists paused copies and previews saved jobs idempotently', async () => {
+    source([weekly(), weekly({ id: 'unbound' })])
+    let s = scheduler()
+    const threads = { weekly: 'existing.chat:reports-1' }
+    expect(importHermesSchedules(s, { threads }).results[0].thread).toBe(threads.weekly)
+    const result = importHermesSchedules(s, { dryRun: false, threads }).results
+    const job = s.get(result[0].scheduleId)
+    expect(job).toMatchObject({ enabled: false, thread: threads.weekly, timezone: 'UTC' })
+    expect(job.createThread).toBeUndefined()
+    expect(result[1].thread).toBeNull()
+    const saved = s.list()
+    await s.close(); schedulers.splice(schedulers.indexOf(s), 1)
+    s = scheduler()
+    const again = importHermesSchedules(s, { dryRun: false, threads: { weekly: 'other-thread' } }).results[0]
+    expect(again).toMatchObject({ status: 'already imported', thread: threads.weekly, promptLength: job.prompt.length, nextRun: '2026-10-26T01:00:00.000Z' })
+    expect(s.list()).toEqual(saved)
+    s.delete(job.id)
+    expect(importHermesSchedules(s).results[0]).toMatchObject({ status: 'already imported', nextRun: null, promptLength: null })
+    expect(s.list()).toHaveLength(1)
+  })
+
+  it.each([null, [], 'bad', { 'bad/id': 'thread' }, { weekly: '' }, { weekly: 'bad/id' }, { weekly: null }, { weekly: 42 }])('rejects invalid thread mappings before any writes (%j)', threads => {
+    source([weekly()])
+    const s = scheduler()
+    expect(() => importHermesSchedules(s, { dryRun: false, threads })).toThrow('invalid threads')
+    expect(s.list()).toEqual([])
+  })
+
   it('imports native cron/interval/once/skill/model fields paused; dry-run and retries do not mutate or duplicate anything', () => {
     const path = join(process.env.HERMES_HOME!, 'cron', 'jobs.json'); mkdirSync(join(process.env.HERMES_HOME!, 'cron'))
     const raw = JSON.stringify({ jobs: [
@@ -284,15 +507,16 @@ describe('paused read-only Hermes import', () => {
     ] }, null, 2)
     writeFileSync(path, raw, { mode: 0o400 })
     const s = scheduler()
-    expect(importHermesSchedules(s, { dryRun: true }).results.map((r: any) => r.status)).toEqual(['would import (paused)', 'would import (paused)', 'would import (paused)', 'not imported: script job', 'not imported: script job'])
+    expect(importHermesSchedules(s, { dryRun: true }).results.map((r: any) => r.status)).toEqual(['would import (paused)', 'would import (paused)', 'would import (paused)', 'would import (paused)', 'not imported: script-only system job (no agent turn) — move to a host timer or Supervisor health check'])
     expect(s.list()).toEqual([])
     const result = importHermesSchedules(s, { dryRun: false })
-    expect(result.results.filter((r: any) => r.status === 'imported (paused)')).toHaveLength(3)
+    expect(result.results.filter((r: any) => r.status === 'imported (paused)')).toHaveLength(4)
     expect(s.list().every((j: any) => !j.enabled)).toBe(true)
+    expect(s.list().every((j: any) => j.prompt.endsWith('Reply [SILENT] only when there is genuinely nothing to report.'))).toBe(true)
     expect(s.list().find((j: any) => j.name === 'Daily').model).toBe('fixture-model')
-    expect(s.list().find((j: any) => j.name === 'Every')).toMatchObject({ skill: 'one', prompt: 'Also load and follow the skill "two".' })
+    expect(s.list().find((j: any) => j.name === 'Every')).toMatchObject({ skill: 'one', prompt: expect.stringContaining('Also load and follow the skill "two".') })
     expect(importHermesSchedules(s, { dryRun: false }).results[0].status).toBe('already imported')
-    expect(s.list()).toHaveLength(3)
+    expect(s.list()).toHaveLength(4)
     expect(readFileSync(path, 'utf8')).toBe(raw)
   })
 })
@@ -360,9 +584,19 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
         if (sessions.has(body.id)) { send(409, { error: 'exists' }); return }
         sessions.set(body.id, body); send(201, body); return
       }
+      const sessionPath = path.match(/^\/api\/sessions\/([^/]+)$/)
+      if (sessionPath && req.method === 'GET') {
+        const session = sessions.get(decodeURIComponent(sessionPath[1])); send(session ? 200 : 404, session ?? {}); return
+      }
+      if (sessionPath && req.method === 'PATCH') {
+        const id = decodeURIComponent(sessionPath[1]), session = sessions.get(id)
+        if (!session) { send(404, {}); return }
+        Object.assign(session, body); send(200, session); return
+      }
       if (path === '/v1/runs' && req.method === 'POST') {
         const key = String(req.headers['idempotency-key'])
-        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? 'fixture report', error: 'credential-fixture-do-not-expose' }) }
+        const session = sessions.get(body.session_id); if (session) session.archived = false
+        if (!admitted.has(key)) { bodies.push(body); keys.push(key); admitted.set(key, { run_id: `fixture_${admitted.size}`, session_id: body.session_id, status: extra.fixtureStatus ?? 'completed', output: extra.fixtureOutput ?? plainReport('The check finished.'), error: 'credential-fixture-do-not-expose' }) }
         send(202, admitted.get(key)); return
       }
       if (path.startsWith('/v1/runs/') && path.endsWith('/events')) {
@@ -389,7 +623,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       schedulerStatePath: join(root, 'http-schedules.sqlite3'), schedulerNow: () => clock, schedulerHermesHome: process.env.HERMES_HOME, ...extra })
     servers.push(server)
     const address = await listen(server)
-    return { server, origin: `http://127.0.0.1:${address.port}`, bodies, keys, sessions }
+    return { server, origin: `http://127.0.0.1:${address.port}`, admitted, bodies, keys, sessions }
   }
 
   it('requires owner auth for CRUD/run/import and sends through the ordinary queue into one durable named thread', async () => {
@@ -422,7 +656,28 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect((await api(f.origin, `/${created.id}/run`, 'POST')).status).toBe(404)
   })
 
-  it.each(['fixture report', 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
+  it('deliver: notification reads the unscrubbed answer through the real run route and keeps the thread and owner views silent', async () => {
+    const f = await fixture({ fixtureOutput: '**Disk almost full**\nThales is at 93%.\n[SILENT]' })
+    const sent: any[] = []
+    f.server.scheduler.notifier = { available: () => true, send: async (n: any) => { sent.push(n); return { app: 'notifications' } } }
+    const created = await (await api(f.origin, '', 'POST', job({ enabled: false, deliver: 'notification' }))).json()
+    const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
+    await f.server.scheduler.tick(false); await f.server.scheduler.refreshRuns()
+    expect(f.bodies[0].input).toContain("the owner's Notifications, not this chat")
+    expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key }])
+    expect(f.server.scheduler.project(f.server.scheduler.get(created.id)).lastRun.outcome).toBe('notified')
+    expect(f.sessions.get(receipt.thread)).toMatchObject({ hidden: true })
+    const row = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
+    const runId = JSON.parse(row.receipt).run_id
+    // The raw view is internal-only: an owner asking for it still gets the scrubbed run.
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'X-Wizard-Schedule-Raw': '1' }
+    const run = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers })).json()
+    expect(run.output).toBe('')
+    const history = await (await fetch(`${f.origin}/wizard/hermes/api/sessions/${receipt.thread}/messages?view=wizard`, { headers })).json()
+    expect(history.messages).toEqual([])
+  })
+
+  it.each([plainReport('The check finished.'), 'nothing changed [SILENT]'])('projects scheduled output through real history and SSE routes: %s', async fixtureOutput => {
     const f = await fixture({ fixtureOutput })
     const created = await (await api(f.origin, '', 'POST', job({ enabled: false }))).json()
     const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
@@ -437,12 +692,59 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
       expect(events).not.toContain('[SILENT]')
       expect(events).not.toContain('message.delta')
     } else {
-      expect(history.messages.map((m: any) => m.content)).toEqual(['fixture report'])
-      expect(events).toContain('fixture report')
+      expect(history.messages.map((m: any) => m.content)).toEqual(['**The check finished.**'])
+      expect(events).toContain('The check finished.')
     }
     expect(events).toContain('run.completed')
     await f.server.scheduler.tick(false)
     expect(f.bodies).toHaveLength(1)
+  })
+
+  it.each([
+    ['nothing changed [SILENT]', true, true],
+    [plainReport('Dependency finished.'), false, false],
+  ])('keeps Done and Defer quiet while pending, then resurfaces only a visible watcher result: %s', async (fixtureOutput, archived, deferred) => {
+    const f = await fixture({ fixtureOutput })
+    f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'Content-Type': 'application/json' }
+    await fetch(`${f.origin}/wizard/hermes/api/sessions?view=wizard`, { headers })
+    expect((await fetch(`${f.origin}/wizard/thread-dispositions`, { method: 'PUT', headers,
+      body: JSON.stringify({ runtime: 'direct', sessionId: 'wizard_origin', deferred: true }) })).status).toBe(200)
+    let disposition = await (await fetch(`${f.origin}/wizard/thread-dispositions`, { headers })).json()
+    expect(Boolean(disposition.state['direct:wizard_origin']?.deferred)).toBe(true)
+    const watch = await (await api(f.origin, '', 'POST', job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check it.' }))).json()
+    expect((await api(f.origin, `/${watch.id}/run`, 'POST')).status).toBe(202)
+    await f.server.scheduler.tick(false)
+    expect(f.sessions.get('wizard_origin').archived).toBe(archived)
+    disposition = await (await fetch(`${f.origin}/wizard/thread-dispositions`, { headers })).json()
+    expect(f.server.scheduler.get(watch.id).enabled).toBe(isSilentResult(fixtureOutput))
+    expect(Boolean(disposition.state['direct:wizard_origin']?.deferred)).toBe(deferred)
+  })
+
+  it('keeps an archived watcher quiet when capacity delays its durable queue dispatch', async () => {
+    const f = await fixture({ fixtureStatus: 'running', runQueueMaxActive: 1 })
+    f.sessions.set('blocker', { id: 'blocker', title: 'Blocker', archived: false })
+    f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
+    const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'Content-Type': 'application/json' }
+    const blocker = await fetch(`${f.origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': 'blocker-key' }, body: JSON.stringify({ session_id: 'blocker', input: 'Hold capacity.' }) })
+    expect(blocker.status).toBe(202)
+    const watch = await (await api(f.origin, '', 'POST', job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Check it.' }))).json()
+    const receipt = await (await api(f.origin, `/${watch.id}/run`, 'POST')).json()
+    await f.server.scheduler.tick(false)
+    expect(f.bodies.map((body: any) => body.session_id)).toEqual(['blocker'])
+    expect(f.sessions.get('wizard_origin').archived).toBe(true)
+    const occurrence = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
+    const watcherRunId = JSON.parse(occurrence.receipt).run_id
+    const queueDb = new DatabaseSync(join(root, 'http-queue.sqlite3'))
+    expect(JSON.parse(queueDb.prepare('SELECT continuation_json FROM wizard_run_queue WHERE public_run_id=?').get(watcherRunId).continuation_json)).toMatchObject({ kind: 'watch', preserve_archived: true })
+    queueDb.close()
+    f.admitted.get('blocker-key').status = 'completed'
+    for (let i = 0; i < 20 && f.bodies.length < 2; i++) {
+      await fetch(`${f.origin}/wizard/hermes/v1/runs/${watcherRunId}`, { headers })
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(f.bodies.map((body: any) => body.session_id)).toEqual(['blocker', 'wizard_origin'])
+    expect(f.sessions.get('wizard_origin').archived).toBe(true)
   })
 
   it.each([
@@ -467,14 +769,18 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     const f = await fixture()
     expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: true })).status).toBe(200)
     expect(f.server.scheduler.list()).toHaveLength(0)
-    expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: false })).status).toBe(200)
+    expect((await api(f.origin, '/import-hermes', 'POST', { dryRun: false, threads: { importable: 'bad/id' } })).status).toBe(400)
+    expect(f.server.scheduler.list()).toHaveLength(0)
+    const imported = await api(f.origin, '/import-hermes', 'POST', { dryRun: false, threads: { importable: 'existing-report-thread' } })
+    expect(imported.status).toBe(200)
+    expect((await imported.json()).results[0]).toMatchObject({ thread: 'existing-report-thread', timezone: 'UTC', nextRun: expect.any(String), promptLength: expect.any(Number) })
     expect(f.server.scheduler.list()).toHaveLength(1)
     expect(f.server.scheduler.list()[0].enabled).toBe(false)
     expect(readFileSync(join(path, 'jobs.json'), 'utf8')).toBe(raw)
     expect(f.bodies).toHaveLength(0)
   })
 
-  it('defaults new jobs and paused imports to the current owner timezone without changing existing jobs', async () => {
+  it('defaults new jobs to the owner clock but imports to the source clock without changing existing jobs', async () => {
     const settingsPath = join(root, 'owner-settings.json')
     writeFileSync(settingsPath, JSON.stringify({ schema: 1, clock: { timezone: 'America/New_York' } }))
     const f = await fixture({ settingsPath })
@@ -487,7 +793,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     const path = join(process.env.HERMES_HOME!, 'cron'); mkdirSync(path)
     writeFileSync(join(path, 'jobs.json'), JSON.stringify({ jobs: [{ id: 'tz-import', name: 'Imported', prompt: 'report', schedule: { kind: 'cron', expr: '0 9 * * *' } }] }))
     const imported = await (await api(f.origin, '/import-hermes', 'POST', { dryRun: false })).json()
-    expect(imported.results[0].schedule.timezone).toBe('Europe/London')
+    expect(imported.results[0].schedule.timezone).toBe('UTC')
   })
 
   it('never starts its timer by default, even if the option alone is true', async () => {
@@ -529,7 +835,7 @@ describe('windows, reminders and trickled agent work', () => {
     const work = s.create({ name: 'Overnight merge', when: { at: 'overnight' }, prompt: 'Merge the PR', thread: 'wizard_t2' })
     const r = s.transaction(() => s.reserve(remind, clock)), w = s.transaction(() => s.reserve(work, clock))
     expect(r.body.input).toContain('reminded'); expect(r.body.input).not.toContain('[SILENT]')
-    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).not.toContain('[SILENT]')
+    expect(w.body.input).toContain('Do the work now'); expect(w.body.input).toContain('Reporter format')
     expect(isScheduleInput(r.body.input) && isScheduleInput(w.body.input)).toBe(true)
     expect(r.body.session_id).toBe('wizard_t1')
     expect(() => s.create({ name: 'x', kind: 'remind', when: { at: 'morning' }, skill: 'k' })).toThrow(/reminder needs/)
@@ -540,7 +846,7 @@ describe('windows, reminders and trickled agent work', () => {
     const admitted: string[] = []
     const status: Record<string, string> = {}
     const s = scheduler(async (o: any) => { admitted.push(o.jobId); status[o.jobId] = 'running'; return { run_id: o.jobId } },
-      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId] }) })
+      { trickleMs: 60_000, maxInflight: 3, lookup: async (o: any) => ({ status: status[o.jobId], output: '[SILENT]' }) })
     const jobs = Array.from({ length: 6 }, (_, i) => s.create({ name: `Work ${i}`, when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: `wizard_w${i}` }))
     const reminders = Array.from({ length: 2 }, (_, i) => s.create({ name: `R ${i}`, kind: 'remind', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'note', thread: `wizard_r${i}` }))
     await s.tick()
@@ -576,5 +882,220 @@ describe('windows, reminders and trickled agent work', () => {
     expect((await call('cancel', { session_id: 'wizard_a', schedule_id: other.id })).status).toBe(409)
     expect((await call('cancel', { session_id: 'wizard_a', schedule_id: made.id })).status).toBe(200)
     expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(0)
+  })
+
+  it('creates, lists and stops a current-thread watcher over the agent gateway only', async () => {
+    vi.stubEnv('WIZARD_SCHEDULER', '1')
+    const token = `fixture-gateway-${randomUUID()}`
+    const appsJsonPath = join(root, 'apps.json'); writeFileSync(appsJsonPath, JSON.stringify({ apps: [] }))
+    const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, appsJsonPath, mcpToken: token,
+      schedulerEnabled: true, schedulerIntervalMs: 3_600_000, schedulerStatePath: join(root, 'follow-up-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
+    servers.push(server)
+    const origin = `http://127.0.0.1:${(await listen(server)).port}`
+    let rpcId = 0
+    const call = async (args: any, auth = token) => {
+      const response = await fetch(`${origin}/wizard/mcp`, { method: 'POST', headers: { Authorization: ['Bearer', auth].join(' '), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name: 'wizard_follow_up', arguments: args } }) })
+      if (!response.ok) return { status: response.status }
+      const result = (await response.json()).result
+      return { status: response.status, error: result.isError === true, value: result.isError ? result.content[0].text : JSON.parse(result.content[0].text) }
+    }
+    expect((await call({ action: 'create', session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.' }, `wrong-${randomUUID()}`)).status).toBe(401)
+    const made = (await call({ action: 'create', session_id: 'wizard_origin', name: 'Composer dependency', instructions: 'Wait for Knowledge MVP.', every_minutes: 7 })).value
+    expect(made).toMatchObject({ kind: 'watch', thread: 'wizard_origin', agent: 'main', name: 'Composer dependency', enabled: true, nextRun: '2026-10-21T00:07:00.000Z' })
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups.map((j: any) => j.id)).toEqual([made.id])
+    expect(await call({ action: 'stop', session_id: 'wizard_other', watcher_id: made.id })).toMatchObject({ error: true, value: 'follow-up not found' })
+    expect((await call({ action: 'stop', session_id: 'wizard_origin', watcher_id: made.id })).value).toEqual({ stopped: 1 })
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups).toEqual([])
+    expect((await call({ action: 'create', session_id: '../wrong', name: 'x', instructions: 'x' })).error).toBe(true)
+    // The main agent reaches it through its plugin, which supplies the session id: it is not a listed gateway tool.
+    const listed = await (await fetch(`${origin}/wizard/mcp`, { method: 'POST', headers: { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list' }) })).json()
+    expect(listed.result.tools.map((t: any) => t.name)).not.toContain('wizard_follow_up')
+    const second = (await call({ action: 'create', session_id: 'wizard_origin', name: 'Second dependency', instructions: 'Wait again.' })).value
+    expect(second.nextRun).toBe('2026-10-21T00:30:00.000Z')
+    const retried = (await call({ action: 'create', session_id: 'wizard_origin', name: ' Second dependency ', instructions: ' Wait again. ' })).value
+    expect(retried.id).toBe(second.id)
+    expect((await call({ action: 'list', session_id: 'wizard_origin' })).value.follow_ups).toHaveLength(1)
+    const stopBody = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_origin' }) }
+    expect((await fetch(`${origin}/wizard/follow-ups/stop`, stopBody)).status).toBe(403)
+    const stopped = await fetch(`${origin}/wizard/follow-ups/stop`, { ...stopBody,
+      headers: { ...stopBody.headers, 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters' } })
+    expect(await stopped.json()).toMatchObject({ ok: true, stopped: 1 })
+    expect(server.scheduler.get(second.id).enabled).toBe(false)
+  })
+
+  it('stopping drops a reserved check that has not launched, so it never runs after delivery recovers', async () => {
+    let failing = true
+    const calls: any[] = []
+    const s = scheduler(async (o: any) => { if (failing) throw Error('delivery outage'); calls.push(o); return { run_id: 'late' } })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait for the export.' }))
+    clock += 5 * 60_000; await s.tick()
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(1)
+    expect(s.stopFollowUps('wizard_origin')).toEqual({ stopped: 1 })
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(0)
+    failing = false
+    clock += 60 * 60_000; await s.tick(); await s.tick(false)
+    expect(calls).toHaveLength(0)
+    expect(() => s.runNow(watch.id)).toThrow(/not active/)
+  })
+
+  it('never launches a pending watcher row whose watcher was stopped meanwhile', async () => {
+    const calls: any[] = []
+    const s = scheduler(async (o: any) => { calls.push(o); return { run_id: 'x' } })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait.' }))
+    // A row reserved before the stop, as a crash between reserve and disable would leave it.
+    s.transaction(() => s.reserve(s.get(watch.id), clock, true))
+    s.save({ ...s.get(watch.id), enabled: false })
+    await s.tick(false)
+    expect(calls).toHaveLength(0)
+    expect(s.db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE job_id=? AND admitted=0').get(watch.id)!.n).toBe(0)
+  })
+
+  it('Run now never adds a second watcher check while one is running or waiting to launch', async () => {
+    const calls: any[] = []
+    let run: any = { status: 'running' }
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const s = scheduler(async (o: any) => { calls.push(o); if (calls.length === 1) await gate; return { run_id: `watch-${calls.length}` } }, { lookup: async () => run })
+    const watch = s.create(job({ kind: 'watch', thread: 'wizard_origin', prompt: 'Wait for the export.' }))
+    const first = s.runNow(watch.id)
+    // Still reserved, not admitted: the same pending check is returned rather than a second one.
+    clock += 1000
+    expect(s.runNow(watch.id).key).toBe(first.key)
+    release(); await s.tick(false)
+    expect(calls).toHaveLength(1)
+    expect(() => s.runNow(watch.id)).toThrow(/already running/)
+    clock += 1000; await s.tick(false)
+    expect(calls).toHaveLength(1)
+    run = { status: 'completed', output: '[SILENT]' }
+    await s.refreshRuns()
+    clock += 1000; s.runNow(watch.id); await s.tick(false)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('a routed agent reaches the watcher tool only on its own gateway key and only for a thread it owns', async () => {
+    const t = followUpTool({ scheduler: scheduler(), running: () => true, mainAgent: 'hermes',
+      ownsThread: (agentId: string, sessionId: string) => agentId === 'hermes' || (agentId === 'helper' && sessionId === 'wizard_helper') })
+    expect(t.list('hermes')).toEqual([])
+    expect(t.list('helper').map((tool: any) => tool.name)).toEqual(['wizard_follow_up'])
+    const made = JSON.parse((await t.call('wizard_follow_up', { action: 'create', session_id: 'wizard_helper', name: 'Helper result', instructions: 'Check.' }, 'helper'))!.content[0].text)
+    expect(made).toMatchObject({ agent: 'helper', thread: 'wizard_helper', kind: 'watch' })
+    expect((await t.call('wizard_follow_up', { action: 'create', session_id: 'wizard_main', name: 'x', instructions: 'x', agent: 'hermes' }, 'helper'))!.isError).toBe(true)
+    expect(JSON.parse((await t.call('wizard_follow_up', { action: 'list', session_id: 'wizard_helper' }, 'hermes'))!.content[0].text).follow_ups).toEqual([])
+    expect(JSON.parse((await t.call('wizard_follow_up', { action: 'stop', session_id: 'wizard_helper' }, 'helper'))!.content[0].text)).toEqual({ stopped: 1 })
+    const off = followUpTool({ scheduler: scheduler(), running: () => false, mainAgent: 'hermes', ownsThread: () => true })
+    expect((await off.call('wizard_follow_up', { action: 'create', session_id: 'wizard_x', name: 'x', instructions: 'x' }, 'hermes'))!.content[0].text).toContain('switched off')
+  })
+})
+
+describe('Boomerang returns (kind return)', () => {
+  it('validates a return as a once-only, prompt-free hand-back of a thread or message', () => {
+    const s = scheduler()
+    const thread = s.create({ name: 'Boomerang · Loomis', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', prompt: '  Reply to Loomis  ' })
+    expect(thread).toMatchObject({ kind: 'return', thread: 'wizard_t1', prompt: 'Reply to Loomis', skill: '', target: { message: null, excerpt: '' } })
+    const message = s.create({ name: 'Boomerang · msg', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: 1792700000.5, excerpt: 'the   price\nquote' } })
+    expect(message.target).toEqual({ message: 1792700000.5, excerpt: 'the price quote' })
+    expect(() => s.create({ name: 'x', kind: 'return', when: { every: 5 }, thread: 'wizard_t1' })).toThrow(/once/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' } })).toThrow(/thread/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', skill: 'k' })).toThrow(/runs nothing/)
+    expect(() => s.create({ name: 'x', kind: 'return', when: { once: '2026-10-21T02:00:00Z' }, thread: 'wizard_t1', target: { message: '<b>' } })).toThrow(/target/)
+    expect(() => s.create({ name: 'x', when: { once: '2026-10-21T02:00:00Z' }, prompt: 'p', target: { message: 1 } })).toThrow(/only for kind return/)
+    const r = s.transaction(() => s.reserve(message, clock))
+    expect(r.body).toBeUndefined()
+    expect(r).toMatchObject({ kind: 'return', thread: 'wizard_t1', target: { message: 1792700000.5 } })
+  })
+
+  it('returns on time without a run, skips the trickle, and serves its watch id only once returned', async () => {
+    const delivered: any[] = []
+    const s = scheduler(async (o: any) => { delivered.push(o); return { returned: true } }, { trickleMs: 60_000, maxInflight: 1,
+      lookup: async () => ({ status: 'running' }) })
+    const work = s.create({ name: 'Busy', when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: 'wizard_w' })
+    const back = s.create({ name: 'Boomerang · Thread', kind: 'return', when: { once: '2026-10-21T00:02:00Z' }, thread: 'wizard_b', prompt: 'Check the quote' })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', session_id: 'wizard_b', output: '' })
+    expect(s.returnRun(`wzb_${work.id}`)).toBeNull()
+    expect(s.returnRun('wzb_missing')).toBeNull()
+    await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id])
+    clock += 120_000; await s.tick()
+    // The trickle and the in-flight cap (work still running) never hold a Boomerang.
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id])
+    expect(delivered[1].body).toBeUndefined()
+    expect(s.project(s.get(back.id))).toMatchObject({ nextRun: null, lastRun: { outcome: 'returned' } })
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed', session_id: 'wizard_b', output: '🪃 Back: Check the quote' })
+    clock += 120_000; await s.tick(); await s.refreshRuns()
+    expect(delivered).toHaveLength(2)
+    expect(s.project(s.get(back.id)).lastRun.outcome).toBe('returned')
+    // Again: a new time re-arms it, and the earlier return never reads as this one.
+    s.update(back.id, { when: { once: '2026-10-21T01:00:00Z' }, enabled: true })
+    expect(s.project(s.get(back.id)).nextRun).toBe('2026-10-21T01:00:00.000Z')
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'queued', output: '' })
+    clock = Date.parse('2026-10-21T01:00:30Z'); await s.tick()
+    expect(delivered.map(o => o.jobId)).toEqual([work.id, back.id, back.id])
+    expect(s.returnRun(`wzb_${back.id}`)).toMatchObject({ status: 'completed' })
+    s.delete(back.id)
+    expect(s.returnRun(`wzb_${back.id}`)).toBeNull()
+  })
+})
+
+describe('deliver: notification (alerts go to the notifications slot, not Chats)', () => {
+  const notifier = (up = true, fail = false) => {
+    const sent: any[] = []
+    return { sent, available: () => up, send: async (n: any) => { if (fail) throw Error('down'); sent.push(n); return { app: 'notifications' } } }
+  }
+  it('freezes a silent notification instruction into the run and sends the answer to the slot once', async () => {
+    const n = notifier(); let bodies: any[] = []
+    const s = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r1' } }, { notifier: n,
+      lookup: async () => ({ status: 'completed', output: '**Disk almost full**\nThales is at 93%. Free space or approve cleanup.\n[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' }))
+    expect(j.deliver).toBe('notification')
+    clock += 5 * 60_000; await s.tick()
+    expect(bodies[0].deliver).toBe('notification')
+    expect(bodies[0].body.input).toContain("the owner's Notifications, not this chat")
+    expect(isSilentResult('**Disk almost full**\nThales is at 93%.\n[SILENT]')).toBe(true)
+    await s.refreshRuns(); await s.refreshRuns()
+    expect(n.sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%. Free space or approve cleanup.', key: expect.stringMatching(/^schedule:/) }])
+    expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('sends nothing for a [SILENT]-only answer', async () => {
+    const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => ({ status: 'completed', output: '[SILENT]' }) })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    expect(n.sent).toEqual([]); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('silent')
+  })
+  it('falls back to the thread when the slot is empty or stopped, and retries a failed send', async () => {
+    let bodies: any[] = []
+    const s1 = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r' } }, { notifier: notifier(false) })
+    s1.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s1.tick()
+    expect(bodies[0].deliver).toBeUndefined()
+    expect(bodies[0].body.input).not.toContain('Notifications')
+    await s1.close(); schedulers.splice(schedulers.indexOf(s1), 1); rmSync(join(root, 'scheduler.sqlite3'), { force: true })
+    let fail = true; const sent: any[] = []
+    const flaky = { available: () => true, send: async (x: any) => { if (fail) throw Error('down'); sent.push(x) } }
+    const s2 = scheduler(undefined, { notifier: flaky, lookup: async () => ({ status: 'completed', output: 'Backup failed\nRestore check could not reach R2.\n[SILENT]' }) })
+    const j = s2.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s2.tick()
+    expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'failed', error: 'Notification not delivered; will retry', finishedAt: null })
+    fail = false; await s2.refreshRuns()
+    expect(sent).toHaveLength(1); expect(s2.project(s2.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
+  })
+  it('observes a notification occurrence past the 6 h run window', async () => {
+    let state: any = { status: 'running' }; const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => state })
+    const j = s.create(job({ deliver: 'notification' })); clock += 5 * 60_000; await s.tick()
+    clock += 8 * 3600_000; state = { status: 'completed', output: 'Render done\nAll 3 clips exported.\n[SILENT]' }
+    await s.refreshRuns()
+    expect(n.sent).toHaveLength(1); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('notified')
+  })
+  it('validates deliver and keeps returns as threads', () => {
+    const s = scheduler()
+    expect(s.create(job()).deliver).toBe('thread')
+    expect(() => s.create(job({ deliver: 'email' }))).toThrow(/deliver must be/)
+    expect(() => s.create({ name: 'R', kind: 'return', when: { once: '2026-10-22T00:00:00Z' }, thread: 'wizard_1_abc', deliver: 'notification' })).toThrow(/return always/)
+  })
+  it('extracts title and message from an answer', () => {
+    expect(notificationFromOutput('# Job done\nAll 3 renders finished.\n[SILENT]')).toEqual({ title: 'Job done', message: 'All 3 renders finished.' })
+    expect(notificationFromOutput('One line only [SILENT]')).toEqual({ title: '', message: 'One line only' })
+    expect(notificationFromOutput('[SILENT]')).toBeNull()
   })
 })

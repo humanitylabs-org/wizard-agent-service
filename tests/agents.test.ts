@@ -26,6 +26,7 @@ async function readBody(req: IncomingMessage) {
 async function fakeHermes(name: string, sessions: string[] = [], messages?: unknown[], socketPath?: string) {
   const seen: Seen[] = []
   const known = new Set(sessions)
+  const rows = new Map(sessions.map(id => [id, { id, title: `${name} ${id}`, source: 'api_server', archived: false }]))
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://x')
     const body = await readBody(req)
@@ -38,13 +39,14 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
       { slug: 'openai-codex', name: 'Codex', authenticated: true, models: ['gpt-6.1-sol'] },
       { slug: 'nous', name: 'Nous', authenticated: false, models: [] },
     ] })
-    if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => ({ id, title: `${name} ${id}`, source: 'api_server' })) })
+    if (req.method === 'GET' && url.pathname === '/api/sessions') return json(200, { data: [...known].map((id) => rows.get(id)) })
     const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
-    if (req.method === 'DELETE' && sessionMatch) return known.delete(decodeURIComponent(sessionMatch[1])) ? json(200,{ok:true}) : json(404,{error:'not found'})
-    if (req.method === 'GET' && sessionMatch) return known.has(decodeURIComponent(sessionMatch[1])) ? json(200, { session: { id: decodeURIComponent(sessionMatch[1]), title: name } }) : json(404, { error: 'not found' })
+    if (req.method === 'DELETE' && sessionMatch) { const id = decodeURIComponent(sessionMatch[1]); rows.delete(id); return known.delete(id) ? json(200,{ok:true}) : json(404,{error:'not found'}) }
+    if (req.method === 'GET' && sessionMatch) { const row = rows.get(decodeURIComponent(sessionMatch[1])); return row ? json(200, { session: row }) : json(404, { error: 'not found' }) }
+    if (req.method === 'PATCH' && sessionMatch) { const row = rows.get(decodeURIComponent(sessionMatch[1])); if (!row) return json(404, { error: 'not found' }); Object.assign(row, body); return json(200, { session: row }) }
     if (req.method === 'GET' && /\/messages$/.test(url.pathname)) return json(200, { data: messages ?? [{ role: 'assistant', content: `${name} says hi` }] })
-    if (req.method === 'POST' && url.pathname === '/api/sessions') { known.add(body?.id ?? 'generated_1'); return json(201, { session: { id: body?.id ?? 'generated_1' } }) }
-    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
+    if (req.method === 'POST' && url.pathname === '/api/sessions') { const id = body?.id ?? 'generated_1'; known.add(id); rows.set(id, { ...body, id, archived: false }); return json(201, { session: rows.get(id) }) }
+    if (req.method === 'POST' && url.pathname === '/v1/runs') { known.add(body.session_id); const row = rows.get(body.session_id) ?? { id: body.session_id, title: name, source: 'api_server', archived: false }; row.archived = false; rows.set(body.session_id, row); return json(202, { run_id: `${name}-run-1`, status: 'started' }) }
     if (req.method === 'GET' && /^\/v1\/runs\/[^/]+$/.test(url.pathname)) return json(200, { run_id: url.pathname.split('/').at(-1), status: 'completed', output: `${name} done` })
     json(404, { error: 'nope' })
   })
@@ -52,10 +54,10 @@ async function fakeHermes(name: string, sessions: string[] = [], messages?: unkn
   if (socketPath) {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
     chmodSync(socketPath, 0o600)
-    return { port: 0, origin: '', seen, known }
+    return { port: 0, origin: '', seen, known, rows }
   }
   const address = await listen(server) as import('node:net').AddressInfo
-  return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known }
+  return { port: address.port, origin: `http://127.0.0.1:${address.port}`, seen, known, rows }
 }
 
 function box() {
@@ -96,11 +98,12 @@ async function start(dir: string, main: { origin: string }, extra: Record<string
   })
   servers.push(svc)
   const address = await listen(svc) as import('node:net').AddressInfo
-  return { base: `http://127.0.0.1:${address.port}`, calls, deliveries }
+  return { base: `http://127.0.0.1:${address.port}`, calls, deliveries, server: svc }
 }
 
 const json = (body: unknown, headers: Record<string, string> = {}) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
-const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private' } }
+// Explicitly off: these tests switch standard-chat reading themselves (the default-on rule has its own test).
+const PRIVATE = { label: 'Private', harness: 'hermes', model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset: 'private', read_standard_chats: false } }
 
 // Create the private agent and point it at a fake Hermes on the port the registry assigned.
 async function withPrivate(dir: string, base: string, privatePort?: number) {
@@ -116,6 +119,24 @@ async function withPrivate(dir: string, base: string, privatePort?: number) {
 }
 
 describe('agents registry and API', () => {
+  it('owner can hide/unhide agents without stopping them; hidden must be boolean and survives readback', async () => {
+    const dir = box(), main = await fakeHermes('main'), { base, calls } = await start(dir, main)
+    const { agent } = await withPrivate(dir, base)
+    const route = base + '/wizard/v1/agents/' + agent.id
+    const patch = (hidden: unknown) => fetch(route, { ...json({ hidden }), method: 'PATCH' })
+    expect((await patch('true')).status).toBe(400)
+    const before = calls.slice()
+    expect((await patch(true)).status).toBe(200)
+    expect((await (await fetch(route)).json()).agent.hidden).toBe(true)
+    expect((await (await fetch(base + '/wizard/v1/agents')).json()).agents.find((a:any)=>a.id===agent.id).hidden).toBe(true)
+    expect(calls).toEqual(before)
+    expect(JSON.parse(readFileSync(join(dir, 'agents', agent.id, 'agent.json'), 'utf8')).hidden).toBe(true)
+    expect((await patch(false)).status).toBe(200)
+    expect((await (await fetch(route)).json()).agent.hidden === true).toBe(false)
+    expect((await fetch(base + '/wizard/v1/agents/hermes', { ...json({hidden:true}), method:'PATCH' })).status).toBe(200)
+    expect((await (await fetch(base + '/wizard/v1/agents/hermes')).json()).agent.hidden).toBe(true)
+  })
+
   it('prepares only the reserved import socket through an owner-only API, without runtime calls', async () => {
     const dir = box(), main = await fakeHermes('main')
     const registry = createAgentRegistry({ agentsDir: join(dir, 'agents'), isolation: 'restricted',
@@ -299,18 +320,21 @@ describe('agents registry and API', () => {
     expect(text).not.toContain('/opt/data')
     expect(text).not.toContain(dir)
     const rows = JSON.parse(text).data
-    const envelope = JSON.parse(rows[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
-    expect(envelope.items.map((i: any) => [i.name, i.kind])).toEqual([['notes.md', 'file'], ['chart.png', 'image']])
+    const envelopes = [...rows[0].content.matchAll(/<helm_attachments>(.*?)<\/helm_attachments>/gs)].map(match => JSON.parse(match[1]))
+    const items = envelopes.flatMap(envelope => envelope.items)
+    expect(items).toHaveLength(2)
+    expect(items.map((i: any) => [i.name, i.kind])).toEqual(expect.arrayContaining([['notes.md', 'file'], ['chart.png', 'image']]))
+    expect(envelopes.find(envelope => envelope.inline)?.items[0].name).toBe('chart.png')
     expect(rows[1].content).toContain('[file: escape.md unavailable]')
     expect(rows[1].content).toContain('[file: outside.md unavailable]')
     expect(rows[1].content).not.toContain('<helm_attachments>')
     // Bytes live in the agent's own folder, not the main agent's shared artifact store.
     expect(readdirSync(join(dir, 'agents', 'private', 'wizard-artifacts')).filter(n => n.endsWith('.bin')).length).toBe(2)
-    const md = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+    const md = await fetch(`${base}/wizard/attachments/${items.find(item => item.kind === 'file').id}`)
     expect(md.status).toBe(200)
     expect(md.headers.get('content-disposition')).toContain('notes.md')
     expect(await md.text()).toContain('OUTBOUND_MD_CANARY')
-    const image = await fetch(`${base}/wizard/attachments/${envelope.items[1].id}`)
+    const image = await fetch(`${base}/wizard/attachments/${items.find(item => item.kind === 'image').id}`)
     expect(image.status).toBe(200)
     expect(image.headers.get('content-type')).toBe('image/png')
     expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
@@ -369,6 +393,7 @@ describe('agents registry and API', () => {
     expect(run.status).toBe(202)
     const sent = priv.seen.find(r => r.path === '/v1/runs')
     expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    expect(sent?.body.instructions).toContain('Put each MEDIA line right after the sentence that talks about it; it shows there as a tappable picture.')
     const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
     expect(status.status).toBe(200)
   })
@@ -628,6 +653,44 @@ describe('per-agent threads and runs', () => {
     expect(await unknown.json()).toMatchObject({ check: 'agent.id' })
   })
 
+  it('projects same-id follow-up watchers only inside their owning agent list', async () => {
+    const dir = box()
+    const main = await fakeHermes('main', ['wizard_shared'])
+    const priv = await fakeHermes('private', ['wizard_shared'])
+    const { base, server } = await start(dir, main, { schedulerStatePath: join(dir, 'schedules.sqlite3') })
+    await withPrivate(dir, base, priv.port)
+    server.scheduler.create({ name: 'Main dependency', kind: 'watch', when: { every: 5 }, prompt: 'Check main.', thread: 'wizard_shared', agent: 'main' })
+    server.scheduler.create({ name: 'Private dependency', kind: 'watch', when: { every: 5 }, prompt: 'Check private.', thread: 'wizard_shared', agent: 'private' })
+
+    const mainList = await (await fetch(`${base}/wizard/hermes/api/sessions`)).json()
+    const mainRow = (mainList.data ?? mainList.sessions).find((row: any) => row.id === 'wizard_shared')
+    expect(mainRow.wizard_follow_up).toMatchObject({ active: true, count: 1, names: ['Main dependency'] })
+
+    const privateList = await (await fetch(`${base}/wizard/hermes/api/sessions?agent=private`)).json()
+    const privateRow = privateList.data.find((row: any) => row.id === 'wizard_shared')
+    expect(privateRow.wizard_follow_up).toMatchObject({ active: true, count: 1, names: ['Private dependency'] })
+  })
+
+  it('delivers a routed watcher only through its owning agent and restores that same routed thread', async () => {
+    const dir = box()
+    const main = await fakeHermes('main', ['wizard_shared'])
+    const priv = await fakeHermes('private', ['wizard_shared'])
+    priv.rows.get('wizard_shared')!.archived = true
+    const { base, server } = await start(dir, main, { schedulerStatePath: join(dir, 'schedules.sqlite3'), runQueueStatePath: join(dir, 'queue.sqlite3'), runQueuePollIntervalMs: 20 })
+    await withPrivate(dir, base, priv.port)
+    const watch = server.scheduler.create({ name: 'Private result', kind: 'watch', when: { every: 5 }, prompt: 'Check private.', thread: 'wizard_shared', agent: 'private' })
+    server.scheduler.runNow(watch.id); await server.scheduler.tick(false)
+    expect(priv.seen.some((row) => row.method === 'POST' && row.path === '/v1/runs')).toBe(true)
+    expect(main.seen.some((row) => row.method === 'POST' && row.path === '/v1/runs')).toBe(false)
+    for (let i = 0; i < 100 && server.scheduler.get(watch.id).enabled; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20)); await server.scheduler.refreshRuns()
+    }
+    expect(server.scheduler.get(watch.id).enabled).toBe(false)
+    expect(priv.rows.get('wizard_shared')!.archived).toBe(false)
+    expect(priv.seen.filter((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared').map(row => row.body.archived)).toEqual([true, true, false]) // Original and one Reporter rewrite stay hidden; only the final result resurfaces.
+    expect(main.seen.some((row) => row.method === 'PATCH' && row.path === '/api/sessions/wizard_shared')).toBe(false)
+  })
+
   it('recap delivery: token required, goes through the runtime into the agent, pins the thread', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -766,7 +829,7 @@ describe('private round 2: read-only standard retrieval, private search and dele
     expect(config).toContain('standard_chats:')
     expect(config).toContain('http://gateway:8923/wizard/standard-chats/mcp')
     expect(config).not.toContain(token)
-    expect(config).not.toContain('  wizard:')
+    expect(config).toContain('  wizard:') // own Spaces are available without ticking apps
     const reply=await call({Authorization:`Bearer ${token}`})
     expect(reply.status).toBe(200)
     expect(JSON.stringify(await reply.json())).toContain('lighthouse')
@@ -811,11 +874,23 @@ describe('private round 2: read-only standard retrieval, private search and dele
     const created=await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private',read_standard_chats:true}}))
     expect(created.status).toBe(201)
     const config=readFileSync(join(dir,'agents','private','home','config.yaml'),'utf8')
-    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:')
+    expect(config).toContain('http://readonly-relay:18986/wizard/standard-chats/mcp');expect(config).not.toContain('  wizard:') // no app gateway URL configured
     expect(readFileSync(join(dir,'agents','private','home','.env'),'utf8')).toContain('WIZARD_MCP_TOKEN=')
     const standard=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','.env'),'utf8')).not.toContain('WIZARD_MCP_TOKEN=')
     expect(readFileSync(join(dir,'agents',standard.agent.id,'home','config.yaml'),'utf8')).not.toContain('readonly-relay')
+  })
+  it('private agents read standard chats by default when the transport exists; explicit false wins; none without transport',async()=>{
+    const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main,{standardChatsUrl:'http://readonly-relay:18986/wizard/standard-chats/mcp'})
+    const on=await(await fetch(base+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private'}}))).json()
+    expect(on.agent.permissions.read_standard_chats).toBe(true)
+    const off=await(await fetch(base+'/wizard/v1/agents',json({...PRIVATE,label:'Diary',permissions:{preset:'private',read_standard_chats:false}}))).json()
+    expect(off.agent.permissions.read_standard_chats).toBe(false)
+    const std=await(await fetch(base+'/wizard/v1/agents',json({label:'Ordinary',model:{provider:'anthropic',model:'claude-opus-5-5'}}))).json()
+    expect(std.agent.permissions.read_standard_chats).toBe(false)
+    const dir2=box(),main2=await fakeHermes('main'),{base:base2}=await start(dir2,main2)
+    const bare=await fetch(base2+'/wizard/v1/agents',json({...PRIVATE,permissions:{preset:'private'}}))
+    expect(bare.status).toBe(201);expect((await bare.json()).agent.permissions.read_standard_chats).toBe(false)
   })
   it('refuses a nonfunctional grant before persisting when no retrieval transport is configured',async()=>{
     const dir=box(),main=await fakeHermes('main'),{base}=await start(dir,main);await withPrivate(dir,base)

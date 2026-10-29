@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cacheableRow, createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode } from '../server/session-list-cache.mjs'
+import { cacheableRow, createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from '../server/session-list-cache.mjs'
 
 // A fake projection: a thread's status comes from a mutable "world" (runs, failures), the way the
 // real projection reads the queue and Hermes truth. Counts every projected thread.
@@ -103,6 +103,26 @@ test('an archive thread whose old queue run is pruned (or changes) is re-project
   lastRun.set('s180', 'wizardq_new')
   const added = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(added.rows, 's180').wizard_last_run_id, 'wizardq_new')
+})
+
+test('a saved background result that appears or clears on an archive thread re-projects it (stale row turned the cache off)', async () => {
+  const w = world()
+  const results = new Map()
+  const projectBatch = async (batch, first) => (await w.projectBatch(batch, first))
+    .map((r) => (results.has(r.id) ? { ...r, wizard_background_result: { id: results.get(r.id) } } : r))
+  const stamps = () => mergeStamps(new Map([['s10', 'wizardq_a=completed']]), new Map([...results].map(([id, rec]) => [id, `${rec};`])))
+  const p = createHybridProjector({ now: () => 0 })
+  await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  results.set('s210', 'bg_1')
+  w.projected.length = 0
+  const shown = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  assert.equal(row(shown.rows, 's210').wizard_background_result.id, 'bg_1')
+  assert.deepEqual(w.projected.slice(100), ['s210'])
+  results.delete('s210')
+  const cleared = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
+  assert.equal(row(cleared.rows, 's210').wizard_background_result, undefined)
+  assert.equal(mergeStamps(null, new Map([['x', 'y']])), null, 'no queue: no stamps')
+  assert.equal(mergeStamps(new Map([['s1', 'q']]), new Map([['s1', 'bg;']])).get('s1'), 'q|bg:bg;')
 })
 
 test('warm (recently active, quiet) threads are rebuilt once a minute, not on every build', async () => {
