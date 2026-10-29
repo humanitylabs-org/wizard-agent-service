@@ -44,6 +44,8 @@ import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from private_providers import CLIENT_IMAGE, PrivateProviders, client_service, migrate_provider
+from provider_key_scrub import scrub as scrub_provider_key
 import hermes_lock
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
@@ -123,9 +125,10 @@ def container_for(project: str, service: str) -> str:
 # ---------------------------------------------------------------- agent folder
 
 class Agents:
-    def __init__(self, root: Path, tinfoil_key_file: Path | None):
+    def __init__(self, root: Path, tinfoil_key_file: Path | None = None, apps_path: Path | None = None, client_image: str = CLIENT_IMAGE):
         self.root = root.resolve()
         self.tinfoil_key_file = tinfoil_key_file
+        self.providers = PrivateProviders(self, apps_path or self.root.parent / 'apps.json', docker, RuntimeFailure, client_image)
 
     def read(self, agent_id: str) -> dict:
         if not ID_RE.match(agent_id) or agent_id == "hermes":
@@ -173,7 +176,7 @@ class Agents:
         except OSError:
             raise RuntimeFailure("agent_not_prepared", 409) from None
         lines = [line for line in lines if not line.startswith("TINFOIL_API_KEY=")]
-        if (agent.get("model") or {}).get("provider") == "tinfoil":
+        if not self.providers.is_private(agent) and (agent.get("model") or {}).get("provider") == "tinfoil":
             key = self.tinfoil_key()
             if not key:
                 raise RuntimeFailure("provider_not_configured", 503)
@@ -198,6 +201,45 @@ def restricted(agent: dict) -> bool:
     return (agent.get("runtime") or {}).get("isolation") == "restricted"
 
 
+def agent_identity(agent: dict) -> tuple[int, int]:
+    """Recorded non-root identity; older restricted records use the original new-agent default."""
+    runtime = agent.get('runtime') or {}
+    uid, gid = runtime.get('uid', AGENT_UID), runtime.get('gid', AGENT_UID)
+    if any(type(v) is not int or not 1 <= v <= 2147483647 for v in (uid, gid)):
+        raise RuntimeFailure('agent_identity_invalid', 409)
+    return uid, gid
+
+
+def legacy_identity(agent: dict, agents: Agents) -> dict:
+    """Metadata only: never stat, open or traverse an agent home. Refuse unknown/root identities."""
+    runtime = agent.get('runtime') or {}
+    if 'uid' in runtime or 'gid' in runtime:
+        if 'uid' not in runtime or 'gid' not in runtime:
+            raise RuntimeFailure('agent_identity_invalid', 409)
+        uid, gid = agent_identity(agent)
+    elif restricted(agent):
+        uid, gid = agent_identity(agent)
+    else:
+        ids = docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=' + runtime['app_id']], timeout=60).stdout.split()
+        if len(ids) != 1:
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        doc = json.loads(docker(['inspect', ids[0]], timeout=60).stdout)[0]
+        if not any(m.get('Source') == str(agents.home(agent['id'])) and m.get('Destination') == '/opt/data' for m in doc.get('Mounts', [])):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        config = doc.get('Config') or {}
+        env = dict(v.split('=', 1) for v in config.get('Env', []) if '=' in v)
+        user = config.get('User', '')
+        # Stock legacy images launch as root and drop to HERMES_UID/GID in their entrypoint.
+        # For an explicit non-root numeric user, Config.User is the effective identity.
+        launcher = user in ('', 'root', '0', '0:0', 'root:root')
+        pair = [env.get('HERMES_UID', ''), env.get('HERMES_GID', '')] if launcher else user.split(':')
+        if len(pair) != 2 or not all(isinstance(v, str) and re.fullmatch(r'[0-9]+', v) for v in pair):
+            raise RuntimeFailure('agent_identity_unknown', 409)
+        uid, gid = map(int, pair)
+        agent_identity({'runtime': {'uid': uid, 'gid': gid}})
+    return {'uid': uid, 'gid': gid}
+
+
 def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Network]:
     """The agent's own /28 pair, as allocated by the Agent Service; anything else is refused."""
     network = (agent.get("runtime") or {}).get("network") or {}
@@ -216,7 +258,7 @@ def agent_networks(agent: dict) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Ne
 def service_names(agent: dict) -> tuple[str, str]:
     """Unique per agent: Runtipi puts every app on one shared network, where service names are DNS aliases."""
     app_id = agent["runtime"]["app_id"]
-    return app_id, f"{app_id}-tinfoil"
+    return app_id, f"{app_id}-client" if agent.get("runtime", {}).get("private_client") else f"{app_id}-tinfoil"
 
 
 CLAUDE_LOGIN_VOLUME = "wizard-ai-accounts-claude"   # the Claude app's shared login (wizard-claude compose)
@@ -224,10 +266,16 @@ def uses_claude_login(agent: dict) -> bool:
     return agent.get("privacy") == "standard" and (agent.get("model") or {}).get("provider") == "anthropic"
 
 
-def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool) -> str:
+def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, uid: int, gid: int, ports: bool,
+                private_link: dict | None = None, listener_port: int = 8929, main_service: str = '') -> str:
     """Miguel's hermes-agent package shape (stock image, HERMES_HOME at /opt/data), API server instead of the
     dashboard, plus the Tinfoil attestation proxy as a sidecar the agent reaches by service name."""
     main, proxy = service_names(agent)
+    if private_link:
+        return private_compose_doc(agent, image=image, client_image=proxy_image, home_source=home_source,
+                                   link=private_link, listener_port=listener_port, main=main_service or main)
+    if agent.get('runtime', {}).get('private_client'):
+        raise RuntimeFailure('private_provider_unavailable', 503)
     hermes = {
         "image": image,
         "command": ["gateway", "run"],
@@ -262,6 +310,40 @@ def compose_doc(agent: dict, *, image: str, proxy_image: str, home_source: str, 
     if doc_volumes:
         doc["volumes"] = doc_volumes
     return json.dumps(doc, indent=2) + "\n"   # JSON is valid YAML; no PyYAML dependency
+
+
+def private_compose_doc(agent, *, image, client_image, home_source, link, listener_port, main):
+    uplink, sandbox = agent_networks(agent)
+    uid, gid = agent_identity(agent)
+    client = service_names(agent)[1]
+    edge = f"agent-{agent['id']}-edge"
+    # No auto-start after Docker/host restart: private topology must be reconciled before any client starts.
+    hardening = {'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'restart': 'no'}
+    services = {
+        main: {**hardening, 'image': image or DEFAULT_IMAGE, 'user': f'{uid}:{gid}',
+               'entrypoint': ['/opt/hermes/.venv/bin/hermes'], 'command': ['gateway', 'run'],
+               'init': True, 'working_dir': '/opt/data', 'stop_grace_period': '1m',
+               'environment': {'HOME': '/opt/data', 'HERMES_HOME': '/opt/data',
+                               'PATH': '/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin:/bin',
+                               'API_SERVER_ENABLED': 'true', 'API_SERVER_HOST': '0.0.0.0',
+                               'API_SERVER_PORT': '8642', 'API_SERVER_KEY': '${AGENT_API_KEY:?set AGENT_API_KEY}',
+                               'WIZARD_GATEWAY_URL': f'http://{edge}:8923'},
+               'volumes': [f'{home_source}:/opt/data'],
+               'tmpfs': ['/tmp:rw,nosuid,nodev,size=1g,mode=1777'], 'networks': {'sandbox': {'ipv4_address': str(sandbox.network_address + 2)}},
+               'mem_limit': '4g', 'pids_limit': 512, 'depends_on': [client, edge]},
+        client: client_service(link, client_image),
+        edge: {**hardening, 'image': SIDECAR_IMAGE, 'build': {'context': str(RESTRICTED_DIR / 'sidecars')},
+               'user': '${AGENT_EDGE_UID:?set AGENT_EDGE_UID}:${AGENT_EDGE_GID:?set AGENT_EDGE_GID}', 'command': ['python3', '-u', '/srv/edge.py'],
+               'environment': {'EDGE_UPSTREAM_SOCKET': '/run/agent-gateway/gateway.sock', 'EDGE_INGRESS_SOCKET': '/run/agent-gateway/ingress.sock',
+                               'EDGE_TOKEN_SHA256': '${EDGE_TOKEN_SHA256:?set EDGE_TOKEN_SHA256}', 'EDGE_AGENT_HOST': main},
+               'volumes': [{'type': 'bind', 'source': '${AGENT_GATEWAY_DIR:?set AGENT_GATEWAY_DIR}', 'target': '/run/agent-gateway', 'bind': {'create_host_path': False}}],
+               'networks': {'sandbox': {'aliases': ['edge'], 'ipv4_address': str(sandbox.network_address + 4)}}, 'pids_limit': 64, 'mem_limit': '128m'},
+    }
+    doc = {'services': services, 'networks': {
+        'sandbox': {'internal': True, 'driver_opts': {'com.docker.network.bridge.inhibit_ipv4': 'true'},
+                    'ipam': {'config': [{'subnet': str(sandbox)}]}},
+        'relay': {'external': True, 'name': link['network']}}}
+    return json.dumps(doc, indent=2) + '\n'
 
 
 def config_doc(agent: dict, *, version: str) -> str:
@@ -361,6 +443,7 @@ class RestrictedDriver:
         return f"agent-{agent_id}"
 
     def env(self, agent: dict) -> dict:
+        agent_identity(agent)  # reject malformed identity before Docker or filesystem mutations
         uplink, sandbox = agent_networks(agent)
         api_key = self.agents.secret(agent["id"], "runtime.key")
         gateway_key = self.agents.secret(agent["id"], "gateway.key")
@@ -388,6 +471,11 @@ class RestrictedDriver:
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
         env = self.env(agent)
+        private_file = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
+        if self.agents.providers.is_private(agent):
+            if not private_file.is_file():
+                raise RuntimeFailure('private_provider_not_prepared', 409)
+            return docker(['compose', '-p', self.project(agent['id']), '-f', str(private_file), *args], timeout=timeout, env=env)
         files = ["-f", str(self.compose_file)]
         hosts = os.environ.get("EGRESS_PASSTHROUGH_HOSTS")
         if hosts:
@@ -444,6 +532,7 @@ class RestrictedDriver:
     def sync_home(self, agent: dict) -> None:
         """Copy the Service-managed files into the agent-owned home: a one-shot, no-network, read-only container with
         only the file capabilities, like the runtime's own home-init. The host never writes into the home itself."""
+        uid, gid = agent_identity(agent)
         managed = self.agents.managed(agent["id"])
         missing = [name for name in MANAGED_FILES if not (managed / name).is_file()]
         if missing:
@@ -455,7 +544,7 @@ class RestrictedDriver:
         # by mktemp (exclusive, root-owned 0700, unpredictable name), then renamed over the target. rename(2)
         # replaces a planted symlink or FIFO instead of following or opening it; a planted directory makes the sync
         # fail, which only stops that agent.
-        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
+        copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {uid}:{gid} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
         bundles = ('plugins/wizard-supervisor-tools', 'skills/reporter', 'skills/supervisor')
         asset_copy = ''
@@ -464,11 +553,11 @@ class RestrictedDriver:
                 continue  # Older Service releases have no Supervisor bundle.
             parent, leaf = rel.split('/')
             asset_copy += (f'; test ! -L /opt/data/{parent}; mkdir -p /opt/data/{parent};'
-                           f' cp -R /managed/{rel} "$tmp/{leaf}"; chown -R {AGENT_UID}:{AGENT_UID} "$tmp/{leaf}";'
+                           f' cp -R /managed/{rel} "$tmp/{leaf}"; chown -R {uid}:{gid} "$tmp/{leaf}";'
                            f' if [ -e /opt/data/{rel} ] || [ -L /opt/data/{rel} ]; then mv -T /opt/data/{rel} "$tmp/old-{leaf}"; fi;'
                            f' mv -T "$tmp/{leaf}" /opt/data/{rel}')
         script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy}{asset_copy};'
-                  f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
+                  f' chown {uid}:{gid} /opt/data; chmod 700 /opt/data')
         name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
         try:
             docker(["run", "--rm", "--name", name, "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
@@ -493,7 +582,8 @@ class RestrictedDriver:
                    env={"CLAUDE_CODE_OAUTH_TOKEN": "", "CLAUDE_TOKEN_FILE": ""})
 
     def _prepare(self, agent: dict) -> None:
-        if (agent.get("model") or {}).get("provider") == "tinfoil":
+        agent_identity(agent)  # reject malformed/root identity before any Docker build or home mutation
+        if not self.agents.providers.is_private(agent) and (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
         if agent["runtime"].get("admission") == "importing":
@@ -509,6 +599,36 @@ class RestrictedDriver:
             safe = False
         if not safe:
             raise RuntimeFailure("agent_socket_not_ready", 409)
+        if self.agents.providers.is_private(agent):
+            uid, gid = agent_identity(agent)
+            # Validate installed/healthy provider before any agent mutation.
+            app = self.agents.providers.app(agent.get('model', {}).get('provider'))
+            self.agents.providers.request(app, 'GET', '/api/connection')
+            docker(['build', '-t', SIDECAR_IMAGE, str(self.runtime_dir / 'sidecars')], timeout=1800)
+            private_file = self.agents.root / agent['id'] / 'runtime' / 'private-compose.json'
+            private_file.parent.mkdir(mode=0o700, exist_ok=True)
+            if private_file.exists():
+                self._compose(agent, 'down', '--remove-orphans', timeout=300)
+            elif agent['runtime'].get('migration_source'):
+                # Stop via the OLD driver/project before syncing or minting. New agents have no old project.
+                source = agent['runtime']['migration_source']
+                old = json.loads(json.dumps(agent))
+                old['model']['provider'] = source['provider']
+                old['runtime'].pop('private_client', None)
+                old['runtime'].pop('isolation', None)
+                if source.get('isolation'):
+                    old['runtime']['isolation'] = source['isolation']
+                previous = self if restricted(old) else getattr(self, 'legacy_driver', None)
+                if previous is None:
+                    raise RuntimeFailure('private_migration_driver_unavailable', 503)
+                if previous is self:
+                    docker(['compose', '-p', self.project(agent['id']), '-f', str(self.compose_file), 'stop'], timeout=300, env=self.env(old))
+                else:
+                    previous.stop(old)
+            link = self.agents.providers.prepare(agent)
+            private_file.write_text(compose_doc(agent, image=self.image or DEFAULT_IMAGE,
+                proxy_image=self.agents.providers.client_image, home_source=str(self.agents.home(agent['id'])),
+                uid=uid, gid=gid, ports=False, private_link=link, main_service=RESTRICTED_SERVICE))
         if agent.get('imported'):
             docker(["image", "inspect", SIDECAR_IMAGE], timeout=30)
             docker(["image", "inspect", agent["runtime"].get("image") or self.image], timeout=30)
@@ -566,6 +686,12 @@ class RestrictedDriver:
         self._compose(agent, "stop", timeout=300)
         self._remove_claude_seeder(agent)
         return {"ok": True}
+
+    def delete(self, agent: dict) -> dict:
+        self._compose(agent, 'down', '--remove-orphans', timeout=300)
+        self.agents.providers.revoke(agent)
+        (self.agents.root / agent['id'] / 'runtime' / 'private-compose.json').unlink(missing_ok=True)
+        return {'ok': True}
 
 
 def sidecar_source_labels(runtime_dir: Path) -> dict[str, str]:
@@ -867,6 +993,10 @@ def guard_image_change(driver, agent):
 
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
+    if action in {'start', 'apply'} and (driver.agents.root / agent['id'] / 'runtime' / 'private-restore.json').exists():
+        raise RuntimeFailure('private_restore_pending', 409)
+    if action in {'start', 'apply'} and not driver.agents.providers.is_private(agent) and (driver.agents.root / agent['id'] / 'runtime' / 'key-scrub.json').exists():
+        raise RuntimeFailure('private_migration_pending', 409)
     if isinstance(driver, ImportDriver):
         # Imports have no compose generation. Absence in a compose label lookup
         # MUST NOT mint a false stopped seal for an actually running import.
@@ -949,7 +1079,7 @@ def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
              "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
     service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
     cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(driver.project(agent['id']), service))
-    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else ":".join(map(str, agent_identity(agent))) if restricted(agent) else "hermes"
     if isinstance(driver, ImportDriver):
         label = docker(['inspect', '--format', '{{index .Config.Labels "wizard.import.id"}}', cid], timeout=10).stdout.strip()
         if label != agent['id']:
@@ -1115,7 +1245,7 @@ class ImportDriver:
 
 def driver_for(agent: dict, driver, restricted_driver):
     """A restricted agent runs only in the restricted runtime; it never falls back to the default driver."""
-    if restricted(agent):
+    if restricted(agent) or agent.get('runtime', {}).get('private_client'):
         if restricted_driver is None:
             raise RuntimeFailure("restricted_runtime_unavailable", 503)
         return restricted_driver
@@ -1124,7 +1254,69 @@ def driver_for(agent: dict, driver, restricted_driver):
     return driver
 
 
+def unmigrate_private_provider(agents, agent, payload, legacy, sealed):
+    """Attempt-fenced restore; called under BOTH lifecycle and process locks.
+
+    Only the existing host credential source is used. No plaintext undo copy,
+    home scan, privacy downgrade, or arbitrary runtime payload is accepted.
+    """
+    from provider_key_scrub import atomic
+    attempt = payload.get('attempt') if isinstance(payload, dict) else None
+    phase = payload.get('phase') if isinstance(payload, dict) else None
+    source = agent['runtime'].get('migration_source') or agent['runtime'].get('private_restore_source') or {}
+    if (not isinstance(attempt, str) or not re.fullmatch(r'[a-f0-9]{32}', attempt)
+            or source.get('attempt') != attempt or source.get('provider') != 'tinfoil'
+            or source.get('model', {}).get('provider') != 'tinfoil'
+            or source.get('runtime', {}).get('private_client') or source.get('runtime', {}).get('isolation')):
+        raise RuntimeFailure('private_restore_scope_mismatch', 409)
+    if (not agents.tinfoil_key() or agents.tinfoil_key_file is None
+            or agents.tinfoil_key_file.resolve().is_relative_to(agents.home(agent['id']).resolve())):
+        raise RuntimeFailure('private_migration_host_source_unavailable', 503)
+    root = agents.root / agent['id'] / 'runtime'
+    root.mkdir(mode=0o700, exist_ok=True)
+    fence = root / 'private-restore.json'
+    prior = json.loads(fence.read_text()) if fence.exists() else {}
+    if prior and prior.get('attempt') != attempt:
+        raise RuntimeFailure('private_restore_scope_mismatch', 409)
+    def save(status):
+        atomic(fence, json.dumps({'schema': 1, 'attempt': attempt, 'status': status}).encode())
+    if phase == 'prepare':
+        if not agents.providers.is_private(agent):
+            if agent['runtime'].get('private_restore_attempt') != attempt:
+                raise RuntimeFailure('private_restore_scope_mismatch', 409)
+            return {'ok': True, 'attempt': attempt, 'phase': phase}
+        if sealed is None:
+            raise RuntimeFailure('restricted_runtime_unavailable', 503)
+        if prior.get('status') != 'prepared':
+            save('pending')  # fence all starts before the first destructive write
+            if (root / 'private-compose.json').exists():
+                sealed.delete(agent)  # down, revoke client/network, remove compose
+            else:
+                agents.providers.revoke(agent)
+            save('prepared')
+    elif phase == 'commit':
+        if (agent['runtime'].get('private_client') or agents.providers.is_private(agent)
+                or agent['runtime'].get('private_restore_attempt') != attempt):
+            raise RuntimeFailure('private_restore_scope_mismatch', 409)
+        # An idempotent retry after commit must not rewrite a running home's env.
+        if not fence.exists():
+            return {'ok': True, 'attempt': attempt, 'phase': phase}
+        if prior.get('status') != 'prepared':
+            raise RuntimeFailure('private_restore_not_prepared', 409)
+        agents.add_provider_keys(agent)
+        (root / 'key-scrub.json').unlink(missing_ok=True)
+        # Call the exact original driver while holding the restart fence. A
+        # failed apply leaves it in place for an explicit retry, never auto-start.
+        legacy.apply(agent)
+        fence.unlink()
+    else:
+        raise RuntimeFailure('invalid_restore_phase', 400)
+    return {'ok': True, 'attempt': attempt, 'phase': phase}
+
+
 def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None):
+    if restricted_driver is not None:
+        restricted_driver.legacy_driver = driver
     class Handler(BaseHTTPRequestHandler):
         server_version = "wizard-agent-runtime"
 
@@ -1150,7 +1342,21 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census)", self.path)
+            if self.path == '/providers/reconcile':
+                # Owner-runtime control plane: installers must not import Agents
+                # and traverse unrelated private records in their own process.
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                    if length not in {0, 2} or (length and self.rfile.read(length) != b'{}'):
+                        self._json(400, {'error': 'invalid_payload'})
+                        return
+                    failures = agents.providers.reconcile_installed()
+                    self._json(503 if failures else 200, {'ok': not failures, 'failure_count': len(failures)})
+                except Exception as error:
+                    sys.stderr.write(f'[agent-runtime] provider reconciliation failed: {type(error).__name__}\n')
+                    self._json(502, {'error': 'runtime_failed'})
+                return
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|delete|identity|scrub-private-migration|rollback-private-migration|unmigrate-private-provider|private-migration-status|deliver|place|fetch|inspect|census)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1177,6 +1383,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                     self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
                     return
                 agent = agents.read(agent_id)
+                if action == "identity":
+                    self._json(200, legacy_identity(agent, agents))
+                    return
                 chosen = driver_for(agent, driver, restricted_driver)
                 if action == "place":
                     if not isinstance(payload, dict):
@@ -1191,9 +1400,46 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 if action == "deliver":
                     self._json(200, deliver(chosen, agent, payload))
                     return
-                with lifecycle_lock(chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
+                with lifecycle_lock(driver if action == 'unmigrate-private-provider' else chosen, restricted_driver, agent_id), import_process_lock(agents, agent_id):
                     agent = agents.read(agent_id)
-                    result = lifecycle_action(chosen, agent, action)
+                    if action in {'apply', 'start'} and agents.providers.is_private(agent) and chosen is not restricted_driver:
+                        raise RuntimeFailure('private_migration_generation_changed', 409)
+                    if action == 'private-migration-status':
+                        if not agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_not_sealed', 409)
+                        receipt = json.loads((agents.root / agent_id / 'runtime' / 'key-scrub.json').read_text())
+                        cid = container_for('agent-' + agent_id, RESTRICTED_SERVICE)
+                        code = "import sys,os,json,re;from pathlib import Path;needle=sys.stdin.buffer.read();assert needle;hits=0;count=0;assignment=re.compile(rb'(?m)^[ \\t]*(?:export[ \\t]+)?TINFOIL_API_KEY[ \\t]*=')\nfor d,dirs,names in os.walk('/opt/data',followlinks=False):\n for n in names:\n  p=Path(d)/n\n  if p.is_symlink() and not p.is_file():continue\n  if not p.is_file():continue\n  count+=1;over=b'';found=False\n  with p.open('rb') as f:\n   while chunk:=f.read(1048576):\n    chunk=over+chunk;found=found or needle in chunk or assignment.search(chunk) is not None;over=chunk[-max(len(needle),4096):]\n  hits+=int(found)\nprint(json.dumps({'files_scanned':count,'credential_matches':hits}))"
+                        scan = json.loads(docker(['exec', '-i', cid, '/opt/hermes/.venv/bin/python', '-c', code], input_text=agents.tinfoil_key(), timeout=180).stdout)
+                        result = {'sealed': True, 'retirement_status': receipt.get('status'), 'retired_files': receipt.get('count'), **scan}
+                    elif action == 'unmigrate-private-provider':
+                        result = unmigrate_private_provider(agents, agent, payload, driver, restricted_driver)
+                    elif action == 'rollback-private-migration':
+                        if agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_already_sealed', 409)
+                        # Restore only the active env from the host-side legacy source;
+                        # never restore retired backups or read a key from the home.
+                        agents.add_provider_keys(agent)
+                        (agents.root / agent_id / 'runtime' / 'key-scrub.json').unlink(missing_ok=True)
+                        result = {'ok': True}
+                    elif action == 'scrub-private-migration':
+                        if agents.providers.is_private(agent):
+                            raise RuntimeFailure('private_migration_already_sealed', 409)
+                        source_key = agents.tinfoil_key()
+                        if agent.get('model', {}).get('provider') == 'tinfoil' and (not source_key or agents.tinfoil_key_file is None or agents.tinfoil_key_file.resolve().is_relative_to(agents.home(agent_id).resolve())):
+                            raise RuntimeFailure('private_migration_host_source_unavailable', 503)
+                        # Stop every old writer before touching its retained home. No
+                        # plaintext rollback backup: legacy start reads the host source.
+                        chosen.stop(agent)
+                        result = scrub_provider_key(agents.home(agent_id),
+                            agents.root / agent_id / 'runtime' / 'key-scrub.json', source_key)
+                        # Stopped containers also retain legacy credentials in Config.Env.
+                        ids = docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=agent-' + agent_id], timeout=60).stdout.split()
+                        ids += docker(['ps', '-aq', '--filter', 'label=com.docker.compose.service=agent-' + agent_id + '-tinfoil'], timeout=60).stdout.split()
+                        if ids:
+                            docker(['rm', *ids], timeout=60)
+                    else:
+                        result = lifecycle_action(chosen, agent, action)
                 self._json(200, result)
             except RuntimeFailure as error:
                 self._json(error.status, {"error": error.code})
@@ -1214,7 +1460,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
     ap.add_argument("--tinfoil-key-file", type=Path)
     ap.add_argument("--image", default=DEFAULT_IMAGE)
-    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
+    ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE, help='legacy Tinfoil sidecar image (not the sealed client image)')
+    ap.add_argument('--client-image', default=None)
+    ap.add_argument('--apps-json', type=Path, help='installed registry (default: agents-dir/../apps.json)')
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
@@ -1226,7 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
     token = args.token_file.read_text().strip()
     if len(token) < 24:
         raise SystemExit("token file must hold a random token of at least 24 characters")
-    agents = Agents(args.agents_dir, args.tinfoil_key_file)
+    agents = Agents(args.agents_dir, args.tinfoil_key_file, args.apps_json, args.client_image or CLIENT_IMAGE)
     if args.driver == "runtipi":
         if not args.wam:
             raise SystemExit("--wam is required for the runtipi driver")
@@ -1236,6 +1484,14 @@ def main(argv: list[str] | None = None) -> int:
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
+    # Reconcile only installed provider capabilities or previously sealed records. Legacy-only boxes are untouched.
+    try:
+        installed = json.loads(agents.providers.apps_path.read_text()).get('apps', [])
+    except (OSError, ValueError):
+        installed = []
+    if any(isinstance(app.get('private_inference'), dict) for app in installed) or any(agents.root.glob('*/runtime/private-provider.json')):
+        for failure in agents.providers.reconcile_installed():
+            sys.stderr.write(f"[agent-runtime] provider unavailable: {failure.get('app')} {failure.get('error')}\n")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

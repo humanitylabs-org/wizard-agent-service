@@ -41,6 +41,22 @@
   ],
   "features": [
     {
+      "id": "private-provider-admission",
+      "description": "Provider loss rejects new sessions/runs only for already migrated agents, without affecting other runtime kinds",
+      "layer": "server",
+      "how_to_test": "Use real Wizard HTTP for main, host-profile, legacy container and Unix restricted kinds. Admit a normal run with no provider app, then install a stopped capability and mark the synthetic container/restricted record as previously migrated. Assert 503 before upstream dispatch for marked agents; main/profile remain usable. Migration lifecycle is covered independently.",
+      "source_refs": [
+        "server/agents-http.mjs",
+        "server/agents.mjs"
+      ],
+      "reference_tests": [
+        "tests/legacy-private-compat.test.ts",
+        "tests/private-provider-launch.test.ts"
+      ],
+      "fixture": "private-provider-admission",
+      "policy_exemptions": []
+    },
+    {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
       "layer": "server",

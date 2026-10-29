@@ -10,7 +10,7 @@ test.each(['anthropic', 'tinfoil', 'local'])('routed queue pins the model but ne
   const root = mkdtempSync(join(tmpdir(), 'routed-provider-'))
   const agent = { id: 'fixture-agent', model: { provider, model: 'fixture-model' } }
   const disposers: Array<() => Promise<void>> = [], sent: any[] = []
-  const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+  const registry = { agentsDir: root, list: () => [], read: () => agent, apiKey: () => 'fixture-runtime-key',
     fetchAgent: async (_agent: any, path: string, init: any = {}) => {
       if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model', provider } })
       if (init.method === 'POST') { sent.push(JSON.parse(init.body)); return Response.json({ run_id: 'fixture-run', status: 'running' }, { status: 202 }) }
@@ -26,12 +26,51 @@ test.each(['anthropic', 'tinfoil', 'local'])('routed queue pins the model but ne
   } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a cached routed queue follows the current sealed runtime after migration', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'routed-migrate-'))
+  const legacy = { id: 'fixture-agent', model: { provider: 'tinfoil', model: 'fixture-model' }, runtime: { isolation: '', port: 18001 } }
+  let current = legacy
+  const sent: string[] = [], disposers: Array<() => Promise<void>> = []
+  const registry = { agentsDir: root, list: () => [], read: () => current, apiKey: () => 'fixture-auth',
+    fetchAgent: async (agent: any, path: string) => {
+      sent.push(agent.runtime.isolation)
+      if (agent !== current) throw new TypeError('old TCP route is closed')
+      return Response.json(path.startsWith('/api/sessions/') ? { model: 'fixture-model' } : { run_id: 'fixture-run', status: 'completed', output: 'synthetic' })
+    } }
+  try {
+    const queues = createRoutedQueues({ registry, own: (f: any) => disposers.push(f), pollIntervalMs: 0 })
+    const post = (key: string, agent: any) => queues.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify({ session_id: 'wizard_' + key, input: 'synthetic' }) })
+    assert.equal((await (await post('before', legacy)).json()).status, 'completed')
+    current = { ...legacy, runtime: { ...legacy.runtime, isolation: 'restricted' } }
+    const after = await (await post('after', current)).json()
+    assert.equal(after.status, 'completed')
+    assert.equal(sent.at(-1), 'restricted')
+  } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('removing an agent never dispatches an already cached legacy runtime', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'routed-removed-'))
+  const agent = { id: 'fixture-agent', model: { model: 'fixture-model' } }
+  let current: any = agent, calls = 0
+  const disposers: Array<() => Promise<void>> = []
+  const registry = { agentsDir: root, list: () => [], read: () => current, apiKey: () => 'fixture-auth', fetchAgent: async () => { calls++; return Response.json({ run_id: 'fixture-run', status: 'completed' }) } }
+  try {
+    const queues = createRoutedQueues({ registry, own: (f: any) => disposers.push(f), pollIntervalMs: 0 })
+    const post = (id: string) => queues.fetch(agent, '/v1/runs', { method: 'POST', body: JSON.stringify({ session_id: 'wizard_' + id, input: 'synthetic', model: 'fixture-model' }) })
+    assert.equal((await (await post('before')).json()).status, 'completed')
+    const before = calls
+    current = null
+    assert.equal((await (await post('after')).json()).status, 'failed')
+    assert.equal(calls, before)
+  } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
 test('a capacity-delayed routed watcher durably restores archive state at actual dispatch', async () => {
   const root = mkdtempSync(join(tmpdir(), 'routed-watch-'))
   const agent = { id: 'fixture-agent', model: { provider: 'local', model: 'fixture-model' } }
   const disposers: Array<() => Promise<void>> = [], calls: any[] = []
   let firstStatus = 'running', archived = true, sequence = 0
-  const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+  const registry = { agentsDir: root, list: () => [], read: () => agent, apiKey: () => 'fixture-runtime-key',
     fetchAgent: async (_agent: any, path: string, init: any = {}) => {
       if (path.startsWith('/api/sessions/') && init.method === 'PATCH') { archived = JSON.parse(init.body).archived; calls.push({ path, archived }); return Response.json({ archived }) }
       if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model', archived } })
