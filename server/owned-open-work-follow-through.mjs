@@ -8,7 +8,8 @@ import { mkdirSync, chmodSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { parseStatus } from './thread-status.mjs'
-import { countDispatchHandles, ownedOpenItems, guardOwnedOpenWork, claimsExistingHandle } from './owned-open-work.mjs'
+import { dispatchHandles, countDispatchHandles, ownedOpenItems, guardOwnedOpenWork, claimsExistingHandle, nonHoldingFollowUpIds } from './owned-open-work.mjs'
+import { isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 
 export const OWNED_WORK_KIND = 'owned-open-work'
 export const ownedWorkStatePathOf = options => options.followThrough === false || options.ownedOpenWork === false ? ''
@@ -19,6 +20,7 @@ const digest = text => createHash('sha256').update(text).digest('hex')
 const hidden = new Set(['commentary', 'hidden', 'system', 'internal_notification', 'async_delegation_complete'])
 const MAX_ROWS = 10_000
 const MAX_AGE = 2 * 3600
+const CLAIM_GRACE = 120
 
 export function readOwnedOpenWork(path, sessionId) {
   if (!path || !sessionId) return null
@@ -28,30 +30,42 @@ export function readOwnedOpenWork(path, sessionId) {
     db.exec('BEGIN')
     const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
     if (!['id', 'session_id', 'role', 'content', 'tool_calls', 'tool_call_id', 'timestamp'].every(key => cols.has(key))) return null
+    const retained = `AND ${retainedMessagesWhere(cols)}`
     const active = cols.has('active') ? 'AND COALESCE(active,1)=1' : ''
     const latest = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role IN ('user','assistant') ${active} ORDER BY id DESC LIMIT 100`).all(sessionId)
       .find(row => !hidden.has(row.display_kind) && String(row.content ?? '').trim())
     if (!latest || latest.role !== 'assistant' || latest.tool_calls && latest.tool_calls !== '[]' && latest.tool_calls !== 'null') return null
-    const user = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${active} ORDER BY id DESC LIMIT 1`).get(sessionId, latest.id)
-    if (!user) return null
+    // Machine wakeups, reporter rewrites and compaction must not renew nudge authority.
+    // Keep retained rows: compaction changes context, not the owner request chain.
+    const users = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${retained} ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
+    const user = users.find(row => !/^\s*\[(?:reporter|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT)/u.test(String(row.content ?? '')))
+    const owner = users.find(row => isHumanRequest(row) && !String(row.content ?? '').startsWith('[reporter]'))
+    if (!user || !owner) return null // machine-only chains have no owner authority
+    const continuation = users.some(row => row.id >= owner.id && String(row.content ?? '').startsWith(OWNED_WORK_PREFIX))
     const items = ownedOpenItems(latest.content)
-    const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${active} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
+    const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${retained} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
     if (rows.length > MAX_ROWS) return null // incomplete tool evidence is not zero handles
     const claimed = items.filter(claimsExistingHandle).length
     // Earlier turns of this thread (bounded): real handles that a restated item may point to.
-    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ${active} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
-    const handleCount = countDispatchHandles(rows) + Math.min(claimed, prior)
-    return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), messageId: String(latest.message_uid || latest.id),
+    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ${retained} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
+    const handles = dispatchHandles(rows)
+    const handleCount = handles.length + Math.min(Math.max(0, claimed - handles.length), prior)
+    return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), chainId: String(owner.message_uid || owner.id), messageId: String(latest.message_uid || latest.id),
       userId: Number(user.id), replyId: Number(latest.id), fingerprint: digest(latest.content), at: Number(latest.timestamp),
       status: parseStatus(latest.content), items, ownedCount: items.length, handleCount,
-      continuation: String(user.content ?? '').startsWith(OWNED_WORK_PREFIX) }
+      followUpIds: nonHoldingFollowUpIds(latest.content, parseStatus(latest.content), handles),
+      continuation }
+
   } catch { return null } finally { db?.close() }
 }
+
+export const readNonHoldingFollowUps = (path, sessionId) => new Set(readOwnedOpenWork(path, sessionId)?.followUpIds ?? [])
 
 // Rowid-range scan only: state.db holds millions of rows, so a time/content predicate
 // over the whole table is a full scan. Callers pass the previous high-water id; the
 // first scan starts a bounded window behind the newest row (ids are monotonic).
 export const OWNED_SCAN_WINDOW = 20_000
+/** @param {string} path @param {{now?: number, afterId?: number|null}} [options] */
 export function scanOwnedOpenWork(path, { now = Date.now(), afterId = null } = {}) {
   if (!path) return { evidence: [], lastId: afterId }
   let db
@@ -59,12 +73,16 @@ export function scanOwnedOpenWork(path, { now = Date.now(), afterId = null } = {
     db = new DatabaseSync(path, { readOnly: true })
     const top = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get()?.id ?? 0)
     const from = afterId == null ? Math.max(0, top - OWNED_SCAN_WINDOW) : Math.min(afterId, top)
-    const sessions = db.prepare(`SELECT DISTINCT session_id FROM messages WHERE id>? AND id<=? AND role='assistant'
-      AND timestamp>=? AND instr(lower(content),'still open:')>0 LIMIT 201`).all(from, top, now/1000 - MAX_AGE)
+    // Page matching rows in primary-key order, with one unprocessed sentinel.
+    // DISTINCT hides the boundary id; jumping to top loses every later session.
+    const rows = db.prepare(`SELECT id, session_id FROM messages WHERE id>? AND id<=? AND role='assistant'
+      AND timestamp>=? AND instr(lower(content),'still open:')>0 ORDER BY id LIMIT 201`).all(from, top, now/1000 - MAX_AGE)
+    const page = rows.slice(0, 200)
+    const lastId = rows.length > 200 ? Number(page.at(-1).id) : top
     db.close(); db = null
-    const evidence = sessions.filter(row => /^(?:wizard_|wizard-assistant-)/u.test(row.session_id))
-      .map(row => readOwnedOpenWork(path, row.session_id)).filter(Boolean)
-    return { evidence, lastId: top }
+    const sessions = new Set(page.map(row => row.session_id).filter(id => /^(?:wizard_|wizard-assistant-)/u.test(id)))
+    const evidence = [...sessions].map(id => readOwnedOpenWork(path, id)).filter(Boolean)
+    return { evidence, lastId }
   } catch { return { evidence: [], lastId: afterId } } finally { db?.close() }
 }
 export function findOwnedOpenWork(path, now = Date.now()) {
@@ -102,8 +120,17 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     session_id TEXT NOT NULL, run_id TEXT NOT NULL, reply_id TEXT NOT NULL,
     fingerprint TEXT NOT NULL, state TEXT NOT NULL, created_at REAL NOT NULL,
     PRIMARY KEY(session_id,run_id), UNIQUE(session_id,reply_id))`)
-  const claimFor = evidence => db.prepare('SELECT * FROM owned_work_claims WHERE session_id=? AND (run_id=? OR reply_id=?)')
-    .get(evidence.sessionId, evidence.runId, evidence.messageId)
+  if (!db.prepare('PRAGMA table_info(owned_work_claims)').all().some(row => row.name === 'chain_id')) db.exec('ALTER TABLE owned_work_claims ADD COLUMN chain_id TEXT')
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS owned_work_chain ON owned_work_claims(session_id,chain_id)')
+  const claimFor = evidence => db.prepare('SELECT * FROM owned_work_claims WHERE session_id=? AND (run_id=? OR reply_id=? OR chain_id=?)')
+    .get(evidence.sessionId, evidence.runId, evidence.messageId, evidence.chainId ?? evidence.runId)
+  const canClaim = evidence => {
+    const claim = claimFor(evidence)
+    // Only reconcile an interrupted admission of this exact witness, never a
+    // rewritten reply or another machine turn in an already-claimed owner chain.
+    return !claim || claim.state === 'claimed' && claim.created_at < now()/1000 - CLAIM_GRACE
+      && claim.run_id === evidence.runId && claim.reply_id === evidence.messageId && claim.fingerprint === evidence.fingerprint
+  }
   // Session-list projection reads only sessions the scanner flagged (or that hold a
   // claim), so listing hundreds of threads never seeks hundreds of transcripts.
   const candidates = new Map()
@@ -115,17 +142,18 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
     if (now()/1000 - candidates.get(sessionId) > MAX_AGE) { candidates.delete(sessionId); return null }
     const evidence = read(sessionId)
     if (!evidence) {
-      // The admitted continuation is running: keep the previous green status hidden until
-      // its own reply lands (then that reply is evaluated, as a continuation, on its own).
-      const pending = db.prepare("SELECT 1 FROM owned_work_claims WHERE session_id=? AND state IN ('claimed','admitted') AND created_at>=? LIMIT 1")
-        .get(sessionId, now()/1000 - 15 * 60)
+      // A fresh claim may be admitting; an admitted continuation may be running.
+      // Stale claimed rows need recovery, not a fabricated running continuation.
+      const pending = db.prepare(`SELECT 1 FROM owned_work_claims WHERE session_id=? AND
+        ((state='claimed' AND created_at>=?) OR (state='admitted' AND created_at>=?)) LIMIT 1`)
+        .get(sessionId, now()/1000 - CLAIM_GRACE, now()/1000 - 15 * 60)
       return pending ? { agentId: 'hermes', sessionId, ownedCount: 1, handleCount: 0, continuation: false } : null
     }
     if (!evidence.status) return null
     // A known admission failure or expired authority stops the spinner without
     // pretending that a follow-up is running, and never grants a fresh retry.
     const claim = claimFor(evidence)
-    return { ...evidence, continuation: evidence.continuation || Boolean(claim && claim.state === 'failed')
+    return { ...evidence, continuation: evidence.continuation || Boolean(claim && (claim.state === 'failed' || claim.reply_id !== evidence.messageId))
       || now()/1000-evidence.at > MAX_AGE }
   }
   let ticking = false, stopped = false
@@ -136,29 +164,35 @@ export function createOwnedWorkFollowThrough({ statePath, sessionDbPath, read = 
       const found = await scan(now())
       for (const evidence of found) if (evidence?.sessionId && evidence.items?.length) candidates.set(evidence.sessionId, now()/1000)
       // Flagged threads that were busy (or otherwise skipped) on an earlier scan are re-read
-      // each tick until claimed or aged out; the incremental scan alone would never revisit them.
+      // each tick until admitted/failed or aged out, including stale interrupted claims.
       const seen = new Set(found.map(evidence => evidence?.sessionId))
       for (const [sessionId, at] of candidates) {
         if (seen.has(sessionId) || now()/1000 - at > MAX_AGE) continue
         const evidence = read(sessionId)
-        if (evidence && !claimFor(evidence)) found.push(evidence)
+        if (evidence && canClaim(evidence)) found.push(evidence)
       }
       for (const evidence of found) {
         if (stopped) break
         if (evidence.agentId !== 'hermes' || evidence.continuation || !evidence.items?.length
-          || guardOwnedOpenWork(evidence.status, evidence) === evidence.status || claimFor(evidence)
+          || guardOwnedOpenWork(evidence.status, evidence) === evidence.status || !canClaim(evidence)
           || await busy(evidence.sessionId)) continue
         const token = { kind: OWNED_WORK_KIND, agent_id: 'hermes', session_id: evidence.sessionId,
-          sessionId: evidence.sessionId, runId: evidence.runId, messageId: evidence.messageId,
+          sessionId: evidence.sessionId, runId: evidence.runId, chainId: evidence.chainId ?? evidence.runId, messageId: evidence.messageId,
           userId: evidence.userId, fingerprint: evidence.fingerprint }
         try { await validate(token) } catch { continue }
-        // Commit the per-run AND per-reply witness BEFORE sending. The queue's
-        // stable key reconciles a transport retry; restart never creates a new turn.
-        const claimed = db.prepare('INSERT OR IGNORE INTO owned_work_claims VALUES(?,?,?,?,?,?)')
-          .run(evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, 'claimed', now()/1000)
+        // Persist before sending. Reclaim the same interrupted witness atomically,
+        // refreshing its grace period so concurrent controllers cannot both retry.
+        // The unchanged stable queue key reconciles a crash after queue admission.
+        const at = now()/1000
+        const claimed = claimFor(evidence)
+          ? db.prepare(`UPDATE owned_work_claims SET created_at=? WHERE session_id=? AND run_id=? AND reply_id=?
+              AND fingerprint=? AND state='claimed' AND created_at<?`)
+            .run(at, evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, at - CLAIM_GRACE)
+          : db.prepare('INSERT OR IGNORE INTO owned_work_claims(session_id,run_id,reply_id,fingerprint,state,created_at,chain_id) VALUES(?,?,?,?,?,?,?)')
+            .run(evidence.sessionId, evidence.runId, evidence.messageId, evidence.fingerprint, 'claimed', at, evidence.chainId ?? evidence.runId)
         if (!claimed.changes) continue
         const key = `wizard-owned-work-${digest(`${evidence.sessionId}\0${evidence.runId}`).slice(0, 40)}`
-        const input = `${OWNED_WORK_PREFIX}\n${evidence.items.map(item => `- ${item}`).join('\n')}\nStart each one now within existing authority (wizard_schedule, wizard_heavy_submit, delegate_task or kanban_create), then end with an updated finish report naming each handle and when it lands. Do not widen authority: ask for owner decisions, money or external sends. If an item actually needs the owner, say so and mark it needs_you. This is the only automatic correction; do not offer the same work again.`
+        const input = `${OWNED_WORK_PREFIX}\n${evidence.items.map(item => `- ${item}`).join('\n')}\nResolve each item plainly: either start it within existing authority (wizard_schedule, wizard_heavy_submit, delegate_task or kanban_create) and name its handle and when it lands, or ask the owner one clear question about starting it. Do not widen authority: ask for owner decisions, money or external sends. A verified requested outcome remains done even with started optional follow-ups. This is the only automatic correction in this owner request chain; do not leave ambiguous offers.`
         try {
           await admit(evidence.sessionId, input, key, token)
           db.prepare("UPDATE owned_work_claims SET state='admitted' WHERE session_id=? AND run_id=?").run(evidence.sessionId, evidence.runId)

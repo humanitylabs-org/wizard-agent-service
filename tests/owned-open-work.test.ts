@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ownedOpenItems, countDispatchHandles, guardOwnedOpenWork, projectOwnedOpenWork } from '../server/owned-open-work.mjs'
+import { ownedOpenItems, countDispatchHandles, dispatchHandles, nonHoldingFollowUpIds, guardOwnedOpenWork, projectOwnedOpenWork } from '../server/owned-open-work.mjs'
 import { createOwnedWorkFollowThrough, readOwnedOpenWork, findOwnedOpenWork, requireOwnedWorkContinuation, OWNED_WORK_PREFIX } from '../server/owned-open-work-follow-through.mjs'
 import { createWizardServer, listen, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
-import { OWNED_OPEN_WORK_INSTRUCTIONS } from '../server/thread-status.mjs'
+import { OWNED_OPEN_WORK_INSTRUCTIONS, guardHeavyStatus, parseStatus } from '../server/thread-status.mjs'
+import { readHermesSessionTruth } from '../server/session-truth.mjs'
+import { readHelperStatuses } from '../server/helper-status.mjs'
 
 const cleanup: Array<() => unknown> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -18,7 +21,7 @@ function directory() { const path = mkdtempSync(join(tmpdir(), 'owned-open-')); 
 function transcript() {
   const root = directory(), path = join(root, 'state.db'), db = new DatabaseSync(path)
   cleanup.push(() => db.close())
-  db.exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,display_kind TEXT,tool_calls TEXT,tool_call_id TEXT);
+  db.exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,compacted INT DEFAULT 0,display_kind TEXT,tool_calls TEXT,tool_call_id TEXT);
     CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,title_source TEXT,started_at REAL,source TEXT,model TEXT,ended_at REAL,end_reason TEXT,message_count INTEGER DEFAULT 0,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER DEFAULT 0,archived INTEGER DEFAULT 0,hidden INTEGER DEFAULT 0);`)
   const add = (role: string, content: string, extra: any = {}) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp,display_kind,tool_calls,tool_call_id) VALUES(?,?,?,?,?,?,?)')
@@ -35,6 +38,56 @@ const call = (name: string, args: any = {}, id = 't1') => ({ id, function: { nam
 const events = (name: string, args: any = {}, result: any = { id: 'live_1', status: 'queued' }) => [
   { role: 'assistant', tool_calls: JSON.stringify([call(name, args)]) }, { role: 'tool', tool_call_id: 't1', content: JSON.stringify(result) },
 ]
+
+describe('owner corrections', () => {
+  it('clear question about follow-up is accepted', () => {
+    for (const item of ['Archimedes: Want me to start the soak? Reply yes', 'Should I run a follow-up check?', 'Shall I start the next pass?']) {
+      expect(ownedOpenItems(reply(item))).toEqual([])
+    }
+    for (const item of ['Archimedes: mine to finish', 'Archimedes: say the word', 'Archimedes: if you want']) expect(ownedOpenItems(reply(item))).toHaveLength(1)
+  })
+  it('owner-labelled item is not owned', () => {
+    for (const label of ['You', 'James', 'Owner']) expect(ownedOpenItems(reply(`${label}: the check covers Archimedes only for now. Whether other agents get it is your call.`))).toEqual([])
+  })
+  it('schedule via tool_call wrapper is credited', () => {
+    const result = { id: '3cd71960-44b0-4f83-a6ce-a4e17746f307', name: 'Owned work check', nextRun: '2026-10-27T22:00:00+07:00' }
+    for (const name of ['mcp__tool_call', 'tool_call', 'functions.tool_call']) expect(countDispatchHandles(events(name, { calls: [{ name: 'wizard_schedule', arguments: { when: '22:00' } }] }, result))).toBe(1)
+    expect(countDispatchHandles(events('mcp__wizard_schedule', {}, result))).toBe(1)
+    expect(countDispatchHandles(events('mcp__wizard_schedule_cancel', {}, result))).toBe(0)
+    expect(countDispatchHandles(events('mcp__tool_call', { calls: [{ name: 'wizard_schedule' }, { name: 'wizard_schedule' }] }, result))).toBe(0)
+    expect(countDispatchHandles(events('mcp__tool_call', { calls: [{ name: 'wizard_schedule' }] }, { ...result, error: 'no' }))).toBe(0)
+  })
+  it('earlier-run schedule handle is credited', () => {
+    const f = transcript(); f.add('user', 'Schedule the follow-up')
+    f.add('assistant', '', { tool_calls: [call('mcp__tool_call', { calls: [{ name: 'wizard_schedule', arguments: { when: '22:00' } }] })] })
+    f.add('tool', JSON.stringify({ id: 'schedule_actual', name: 'Owner check', nextRun: '22:00' }), { tool_call_id: 't1' })
+    f.add('assistant', 'Scheduled'); f.add('user', 'Anything else?')
+    f.add('assistant', reply('Archimedes: started the follow-up schedule_actual, scheduled for 22:00'))
+    f.db.exec('UPDATE messages SET active=0,compacted=1 WHERE id<=3') // compaction cannot erase real handle credit
+    const e = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(e.ownedCount).toBe(1); expect(e.handleCount).toBe(1)
+    expect(guardOwnedOpenWork(e.status, e)).toBe(e.status)
+  })
+  it('follow-through reply is never re-nudged', async () => {
+    const f = transcript(); f.add('user', 'Fix it'); f.add('assistant', reply())
+    const admit = vi.fn(async () => ({})), statePath = join(f.root, 'claims.db')
+    const options: any = { sessionDbPath: f.path, statePath, admit, validate: () => {}, find: async () => [readOwnedOpenWork(f.path, 'wizard_owned')] }
+    const worker = createOwnedWorkFollowThrough(options); cleanup.push(() => worker.close())
+    await worker.tick(); expect(admit).toHaveBeenCalledTimes(1)
+    f.add('user', OWNED_WORK_PREFIX); f.add('assistant', reply())
+    // These were the live boundary changes: reporter rewrite then scheduled wakeup.
+    f.add('user', '[reporter] Rewrite'); f.add('assistant', reply())
+    f.add('user', '[Wizard schedule] Follow up'); f.add('assistant', reply())
+    f.db.exec("UPDATE messages SET active=0,compacted=1 WHERE content LIKE '[Wizard follow-through]%'")
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')!.continuation).toBe(true)
+    const restarted = createOwnedWorkFollowThrough(options); cleanup.push(() => restarted.close())
+    await restarted.tick(); expect(admit).toHaveBeenCalledTimes(1)
+    expect(restarted.evidenceFor('wizard_owned')!.continuation).toBe(true)
+    // A genuine new owner request is a new chain, with its own one correction.
+    f.add('user', 'Different request'); f.add('assistant', reply())
+    await restarted.tick(); expect(admit).toHaveBeenCalledTimes(2)
+  })
+})
 
 describe('owned open work starts without the owner asking', () => {
   it('done + owned item without a handle stays working and starts exactly one continuation', async () => {
@@ -107,7 +160,130 @@ describe('owned open work starts without the owner asking', () => {
   })
 })
 
+describe('owned work claim recovery', () => {
+  function persistedClaim(state = 'claimed', age = 121) {
+    const clock = { at: Date.now() }, current: { value: any } = { value: evidence(reply(), { chainId: 'owner' }) }
+    const statePath = join(directory(), 'claims.db')
+    const admit = vi.fn(async (..._args: any[]) => ({}))
+    const options: any = { statePath, sessionDbPath: '', now: () => clock.at, read: () => current.value,
+      find: vi.fn(async () => []), validate: vi.fn(async () => {}), admit }
+    // Simulate a process exiting after the claim INSERT and before admission.
+    createOwnedWorkFollowThrough(options).close()
+    const db = new DatabaseSync(statePath); cleanup.push(() => db.close())
+    const e = current.value, createdAt = clock.at/1000 - age
+    db.prepare('INSERT INTO owned_work_claims(session_id,run_id,reply_id,fingerprint,state,created_at,chain_id) VALUES(?,?,?,?,?,?,?)')
+      .run(e.sessionId, e.runId, e.messageId, e.fingerprint, state, createdAt, e.chainId)
+    const worker = createOwnedWorkFollowThrough(options); cleanup.push(() => worker.close())
+    const key = `wizard-owned-work-${createHash('sha256').update(`${e.sessionId}\0${e.runId}`).digest('hex').slice(0, 40)}`
+    const rows = () => db.prepare('SELECT * FROM owned_work_claims').all()
+    return { worker, options, admit, clock, current, key, rows, createdAt }
+  }
+  it('retries a stale claimed row after restart with the original key and no fresh scan hit', async () => {
+    const f = persistedClaim()
+    await f.worker.tick(); await f.worker.tick()
+    expect(f.options.find).toHaveBeenCalledTimes(2)
+    expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'admitted', run_id: '1', reply_id: '2', chain_id: 'owner' })])
+  })
+  it.each([0, 119, 120])('skips a fresh claimed row aged %s seconds', async age => {
+    const f = persistedClaim('claimed', age)
+    // Include an explicit scan hit as well as the persisted-candidate path.
+    f.options.find.mockResolvedValue([f.current.value])
+    await Promise.all([f.worker.tick(), f.worker.tick()])
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'claimed', created_at: f.createdAt })])
+  })
+  it('revisits a fresh claim once its grace period expires', async () => {
+    const f = persistedClaim('claimed', 119)
+    await f.worker.tick(); expect(f.admit).not.toHaveBeenCalled()
+    f.clock.at += 2000
+    await f.worker.tick(); expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+  })
+  it.each(['admitted', 'failed'])('never retries a terminal %s claim, even after another restart', async state => {
+    const f = persistedClaim(state)
+    f.options.find.mockResolvedValue([f.current.value])
+    await f.worker.tick()
+    const restarted = createOwnedWorkFollowThrough(f.options); cleanup.push(() => restarted.close())
+    f.clock.at += 121_000
+    await restarted.tick()
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state, created_at: f.createdAt })])
+  })
+  it('marks a failed recovery terminal rather than retrying it', async () => {
+    const f = persistedClaim()
+    f.admit.mockRejectedValueOnce(new Error('queue unavailable'))
+    await f.worker.tick()
+    f.clock.at += 121_000
+    await f.worker.tick()
+    expect(f.admit).toHaveBeenCalledTimes(1)
+    expect(f.admit.mock.calls[0][2]).toBe(f.key)
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'failed' })])
+  })
+  it('only one controller can reclaim a stale row while admission is pending', async () => {
+    const f = persistedClaim()
+    let release!: () => void
+    f.admit.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({}) }))
+    const other = createOwnedWorkFollowThrough(f.options); cleanup.push(() => other.close())
+    const first = f.worker.tick(), second = other.tick()
+    try {
+      await vi.waitFor(() => expect(f.admit).toHaveBeenCalledTimes(1))
+      expect(f.rows()[0].created_at).toBe(f.clock.at/1000)
+      await other.tick()
+      expect(f.admit).toHaveBeenCalledTimes(1)
+    } finally { release?.(); await Promise.all([first, second]) }
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'admitted' })])
+  })
+  it.each([{ runId: 'new-machine-run' }, { messageId: 'rewritten-reply' }, { fingerprint: 'rewritten-content' }])('never recovers a stale claim against a different witness: %s', async change => {
+    const f = persistedClaim()
+    f.current.value = { ...f.current.value, ...change }
+    f.options.find.mockResolvedValue([f.current.value])
+    await f.worker.tick()
+    expect(f.admit).not.toHaveBeenCalled()
+    expect(f.rows()).toEqual([expect.objectContaining({ state: 'claimed', created_at: f.createdAt })])
+  })
+  it.each([
+    ['claimed', 119, true], ['claimed', 121, false], ['admitted', 121, true], ['failed', 119, false],
+  ])('projects missing evidence only while %s at age %s is pending', (state, age, pending) => {
+    const f = persistedClaim(state as string, age as number)
+    f.current.value = null
+    expect(Boolean(f.worker.evidenceFor('wizard_owned'))).toBe(pending)
+  })
+})
+
 describe('owned work evidence', () => {
+  it.each([
+    ['process_wakeup:schedule', 'Scheduled task'], ['process_wakeup:supervisor', 'Builder task'],
+    ['system', 'Service task'], ['internal_notification', 'Service notice'],
+    [null, '[Wizard schedule] Scheduled task'], [null, '[supervisor build] Builder task'],
+  ])('machine-only user rows grant no evidence or admission: %s / %s', async (display_kind, content) => {
+    const f = transcript()
+    f.add('user', content!, { display_kind }); f.add('user', content!, { display_kind })
+    f.add('assistant', reply())
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')).toBeNull()
+    expect(findOwnedOpenWork(f.path)).toEqual([])
+    const admit = vi.fn(async () => ({}))
+    const worker = createOwnedWorkFollowThrough({ sessionDbPath: f.path, statePath: join(f.root, 'claims.db'), admit })
+    cleanup.push(() => worker.close())
+    await worker.tick()
+    expect(worker.evidenceFor('wizard_owned')).toBeNull()
+    expect(admit).not.toHaveBeenCalled()
+    expect(() => requireOwnedWorkContinuation(f.path, { kind: 'owned-open-work', agent_id: 'hermes', sessionId: 'wizard_owned' })).toThrow('no longer current')
+  })
+  it('rewound rows grant neither owner-chain authority nor handle credit', () => {
+    const f = transcript(); f.add('user', 'Current request')
+    f.add('user', 'Deleted request')
+    f.add('assistant', '', { tool_calls: [call('wizard_schedule')] })
+    f.add('tool', '{"id":"deleted_schedule"}', { tool_call_id: 't1' })
+    f.db.exec('UPDATE messages SET active=0 WHERE id BETWEEN 2 AND 4')
+    f.add('assistant', reply())
+    const current = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(current.userId).toBe(1); expect(current.chainId).toBe('1'); expect(current.handleCount).toBe(0)
+    f.db.exec('UPDATE messages SET compacted=1 WHERE id BETWEEN 2 AND 4')
+    const retained = readOwnedOpenWork(f.path, 'wizard_owned')!
+    expect(retained.userId).toBe(2); expect(retained.handleCount).toBe(1)
+  })
   it.each(['mine', 'me', 'I', "I’ll", 'Archimedes', 'agent', '(owner: Archimedes)', 'want me to', 'shall I', 'if you want me to queue', 'I can queue'])('recognizes %s', owner => {
     expect(ownedOpenItems(reply(`${owner}: run checks`))).toHaveLength(1)
   })
@@ -168,7 +344,7 @@ describe('owned work evidence', () => {
 // Real service session-list decoration + private admission + durable queue. No
 // model/provider, owner DB, external network, or deployed release is accessed.
 describe('owned-work service wiring', () => {
-  async function service(enabled = true) {
+  async function service(enabled = true, heavy = false) {
     const f = transcript(), sent: any[] = []
     let scan = false
     f.db.prepare('INSERT INTO sessions(id,title,source,started_at) VALUES(?,?,?,?)').run('wizard_owned', 'Synthetic checks', 'wizard-mobile', Date.now()/1000)
@@ -190,6 +366,8 @@ describe('owned-work service wiring', () => {
       hermesStatePath: f.path, runQueueStatePath: join(f.root, 'queue.db'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [],
       dispatchHealthReader: () => true, followThrough: enabled, followThroughFinder: async () => [], joinedDelegation: 'off',
       ownedOpenWorkFinder: async () => scan ? findOwnedOpenWork(f.path) : [], ownedOpenWorkIntervalMs: 3600_000,
+      ...(heavy ? { heavyStatePath: join(f.root, 'heavy.db'), heavyToken: 'fixture-heavy-token-'.repeat(3),
+        heavyTransport: async (p: any) => ({ job_id: p.job_id, state: 'queued' }) } : {}),
       archivedSessionReader: () => [], pendingFirstSendReader: () => [], wizardOsHome: join(f.root, 'os') })
     const address = await listen(server)
     cleanup.push(async () => { await new Promise<void>(r => server.close(() => r())); await server.drained })
@@ -209,7 +387,9 @@ describe('owned-work service wiring', () => {
     expect(before.status).toBe('running'); expect(before.wizard_attention?.state).not.toBe('done')
     await vi.waitFor(() => expect(f.sent).toHaveLength(1))
     expect(f.sent[0].input).toContain(OWNED_WORK_PREFIX)
-    expect(f.sent[0].instructions).toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
+    // Summary is retired: continuations carry the Wizard OS contract only, never the owned-work style rule.
+    expect(f.sent[0].instructions).not.toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
+    expect(f.sent[0].instructions).toContain('Wizard renders Markdown')
     const history = await fetch(`http://127.0.0.1:${f.server.address().port}/wizard/hermes/api/sessions/wizard_owned/messages?view=wizard`).then(r => r.json())
     const machineTurn = history.data.find((row: any) => row.run_context?.original?.startsWith(OWNED_WORK_PREFIX))
     expect(machineTurn).toMatchObject({ role: 'system', display_kind: 'run_context', content: '', shareable: false })
@@ -222,6 +402,50 @@ describe('owned-work service wiring', () => {
     expect(after.wizard_attention.state).toBe('fyi')
     expect(after.wizard_attention.ask).toBe(status().ask)
   })
+  it('started follow-up does not hold done', async () => {
+    const f = await service(false, true)
+    f.db.exec(`ALTER TABLE messages ADD COLUMN finish_reason TEXT DEFAULT 'stop'; ALTER TABLE sessions ADD COLUMN model_config TEXT;
+      CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY,origin_session_id TEXT,parent_session_id TEXT,origin_ui_session_id TEXT,state TEXT,dispatched_at REAL,completed_at REAL,task_json TEXT,delivery_state TEXT,result_json TEXT);`)
+    f.add('user', 'Fix the bug')
+    for (const [tool, id] of [['wizard_heavy_submit', 'heavy_followup'], ['delegate_task', 'deleg_followup'], ['wizard_schedule', 'schedule_followup']]) {
+      f.add('assistant', '', { tool_calls: [call(tool, {}, id)] }); f.add('tool', JSON.stringify({ job_id: id }), { tool_call_id: id })
+    }
+    const text = reply('Archimedes: started optional follow-up checks: heavy_followup and deleg_followup running now; schedule_followup scheduled for 22:00').replace('The fix works.', 'The fix is verified.')
+    f.add('assistant', text)
+    const e = readOwnedOpenWork(f.path, 'wizard_owned')!
+    const ids = new Set(e.followUpIds)
+    expect([...ids]).toEqual(['heavy_followup', 'deleg_followup', 'schedule_followup'])
+    const heavyJob = { job_id: 'heavy_followup', sessionId: 'wizard_owned', agent_id: 'hermes', state: 'running', resume: '', created_at: Date.now() }
+    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob], nonHoldingIds: ids })).toEqual(status())
+    expect(guardHeavyStatus(status(), { sessionId: 'wizard_owned', jobs: [heavyJob, { ...heavyJob, job_id: 'required_build' }], nonHoldingIds: ids }).state).toBe('fyi')
+    // Routed agents still use the original false-done guard, even with exemptions supplied.
+    expect(guardHeavyStatus(status(), { agentId: 'philosopher', sessionId: 'wizard_owned', jobs: [{ ...heavyJob, agent_id: 'philosopher' }], nonHoldingIds: ids }).state).toBe('fyi')
+    const heavyDb = new DatabaseSync(join(f.root, 'heavy.db'))
+    heavyDb.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
+      .run(heavyJob.job_id, 'wizard_owned', 'wizardq_origin', 'fixture', 'hash', JSON.stringify(heavyJob), 'hermes'); heavyDb.close()
+    const t = Date.now()/1000
+    f.db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_followup', 'wizard_owned', null, '', 'running', t-1, null, '{"goals":["Optional check"]}', 'pending', '{}')
+    expect(readHelperStatuses(f.path, ['wizard_owned']).size).toBe(0)
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helpersRunning ?? 0).toBe(0)
+    const done = await f.list()
+    expect(done.status).not.toBe('running'); expect(done.wizard_attention.state).toBe('done')
+    expect(done.wizard_waiting_on).toBeUndefined(); expect(done.wizard_helper_status).toBeUndefined()
+    f.db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_required', 'wizard_owned', null, '', 'running', t-1, null, '{"goals":["Required result"]}', 'pending', '{}')
+    expect(readHelperStatuses(f.path, ['wizard_owned']).get('wizard_owned')?.pending).toBe(1)
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helpersRunning).toBe(1)
+    f.db.exec("DELETE FROM async_delegations WHERE delegation_id='deleg_required'")
+    // A terminal but undelivered optional helper must not turn the already fixed request back to Working.
+    f.db.prepare("UPDATE async_delegations SET state='completed',completed_at=?,result_json=?").run(t, '{"results":[{"task_index":0,"status":"completed","summary":"Optional result"}]}')
+    expect(readHermesSessionTruth(f.path, ['wizard_owned']).get('wizard_owned')?.helperResultUnanswered).not.toBe(true)
+    // No marker/background handoff is NOT completion, even if its prose calls work optional.
+    f.add('assistant', 'Optional follow-up heavy_followup is running now. Waiting for its required result.')
+    expect(readOwnedOpenWork(f.path, 'wizard_owned')!.followUpIds).toEqual([])
+    const holding = await f.list(); expect(holding.status).toBe('running')
+    const handles = dispatchHandles(events('wizard_heavy_submit', {}, { job_id: 'heavy_followup' }))
+    expect(nonHoldingFollowUpIds(text, status('check'), handles)).toEqual([])
+    expect(nonHoldingFollowUpIds(text.replace('heavy_followup', 'heavy_followup_other'), status(), handles)).toEqual([])
+    expect(nonHoldingFollowUpIds(text, status('fyi'), handles)).toEqual(['heavy_followup'])
+  })
   it('followThrough:false leaves shared Hermes sessions untouched', async () => {
     const f = await service(false); f.add('user', 'Fix'); f.add('assistant', reply())
     expect((await f.list()).wizard_attention.state).toBe('done'); expect(f.sent).toHaveLength(0)
@@ -230,6 +454,32 @@ describe('owned-work service wiring', () => {
 })
 
 describe('owned open work scan stays cheap on large transcripts', () => {
+  it('owned-work scan never skips sessions past the page limit', async () => {
+    const { scanOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
+    const f = transcript(), now = Date.now()
+    const add = f.db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)')
+    f.db.exec('BEGIN')
+    for (let i = 0; i < 425; i++) {
+      const id = `wizard_page_${i}`
+      add.run(id, 'user', 'Approved request', now/1000)
+      add.run(id, 'assistant', reply(), now/1000)
+      // Repeated matches must not consume authority for another session.
+      if (i % 3 === 0) add.run(id, 'assistant', reply(), now/1000)
+    }
+    f.db.exec('COMMIT')
+    const top = Number(f.db.prepare('SELECT MAX(id) n FROM messages').get()!.n)
+    let afterId = 0
+    const seen = new Set<string>()
+    for (let tick = 0; tick < 10 && afterId < top; tick++) {
+      const page = scanOwnedOpenWork(f.path, { now, afterId })
+      expect(page.lastId).toBeGreaterThan(afterId)
+      for (const e of page.evidence) seen.add(e.sessionId)
+      afterId = page.lastId!
+    }
+    expect(afterId).toBe(top)
+    expect([...seen].sort()).toEqual(Array.from({length:425}, (_, i) => `wizard_page_${i}`).sort())
+    expect(scanOwnedOpenWork(f.path, { now, afterId }).evidence).toEqual([])
+  })
   it('scans only rows after the previous high-water id', async () => {
     const { scanOwnedOpenWork } = await import('../server/owned-open-work-follow-through.mjs')
     const { mkdtempSync } = await import('node:fs')

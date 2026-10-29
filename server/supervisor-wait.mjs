@@ -3,6 +3,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { readHermesSessionTruth } from './session-truth.mjs'
 import { withoutOwnerGates } from './heavy-wait.mjs'
+import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 
 export const SUPERVISOR_WAIT_CAP_SECONDS = 12 * 3600
 export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = Date.now(), { includeOwnerGates = false } = {}) {
@@ -12,7 +13,7 @@ export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = 
   try {
     db = new DatabaseSync(supervisorPath, { readOnly: true })
     hermes = new DatabaseSync(hermesPath, { readOnly: true })
-    const builds = db.prepare(`SELECT b.thread,b.state,b.data,r.thread AS parent FROM builds b JOIN reviews r ON r.id=b.review
+    const builds = db.prepare(`SELECT b.id,b.thread,b.state,b.data,r.thread AS parent FROM builds b JOIN reviews r ON r.id=b.review
       WHERE r.state='open' AND b.state IN ('running','ended') AND r.thread IN (${wanted.map(() => '?').join(',')})`).all(...wanted)
     if (!builds.length) return waits
     const start = hermes.prepare('SELECT started_at FROM sessions WHERE id=?')
@@ -20,7 +21,10 @@ export function readSupervisorBuildWaits(supervisorPath, hermesPath, ids, now = 
     const children = new Map()
     const threads = [...new Set(builds.map(b => b.thread))]
     for (let at = 0; at < threads.length; at += 100) for (const [id, truth] of readHermesSessionTruth(hermesPath, threads.slice(at, at + 100), now / 1000)) children.set(id, truth)
+    const followUps = new Map()
     for (const build of builds) {
+      if (!followUps.has(build.parent)) followUps.set(build.parent, readNonHoldingFollowUps(hermesPath, build.parent))
+      if (followUps.get(build.parent).has(build.id) || followUps.get(build.parent).has(build.thread)) continue
       let data; try { data = JSON.parse(build.data) } catch { continue }
       // Legacy build rows predate created_at. Never renew their cap from read time.
       const since = Number(data.created_at) / 1000 || Number(start.get(build.thread)?.started_at)

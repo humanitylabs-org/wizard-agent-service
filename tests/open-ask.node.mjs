@@ -13,7 +13,7 @@ import { scene, kinds } from '../qa/agent-parity/fixture.mjs'
 
 for (const kind of kinds) test(`open QR ask survives progress while background runs through ${kind} HTTP`, async () => {
   const root = mkdtempSync(join(tmpdir(), 'open-ask-runtime-')), heavyStatePath = join(root, 'heavy.db')
-  const s = await scene(kind, { heavyStatePath, heavyToken: 'synthetic-open-ask-000000000000000000', heavyPollIntervalMs: 3_600_000,
+  const s = await scene(kind, { heavyStatePath, heavyToken: 'fixture-open-ask-token-not-secret', heavyPollIntervalMs: 3_600_000,
     heavyTransport: async () => { throw Error('fixture never contacts a worker') } })
   const db = new DatabaseSync(heavyStatePath), sid = 'wizard_qr_runtime', now = Date.now() / 1000
   const message = (state, ask, at) => ({ role: 'assistant', timestamp: at, content: `QR reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state, ask, subject: 'Parity QA' })}[/WIZARD_STATUS_V1]` })
@@ -132,4 +132,12 @@ test('QR delivered while helper builds button survives real main HTTP and slim l
     assert.equal(listRow(row).background, 'helper')
     assert.deepEqual(listRow(row).attention, qr)
   } finally { if (server.listening) await new Promise(r => server.close(r)); db.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('owner-stopped, cancelled and expired runs keep their terminal status while background is recorded', () => {
+  for (const status of ['cancelled', 'expired', 'stopping', 'failed']) {
+    const row = projectOpenAskSession({ id: 'stopped', status }, { replies: [reply({ state: 'fyi', ask: 'Helper still working' })], background: 'helper', lastUserAt: 10 })
+    assert.equal(row.status, status)
+    assert.equal(row.wizard_waiting_on, undefined)
+  }
 })
