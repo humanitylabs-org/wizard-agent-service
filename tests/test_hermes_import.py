@@ -75,6 +75,171 @@ class ImportTests(unittest.TestCase):
         return m.apply(p or self.plan(), 'fixture-agent', self.wizard, runtime_factory=FakeRuntime)
     def undo(self, result):
         return m.undo(result['journal'], runtime_factory=FakeRuntime)
+    def host_fixture(self):
+        for rel in ['data/apps/inbox/data', 'hermes-agent/venv/bin/python', 'scripts/host.sh', 'state/host/data']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('host fixture: ' + rel)
+        return m.approve(dict(self.plan(), host_shared_paths=['scripts', 'state/host']))
+
+    def tree_identity(self):
+        return {'.': (self.home.stat().st_ino, None), **{
+            p.relative_to(self.home).as_posix(): (p.lstat().st_ino, p.read_bytes() if p.is_file() else None)
+            for p in self.home.rglob('*')}}
+
+    def test_host_shared_move_keeps_host_inodes_and_bytes(self):
+        plan = self.host_fixture()
+        before = self.tree_identity()
+        result = self.apply(plan)
+        for rel in ['data/apps', 'data/apps/inbox/data', 'hermes-agent', 'hermes-agent/venv/bin/python', 'scripts', 'state/host/data']:
+            p = self.home / rel
+            self.assertTrue(p.exists(), rel)
+            self.assertEqual((p.stat().st_ino, p.read_bytes() if p.is_file() else None), before[rel])
+        self.assertEqual((self.home / 'data').stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.home / 'state').stat().st_mode & 0o777, 0o700)
+        self.undo(result)
+        self.assertEqual(self.tree_identity(), before)
+
+    def test_host_shared_absent_from_sealed_home_and_mounts(self):
+        plan = self.host_fixture()
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            mounted = m.approve(dict(plan, dependencies=[{'kind': 'folder', 'path': str(self.home / rel),
+                'proposal': 'mount ro', 'action': 'mount ro', 'approved': True}]))
+            with self.assertRaisesRegex(m.ImportFailure, 'home_mount_override|mount_sealed'):
+                m.validate_plan(mounted, self.wizard)
+        result = self.apply(plan)
+        directory = self.wizard / 'agents/fixture-agent'
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            self.assertFalse((directory / 'home' / rel).exists(), rel)
+            self.assertFalse((directory / 'quarantine' / rel).exists(), rel)
+        with patch.object(m, 'run', return_value='') as called:
+            m.DockerRuntime(plan, directory, 'fixture-agent').start()
+        args = called.call_args.args[0]
+        mounts = [args[i + 1] for i, a in enumerate(args[:-1]) if a == '--mount']
+        self.assertFalse(any('src=' + str(self.home) in x for x in mounts))
+        self.undo(result)
+
+    def test_host_shared_writer_allowed_but_state_db_writer_refused(self):
+        import subprocess
+        plan = self.host_fixture()
+        for rel in ['data/apps-other/file', 'cron/writer', 'sessions/writer', 'memories/writer', 'skills/writer']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('agent fixture')
+        for rel, blocked in [('data/apps/inbox/data', False), ('scripts/host.sh', False), ('state/host/data', False),
+                             ('state.db', True), ('data/apps-other/file', True), ('cron/writer', True),
+                             ('sessions/writer', True), ('memories/writer', True), ('skills/writer', True)]:
+            with self.subTest(rel=rel):
+                child = subprocess.Popen([sys.executable, '-c',
+                    'import sys,time; f=open(sys.argv[1],"a"); print("ready",flush=True); time.sleep(30)',
+                    str(self.home / rel)], stdout=subprocess.PIPE, text=True)
+                try:
+                    assert child.stdout is not None
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    # Exercise both /proc fd names and the fail-closed lease
+                    # fallback used for non-dumpable systemd service processes.
+                    selected = m.host_shared_paths(plan)
+                    real_iterdir = Path.iterdir
+                    def denied(path):
+                        if path == Path('/proc') / str(child.pid) / 'fd':
+                            raise PermissionError('fixture denied')
+                        return real_iterdir(path)
+                    with patch.object(Path, 'iterdir', denied):
+                        if blocked:
+                            with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                                self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                        else:
+                            self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                    with patch.object(m, 'assert_no_writers', lambda source, **kw: self.census_real(source, _pids=[child.pid], **kw)):
+                        if blocked:
+                            with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                                self.apply(plan)
+                        else:
+                            result = self.apply(plan)
+                finally:
+                    child.terminate(); child.wait()
+                    if child.stdout is not None:
+                        child.stdout.close()
+                    journal = self.wizard / 'agents/fixture-agent/import-journal.json'
+                    if journal.exists():
+                        self.undo({'journal': str(journal)})
+                plan = m.approve(dict(self.plan(), host_shared_paths=['scripts', 'state/host']))
+
+    def test_host_shared_undo_crash_between_renames_exact_tree(self):
+        plan = self.host_fixture()
+        before = self.tree_identity()
+        real_rename = Path.rename
+        count = [0]
+        def crash(src, dst):
+            value = real_rename(src, dst)
+            if Path(dst) == self.home / 'data/apps':
+                count[0] += 1
+                raise SystemExit('host-shared-rename-crash')
+            return value
+        with patch.object(Path, 'rename', crash):
+            with self.assertRaisesRegex(SystemExit, 'host-shared-rename-crash'):
+                self.apply(plan)
+        self.assertEqual(count[0], 1)
+        self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+        self.assertEqual(self.tree_identity(), before)
+        # All shared intent/completion writes, plus undo death after the actual
+        # reverse rename (before completion is durable), must reconcile too.
+        original_dump = m.dump
+        writes = []
+        def count_writes(path, value):
+            original_dump(path, value)
+            if Path(path).name == 'import-journal.json':
+                writes.append(1)
+        with patch.object(m, 'dump', count_writes):
+            result = self.apply(plan)
+        self.undo(result)
+        for boundary in range(1, len(writes) + 1):
+            with self.subTest(boundary=boundary):
+                seen = [0]
+                def crash_write(path, value):
+                    original_dump(path, value)
+                    if Path(path).name == 'import-journal.json':
+                        seen[0] += 1
+                        if seen[0] == boundary:
+                            raise SystemExit('journal-crash')
+                with patch.object(m, 'dump', crash_write), self.assertRaises(SystemExit):
+                    self.apply(plan)
+                self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+                self.assertEqual(self.tree_identity(), before)
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            with self.subTest(undo_crash=rel):
+                result = self.apply(plan)
+                def crash_undo(src, dst):
+                    value = real_rename(src, dst)
+                    if src == self.home / rel:
+                        raise SystemExit('undo-rename-crash')
+                    return value
+                with patch.object(Path, 'rename', crash_undo), self.assertRaises(SystemExit):
+                    self.undo(result)
+                self.undo(result)
+                self.assertEqual(self.tree_identity(), before)
+
+    def test_host_shared_invalid_paths_rejected(self):
+        self.host_fixture()
+        for rel in ['state.db', 'memories', 'skills', 'sessions', 'cron', 'config.yaml', '.env',
+                    '.', '..', '../outside', '/absolute', 'state/../skills', 'missing', 'data/../../outside', 'scripts//host.sh']:
+            with self.subTest(rel=rel):
+                p = m.approve(dict(self.plan(), host_shared_paths=[rel]))
+                with self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+                    m.validate_plan(p, self.wizard)
+        for value in ['scripts', [1], None]:
+            with self.subTest(value=value), self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+                m.validate_plan(m.approve(dict(self.plan(), host_shared_paths=value)), self.wizard)
+        alias = self.home / 'alias'
+        alias.symlink_to(self.home / 'skills', target_is_directory=True)
+        with self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+            m.validate_plan(m.approve(dict(self.plan(), host_shared_paths=['alias'])), self.wizard)
+
+        p = self.host_fixture()
+        p['host_shared_paths'].append('data')
+        with self.assertRaisesRegex(m.ImportFailure, 'plan_not_approved'):
+            m.validate_plan(p, self.wizard)
+
     def test_credential_named_documentation_is_not_a_secret_file(self):
         d = self.home / 'skills/agent-credential-provisioning'
         d.mkdir(parents=True)
@@ -393,7 +558,7 @@ class ImportTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, '-c', 'import sys,time; f=open(sys.argv[1],"a"); print("ready",flush=True); time.sleep(30)', str(self.home / '.env')], stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
-            with patch.object(m, 'assert_no_writers', lambda source: self.census_real(source, _pids=[child.pid])):
+            with patch.object(m, 'assert_no_writers', lambda source, **kw: self.census_real(source, _pids=[child.pid], **kw)):
                 with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
                     self.apply()
         finally:

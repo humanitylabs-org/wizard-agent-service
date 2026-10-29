@@ -115,10 +115,16 @@ def relocate(source, target):
             transfer.rename(source.parent)
 
 
-def metadata(home):
+def metadata(home, *, ignored=()):
     result = {}
+    def shared(path):
+        rel = path.relative_to(home).as_posix()
+        return any(rel == p or rel.startswith(p + '/') for p in ignored)
     for base, dirs, names in os.walk(home, followlinks=False):
+        dirs[:] = [n for n in dirs if not shared(Path(base) / n)]
         for path in [Path(base), *(Path(base) / n for n in dirs + names)]:
+            if shared(path):
+                continue
             s = path.lstat()
             result[path.relative_to(home).as_posix()] = [s.st_uid, s.st_gid, stat.S_IMODE(s.st_mode)]
     return result
@@ -198,7 +204,8 @@ def apply(h, plan, agent_id, wizard_home, *, allow_source_stop=False):
     work.mkdir(mode=0o700, parents=True)
     path = work / 'journal.json'
     journal = {'schema': 1, 'restricted_import': True, 'id': agent_id, 'root': str(root), 'plan': plan,
-               'step': 'intent', 'state': 'preparing', 'metadata': metadata(source) if plan['move'] else {},
+               'step': 'intent', 'state': 'preparing',
+               'metadata': metadata(source, ignored=h.host_shared_paths(plan)) if plan['move'] else {},
                'uid': os.getuid(), 'gid': os.getgid()}
     checkpoint(h, path, journal, 'intent')
     cfg = plan['summary']['model']
