@@ -66,12 +66,12 @@
     },
     {
       "id": "provider-signin-recovery",
-      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route.",
+      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route; a stale picker retry on another model is refused, not misacknowledged or duplicated.",
       "layer": "server",
       "fixture": "provider-signin-recovery",
       "how_to_test": "Fail a real HTTP admission with a controlled zero-token sign-in error, observe unavailable then ready, and assert one same-model source-preserving resend on main, host-profile, container and restricted queues.",
       "source_refs": ["server/run-queue.mjs", "server/routed-run-queue.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "tests/provider-saved-retry-route-race.node.mjs", "qa/agent-parity/server-checks.mjs"],
       "policy_exemptions": []
     },
     {
@@ -530,13 +530,18 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
-        "server/thread-status.mjs"
+        "server/thread-status.mjs",
+        "server/open-ask.mjs",
+        "server/session-list-view.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
         "tests/thread-status-backfill-list.test.ts",
-        "tests/heavy-status.test.ts"
+        "tests/heavy-status.test.ts",
+        "tests/open-ask.node.mjs",
+        "wizard-ux/tests/ready-open-ask.test.mjs"
       ],
       "fixture": "status-list-state",
       "policy_exemptions": []
@@ -1021,12 +1026,13 @@
       "id": "model-lock",
       "description": "Queue/steer/retry on one route while changing global default",
       "layer": "server",
-      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked.",
+      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked. In wizard-ux, node --test tests/agent-held-take-model.test.mjs checks that a take or Retry bound to a host-profile, container, restricted or Private agent rides on that agent's own route (an explicit pick on its provider is kept; a main-agent route is replaced by the agent default) while a main-thread take keeps its own route. These are fixture checks, not live runtime proof.",
       "source_refs": [
         "server/run-queue.mjs"
       ],
       "reference_tests": [
-        "tests/proxy-queue.test.ts"
+        "tests/proxy-queue.test.ts",
+        "wizard-ux/tests/agent-held-take-model.test.mjs"
       ],
       "fixture": "model-lock",
       "policy_exemptions": []
