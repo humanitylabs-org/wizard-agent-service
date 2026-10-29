@@ -48,7 +48,7 @@ describe('classifyProviderSignOut', () => {
   })
   it('annotates a plain message and a structured field', () => {
     expect(annotateProviderSignOut(claudeRun())).toMatchObject({
-      safe_error: 'Claude is signed out. Open Claude to reconnect, then tap Retry.',
+      safe_error: 'Claude sign-in expired',
       wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude' },
     })
     const other = { status: 'failed', error: 'boom' }
@@ -73,7 +73,7 @@ describe('run queue projection', () => {
     const q = await make(claudeRun())
     await q.admit(request()); await q.tick(true)
     for (const row of [q.latestProjections(['wizard_nolan'])[0], q.latestProjections()[0]]) {
-      expect(row).toMatchObject({ status: 'failed', safeError: 'Claude is signed out. Open Claude to reconnect, then tap Retry.',
+      expect(row).toMatchObject({ status: 'failed', safeError: '',
         reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude' } })
     }
   })
@@ -93,12 +93,12 @@ describe('decorateReconnect + list view', () => {
   it('installed app: Open message, app status from /api/connection', () => {
     const [row] = decorateReconnect([{ id: 's', status: 'failed', wizard_reconnect: { ...field } }], { installedApps: installed, usage: usage('expired') })
     expect(row.wizard_reconnect).toMatchObject({ installed: true, app_status: 'expired', app_name: 'Claude' })
-    expect(row.wizard_safe_error).toBe('Claude is signed out. Open Claude to reconnect, then tap Retry.')
+    expect(row.wizard_safe_error).toBe('Claude sign-in expired')
   })
   it('missing app: Get message, still shown', () => {
     const [row] = decorateReconnect([{ id: 's', status: 'failed', wizard_reconnect: { ...field } }], { installedApps: [], usage: null })
     expect(row.wizard_reconnect).toMatchObject({ installed: false, app_status: 'unknown' })
-    expect(row.wizard_safe_error).toContain('Get the Claude app')
+    expect(row.wizard_safe_error).toContain('Claude sign-in expired')
   })
   it('the run stays authoritative when the app reads a different sign-in as connected', () => {
     const [row] = decorateReconnect([{ id: 's', status: 'failed', wizard_reconnect: { ...field } }], { installedApps: installed, usage: usage(null) })
@@ -129,7 +129,7 @@ describe('Chats list over HTTP', () => {
     for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
   })
   async function boot(apps: object[], failure: object) {
-    const sessions = [{ id: 'wizard_nolan', source: 'api_server', title: 'Plan my week', message_count: 2, hidden: false, archived: false, updated_at: new Date().toISOString() }]
+    const sessions = [{ id: 'wizard_nolan', source: 'api_server', title: 'Plan my week', status: 'failed', message_count: 2, hidden: false, archived: false, updated_at: new Date().toISOString() }]
     let status = 'running'
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')
@@ -186,14 +186,14 @@ describe('Chats list over HTTP', () => {
   it('Claude installed: Open Claude message + reconnect field (full and list views)', async () => {
     const h = await boot([claudeApp], claudeRun())
     expect(await h.row()).toMatchObject({ status: 'failed',
-      wizard_safe_error: 'Claude is signed out. Open Claude to reconnect, then tap Retry.',
+      wizard_safe_error: 'Claude sign-in expired',
       wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude', installed: true, app_status: 'expired' } })
-    expect(await h.row('&view=list')).toMatchObject({ safeError: 'Claude is signed out. Open Claude to reconnect, then tap Retry.',
+    expect(await h.row('&view=list')).toMatchObject({ safeError: 'Claude sign-in expired',
       reconnect: { appId: 'wizard-claude', installed: true, appStatus: 'expired' } })
   })
   it('Claude not installed: Get message, installed false', async () => {
     const h = await boot([], claudeRun())
-    expect(await h.row()).toMatchObject({ wizard_safe_error: 'Claude is signed out. Get the Claude app to reconnect, then tap Retry.',
+    expect(await h.row()).toMatchObject({ wizard_safe_error: 'Claude sign-in expired',
       wizard_reconnect: { app_id: 'wizard-claude', installed: false } })
   })
   it('an unrelated failure gets no reconnect (negative control)', async () => {

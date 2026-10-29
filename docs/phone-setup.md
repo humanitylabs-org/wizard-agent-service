@@ -56,7 +56,9 @@ removes `access.tailscale`, clears `base_url` (the old tailnet host stays in `al
 and clears `setup.phone_*`. Unknown keys in the file are preserved; an unreadable file is never overwritten.
 
 `phone_seen` = a request reached the tailnet listener, passed owner verification and carried a phone/tablet
-user agent, **or** an iOS/Android device of the owner is online in the helper's peer list after enrollment.
+user agent: the owner's phone actually opened Wizard. An iOS/Android device that is merely online in the helper's
+peer list does not count (it is often on Tailscale long before it has the Wizard app or address); it is listed in
+`phones`, which the Setup app can use as a hint ("your iPhone is on your network, now scan the code").
 
 ## Access rules (PR15, unchanged and extended)
 

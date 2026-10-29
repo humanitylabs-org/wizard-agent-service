@@ -164,6 +164,7 @@ export function createSharedSnapshot({ debounceMs = 3_000, ceilingMs = 30_000, s
       if (!inFlight) start()
       return inFlight.promise
     },
+    peek() { return current?.value ?? null },
     clear() { current = null },
     age() { return current ? now() - current.at : null },
   }
