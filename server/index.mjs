@@ -1,4 +1,5 @@
 import { defaultKeeperSocket } from './run-stream-keeper.mjs'
+import { sharedVaultRegistration } from './shared-vault-bootstrap.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
@@ -234,6 +235,7 @@ server = createWizardServer({
   standardChatsUrl: process.env.WIZARD_STANDARD_CHATS_URL || '',
   // New restricted agents reach the Service through their own Unix socket, never a TCP agent port.
   agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
+  appOwnerRoutes: await sharedVaultRegistration(process.env.WIZARD_SHARED_VAULT_OWNER_CONFIG || ''),
 })
 await server.agentSocketsReady
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))

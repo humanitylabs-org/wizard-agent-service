@@ -45,6 +45,8 @@ from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import hermes_lock
+import app_socket_grants
+import socket
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
@@ -351,8 +353,9 @@ class RestrictedDriver:
     """Runs the pinned restricted runtime, optionally with its reviewed Claude grant override.
     Kept off Runtipi's shared network; the project holds the agent and its sidecars."""
 
-    def __init__(self, agents: Agents, runtime_dir: Path, image: str):
+    def __init__(self, agents: Agents, runtime_dir: Path, image: str, app_socket_grants_path: Path | None = None):
         self.agents, self.image = agents, image
+        self.app_socket_grants_path = app_socket_grants_path
         self.runtime_dir = runtime_dir.resolve()
         self.compose_file = self.runtime_dir / "compose.yml"
         verify_vendored(self.runtime_dir)
@@ -410,8 +413,55 @@ class RestrictedDriver:
         override = self.agents.root / agent["id"] / "import-runtime.json"
         if agent.get("imported") and override.is_file():
             files += ["-f", str(override)]
+        grant = self.app_socket_grant(agent, ready=bool(args and args[0] == 'up'))
+        if grant:
+            path = self.agents.root / agent["id"] / "runtime" / "app-sockets.json"
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.write_text(json.dumps(app_socket_grants.compose_override(grant, home=self.agents.home(agent['id']), image=self.image or DEFAULT_IMAGE)))
+            files += ["-f", str(path)]
         return docker(["compose", "-p", self.project(agent["id"]), *files, *args],
                       timeout=timeout, env=env)
+
+    def app_socket_grant(self, agent: dict, *, ready=True):
+        try:
+            return app_socket_grants.grant_for(self.app_socket_grants_path, agent, ready=ready)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise RuntimeFailure('app_socket_grant_denied', 409) from None
+
+    def app_socket_preflight(self):
+        # No authority mounts or agent homes in this one-shot. Reject remapped/rootless/
+        # remote daemons rather than guessing the host uid seen by SO_PEERCRED.
+        try:
+            if os.geteuid() == 0 or os.environ.get('DOCKER_HOST', '').startswith(('tcp:', 'ssh:')):
+                raise ValueError('unprivileged_local_helper_required')
+            info = json.loads(docker(['info', '--format', '{{json .}}'], timeout=30).stdout)
+            if info.get('Name') != socket.gethostname() or any('rootless' in s or 'userns' in s for s in info.get('SecurityOptions', [])):
+                raise ValueError('unmapped_local_daemon_required')
+            snapshot = docker(['run', '--rm', '--network', 'none', '--read-only', '--user', '10000:10000', '--userns', 'host',
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--entrypoint', '/opt/hermes/.venv/bin/python',
+                self.image or DEFAULT_IMAGE, '-I', '-c', app_socket_grants.identity_script('self')], timeout=60)
+            app_socket_grants.verify_identity(json.loads(snapshot.stdout))
+        except (OSError, ValueError, KeyError, TypeError, RuntimeFailure, subprocess.TimeoutExpired):
+            raise RuntimeFailure('app_socket_identity_preflight_denied', 409) from None
+
+    def verify_app_socket_runtime(self, agent: dict, grant):
+        container = container_for(self.project(agent['id']), RESTRICTED_SERVICE)
+        try:
+            identity = docker(['exec', '--user', '10000:10000', container, '/opt/hermes/.venv/bin/python', '-I', '-c',
+                               app_socket_grants.identity_script('1')], timeout=30)
+            app_socket_grants.verify_identity(json.loads(identity.stdout))
+            record = json.loads(docker(['inspect', container], timeout=30).stdout)[0]
+            app_socket_grants.verify_applied(record, grant, self.agents.home(agent['id']))
+            names = list(record['NetworkSettings']['Networks'])
+            if len(names) != 1:
+                raise ValueError('unexpected_socket_runtime_network')
+            net = json.loads(docker(['network', 'inspect', names[0]], timeout=30).stdout)[0]
+            if not net['Internal'] or net['EnableIPv6'] or net.get('Options', {}).get('com.docker.network.bridge.inhibit_ipv4') != 'true':
+                raise ValueError('unsafe_socket_runtime_network')
+        except (OSError, ValueError, KeyError, TypeError, RuntimeFailure, subprocess.TimeoutExpired):
+            # Do not advertise a running unsafe agent. No unrestricted/root fallback.
+            docker(['stop', '-t', '1', container], timeout=30, check=False)
+            raise RuntimeFailure('app_socket_runtime_denied', 409) from None
 
     def _claude_source_module(self):
         spec = importlib.util.spec_from_file_location("runtime_claude_source", self.runtime_dir / "claude_source.py")
@@ -532,12 +582,20 @@ class RestrictedDriver:
         self.sync_home(agent)
 
     def apply(self, agent: dict) -> dict:
+        grant = self.app_socket_grant(agent)  # Validate authority and live socket BEFORE any lifecycle side effect.
+        if grant:
+            self.app_socket_preflight()
+        if grant and uses_claude_login(agent):
+            # This minimal socket-only profile never receives a second provider credential mount.
+            raise RuntimeFailure('app_socket_login_mount_unsupported', 409)
         self._prepare(agent)
         project = self.project(agent["id"])
         # Reconcile actual endpoints/mounts, not only Compose's saved config hash. Legacy
         # projects can retain an endpoint without the `agent` alias after network migration,
         # leaving a healthy agent unreachable through the new socket relay.
         self._compose(agent, "up", "-d", "--force-recreate", "--remove-orphans", timeout=1800)
+        if grant:
+            self.verify_app_socket_runtime(agent, grant)
         return {"ok": True, "driver": "restricted", "project": project, **self.claude_status(agent)}
 
     def claude_status(self, agent: dict) -> dict:
@@ -1218,6 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
+    ap.add_argument('--app-socket-grants', type=Path, help='private trusted per-agent socket grants, never agent.json or a home path')
     args = ap.parse_args(argv)
     if args.image != DEFAULT_IMAGE or os.environ.get('WIZARD_RESTRICTED_AGENT_IMAGE', DEFAULT_IMAGE) not in ('', DEFAULT_IMAGE):
         ap.error('Hermes image differs from the shared exact lock; use a reviewed coordinated promotion')
@@ -1235,7 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
         driver = ComposeDriver(agents, args.image, args.proxy_image)
     restricted_driver = None
     if (args.restricted_runtime_dir / "compose.yml").exists():
-        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
+        restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""), args.app_socket_grants)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(token, agents, driver, args.main_container, restricted_driver))
     sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
     server.serve_forever()

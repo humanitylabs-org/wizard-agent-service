@@ -1,0 +1,6 @@
+{
+  "serviceBase": "07d1a6a9ef267b425f2428a68ea9435e7d030a42",
+  "vaultCommit": "efac5ab2e49d2c4ebb61a65fb0b503ccbcb56cc7",
+  "ownerAdapterCommit": "2dc1a84b1e9985f904542121ff20e57a0f4ba681",
+  "reason": "Combine the DNS/UID and offline-writer-fence repairs; refuse the superseded app candidate. Positive private-browser workflow is a mandatory first worker gate, not presumed fixed."
+}

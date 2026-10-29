@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/humanitylabs-org/wizard-shared-vault",
+  "commit": "2dc1a84b1e9985f904542121ff20e57a0f4ba681",
+  "path": "integration/service_owner_route.mjs",
+  "sha256": "5d9c7759c88e4b7f61d25da2767e53a5f09fbe92ae6f471a981a8b0e3086e02c",
+  "license": "GPL-3.0-only",
+  "activation": "explicit-trusted-bootstrap-only; staged pending independent review"
+}

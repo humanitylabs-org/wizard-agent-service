@@ -1,0 +1,8 @@
+name: shared-vault
+version: "0.1.0"
+description: "Credential-free client for the explicitly mounted per-agent Shared Vault socket."
+author: "Humanity Labs"
+provides_tools:
+  - shared_vault_status
+  - shared_vault_handles
+  - shared_vault_run

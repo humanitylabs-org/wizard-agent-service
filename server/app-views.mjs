@@ -35,7 +35,7 @@ const BOOT = `(() => {
   addEventListener('DOMContentLoaded', () => send('wizard:own-view:ready', 'index.html'));
 })();`;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.json': 'application/json', '.woff2': 'font/woff2' };
-export function serveAppView(request, response, url, { appsJsonPath, apps }) {
+export function serveAppView(request, response, url, { appsJsonPath, apps, appOwnerApiRoutes = new Map() }) {
   if (!url.pathname.startsWith('/wizard/views/')) return false;
   const reply = (code, body, type = 'text/plain; charset=utf-8', extra = {}) => {
     response.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...extra });
@@ -51,6 +51,15 @@ export function serveAppView(request, response, url, { appsJsonPath, apps }) {
   // A same-origin redirect, not a privileged proxy: data requests still go through
   // the app's existing API route and its authentication/CSRF checks. No MCP route.
   if (parts[0] === 'api') {
+    const ownerRoutes = appOwnerApiRoutes.get(id);
+    if (ownerRoutes) {
+      const rawBase = `/wizard/views/${id}/api/`;
+      const leaf = (request.url || '').slice(rawBase.length);
+      if (!request.url?.startsWith(rawBase) || !ownerRoutes.has(`${request.method} ${leaf}`)) return reply(403, 'API route unavailable');
+      // A same-origin method-preserving redirect only. The owner handler still verifies the
+      // original Host/Origin and trusted principal; this mapping never adds authority.
+      return reply(307, '', 'text/plain', { Location: `/wizard/apps/${id}/api/${leaf}` });
+    }
     const apiPath = metadata(appsJsonPath, id)?.api_path || '/api';
     if (!app.url.startsWith('/') || app.url.startsWith('//') || !/^\/[a-zA-Z0-9_/-]+$/.test(apiPath) || /(?:^|\/)mcp(?:\/|$)/i.test(apiPath + '/' + parts.join('/'))) return reply(403, 'API route unavailable');
     const base = app.url.replace(/[?#].*$/, '').replace(/[^/]*$/, '');
