@@ -13,7 +13,13 @@ Part B  installed-Runtipi recipe lifecycle with the bundled docker-compose
         v2.40.0 (from wizard-app-manager:grants-fix-fead192e9fb2-amd64):
         install, restart, upgrade, catalog/user-config persistence, rollback,
         and the unsealed negatives (user config disabled / edited).
-Writes JSON evidence to $R10_EVIDENCE (default <worktree>/qa/round10).
+Writes JSON evidence to $R10_EVIDENCE (default <worktree>/qa/round10b).
+
+Round 10b (after the round-10 false success): exit 0 only when every required
+check passed (scripts/private_seal_evidence.required_unmet); unmet -> 2, error
+-> 1. Capture is per flow and per hop, the data scan tolerates only the exact
+read-only Service key mount, provider stop is bounded and the restore and every
+Runtipi step wait for real readiness before they are judged.
 """
 import hashlib
 import json
@@ -27,11 +33,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'ops/agent-runtime'))
+sys.path.insert(0, str(ROOT / 'scripts'))
+import private_seal_evidence as ev  # noqa: E402
 import agent_runtime as ar  # noqa: E402
 import private_seal as seal  # noqa: E402
 from incognito_runtime import PYTHON  # noqa: E402
 
-OUT = Path(os.environ.get('R10_EVIDENCE', ROOT / 'qa/round10')); OUT.mkdir(parents=True, exist_ok=True)
+OUT = Path(os.environ.get('R10_EVIDENCE', ROOT / 'qa/round10b')); OUT.mkdir(parents=True, exist_ok=True)
 WORK = Path(os.environ.get('R10_WORK', ROOT / 'r10-work'))
 DC = os.environ.get('R10_COMPOSE', str(ROOT / 'bin/docker-compose'))
 AGENT_IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
@@ -152,40 +160,61 @@ for name,host,port in p.get('connects',[]):
   except Exception as e: out[name]='refused:'+type(e).__name__
 print(json.dumps(out))'''
 
-SNIFF = r'''import json,os,re,select,socket,struct,sys,time
-p=json.loads(sys.stdin.readline());m=p['m'].encode();k=p['k'].encode();ph=p['p'].encode()
-s=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.ntohs(3))
-names={}
-for n in os.listdir('/sys/class/net'):
-  try:names[int(open('/sys/class/net/%s/ifindex'%n).read())]=n
-  except Exception:pass
-st={};buf={}
-print('ready',flush=True)
-end=time.time()+p['t']
-while time.time()<end:
-  if not select.select([s],[],[],0.5)[0]:continue
-  data,addr=s.recvfrom(65535)
-  if addr[2]==socket.PACKET_OUTGOING and names.get(addr[1])=='lo':continue
-  n=names.get(addr[1],str(addr[1]))
-  if len(data)<34 or data[12:14]!=b'\x08\x00':continue
-  ip=data[14:];ihl=(ip[0]&15)*4
-  if ip[9]!=6:continue
-  src,dst=socket.inet_ntoa(ip[12:16]),socket.inet_ntoa(ip[16:20]);tcp=ip[ihl:];sp,dp=struct.unpack('!HH',tcp[:4]);pay=tcp[(tcp[12]>>4)*4:]
-  d=st.setdefault(n,{'frames':0,'payload_bytes':0,'pairs':{},'tls_client_hello_sni':[],'tls_app_records':0,'http_requests':0})
-  d['frames']+=1;d['payload_bytes']+=len(pay)
-  key='%s>%s:%d'%(src,dst,dp) if dp<sp else '%s:%d>%s'%(src,sp,dst)
-  d['pairs'][key]=d['pairs'].get(key,0)+1
-  if pay[:1]==b'\x16' and len(pay)>5 and pay[5]==1:
-    for h in re.findall(rb'[a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?:sh|dev|com)',pay):
-      h=h.decode()
-      if h not in d['tls_client_hello_sni']:d['tls_client_hello_sni'].append(h)
-  if pay[:3]==b'\x17\x03\x03':d['tls_app_records']+=1
-  if re.match(rb'(GET|POST|DELETE) /',pay):d['http_requests']+=1
-  b=buf.setdefault(n,bytearray())
-  if len(b)<4000000:b.extend(pay)
-for n,b in buf.items():
-  st[n].update({'marker_seen':m in b,'synthetic_key_seen':k in b,'placeholder_seen':ph in b,'key_in_authorization':(b'Bearer '+k) in b})
-print(json.dumps(st))'''
+
+
+READY = r'''import json,sys,time,urllib.request,urllib.error
+p=json.load(sys.stdin);t=time.monotonic();last={}
+while time.monotonic()-t<p['limit']:
+  ok=True
+  for port in p['ports']:
+    try:
+      r=urllib.request.Request('http://%s:%d/verification-document'%(p['host'],port),headers={'Authorization':'Bearer '+p['ph']})
+      with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(r,timeout=5) as h:last[str(port)]=h.status
+    except urllib.error.HTTPError as e:last[str(port)]=e.code
+    except Exception as e:last[str(port)]='error:'+type(e).__name__
+    ok=ok and last[str(port)]==200
+  if ok:break
+  time.sleep(1)
+print(json.dumps({'ready':ok,'ms':round((time.monotonic()-t)*1000),'last':last}))'''
+
+
+def wait_ready(container, host, ports=(3301, 3302), limit=150):
+    """Poll both attested routes through the injector until 200 (or the limit)."""
+    return agent_py(container, READY, {'host': host, 'ports': list(ports), 'ph': seal.PLACEHOLDER_KEY, 'limit': limit},
+                    timeout=limit + 60)
+
+
+def stack_diagnostics(project):
+    """Synthetic stack only: container states and scrubbed proxy log tails, for a failed readiness."""
+    out = {}
+    for c in run(['docker', 'ps', '-a', '--format', '{{.Names}}', '--filter', f'label=com.docker.compose.project={project}'],
+                 check=False).stdout.split():
+        st = run(['docker', 'inspect', '--format', '{{json .State}}', c], check=False).stdout
+        try:
+            st = {k: json.loads(st).get(k) for k in ('Status', 'ExitCode', 'OOMKilled', 'RestartCount', 'Error', 'StartedAt')}
+        except ValueError:
+            st = {'inspect': 'unreadable'}
+        if c.endswith('-tinfoil-1') or c.endswith('-search-1'):
+            logs = run(['docker', 'logs', '--tail', '15', c], check=False)
+            st['log_tail'] = scrub((logs.stdout + logs.stderr)[-2500:])
+        out[c] = st
+    return out
+
+
+def start_sniffer(name, container):
+    p = subprocess.Popen(['docker', 'run', '--rm', '-i', '--name', name, '--network', 'container:' + container, '--user', '0',
+                          '--cap-drop', 'ALL', '--cap-add', 'NET_RAW', '--entrypoint', 'python', seal.KEY_IMAGE, '-c', ev.SNIFF, '900'],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = p.stdout.readline().strip()
+    if line != 'ready':
+        receipt.setdefault('diagnostics', []).append({'sniffer': name, 'stderr': scrub(p.stderr.read()[-800:])})
+        raise RuntimeError('sniffer_not_ready')
+    return p
+
+
+def stop_sniffer(p):
+    out, _ = p.communicate('stop\n', timeout=180)
+    return json.loads(out.strip().splitlines()[-1])
 
 
 def part_a():
@@ -217,6 +246,11 @@ def part_a():
     dc = [DC, '-p', project, '-f', file]
     agent_c, proxy_c, key_c = f'{project}-{app}-1', f'{project}-{app}-tinfoil-1', f'{project}-{app}-key-1'
     try:
+        receipt['phase'] = 'a_capture_start'
+        # Edge first, with a sniffer in its namespace BEFORE the proxies start, so
+        # every provider-hop TLS handshake (pooled from attestation) is observed.
+        run([*dc, 'up', '-d', f'{app}-edge'], timeout=300)
+        sniff_edge = start_sniffer('r10b-sniff-edge', f'{project}-{app}-edge-1')
         t = time.monotonic(); run([*dc, 'up', '-d'], timeout=300); receipt['timings_ms']['a_up'] = ms(t)
         receipt['phase'] = 'a_attestation'
         ph = seal.PLACEHOLDER_KEY
@@ -233,11 +267,7 @@ print(json.dumps(out))''', {'p': ph}, timeout=150)
         receipt['attestation_via_injector'] = att
         receipt['checks']['both_attested_via_injector'] = set(att) == {'3301', '3302'} and all(v.get('securityVerified') is True for v in att.values())
         receipt['phase'] = 'a_capture'
-        sniff = subprocess.Popen(['docker', 'run', '--rm', '-i', '--name', 'r10sniff', '--network', 'container:' + proxy_c, '--user', '0',
-                                  '--cap-drop', 'ALL', '--cap-add', 'NET_RAW', '--entrypoint', 'python', seal.KEY_IMAGE, '-c', SNIFF],
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        sniff.stdin.write(json.dumps({'m': MARKER, 'k': KEY, 'p': ph, 't': 40}) + '\n'); sniff.stdin.flush()
-        assert sniff.stdout.readline().strip() == 'ready'
+        sniff_proxy = start_sniffer('r10b-sniff-proxy', proxy_c)
         keyed_ip = str(seal.networks(agent)[2][2])
         body = {'model': 'llama3-3-70b', 'messages': [{'role': 'user', 'content': MARKER}], 'max_tokens': 8}
         mcp = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': MARKER, 'version': '0'}}}
@@ -247,20 +277,21 @@ print(json.dumps(out))''', {'p': ph}, timeout=150)
             ['agent_presents_provider_key', 'http://agent-synthetic-tinfoil:3301/v1/chat/completions', KEY, body],
             ['agent_presents_other_bearer', 'http://agent-synthetic-tinfoil:3301/v1/chat/completions', 'other', body]],
             'connects': [['agent_to_official_proxy_direct', keyed_ip, 3301], ['agent_to_internet_ip', '1.1.1.1', 443]]}, timeout=200)
-        out, err = sniff.communicate(timeout=90)
-        capture = json.loads(out.strip().splitlines()[-1])
-        receipt['agent_calls'] = calls; save('a-capture.json', capture)
-        keyed_if = [i for i, d in capture.items() if any(p.startswith(f'10.248.{n}.') or f'>10.248.{n}.' in p for p in d['pairs'])]
-        prov_if = [i for i, d in capture.items() if any(p.startswith(f'10.247.{n}.') or f'>10.247.{n}.' in p for p in d['pairs'])]
-        kd = capture[keyed_if[0]] if keyed_if else {}; pd = capture[prov_if[0]] if prov_if else {}
+        time.sleep(2)
+        flows = ev.merge_flows(stop_sniffer(sniff_proxy), stop_sniffer(sniff_edge))
+        nets = seal.networks(agent)
+        cap = ev.classify_capture(flows, {'seal': str(nets[0]), 'provider': str(nets[1]), 'keyed': str(nets[2]),
+                                          'agent_ip': str(nets[0][2]), 'injector_ip': str(nets[0][3])},
+                                  {'marker': MARKER, 'key': KEY, 'placeholder': ph}, seal.HOSTS)
+        del flows
+        receipt['agent_calls'] = calls; save('a-capture.json', cap)
         reached_provider = isinstance(calls['placeholder_inference']['status'], int) and calls['placeholder_inference']['error'] not in (
             'provider_unavailable', 'agent_must_not_hold_provider_key', 'request_refused', 'provider_key_unavailable')
         receipt['six_privacy_checks']['a_relay_ehbp_capture'] = {
-            'status': 'passed' if (kd.get('key_in_authorization') and pd.get('tls_client_hello_sni') and pd.get('tls_app_records', 0) > 0
-                                   and not pd.get('marker_seen') and not pd.get('synthetic_key_seen') and not pd.get('placeholder_seen')) else 'failed',
-            'scope': 'Raw AF_PACKET capture in the official proxy network namespace. Keyed internal hop: plaintext HTTP from the Service injector carrying the injected bearer. Provider hop to the edge/enclave: TLS only; marker, synthetic key and placeholder absent from every byte. EHBP body framing rides inside that TLS and is not independently decrypted (no TLS key log in tinfoil-go v0.15).',
-            'keyed_interface': {k: kd.get(k) for k in ('http_requests', 'key_in_authorization', 'marker_seen', 'placeholder_seen')},
-            'provider_interface': {k: pd.get(k) for k in ('tls_client_hello_sni', 'tls_app_records', 'marker_seen', 'synthetic_key_seen', 'placeholder_seen', 'http_requests')},
+            'status': 'passed' if (cap['passed'] and reached_provider) else 'failed',
+            'failures': cap['failures'] + ([] if reached_provider else ['placeholder_request_did_not_reach_provider']),
+            'summary': cap['summary'],
+            'scope': 'Raw AF_PACKET capture in the edge namespace (started before the proxies, so handshakes are seen) and the official proxy namespace, reassembled per TCP flow and classified per hop by subnet. Keyed hop (injector -> official proxy, internal): plaintext HTTP carrying the injected bearer by design. Provider hop (proxy -> edge) and egress (edge -> internet): CONNECT to an allowed host, then well-formed TLS records only, SNI equal to the CONNECT host, marker/synthetic key/placeholder absent; any other flow carrying a needle fails. EHBP body framing inside TLS is not independently decrypted (no TLS key log in tinfoil-go v0.15).',
             'provider_answered_status': calls['placeholder_inference']['status'], 'evidence': str(OUT / 'a-capture.json')}
         receipt['phase'] = 'a_key_location'
         inside = agent_py(agent_c, r'''import json,os,sys,pathlib
@@ -275,7 +306,8 @@ print(json.dumps({'key_hits_inside_agent':hits,'env_has_tinfoil_var':'TINFOIL_AP
         envs = {}
         for c in run(['docker', 'ps', '-a', '--format', '{{.Names}}', '--filter', f'label=com.docker.compose.project={project}']).stdout.split():
             envs[c] = KEY in run(['docker', 'inspect', '--format', '{{json .Config.Env}}{{json .Mounts}}', c]).stdout
-        mounts = {c: [m['Source'] for m in json.loads(run(['docker', 'inspect', '--format', '{{json .Mounts}}', c]).stdout)] for c in envs}
+        mounts_full = {c: json.loads(run(['docker', 'inspect', '--format', '{{json .Mounts}}', c]).stdout) for c in envs}
+        mounts = {c: [m['Source'] for m in ms_] for c, ms_ in mounts_full.items()}
         key_mounted_in = sorted(c for c, srcs in mounts.items() if KEYSRC[0] in srcs)
         receipt['six_privacy_checks']['d_provider_key_location'] = {
             'status': 'passed' if (not migration['home_env_has_synthetic_key'] and migration['home_env_has_placeholder'] and not inside['key_hits_inside_agent']
@@ -301,11 +333,18 @@ print(json.dumps({'key_hits_inside_agent':hits,'env_has_tinfoil_var':'TINFOIL_AP
         fail_closed = all(stopped[k]['status'] == 502 and stopped[k]['error'] == 'provider_unavailable' and stopped[k]['ms'] < bound_ms
                           for k in ('inference_while_stopped', 'search_while_stopped', 'inference_after_removal'))
         t = time.monotonic(); run([*dc, 'up', '-d'], timeout=300); receipt['timings_ms']['a_provider_restore'] = ms(t)
+        ready = wait_ready(agent_c, 'agent-synthetic-tinfoil')
+        receipt['timings_ms']['a_provider_ready_after_restore'] = ready['ms']
         restored = agent_py(agent_c, REQUEST, {'m': MARKER, 'k': KEY, 'timeout': 90, 'calls': [
-            ['inference_after_restore', 'http://agent-synthetic-tinfoil:3301/v1/chat/completions', ph, body]]}, timeout=150)
+            ['inference_after_restore', 'http://agent-synthetic-tinfoil:3301/v1/chat/completions', ph, body],
+            ['search_after_restore', 'http://agent-synthetic-tinfoil:3302/mcp', ph, mcp]]}, timeout=150)
+        restored['ready'] = ready['ready']; restored['readiness'] = ready
+        e_problems = ev.stopped_provider_verdict(stopped, restored, bound_ms)
+        if not ready['ready']:
+            restored['diagnostics'] = stack_diagnostics(project)
         receipt['six_privacy_checks']['e_stopped_provider_fail_closed'] = {
-            'status': 'passed_transport' if fail_closed else 'failed',
-            'bound_ms': bound_ms, 'while_stopped': stopped, 'after_restore': restored,
+            'status': 'passed_transport' if (fail_closed and not e_problems) else 'failed', 'problems': e_problems,
+            'bound_ms': bound_ms, 'injector_connect_timeout_s': 2.0, 'while_stopped': stopped, 'after_restore': restored,
             'scope': 'Transport layer: with the official proxy stopped the injector answers 502 provider_unavailable within the bound; no alternative route (edge CONNECT from agent is still denied by the edge allowlist). Stock-Hermes run classification is NOT re-measured here: round 9B observed stock Hermes still retrying during the bounded window, then cancelled explicitly. Retrying is not reported as terminal failure.'}
         receipt['phase'] = 'a_other_agent'
         seal_ip, key_ip = str(seal.networks(agent)[0][2]), str(seal.networks(agent)[0][3])
@@ -323,18 +362,28 @@ print(json.dumps({'key_hits_inside_agent':hits,'env_has_tinfoil_var':'TINFOIL_AP
         receipt['checks']['other_sealed_agent_cannot_reach_host_api'] = other['other_sealed_agent'].get('host_published_api', '').startswith('refused')
         receipt['phase'] = 'a_scan'
         scan = {}
+        needles = {'marker': MARKER, 'key': KEY}
+        key_sha = hashlib.sha256(Path(KEYSRC[0]).read_bytes()).hexdigest()
+        expected = {'container': key_c, 'destination': seal.KEY_TARGET, 'source': KEYSRC[0]}
+        found_mounts, unexpected_mounts = ev.key_mount_findings(mounts_full, expected)
         for c in envs:
             logs = run(['docker', 'logs', c], check=False)
             text = logs.stdout + logs.stderr
             diff = run(['docker', 'diff', c], check=False).stdout.split('\n')
             changed = [line[2:] for line in diff if line[:1] in ('A', 'C') and line[2:]]
-            hits = []
+            excluded = {seal.KEY_TARGET} if ev.expected_key_mount(c, mounts_full[c], expected) else set()
+            hits, excluded_seen, unreadable = [], set(), []
             for path in changed[:400]:
                 tar = subprocess.run(['docker', 'cp', f'{c}:{path}', '-'], capture_output=True, timeout=60)
-                if MARKER.encode() in tar.stdout or KEY.encode() in tar.stdout:
-                    hits.append(path)
+                res = ev.scan_changed_path(path, tar.stdout, needles, excluded, key_sha)
+                hits += res['hits']; excluded_seen |= set(res['excluded_seen'])
+                if res['unreadable']:
+                    unreadable.append(path)
             scan[c] = {'log_bytes': len(text), 'log_unreadable_driver_none': 'logging driver' in logs.stderr and logs.returncode != 0,
-                       'marker_in_logs': MARKER in text, 'key_in_logs': KEY in text, 'changed_paths': len(changed), 'changed_paths_with_marker_or_key': hits}
+                       'marker_in_logs': MARKER in text, 'key_in_logs': KEY in text, 'changed_paths': len(changed),
+                       'unscanned_changed_paths': max(0, len(changed) - 400), 'unreadable_changed_paths': unreadable,
+                       'changed_paths_with_marker_or_key': sorted(set(hits)),
+                       'expected_key_mount_tolerated': sorted(excluded_seen)}
         host = []
         for f in root.rglob('*'):
             if f.is_file() and f != keyfile:
@@ -342,13 +391,16 @@ print(json.dumps({'key_hits_inside_agent':hits,'env_has_tinfoil_var':'TINFOIL_AP
                 if MARKER.encode() in data or KEY.encode() in data:
                     host.append(str(f.relative_to(root)))
         volumes = run(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={project}']).stdout.split()
-        clean = not host and not volumes and all(not v['marker_in_logs'] and not v['key_in_logs'] and not v['changed_paths_with_marker_or_key'] for v in scan.values())
+        clean = (not host and not volumes and not unexpected_mounts and found_mounts == [f'{key_c}:{seal.KEY_TARGET}']
+                 and all(not v['marker_in_logs'] and not v['key_in_logs'] and not v['changed_paths_with_marker_or_key']
+                         and not v['unscanned_changed_paths'] and not v['unreadable_changed_paths'] for v in scan.values()))
         receipt['six_privacy_checks']['f_provider_logs_data_codeword_scan'] = {
             'status': 'passed' if clean else 'failed', 'containers': scan, 'host_mount_hits_outside_key_file': host, 'project_volumes': volumes,
-            'scope': 'Every project container: stdout/stderr logs, every added/changed filesystem path (docker diff + docker cp), the synthetic agents root (home, provider-key, gateway dirs) and project volumes, for the run marker and the synthetic key. The Service-owned key file and its source are the only expected key locations.'}
+            'expected_key_mounts': found_mounts, 'unexpected_key_mounts': unexpected_mounts,
+            'scope': 'Every project container: stdout/stderr logs, every added/changed filesystem path (docker diff + docker cp, scanned tar member by member), the synthetic agents root and project volumes, for the run marker and the synthetic key. Tolerated: only the exact read-only bind of the Service key file at /run/provider-key/key in the injector, with content hash equal to the Service key; its mountpoint ancestors are still scanned for every other member. Any other key mount, copy, unscanned or unreadable path fails.'}
         save('a-receipt.json', {k: receipt[k] for k in ('six_privacy_checks', 'attestation_via_injector', 'agent_calls', 'timings_ms')})
     finally:
-        subprocess.run(['docker', 'rm', '-f', 'r10sniff'], capture_output=True)
+        subprocess.run(['docker', 'rm', '-f', 'r10b-sniff-edge', 'r10b-sniff-proxy'], capture_output=True)
         run([*dc, 'down', '-v', '--remove-orphans', '-t', '5'], check=False, timeout=300)
 
 
@@ -428,6 +480,7 @@ def part_b():
     def verify(step, doc, t0, **extra):
         merged = json.loads(dc('config', '--format', 'json').stdout)
         merged_problems = seal.runtime_violations(doc, {s: set((v.get('networks') or {}).keys()) for s, v in merged['services'].items()})
+        ready = wait_ready(f'{project}-{app}-1', f'{app}-tinfoil')
         live = attached(project)
         problems = seal.runtime_violations(doc, live)
         ports = run(['docker', 'ps', '--filter', f'label=com.docker.compose.project={project}', '--format', '{{.Ports}}']).stdout.split()
@@ -437,7 +490,9 @@ def part_b():
         ids = run(['docker', 'ps', '-q', '--filter', f'label=com.docker.compose.project={project}']).stdout.split()
         row = {'step': step, 'ms': ms(t0), 'merged_config_violations': merged_problems, 'running_violations': problems,
                'published_ports': ports, 'verification_status': att['verification']['status'], 'agent_internet': att['internet_ip'],
-               'containers': len(ids), 'state': state(), **extra}
+               'containers': len(ids), 'ready_ms': ready['ms'], 'readiness': ready, 'state': state(), **extra}
+        if not ready['ready'] or att['verification']['status'] != 200:
+            row['diagnostics'] = stack_diagnostics(project)
         row['ok'] = (not merged_problems and not problems and not ports and att['verification']['status'] == 200
                      and att['internet_ip'].startswith('refused') and row['state']['user_has_mark'])
         life['steps'].append(row)
@@ -494,11 +549,13 @@ finally:
     leftovers = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=r10seal'], check=False).stdout.split() + \
         run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=agent-r10_wizardapps'], check=False).stdout.split()
     receipt['leftover_containers'] = len(leftovers)
+    receipt['admission'] = {'required_unmet': ev.required_unmet(receipt), 'exit_code': ev.exit_code(receipt),
+                            'scope': 'Synthetic rehearsal verdict only. Exit 0 = every required synthetic check passed; it is never migration admission.'}
     shutil.rmtree(WORK, ignore_errors=True)
     text = scrub(json.dumps(receipt, indent=2, sort_keys=True))
     (OUT / 'receipt.json').write_text(text + '\n')
     for f in OUT.glob('*.json'):
         f.write_text(scrub(f.read_text()))
-    print(json.dumps({'phase': receipt['phase'], 'checks': receipt['checks'],
+    print(json.dumps({'phase': receipt['phase'], 'checks': receipt['checks'], 'admission': receipt['admission'],
                       'six': {k: v.get('status') for k, v in receipt['six_privacy_checks'].items()}}))
-    sys.exit(0 if receipt['phase'] == 'complete' else 1)
+    sys.exit(ev.exit_code(receipt))

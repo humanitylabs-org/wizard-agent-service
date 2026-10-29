@@ -21,6 +21,11 @@ PLACEHOLDER = 'wizard-sealed-provider-key-held-by-injector'
 MAX_HEAD = 16384
 MAX_BODY = 8 * 1024 * 1024
 IDLE = 600
+# Upstream connect bound. The official proxy is a local container on the same
+# internal bridge: a healthy one accepts in milliseconds. A stopped one leaves a
+# stale neighbour entry whose SYNs are silently dropped, which previously held
+# the agent for the full 10 s before 502 (round 10, forum). Bounded fail-closed.
+CONNECT_TIMEOUT = 2.0
 METHODS = {'GET', 'POST', 'DELETE'}
 SAFE_PATH = re.compile(r'^/[A-Za-z0-9._~/-]*$')
 TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -110,7 +115,7 @@ async def pump(reader, writer):
             pass
 
 
-def handler(upstream_ip, port, key_file):
+def handler(upstream_ip, port, key_file, connect_timeout=CONNECT_TIMEOUT):
     async def handle(reader, writer):
         try:
             head = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 30)
@@ -131,7 +136,7 @@ def handler(upstream_ip, port, key_file):
         except (ValueError, asyncio.LimitOverrunError, asyncio.IncompleteReadError, asyncio.TimeoutError, UnicodeError):
             return await reply(writer, 400, 'request_refused')
         try:
-            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(upstream_ip, port), 10)
+            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(upstream_ip, port), connect_timeout)
         except (OSError, asyncio.TimeoutError):
             return await reply(writer, 502, 'provider_unavailable')
         up_writer.write(request + body)
@@ -146,7 +151,11 @@ async def main():
     key_file = os.environ.get('KEY_FILE', '/run/provider-key/key')
     read_key(key_file)   # fail at start rather than accept requests unkeyed
     ports = [int(p) for p in json.loads(os.environ.get('PORTS', '[3301]'))]
-    servers = [await asyncio.start_server(handler(upstream, p, key_file), listen, p, limit=MAX_HEAD * 2) for p in ports]
+    bound = float(os.environ.get('CONNECT_TIMEOUT', CONNECT_TIMEOUT))
+    if not 0 < bound <= 4:
+        raise ValueError('connect_timeout')   # never configurable past the 5 s fail-closed bound
+    servers = [await asyncio.start_server(handler(upstream, p, key_file, bound), listen, p, limit=MAX_HEAD * 2)
+               for p in ports]
     await asyncio.gather(*(s.serve_forever() for s in servers))
 
 

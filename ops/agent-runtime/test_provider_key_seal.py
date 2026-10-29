@@ -274,6 +274,30 @@ class InjectorTests(unittest.TestCase):
         reply, _ = self.run_case(self.req(), stream=True)
         self.assertIn(b'data: chunk2', reply)
 
+    def test_silently_dropped_upstream_is_502_within_bound(self):
+        """Round 10 forum: a stopped proxy's stale neighbour entry held the agent 10017 ms."""
+        import time
+
+        async def case():
+            async def hang(*_a, **_k):
+                await asyncio.sleep(30)
+            real = inj.asyncio.open_connection
+            inj.asyncio.open_connection = hang
+            try:
+                front = await asyncio.start_server(inj.handler('10.248.0.2', 3301, str(self.key), 0.3), '127.0.0.1', 0)
+                reader, writer = await real('127.0.0.1', front.sockets[0].getsockname()[1])
+                writer.write(self.req()); await writer.drain()
+                t = time.monotonic()
+                reply = await asyncio.wait_for(reader.read(), 5)
+                writer.close(); front.close()
+                return reply, time.monotonic() - t
+            finally:
+                inj.asyncio.open_connection = real
+        reply, took = asyncio.run(case())
+        self.assertTrue(reply.startswith(b'HTTP/1.1 502')); self.assertIn(b'provider_unavailable', reply)
+        self.assertLess(took, 1.5)
+        self.assertLessEqual(inj.CONNECT_TIMEOUT, 2.0)
+
     def test_unreadable_or_placeholder_key_is_503(self):
         self.key.chmod(0o600); self.key.write_text(seal.PLACEHOLDER_KEY + '\n')
         reply, seen = self.run_case(self.req())
