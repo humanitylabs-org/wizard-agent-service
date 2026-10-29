@@ -150,7 +150,7 @@ it('main HTTP chat history, failed receipt and full Retry input agree without a 
 
 it('routed agents share normalization, assistant notice and complete saved Retry input', async () => {
   const agent = { id: 'sample', model: { model: 'claude-opus-5-5' } }
-  const registry = { agentsDir: await temp(), list: () => [], apiKey: () => 'fixture-only-key', fetchAgent: async (_agent: any, path: string, init: any = {}) => {
+  const registry = { agentsDir: await temp(), list: () => [], read: () => agent, apiKey: () => 'fixture-only-key', fetchAgent: async (_agent: any, path: string, init: any = {}) => {
     const parsed = new URL(path, 'http://fixture')
     return new Response(JSON.stringify(parsed.pathname.endsWith('/messages') ? { data: [] }
       : parsed.pathname.startsWith('/api/sessions/') ? { id: 'wizard_signin' } : failure()), { status: init.method === 'POST' ? 202 : 200 })

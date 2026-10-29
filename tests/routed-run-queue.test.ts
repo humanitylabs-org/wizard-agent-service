@@ -70,7 +70,7 @@ test('a capacity-delayed routed watcher durably restores archive state at actual
   const agent = { id: 'fixture-agent', model: { provider: 'local', model: 'fixture-model' } }
   const disposers: Array<() => Promise<void>> = [], calls: any[] = []
   let firstStatus = 'running', archived = true, sequence = 0
-  const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+  const registry = { agentsDir: root, list: () => [], read: () => agent, apiKey: () => 'fixture-runtime-key',
     fetchAgent: async (_agent: any, path: string, init: any = {}) => {
       if (path.startsWith('/api/sessions/') && init.method === 'PATCH') { archived = JSON.parse(init.body).archived; calls.push({ path, archived }); return Response.json({ archived }) }
       if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model', archived } })

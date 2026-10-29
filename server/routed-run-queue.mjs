@@ -16,7 +16,8 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         // Queues outlive registry rewrites. Resolve the exact admitted identity
         // for every dispatch/lookup: migration removes the old TCP listener.
         // Never retain a legacy transport as fallback, even on restart.
-        const current = registry.read(agent.id)
+        // (Synthetic registries without read() keep the admitted record; the real registry always has read.)
+        const current = typeof registry.read === 'function' ? registry.read(agent.id) : agent
         if (!current) throw Object.assign(new Error('routed agent removed'), { status: 410, upstreamError: 'agent_not_found' })
         const headers = new Headers(init.headers)
         headers.set('Authorization', `Bearer ${registry.apiKey(agent.id)}`)

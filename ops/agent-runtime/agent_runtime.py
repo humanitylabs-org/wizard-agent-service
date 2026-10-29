@@ -582,6 +582,7 @@ class RestrictedDriver:
                    env={"CLAUDE_CODE_OAUTH_TOKEN": "", "CLAUDE_TOKEN_FILE": ""})
 
     def _prepare(self, agent: dict) -> None:
+        agent_identity(agent)  # reject malformed/root identity before any Docker build or home mutation
         if not self.agents.providers.is_private(agent) and (agent.get("model") or {}).get("provider") == "tinfoil":
             # No Tinfoil attestation sidecar in the restricted runtime yet; the Service refuses this too.
             raise RuntimeFailure("restricted_provider_unsupported", 409)
