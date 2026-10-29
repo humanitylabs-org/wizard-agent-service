@@ -243,6 +243,13 @@ export class DismissedFailureStore {
     return failureKey === '' || record.failureKey === failureKey
   }
 
+  isDismissedAfter(sessionId, admittedAtMs, agentId = 'hermes') {
+    // A display key can name an external run, not the queued send. Preserve
+    // session-wide Dismiss intent without suppressing later owner requests.
+    const record = this.dismissals.get(sideKey(agentId, sessionId))
+    return Boolean(record && record.dismissedAt >= admittedAtMs)
+  }
+
   dismiss(sessionId, failureKey, agentId = 'hermes') {
     if (!validAgentId(agentId) || !SESSION_KEY.test(sessionId) || typeof failureKey !== 'string' || !failureKey) {
       throw Object.assign(new Error('invalid dismissal'), { status: 400 })
