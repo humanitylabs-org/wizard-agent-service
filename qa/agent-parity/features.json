@@ -42,10 +42,10 @@
   "features": [
     {
       "id": "owned-open-work",
-      "description": "Owner-scoped Hermes-only owned follow-up instructions and follow-through; routed kinds retain existing prompts, done state and admission behavior.",
+      "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
       "layer": "server",
       "fixture": "owned-open-work",
-      "how_to_test": "Admit a synthetic HTTP turn per kind and inspect the actual upstream instructions: Hermes receives OWNED_OPEN_WORK_INSTRUCTIONS and routed kinds do not. Project an owned Still open reply through the real session list, assert routed kinds stay done without owned_work or automatic sends, and execute the Hermes guard. tests/owned-open-work.test.ts additionally proves the main service's hidden continuation, restart dedupe and exact optional-handle behavior. These are disposable fixture checks, not live-model or browser proof.",
+      "how_to_test": "Admit a synthetic HTTP turn per kind and inspect actual upstream instructions: no runtime receives OWNED_OPEN_WORK_INSTRUCTIONS, because reply and follow-up style belong to its persona. Project an owned Still open reply through the real session list, assert routed kinds stay done without owned_work or automatic sends, and execute the Hermes guard. tests/owned-open-work.test.ts additionally proves the main service's hidden continuation, restart dedupe and exact optional-handle behavior. These are disposable fixture checks, not live-model or browser proof.",
       "source_refs": ["server/owned-open-work-follow-through.mjs", "server/owned-open-work.mjs", "server/thread-status.mjs", "server/service.mjs"],
       "reference_tests": ["tests/owned-open-work.test.ts", "qa/agent-parity/server-checks.mjs", "qa/agent-parity/policy.test.mjs"],
       "policy_exemptions": [
@@ -103,9 +103,9 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive the owner-selected Summary or Concise reply rule immediately before the final status instructions, or with Own only Wizard OS facts and the status protocol and no reply-style rule; changes apply on the next turn without restart.",
+      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved.",
       "layer": "server",
-      "how_to_test": "Admit a synthetic turn through main, host-profile, container and restricted HTTP routes; inspect the actual upstream instructions for the exact shared finish-report text followed immediately by STATUS_INSTRUCTIONS. Fixture proof covers prompt delivery, not model compliance.",
+      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
@@ -613,14 +613,16 @@
     },
     {
       "id": "download-links",
-      "description": "Download assistant and user attachments through authenticated public URLs",
+      "description": "Download assistant and user attachments through authenticated public URLs; the owner's browser caches attachments for good and revalidates owner files",
       "layer": "server",
-      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition.",
+      "how_to_test": "Download assistant and user attachments through authenticated public URLs; verify bytes, MIME and safe disposition. Attachments carry private immutable caching; owner files carry private no-cache plus an ETag that answers 304 unchanged and 200 after a same-size edit with preserved mtime.",
       "source_refs": [
-        "server/service.mjs"
+        "server/service.mjs",
+        "server/media-files.mjs"
       ],
       "reference_tests": [
-        "tests/content-disposition.test.ts"
+        "tests/content-disposition.test.ts",
+        "tests/chat-media-browser-cache.test.ts"
       ],
       "fixture": "download-links",
       "policy_exemptions": []
@@ -956,6 +958,22 @@
         "tests/app-bindings.test.ts"
       ],
       "fixture": "app-context",
+      "policy_exemptions": []
+    },
+    {
+      "id": "app-job-routing",
+      "description": "Each agent learns which of its own apps does which job, and the main agent's pointer skills send it through the app's shipped skill first.",
+      "layer": "server",
+      "how_to_test": "Install a synthetic app with a provides job and a shipped skill into the real Service's apps.json, restart, and open the wizard MCP gateway with each kind's own credential and transport. Main: the wizard-job-<job> pointer skill is written, tells it to load the app's skill with skill_view first, and the gateway kernel points at that skills index. Other kinds have no pointer skills: their gateway kernel lists the job -> app map for their own apps instead. Uninstall: the pointer disappears and no kind is told about the app. Disposable fixture checks; the live-model proof for the main agent is ops/acceptance/pointer-skills (fresh KVM VM).",
+      "source_refs": [
+        "server/agent-bridge.mjs",
+        "hermes-plugin/wizard-os/kernel.py"
+      ],
+      "reference_tests": [
+        "tests/agent-bridge.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "app-job-routing",
       "policy_exemptions": []
     },
     {

@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
+import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
@@ -299,12 +300,9 @@ const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 /** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  if (contract.response_style === 'own') return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
-  let instructions = WIZARD_RUN_INSTRUCTIONS.replace(FINISH_REPORT_INSTRUCTIONS, finishReportInstructions(contract.response_style))
-  if (contract.response_style === 'concise') instructions = instructions
-    .replace('give deep investigations, reports, and builds the full structured treatment they require.', 'give deep investigations and reports the depth they require, but no padding.')
-    .replace('Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision.', 'Finish with one self-contained, user-facing response that states the verified result and any remaining action or decision, without recapping the request or the process.')
-  return contract.join ? instructions : instructions.replace('Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer.', DETACHED_DELEGATION)
+  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
+  return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
@@ -1766,7 +1764,9 @@ function safeContentHeaders(file, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(disposition, file.filename),
-    'Cache-Control': 'private, no-store',
+    // Owner files can be edited in place through Wizard Files under the same id: the owner's browser keeps a copy
+    // but asks first (a 304 costs no bytes), so an edit shows at once. Never stored by shared caches.
+    'Cache-Control': 'private, no-cache',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -1792,7 +1792,8 @@ function safeHelmContentHeaders(attachmentId, upstream) {
   return {
     'Content-Type': passive ? upstreamType : 'application/octet-stream',
     'Content-Disposition': contentDisposition(passive && !isMarkdownDownload(decodeURIComponent(encodedName), canonicalType) ? 'inline' : 'attachment', decodeURIComponent(encodedName)),
-    'Cache-Control': 'private, no-store',
+    // Attachment ids are content-bound and never reused: cache them in the owner's browser, never in shared caches.
+    'Cache-Control': 'private, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
   }
 }
@@ -2224,7 +2225,7 @@ const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encod
 
 // Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
 // cookies or credentials), and only content headers come back; redirects must stay on this origin.
-function proxyShellStatic(request, response, shellOrigin, url) {
+function proxyShellStatic(request, response, shellOrigin, url, body) {
   return new Promise((resolvePromise) => {
     // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
     const target = new URL(shellOrigin)
@@ -2232,6 +2233,12 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     target.search = url.search
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    if (body !== undefined) {
+      // The forwarded POST keeps its Origin so a same-origin receiver can still check it.
+      if (typeof request.headers.origin === 'string') headers.origin = request.headers.origin
+      headers['content-type'] = request.headers['content-type'] || 'application/json'
+      headers['content-length'] = String(body.length)
+    }
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
@@ -2243,7 +2250,7 @@ function proxyShellStatic(request, response, shellOrigin, url) {
     })
     upstream.setTimeout(30000, () => upstream.destroy(new Error('timeout')))
     upstream.on('error', () => { if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' }); else response.destroy(); resolvePromise() })
-    upstream.end()
+    upstream.end(body)
   })
 }
 
@@ -2519,6 +2526,7 @@ function buildWizardServer(options, lifetime) {
   const tailnetVerifier = typeof options.tailnetVerifier === 'function' && options.tailnetVerifier.fromRequest ? options.tailnetVerifier : null
   // Wizard shell (wizard-ux) static files for phones on the tailnet listener: GET/HEAD only, after verification.
   const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
+  const diagnosticsOrigin = options.diagnosticsOrigin ? confinedUpstream(options.diagnosticsOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
@@ -2575,6 +2583,9 @@ function buildWizardServer(options, lifetime) {
   // and nothing else: no pointer skills written, no kernel in the main agent's runs, no main-token gateway.
   const gatewayOnly = options.agentBridge === 'gateway'
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
+  const devices = createDevices({ statePath: options.devicesStatePath || (options.mediaIndexPath ? join(dirname(options.mediaIndexPath), 'devices.json') : ''), now: options.devicesNow ?? Date.now })
+  const deviceTools = devicesTool({ devices, now: options.devicesNow ?? Date.now })
+  lifetime.own(() => { try { devices.flush() } catch { /* optional metadata must not block shutdown */ } })
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
@@ -2583,8 +2594,8 @@ function buildWizardServer(options, lifetime) {
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -4843,6 +4854,21 @@ function buildWizardServer(options, lifetime) {
           return
         }
       }
+      // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
+      if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        const body = await readBoundedBody(request, 256 * 1024)
+        try { devices.record(JSON.parse(body.toString('utf8'))?.session) } catch { /* recording must never break diagnostics */ }
+        // A box may keep its own diagnostics receiver (WIZARD_DIAGNOSTICS_ORIGIN); otherwise the shell answers as before.
+        const receiver = diagnosticsOrigin || tailnetShellOrigin
+        if (receiver) await proxyShellStatic(request, response, receiver, url, body)
+        else sendJson(response, 404, { error: 'not_found' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/devices' && request.method === 'GET') {
+        if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
+        sendJson(response, 200, { devices: devices.list() }); return
+      }
       if (url.pathname === '/wizard/standard-chats/mcp') {
         if (request.method !== 'POST') { sendJson(response,405,{error:'method_not_allowed'}); return }
         if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response,415,{error:'json_required'}); return }
@@ -5523,7 +5549,8 @@ function buildWizardServer(options, lifetime) {
             'Content-Type': artifact.mime,
             'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-store',
+            // Artifact ids are the content's own hash: the bytes behind an id never change.
+            'Cache-Control': 'private, max-age=31536000, immutable',
             'X-Content-Type-Options': 'nosniff',
           }
           const range = typeof request.headers.range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range.trim()) : null
@@ -5611,6 +5638,15 @@ function buildWizardServer(options, lifetime) {
           const opened = mediaFiles.open(id, range || null)
           const typeOnly = { headers: { get: (name) => (name === 'content-type' ? file.mime : null) } }
           const headers = { ...safeContentHeaders(file, typeOnly), 'Accept-Ranges': 'bytes' }
+          if (typeof opened.version === 'string') {
+            headers.ETag = `W/"${id}-${opened.size}-${opened.version}"`
+            const match = typeof request.headers['if-none-match'] === 'string' ? request.headers['if-none-match'] : ''
+            if (!range && match.split(',').map((tag) => tag.trim()).includes(headers.ETag)) {
+              opened.stream?.destroy()
+              const { 'Content-Length': _, ...notModified } = headers
+              response.writeHead(304, notModified); response.end(); return
+            }
+          }
           if (opened.status === 416) {
             response.writeHead(416, { ...headers, 'Content-Range': `bytes */${opened.size}` }); response.end(); return
           }

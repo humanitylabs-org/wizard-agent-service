@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -148,6 +149,26 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(r.RecoveryError, 'port_in_use'):
                 self.prepare()
         self.assertFalse(self.home.exists())
+
+    def test_launcher_includes_dotenv_for_import_and_recovery_commands(self):
+        # Both entry points import dotenv before parsing --help. Keep the
+        # launcher contract hermetic: inspect its uv argv, without networking.
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        uv = bin_dir / 'uv'
+        uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        uv.chmod(0o700)
+        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
+        for command, entry in ((['undo', '--help'], 'hermes_import.py'),
+                               (['recovery-home', 'prepare', '--help'], 'recovery_home.py')):
+            with self.subTest(entry=entry):
+                result = subprocess.run(
+                    [str(ROOT / 'ops/agent-runtime/wizard'), 'agent', 'import', 'hermes', *command],
+                    capture_output=True, text=True, check=True, env=env)
+                args = result.stdout.splitlines()
+                self.assertIn('python-dotenv>=1,<2', args)
+                self.assertIn('PyYAML>=6.0.2,<7', args)
+                self.assertIn(str(ROOT / 'ops/agent-runtime' / entry), args)
 
     def test_listener_scrubs_inherited_bot_and_profile_environment(self):
         self.prepare()

@@ -125,11 +125,16 @@ class RestrictedDriverTest(unittest.TestCase):
         compose = [args for args, _ in self.calls if args[0] == "compose"]
         self.assertEqual(compose[0][:4], ["compose", "-p", "agent-daily", "-f"])
         self.assertEqual(compose[0][4], str(ar.RESTRICTED_DIR / "compose.yml"))
-        self.assertEqual([c[5] for c in compose[:3]], ["build", "stop", "up"])
+        self.assertEqual([c[5] for c in compose[:2]], ["stop", "up"])
+        build = next(args for args, _ in self.calls if args[0] == "build")
+        labels = ar.sidecar_source_labels(ar.RESTRICTED_DIR)
+        self.assertIn("org.opencontainers.image.source=" + labels["source"], build)
+        self.assertIn("org.opencontainers.image.revision=" + labels["revision"], build)
+        self.assertEqual(build[-3:], ["-t", ar.SIDECAR_IMAGE, str(ar.RESTRICTED_DIR / "sidecars")])
         # The agent is stopped before its home is touched, and the home sync runs between stop and up.
-        self.assertEqual(compose[1][6:], [ar.RESTRICTED_SERVICE])
+        self.assertEqual(compose[0][6:], [ar.RESTRICTED_SERVICE])
         # build, stop, then the home sync, then up: the host never writes into the agent-owned home itself.
-        order = [args[0] if args[0] != "compose" else args[5] for args, _ in self.calls if args[0] in ("compose", "run")]
+        order = [args[0] if args[0] != "compose" else args[5] for args, _ in self.calls if args[0] in ("build", "compose", "run")]
         self.assertEqual(order[:4], ["build", "stop", "run", "up"])
         sync = next(args for args, _ in self.calls if args[0] == "run")
         for flag in (["--network", "none"], ["--read-only"], ["--cap-drop", "ALL"], ["--user", "0:0"]):
@@ -182,7 +187,7 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertIn('cp -R /managed/plugins/wizard-supervisor-tools', script)
         self.assertIn('mv -T "$tmp/reporter" /opt/data/skills/reporter', script)
         self.assertNotIn('cp -R /managed/plugins /opt/data', script)
-        order = [args[0] if args[0] != 'compose' else args[5] for args, _ in self.calls if args[0] in ('compose', 'run')]
+        order = [args[0] if args[0] != 'compose' else args[5] for args, _ in self.calls if args[0] in ('build', 'compose', 'run')]
         self.assertEqual(order[:4], ['build', 'stop', 'run', 'up'])
 
     def test_sync_timeout_removes_the_named_helper(self):
@@ -304,6 +309,21 @@ class RestrictedDriverTest(unittest.TestCase):
             fh.write("\n# stale pin\n")
         with self.assertRaisesRegex(SystemExit, "edge.py differs"):
             ar.verify_vendored(copy)
+
+    def test_sidecar_labels_follow_the_upstream_source_receipt(self):
+        labels = ar.sidecar_source_labels(ar.RESTRICTED_DIR)
+        text = (ar.RESTRICTED_DIR / "SOURCE.txt").read_text()
+        self.assertIn("Source: " + labels["source"], text)
+        self.assertIn("Commit: " + labels["revision"], text)
+        self.assertRegex(labels["revision"], r"^[0-9a-f]{40}$")
+        self.assertEqual(labels["source"], "https://github.com/humanitylabs-org/wizard-app-store")
+
+    def test_sidecar_labels_reject_incomplete_source_receipt(self):
+        source = self.tmp / "bad-source"
+        source.mkdir()
+        (source / "SOURCE.txt").write_text("Source: https://github.com/example/repo\nCommit: not-a-commit\n")
+        with self.assertRaises(ar.RuntimeFailure):
+            ar.sidecar_source_labels(source)
 
     def test_vendored_runtime_is_checked(self):
         copy = self.tmp / "runtime"

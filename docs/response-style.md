@@ -1,15 +1,16 @@
-# Owner response style
+# Reply style belongs to each agent
 
-See wizard-os `spec/RESPONSE_STYLE.md` ([contract PR #284](https://github.com/humanitylabs-org/wizard-os/pull/284)) and [Wizard UX #631](https://github.com/humanitylabs-org/wizard-ux/pull/631).
+Every owner and every agent uses Own. Summary and Concise are retired. Wizard contributes product facts and protocol, never a reply template or work style.
 
-The owner selects `response_style: summary | concise | own` through the existing settings API. Existing installs and missing preferences remain Summary. Production startup assigns genuinely new Wizard installs once using `crypto.randomInt(2)` before creating stores. Existing settings or Wizard queue/read-state files mark an upgrade. Reads and restarts never reassign.
+Two independent layers reach an agent:
 
-`response_style_experiment` stays in the private local settings file: assignment, new/existing-install source, and bounded counts of actual switches to each style. No content, identifiers, timestamps or telemetry sink. PUT cannot forge it. Non-owner projections omit the owner preference and non-owner writes to that field fail.
+1. **Wizard OS context** (product-owned): what Wizard is, Markdown/links/MEDIA/My skin rendering, files, installed apps and jobs, screen context, background-result delivery, the supervisor phrase and the `WIZARD_STATUS_V1` protocol. Detaching an alongside agent removes this layer.
+2. **The agent's own persona** (owner-owned): `SOUL.md` in its Hermes home, or the equivalent for another harness. Wizard never copies or overrides it. Lasting “reply like this from now on” requests belong there; different agents can have different voices across attach, detach and other surfaces.
 
-Summary restores the pre-#210 finish-report text, with the owner's cold-read context addition. Concise preserves #210 by @oscarhenrycollins. Main and routed-agent run admission select at the next turn, including heavy continuations; already-admitted runs retain their original instruction contract. Scheduled reporter notifications retain their explicit short-format override.
+Fresh installs deterministically read Own. Startup no longer makes or persists a randomized Summary/Concise assignment. Existing settings bytes and historical experiment counters remain untouched on startup. Older shells may still PUT `response_style: summary | concise | own`, but GET always returns `own` and these values never change run instructions. Owner authorization and input validation remain enforced.
 
-Synthetic Forum full suite on the feature head: 125 Vitest files, 1,524 passed / 5 skipped; Node 56 passed / 1 skipped; parity gate 182 passed (including both style changes for all four runtime kinds); Python/import checks pass. Live branches are prepared separately and this change never deploys a running service.
+The shared contract was introduced in wizard-os `spec/RESPONSE_STYLE.md`; this retirement follows [Agent Service #231](https://github.com/humanitylabs-org/wizard-agent-service/pull/231) by @oscarhenrycollins for Miguel and the companion Wizard UX picker removal.
 
-## Own
+The parity fixture admits fresh and legacy-setting turns through main, host-profile, container and restricted routes and inspects actual upstream instructions for Wizard facts, the persona pointer and status protocol, with no reply-style rules. This proves prompt delivery, not model compliance.
 
-`own` sends only Wizard OS facts and protocol: what Wizard is, Markdown/links/MEDIA/My skin rendering, the background-result follow-up turn, the supervisor phrase, and the `WIZARD_STATUS_V1` marker with its fields. It adds no reply-shape or work-style rule (no finish report, no concise rule, no "same intelligence/scale the response", no outcome-ownership or recap paragraphs, no owned-follow-up rule, no "reply ends with the ask"). The agent keeps the style its owner already gave it. Summary and Concise prompts are byte-for-byte unchanged.
+A persona for new Wizard-native boxes remains a product decision for Miguel and James; this change does not seed a house style. Existing owners keep their own persona, including any report-format instructions they chose. Scheduled reporter notifications retain their explicit task-specific short-format contract.
