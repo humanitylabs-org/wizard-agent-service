@@ -521,7 +521,10 @@ class RestrictedDriver:
                     raise RuntimeFailure("import_harness_update_failed")
         else:
             self.agents.add_provider_keys(agent)
-            self._compose(agent, "build", timeout=1800)
+            labels = sidecar_source_labels(self.runtime_dir)
+            docker(["build", "--label", "org.opencontainers.image.source=" + labels["source"],
+                    "--label", "org.opencontainers.image.revision=" + labels["revision"],
+                    "-t", SIDECAR_IMAGE, str(self.runtime_dir / "sidecars")], timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -563,6 +566,16 @@ class RestrictedDriver:
         self._compose(agent, "stop", timeout=300)
         self._remove_claude_seeder(agent)
         return {"ok": True}
+
+
+def sidecar_source_labels(runtime_dir: Path) -> dict[str, str]:
+    """Label the reviewed upstream runtime, not the Service's unrelated HEAD."""
+    text = (runtime_dir / "SOURCE.txt").read_text()
+    source = re.search(r"^Source: (https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", text, re.M)
+    revision = re.search(r"^Commit: ([0-9a-f]{40})$", text, re.M)
+    if source is None or revision is None:
+        raise RuntimeFailure("sidecar_source_receipt_invalid")
+    return {"source": source.group(1), "revision": revision.group(1)}
 
 
 def verify_vendored(runtime_dir: Path) -> None:
