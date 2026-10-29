@@ -6,7 +6,7 @@ import { helperDelegationQuery, assignedHelperCount, HELPER_SOURCE_LIMIT } from 
 import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
 const RUNNING = new Set(['running','stalling','finalizing'])
 const TERMINAL = new Set(['completed','failed','interrupted'])
-export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds = 120, activeSessionIds = new Set(), nonHoldingFor = id => readNonHoldingFollowUps(path, id) } = {}) {
+export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds = 120, activeSessionIds = new Set() } = {}) {
   if (!path || !ids?.length) return new Map()
   let db
   try {
@@ -23,7 +23,7 @@ export function readHelperStatuses(path, ids, { now = Date.now(), stallSeconds =
     const grouped = new Map()
     for (const row of all) { const rows=grouped.get(row.session_id) ?? [];rows.push(row);grouped.set(row.session_id,rows) }
     for (const [sid, sourceRows] of grouped) {
-      const followUps = nonHoldingFor(sid)
+      const followUps = readNonHoldingFollowUps(path, sid)
       const rows = sourceRows.filter(row => !followUps.has(row.delegation_id))
       if (!rows.length) continue
       const gate = ownerGate(db,sid)

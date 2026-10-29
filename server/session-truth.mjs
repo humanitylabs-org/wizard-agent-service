@@ -221,7 +221,7 @@ export function searchHermesSessionText(path, sessionIds, query) {
   const searcher=createHermesTextSearcher(path)
   try { return searcher.search(sessionIds,query) } finally { searcher.close() }
 }
-export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000, { nonHoldingFor = id => readNonHoldingFollowUps(path, id) } = {}) {
+export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
   const ids = boundedIds(sessionIds)
   const truth = new Map()
   if (!ids.length) return truth
@@ -372,7 +372,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // cannot pin a thread in Working forever.
     const followUps = new Map()
     const isFollowUp = (id, handle) => {
-      if (!followUps.has(id)) followUps.set(id, nonHoldingFor(id))
+      if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(path, id))
       return followUps.get(id).has(handle)
     }
     try {
