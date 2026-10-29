@@ -115,6 +115,15 @@ class MediaPluginTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(len(list((self.home / 'cache/images/wizard-sent').iterdir())), 1)
 
+    def test_sent_copy_is_a_snapshot_not_a_link(self):
+        src = self.write('hermes/cache/scratch/run/screenshot.png')
+        out = self.sent(f'MEDIA:{src}')
+        copy = Path(out[6:])
+        self.assertNotEqual(copy.stat().st_ino, src.stat().st_ino)
+        with open(src, 'r+b') as f:  # the agent rewrites the same path in place
+            f.write(b'\x89PNG\r\n\x1a\nNEWER')
+        self.assertEqual(copy.read_bytes(), PNG)
+
     def test_routed_agent_home_under_profiles_still_works(self):
         os.environ['HERMES_HOME'] = str(self.base / 'h/profiles/alice')
         (self.base / 'h/profiles/alice/cache/images').mkdir(parents=True)
