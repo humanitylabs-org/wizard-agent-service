@@ -12,6 +12,34 @@ from private_seal_round11_inherit import digest, validate_inheritance
 from private_seal_round11_protocol import catalog_build_context
 
 ROOT = Path(__file__).resolve().parents[1]
+FOCUSED_SUITES = (
+    ('protocol', 'scripts/ci', 'test_private_seal_round11_protocol.py'),
+    ('followup', 'scripts/ci', 'test_private_seal_round11_followup.py'),
+    ('seal', 'ops/agent-runtime', 'test_private_seal.py'),
+    ('key', 'ops/agent-runtime', 'test_provider_key_seal.py'),
+    ('legacy-search', 'ops/agent-runtime', 'test_private_search.py'),
+    ('edge', 'ops/agent-runtime', 'test_private_seal_edge.py'),
+    ('invocation', 'scripts/ci', 'test_private_seal_round11_invocation.py'),
+)
+
+
+def suite_invocation(root, folder, filename):
+    # Even an exact discover -p imports unrelated child packages. Select one
+    # module from its own directory; do not stub agent/plugin dependencies.
+    assert Path(filename).name == filename and filename.endswith('.py')
+    cwd = (Path(root) / folder).resolve()
+    assert cwd.is_relative_to(Path(root).resolve())
+    return ['python3', '-m', 'unittest', Path(filename).stem, '-v'], cwd
+
+
+def focused_regressions(command, records, qa, *, root=ROOT, suites=FOCUSED_SUITES):
+    for label, folder, filename in suites:
+        argv, cwd = suite_invocation(root, folder, filename)
+        log = label + '-regressions.log'
+        p = command(argv, cwd=cwd, log=log, timeout=180, check=False)
+        records[label] = {'exit_code': p.returncode, 'log_sha256': digest(qa/log),
+                          'argv': argv, 'cwd': str(cwd)}
+    assert records and all(v['exit_code'] == 0 for v in records.values()), 'focused_regressions_failed'
 
 
 def main():
@@ -19,7 +47,7 @@ def main():
     parser.add_argument('--source', required=True)
     parser.add_argument('--manifest-sha256', required=True)
     args = parser.parse_args()
-    assert platform.machine() == 'x86_64' and str(ROOT).startswith('/srv/work/incog-seal-r11e-')
+    assert platform.machine() == 'x86_64' and str(ROOT).startswith(('/srv/work/incog-seal-r11e-', '/srv/work/incog-seal-r11f-'))
     assert os.getuid() != 0 and os.getgid() != 0
     assert len(args.source) == 40 and all(c in '0123456789abcdef' for c in args.source)
     assert digest(ROOT/'SOURCE.json') == args.manifest_sha256
@@ -43,12 +71,12 @@ def main():
     owner = 'wizard.qa.round11=' + args.source[:12]
     resources_owned = False
 
-    def command(argv, *, timeout=60, log=None, check=True):
+    def command(argv, *, timeout=60, log=None, check=True, cwd=ROOT):
         if log:
             with (qa/log).open('w') as stream:
-                p = subprocess.run(argv,cwd=ROOT,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=timeout)
+                p = subprocess.run(argv,cwd=cwd,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=timeout)
         else:
-            p = subprocess.run(argv,cwd=ROOT,env=env,capture_output=True,text=True,timeout=timeout)
+            p = subprocess.run(argv,cwd=cwd,env=env,capture_output=True,text=True,timeout=timeout)
         if check and p.returncode: raise RuntimeError('command_failed:' + argv[0] + ':' + str(p.returncode))
         return p
 
@@ -62,17 +90,7 @@ def main():
         result['prior_round11d_worker_log']={'job_id':'heavy_9fff8ec3c3574893b30a64bb6c8f8080','sha256':'76e8ea202299ebbca93072314c1fc0cdc034cf44376fa9cf2e5ff510ffa93876','verification':'Parent supplied; helper status API was admission-refused, no fresh registry assertion.'}
         # No npm install, stock startup/prompts, gateway build or suite rerun.
         result['regressions']={}
-        suites=[('protocol','scripts/ci','test_private_seal_round11_protocol.py'),
-                ('followup','scripts/ci','test_private_seal_round11_followup.py'),
-                ('seal','ops/agent-runtime','test_private_seal.py'),
-                ('key','ops/agent-runtime','test_provider_key_seal.py'),
-                ('legacy-search','ops/agent-runtime','test_private_search.py'),
-                ('edge','ops/agent-runtime','test_private_seal_edge.py')]
-        for label, folder, pattern in suites:
-            p=command(['python3','-m','unittest','discover','-s',folder,'-p',pattern,'-v'],
-                      log=label+'-regressions.log',timeout=180,check=False)
-            result['regressions'][label]={'exit_code':p.returncode,'log_sha256':digest(qa/(label+'-regressions.log'))}
-        assert all(v['exit_code']==0 for v in result['regressions'].values()), 'focused_regressions_failed'
+        focused_regressions(command, result['regressions'], qa)
         old_images = result['inherited']['images']
         for image, identity in old_images.items():
             actual = command(['docker','image','inspect','--format','{{.Id}}',image]).stdout.strip()
