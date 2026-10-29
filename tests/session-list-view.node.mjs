@@ -5,7 +5,7 @@ const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { i
   wizard_last_user_at: 1700000000, wizard_last_assistant_at: 1700000100, wizard_activity_at: 1700000101,
   wizard_request_preview: 'FULL REQUEST '.repeat(300), latest_message: { role: 'assistant', content: '<memory-context>not visible</memory-context> **Visible** '+ 'answer '.repeat(50), timestamp: 1700000100 },
   wizard_run_id: 'run-exact', wizard_last_run_idempotency_key: 'key-exact', model: 'model-exact', provider: 'provider-exact', wizard_model_lock_updated_at: 123456789,
-  wizard_helper_status: { phase: 'returned', canContinue: true }, wizard_safe_error: 'Safe failure', wizard_attention_level: 'critical', wizard_waiting_on: 'helper',
+  wizard_helper_status: { phase: 'returned', canContinue: true }, wizard_safe_error: 'Safe failure', wizard_attention_level: 'critical', wizard_waiting_on: 'helper', wizard_background: 'helper',
   wizard_title_renames: [{ from: 'Old', to: 'New', at: 123 }], wizard_attention: { state: 'needs_you', ask: 'Check me', subject: 'Subject' },
   wizard_follow_up: { active: true, count: 1, names: ['Knowledge MVP'], nextRun: '2026-10-24T01:00:00.000Z' },
   wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude', installed: true, app_status: 'expired' } };
@@ -17,9 +17,10 @@ test('list keeps exact grouping/unread/ack/model/helper inputs and full title', 
   assert.deepEqual(list.followUp, fixture.wizard_follow_up);
   for (const k of ['request','renames','wizard_request_preview','latest_message','last_user_message','wizard_title_renames']) assert.equal(k in list,false,k);
 });
-test('clean attachments and memory before clipping; working selects user', () => {
+test('clean attachments before clipping; Working helpers show the latest reply', () => {
   const row = listRow({ ...fixture, status:'running', last_user_message: { content:'[WIZARD_FILES_V1][{"mime":"image/png","filename":"one.png"}][/WIZARD_FILES_V1] hello' } });
-  assert.equal(row.preview,'🖼 Photo hello');
+  assert.ok(row.preview.startsWith('Visible answer'));
+  assert.equal(listRow({ ...fixture, status: 'running', wizard_helper_status: null, last_user_message: { content: 'Request text' } }).preview, 'Request text');
   assert.equal(row.previewRole,'assistant'); // legacy unread semantics, not inferred from selected text
 });
 test('aliases, empty rows and optional metadata remain compatible', () => {

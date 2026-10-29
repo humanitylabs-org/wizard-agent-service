@@ -8,6 +8,7 @@
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
 import { indexedSearchWords } from './session-truth.mjs'
+import { replyEpoch } from './open-ask.mjs'
 import { guardOwnerThreadWrite, isTurnWritePath, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { join } from 'node:path'
@@ -81,7 +82,9 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
         } : row
         let attention = !active && run?.output ? parseStatus(run.output) : null
         let assistantAt = run?.updated_at || null
-        if (!run) {
+        let askReplies = run?.output ? [{ timestamp: run.updated_at, status: parseStatus(run.output) }] : []
+        let askUserAt = run?.created_at || 0
+        if (!run || ctx.projectOpenAsk) {
           const response = await ctx.registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&include_compacted=true`, { headers, redirect: 'manual', signal: AbortSignal.timeout(1500) })
           const raw = Buffer.from(await response.arrayBuffer())
           if (response.ok && !secrets.some(secret => raw.includes(Buffer.from(secret)))) {
@@ -89,10 +92,17 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
             const safeMessages = withoutAgentToAgentTurns(messages)
             if (safeMessages.length !== messages.length) row = { ...row, latest_message: null, last_user_message: null, preview: '' }
             const latest = safeMessages.filter(m => ['user', 'assistant'].includes(m.role)).sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0]
+            const ordered = safeMessages.filter(m => ['user', 'assistant'].includes(m.role) && (!m.display_kind || m.display_kind === 'final')).sort((a,b) => replyEpoch(a.timestamp) - replyEpoch(b.timestamp))
+            askReplies = ordered.filter(m => m.role === 'assistant').map(m => ({ timestamp: m.timestamp, status: parseStatus(m.content) }))
+            askUserAt = ordered.filter(m => m.role === 'user').at(-1)?.timestamp || askUserAt
             if (latest?.role === 'assistant') { attention = parseStatus(latest.content); assistantAt = latest.timestamp }
           }
         }
         projected = attention ? { ...projected, wizard_attention: attention } : projected
+        if (ctx.projectOpenAsk) {
+          projected = ctx.projectOpenAsk(agent, projected, askReplies, askUserAt)
+          attention = projected.wizard_attention ?? null
+        }
         result[index] = ctx.routedPresentation ? await ctx.routedPresentation.project(agent, projected, attention, assistantAt, headers) : projected
       } catch { /* Keep this row visible if its own gateway is temporarily unavailable. */ }
     }
