@@ -175,6 +175,12 @@ export const serverChecks = {
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
     // One Space per chat: adding moved it out of parity-space.
     assert.equal((await tool('spaces_list')).spaces.find(x => x.id === space.id).count, 0, 'spaces_add moves, never a second Space')
+    // A full PUT (older shell) naming it in two of this agent's Spaces keeps one: the newly joined one.
+    const full = (await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces
+    assert.equal((await put(full.map(x => x.id === space.id ? { ...x, threads: ['wizard_parity'] } : x))).status, 200)
+    const counts = Object.fromEntries((await tool('spaces_list')).spaces.map(x => [x.id, x.count]))
+    assert.deepEqual([counts[space.id], counts[created.id]], [1, 0], 'PUT cannot leave a chat in two Spaces')
+    await tool('spaces_remove', { space_id: space.id, thread_ids: ['wizard_parity'] })
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
     const run = await admit(s, { input: 'Synthetic Space fill' })
     assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
