@@ -18,7 +18,7 @@ it('live list projection bounds transcript reads by relevant threads, not histor
     heavyTransport: async () => { throw Error('no worker traffic allowed') } })
   const db = new DatabaseSync(statePath), canonical = new DatabaseSync(join(s.root, 'hermes-state.db'))
   canonical.exec('ALTER TABLE messages ADD COLUMN tool_calls TEXT; ALTER TABLE messages ADD COLUMN tool_call_id TEXT; CREATE INDEX messages_session ON messages(session_id)')
-  const attention = { state: 'check', ask: 'Check the finished synthetic repair' }
+  const attention = { state: 'check', ask: 'Check the finished synthetic repair', subject: 'Speed fixture' }
   // A body-heavy real transcript makes accidental per-job reads meaningful.
   s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Synthetic heavy fanout', created_at: now / 1000 - 3600,
     messages: [...Array.from({ length: 80 }, (_, i) => ({ role: 'user', content: `Synthetic request ${i} ${'x'.repeat(4096)}`, timestamp: now / 1000 - 100 + i })),
@@ -45,16 +45,16 @@ it('live list projection bounds transcript reads by relevant threads, not histor
   }
   try {
     const empty = await list()
-    expect(empty.row.wizard_attention).toEqual(attention)
+    expect(empty.row.attention).toEqual(attention)
     save(600)
     const delivered = await list()
-    expect(delivered.row.wizard_attention).toEqual(attention)
+    expect(delivered.row.attention).toEqual(attention)
     expect(delivered.row.status).not.toBe('running')
     expect(delivered.reads).toBe(empty.reads)
     save(1, { state: 'running', resume: '', completion_delivered_at: undefined })
     const one = await list()
     expect(one.row.status).toBe('running')
-    expect(one.row.wizard_attention.state).toBe('fyi')
+    expect(one.row.attention.state).toBe('fyi')
     save(600, { state: 'running', resume: '', completion_delivered_at: undefined })
     const many = await list()
     expect(many.row).toEqual(one.row)
@@ -62,7 +62,7 @@ it('live list projection bounds transcript reads by relevant threads, not histor
     expect(many.reads).toBeLessThanOrEqual(empty.reads + 2)
     save(600, { agent_id: 'foreign-agent', state: 'running', resume: '', completion_delivered_at: undefined })
     const foreign = await list()
-    expect(foreign.row.wizard_attention).toEqual(attention)
+    expect(foreign.row.attention).toEqual(attention)
     expect(foreign.row.status).not.toBe('running')
     expect(foreign.reads).toBe(empty.reads)
     console.log('HEAVY_EVIDENCE_FANOUT ' + JSON.stringify(Object.fromEntries(Object.entries({ empty, delivered, one, many, foreign }).map(([k, v]) => [k, { reads: v.reads, ms: v.ms }]))))
