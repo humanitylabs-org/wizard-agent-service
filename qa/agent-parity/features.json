@@ -153,7 +153,7 @@
       "id": "chats-spaces",
       "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
-      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces (spaces_add and full PUT snapshots keep a chat in one Space per agent), refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
       "source_refs": [
         "server/ui-preferences.mjs",
         "server/spaces-tools.mjs",
@@ -165,6 +165,7 @@
         "tests/thread-spaces-http.test.ts",
         "tests/spaces-tools.test.ts",
         "tests/spaces-search-status.test.ts",
+        "tests/one-space-per-thread.test.ts",
         "tests/managed-harness-upgrade.test.ts",
         "qa/agent-parity/server-checks.mjs",
         "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"
@@ -625,6 +626,21 @@
         "tests/agent-media.test.ts"
       ],
       "fixture": "assistant-media",
+      "policy_exemptions": []
+    },
+    {
+      "id": "sent-media-snapshot",
+      "description": "A file an agent sends is a snapshot: rewriting the source later never changes an earlier chat message",
+      "layer": "server",
+      "how_to_test": "Run the wizard-os media hook with each runtime's own home on a scratch file, store the rewritten reply, serve the attachment, rewrite the source in place and assert the served bytes are unchanged.",
+      "source_refs": [
+        "hermes-plugin/wizard-os/media.py",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/test_wizard_os_media_plugin.py"
+      ],
+      "fixture": "sent-media-snapshot",
       "policy_exemptions": []
     },
     {
