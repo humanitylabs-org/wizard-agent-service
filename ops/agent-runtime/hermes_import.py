@@ -30,9 +30,11 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
+import hermes_lock
+import import_tree
 
 SCHEMA = 1
-IMAGE = 'ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2'
+IMAGE = hermes_lock.load()['runtime_image']
 OUTSIDE_TOOLS = 'web search browser x_search vision video image_gen video_gen tts delegation connections homeassistant spotify'.split()
 TOOLS = 'git gh ssh node npm python3 uv sqlite3 curl jq rg bw op systemctl docker'.split()
 # Directory names, at a home root (also applied to named profile roots).
@@ -208,7 +210,31 @@ def read_inventory(root):
     return rows, texts, symlinks, skipped
 
 
-def scan(source, *, owner_home=None):
+def profile_root(rel):
+    # Historical profile bundles have no active runtime semantics either.
+    name = PurePosixPath(rel).parts[0]
+    return name == 'profiles' or name.startswith(('profiles-', 'profiles_'))
+
+
+def inline_blockers(credentials, plan):
+    def retained(path):
+        parts = PurePosixPath(path).parts
+        if profile_root(path) or parts[0] in LOCAL | RUNTIME_NAMES | {'hooks', 'gateway.json'}:
+            return False
+        if parts[0] == 'plugins' and len(parts) > 1:
+            return parts[1] in plan.get('approved_plugins', [])
+        return True
+    return [c for c in credentials if c['kind'] == 'config-field' and retained(c['path'])]
+
+
+def refuse_inline(credentials, plan):
+    blocked = inline_blockers(credentials, plan)
+    require(not blocked, 'inline_credentials_require_secret_store: Move these inline credentials into the agent secret store, replace them with supported references, then rescan and approve. Key names only: ' + json.dumps(
+        [{'path': c['path'], 'key': c['item']} for c in blocked], sort_keys=True))
+
+
+def scan(source, *, owner_home=None, profiles_policy='archive'):
+    require(profiles_policy in {'archive', 'refuse'}, 'profiles_policy_invalid')
     source = Path(source).absolute()
     owner_home = Path(owner_home or (source.parent if source.name == '.hermes' else Path.home())).absolute()
     is_zip = source.is_file()
@@ -234,6 +260,9 @@ def scan(source, *, owner_home=None):
         critical_names = {r for r in texts if r.startswith('plugins/')} | {c['path'] for c in credential_items} | {'config.yaml', '.env', 'cron/jobs.json'}
         identity = {'device': source.stat().st_dev, 'inode': source.stat().st_ino,
                     'critical': {r: file_hash(source / r) if (source / r).is_file() else None for r in sorted(critical_names)}}
+    profile_roots = sorted({r.split('/')[0] for r, _, _ in rows if profile_root(r)} |
+                           ({p.name for p in source.iterdir() if profile_root(p.name)} if not is_zip else set()))
+    ownership_count = import_tree.ownership(source, 10000, dry_run=True) if not is_zip else None
     require('config.yaml' in texts, 'source_no_regular_config')
     cfg = load_yaml(texts.get('config.yaml', '{}'))
     deps = {}
@@ -244,9 +273,10 @@ def scan(source, *, owner_home=None):
         item = deps.setdefault(key, {'path': path, 'kind': kind, 'references': [], 'proposal': proposal, 'approved': False, **extra})
         if ref not in item['references']:
             item['references'].append(ref)
+    credential_paths = {c['path'] for c in credential_items}
     for rel, text in texts.items():
-        if rel == '.env':
-            continue  # Never derive dependency strings from credentials.
+        if rel == '.env' or profile_root(rel) or rel in credential_paths:
+            continue  # Never derive dependency strings from credential-bearing inputs.
         for line_no, line in enumerate(text.splitlines(), 1):
             # Key/value credentials and URLs are not eligible for path extraction.
             # Tokenize field names first. Embedding an unbounded keyword search
@@ -306,7 +336,7 @@ def scan(source, *, owner_home=None):
     plan = {'schema': SCHEMA, 'source': str(source), 'source_kind': 'archive' if is_zip else 'home',
             'owner_home': str(owner_home), 'source_identity': identity, 'approved': False,
             'path_preserving': not is_zip, 'logical_home': str(source) if not is_zip else '/opt/data',
-            'mode': 'paused', 'move': False,
+            'mode': 'paused', 'move': False, 'profiles_policy': profiles_policy,
             'image': IMAGE, 'network': 'restricted', 'port': 18720,
             'service_url': 'http://127.0.0.1:8923',
             'credentials': credential_items, 'isolation': 'restricted', 'supplemental_groups': [],
@@ -319,6 +349,8 @@ def scan(source, *, owner_home=None):
             'wizard_assets': [], 'source_units': [],
             'dependencies': sorted(deps.values(), key=lambda d: (d['kind'], d['path'])),
             'summary': {'portable_bytes': sum(n for _, n, _ in rows), 'files': len(rows),
+                        'profiles_archived': profile_roots,
+                        'ownership_source_dry_run': ownership_count,
                         'sessions': sessions, 'state_db_bytes': next((n for r, n, _ in rows if r == 'state.db'), 0),
                         'memory_provider': (cfg.get('memory') or {}).get('provider', 'builtin'),
                         'skills': sum(p.startswith('skills/') and p.endswith('/SKILL.md') for p in paths),
@@ -330,6 +362,7 @@ def scan(source, *, owner_home=None):
                         'credential_names': [n for n in env_names if SECRET_KEY.search(n)],
                         'excluded_local_roots': sorted(set(skipped)), 'symlinks': len(symlinks)}}
     # Review token changes whenever ANY selection/permission/route changes. No secret bytes in the plan.
+    plan['summary']['inline_credentials_blocking'] = inline_blockers(credential_items, plan)
     return plan
 
 
@@ -375,6 +408,9 @@ def validate_plan(plan, wizard_home):
     require(plan.get('schema') == SCHEMA and plan.get('approved') is True
             and secrets.compare_digest(str(plan.get('approval', '')), approval_hash(plan)), 'plan_not_approved')
     require(plan.get('mode') in {'paused', 'take-over'}, 'mode_invalid')
+    require(plan.get('profiles_policy', 'archive') in {'archive', 'refuse'}, 'profiles_policy_invalid')
+    require(plan.get('profiles_policy', 'archive') != 'refuse' or not plan['summary'].get('profiles_archived'), 'profiles_require_archive')
+    refuse_inline(plan.get('credentials', []), plan)
     require(plan.get('mode') != 'take-over' or (plan.get('move') and plan.get('source_units')), 'takeover_requires_move_and_writer_units')
     require(not plan.get('move') or plan.get('source_kind') == 'home', 'move_archive')
     require(plan.get('move') or plan.get('source_kind') == 'archive', 'home_requires_move')
@@ -564,6 +600,7 @@ def validate_backups(directory, journal):
 def sanitize_credentials(home, plan, directory, journal, journal_path):
     current = credential_policy.inventory([r for _, r, _, link in files(home) if not link],
                                           lambda r: managed_path(home, r).read_text())
+    refuse_inline(current, plan)
     # Fresh names discovered after scan cannot inherit a broad/default approval.
     for rel in sorted({c['path'] for c in current} - {'.env', 'config.yaml'}):
         path = managed_path(home, rel)
@@ -827,6 +864,10 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
             runtime.import_archive(safe_zip)
             safe_zip.unlink()
         home = directory / 'home'
+        # Private copies break every shared inode before writes or later chown.
+        # No lookup of the inode's other names, including names outside home.
+        journal['hardlinks_detached'] = import_tree.detach_hardlinks(home)
+        dump(journal_path, journal)
         originals = directory / 'originals'
         originals.mkdir(mode=0o700)
         for name in ['config.yaml', '.env', 'cron/jobs.json']:
@@ -844,7 +885,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
         # Remove every machine-specific/bootstrap input from the future runtime; rename, not copy.
         quarantine = directory / 'quarantine'
         quarantine.mkdir(mode=0o700)
-        candidates = [p for p in home.iterdir() if p.name in LOCAL | RUNTIME_NAMES | {'hooks', 'profiles', 'gateway.json'} or p.is_symlink()
+        require(plan.get('profiles_policy', 'archive') != 'refuse' or not any(profile_root(p.name) for p in home.iterdir()), 'profiles_require_archive')
+        candidates = [p for p in home.iterdir() if p.name in LOCAL | RUNTIME_NAMES | {'hooks', 'gateway.json'} or profile_root(p.name) or p.is_symlink()
                       or (p.is_file() and excluded(p.name) and not p.name.endswith(('-wal', '-shm', '-journal')))]
         if (home / 'data/apps').exists():
             candidates.append(home / 'data/apps')  # App data is a Wizard package, not an agent package.
@@ -903,7 +945,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                   'privacy': 'standard', 'appearance': {'glyph': 'spark', 'hue': 265},
                   'model': {'provider': model.get('provider', 'openai-codex'), 'model': model.get('default', ''),
                             'allowed_models': [model.get('default', '')], 'fallback': False},
-                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'none'},
+                  'permissions': {'preset': 'standard', 'outside_tools': plan.get('outside_tools', []), 'files': 'own', 'wizard_apps': [], 'agent_apps': [], 'other_agents': 'read', 'shared_with_agents': True},
                   'runtime': {'kind': 'container', 'app_id': 'agent-' + agent_id, 'api': 'http://agent-' + agent_id + ':8642', 'port': plan['port']},
                   'created_at': int(time.time())}
         journal['state'] = 'starting'
@@ -924,6 +966,12 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
         with contextlib.suppress(Exception):
             runtime.remove()
         raise
+
+
+@lifecycle_lock
+def resume(journal_path, *, dry_run=False):
+    import restricted_import
+    return restricted_import.resume(SimpleNamespace(**globals()), journal_path, dry_run=dry_run)
 
 
 @lifecycle_lock
@@ -1091,6 +1139,8 @@ def main(argv=None):
     p = commands.add_parser('scan')
     p.add_argument('source')
     p.add_argument('--owner-home')
+    p.add_argument('--profiles', choices=['archive', 'refuse'], default='archive',
+                   help='archive all old profile trees outside the runtime (default), or refuse homes containing profiles')
     p.add_argument('--out', required=True)
     p = commands.add_parser('approve')
     p.add_argument('plan')
@@ -1099,6 +1149,9 @@ def main(argv=None):
     p.add_argument('--id', required=True)
     p.add_argument('--wizard-home', default=os.environ.get('WIZARD_OS_HOME', str(Path.home() / '.wizard-os')))
     p.add_argument('--allow-source-stop', action='store_true')
+    p = commands.add_parser('resume', help='resume interrupted ownership sealing only; other crash windows require undo')
+    p.add_argument('journal')
+    p.add_argument('--dry-run', action='store_true', help='count prepared tree entries without changing ownership or starting the agent')
     p = commands.add_parser('lifecycle', help='host runtime helper only')
     p.add_argument('journal')
     p.add_argument('action', choices=['start', 'stop', 'apply'])
@@ -1130,7 +1183,7 @@ def main(argv=None):
             (folder / 'managed/config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
             result = {'updated': True}
         elif args.command == 'scan':
-            plan = scan(args.source, owner_home=args.owner_home)
+            plan = scan(args.source, owner_home=args.owner_home, profiles_policy=args.profiles)
             dump(args.out, plan)
             print(json.dumps({'plan': args.out, 'summary': plan['summary'], 'dependency_count': len(plan['dependencies'])}, indent=2))
         elif args.command == 'approve':
@@ -1142,6 +1195,8 @@ def main(argv=None):
             print(json.dumps({'approval': plan['approval']}))
         elif args.command == 'apply':
             print(json.dumps(apply(json.loads(Path(args.plan).read_text()), args.id, args.wizard_home, allow_source_stop=args.allow_source_stop)))
+        elif args.command == 'resume':
+            print(json.dumps(resume(args.journal, dry_run=args.dry_run)))
         elif args.command == 'lifecycle':
             print(json.dumps(imported_lifecycle(args.journal, args.action)))
         elif args.command == 'route-default':

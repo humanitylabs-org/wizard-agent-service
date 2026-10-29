@@ -44,10 +44,11 @@ import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import hermes_lock
 
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 STORE = "wizardapps"
-DEFAULT_IMAGE = "ghcr.io/humanitylabs-org/hermes-agent:v2026.9.24-wizard2"
+DEFAULT_IMAGE = hermes_lock.load()['runtime_image']
 DEFAULT_PROXY_IMAGE = "ghcr.io/tinfoilsh/tinfoil-proxy:0.2.3"
 # The restricted runtime (wizard-app-store runtimes/restricted-agent, vendored unchanged; see SOURCE.txt).
 RESTRICTED_DIR = Path(__file__).resolve().parent / "restricted-agent"
@@ -382,8 +383,7 @@ class RestrictedDriver:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
         env["CLAUDE_TOKEN_FILE"] = ""  # retired path; never trust an inherited override
         image = agent["runtime"].get("image") if agent.get("imported") else self.image
-        if image:
-            env["AGENT_IMAGE"] = image
+        env["AGENT_IMAGE"] = image or DEFAULT_IMAGE
         return env
 
     def _compose(self, agent: dict, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -457,7 +457,17 @@ class RestrictedDriver:
         # fail, which only stops that agent.
         copy = "; ".join(f'cp /managed/{name} "$tmp/{name}"; chown {AGENT_UID}:{AGENT_UID} "$tmp/{name}"; chmod 600 "$tmp/{name}";'
                          f' mv -T -f "$tmp/{name}" /opt/data/{name}' for name in MANAGED_FILES)
-        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy};'
+        bundles = ('plugins/wizard-supervisor-tools', 'skills/reporter', 'skills/supervisor')
+        asset_copy = ''
+        for rel in bundles:
+            if not (managed / rel).is_dir():
+                continue  # Older Service releases have no Supervisor bundle.
+            parent, leaf = rel.split('/')
+            asset_copy += (f'; test ! -L /opt/data/{parent}; mkdir -p /opt/data/{parent};'
+                           f' cp -R /managed/{rel} "$tmp/{leaf}"; chown -R {AGENT_UID}:{AGENT_UID} "$tmp/{leaf}";'
+                           f' if [ -e /opt/data/{rel} ] || [ -L /opt/data/{rel} ]; then mv -T /opt/data/{rel} "$tmp/old-{leaf}"; fi;'
+                           f' mv -T "$tmp/{leaf}" /opt/data/{rel}')
+        script = (f'set -eu; umask 077; tmp=$(mktemp -d /opt/data/.wizard-sync.XXXXXXXX); trap \'rm -rf "$tmp"\' EXIT; {copy}{asset_copy};'
                   f' chown {AGENT_UID}:{AGENT_UID} /opt/data; chmod 700 /opt/data')
         name = f"{self.project(agent['id'])}-sync-{secrets.token_hex(4)}"
         try:
@@ -511,7 +521,10 @@ class RestrictedDriver:
                     raise RuntimeFailure("import_harness_update_failed")
         else:
             self.agents.add_provider_keys(agent)
-            self._compose(agent, "build", timeout=1800)
+            labels = sidecar_source_labels(self.runtime_dir)
+            docker(["build", "--label", "org.opencontainers.image.source=" + labels["source"],
+                    "--label", "org.opencontainers.image.revision=" + labels["revision"],
+                    "-t", SIDECAR_IMAGE, str(self.runtime_dir / "sidecars")], timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -553,6 +566,16 @@ class RestrictedDriver:
         self._compose(agent, "stop", timeout=300)
         self._remove_claude_seeder(agent)
         return {"ok": True}
+
+
+def sidecar_source_labels(runtime_dir: Path) -> dict[str, str]:
+    """Label the reviewed upstream runtime, not the Service's unrelated HEAD."""
+    text = (runtime_dir / "SOURCE.txt").read_text()
+    source = re.search(r"^Source: (https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", text, re.M)
+    revision = re.search(r"^Commit: ([0-9a-f]{40})$", text, re.M)
+    if source is None or revision is None:
+        raise RuntimeFailure("sidecar_source_receipt_invalid")
+    return {"source": source.group(1), "revision": revision.group(1)}
 
 
 def verify_vendored(runtime_dir: Path) -> None:
@@ -819,6 +842,29 @@ def offline_census(driver, agent: dict) -> dict:
     return {**after, "ids": index['ids']}
 
 
+def guard_image_change(driver, agent):
+    """Never converge an existing agent to a different Hermes during config/start.
+
+    Compare immutable local image IDs, not mutable tag spellings. Stop/delivery
+    stay available. Imports have their separately journalled lifecycle.
+    """
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    ids = docker(['ps', '-aq', '--filter', f'label=com.docker.compose.project={driver.project(agent["id"])}',
+                  '--filter', f'label=com.docker.compose.service={service}'], timeout=60).stdout.split()
+    if not ids:
+        return  # first install consumes the exact frozen default
+    if len(ids) != 1:
+        raise RuntimeFailure('hermes_image_identity_ambiguous', 409)
+    current = docker(['inspect', '--format', '{{.Image}}', ids[0]], timeout=60).stdout.strip()
+    target = docker(['image', 'inspect', '--format', '{{.Id}}', DEFAULT_IMAGE], timeout=60, check=False).stdout.strip()
+    if re.fullmatch(r'sha256:[0-9a-f]{64}', current) and current == target:
+        return
+    try:
+        hermes_lock.authorize()
+    except (ValueError, OSError):
+        raise RuntimeFailure('hermes_updates_paused', 409) from None
+
+
 def lifecycle_action(driver, agent: dict, action: str) -> dict:
     """Called only under lifecycle_lock; a stop returns its seal atomically."""
     if isinstance(driver, ImportDriver):
@@ -834,6 +880,8 @@ def lifecycle_action(driver, agent: dict, action: str) -> dict:
         return inspect_runtime(driver, agent)[0]
     if action == 'census':
         return offline_census(driver, agent)
+    if action in ('apply', 'start') and not agent.get('imported') and isinstance(driver, (ComposeDriver, RuntipiDriver, RestrictedDriver)):
+        guard_image_change(driver, agent)
     result = getattr(driver, action)(agent)
     if action == 'stop' and result.get('ok') is not False:
         try:
@@ -1171,6 +1219,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
     args = ap.parse_args(argv)
+    if args.image != DEFAULT_IMAGE or os.environ.get('WIZARD_RESTRICTED_AGENT_IMAGE', DEFAULT_IMAGE) not in ('', DEFAULT_IMAGE):
+        ap.error('Hermes image differs from the shared exact lock; use a reviewed coordinated promotion')
     if not args.token_file:
         ap.error("--token-file is required for the HTTP helper")
     token = args.token_file.read_text().strip()

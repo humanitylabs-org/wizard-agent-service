@@ -122,6 +122,38 @@ describe('Wizard OS settings for phone setup', () => {
 })
 
 describe('setup API (box-local listener)', () => {
+  it('advertises quiet launch only for explicitly configured alongside installs', async () => {
+    const dir = tempDir()
+    for (const launchMode of ['alongside', 'vm', '', 'unknown']) {
+      const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), launchMode })
+      expect((await setup.overview()).launch_mode).toBe(launchMode === 'alongside' ? 'alongside' : undefined)
+      expect(existsSync(join(dir, 'settings.json'))).toBe(false)
+    }
+  })
+
+  it('a helper outage never marks a stale host phone address ready', async () => {
+    const dir = tempDir()
+    const socketPath = join(dir,'unresponsive.sock')
+    writeFileSync(socketPath,'')
+    let calls = 0
+    const setup = createPhoneSetup({ settingsPath: join(dir, 'settings.json'), socketPath, hostShellUrl: () => `${ORIGIN}:8796/wizard-os-home/`,
+      call: async () => { calls++; throw new Error('The summary must never call or wait for the helper') } })
+    expect((await setup.overview()).items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'todo' })
+    expect(calls).toBe(0)
+  })
+
+  it.each([false,true])('an unlinked helper socket never reclassifies a prior enrollment (pinned=%s)', async (accessPinned) => {
+    const dir = tempDir(), settingsPath = join(dir, 'settings.json')
+    updateSettings(settingsPath, (raw: any) => {
+      raw.network = {base_url: ORIGIN}
+      raw.access = {tailscale:{origin:ORIGIN,owner_logins:[OWNER]}}
+      raw.setup = {phone_started_at:new Date().toISOString()}
+    })
+    const setup = createPhoneSetup({settingsPath, accessPinned, socketPath:join(dir,'missing.sock'), hostShellUrl:()=>`${ORIGIN}:8796/wizard-os-home/`})
+    expect(await setup.phone()).toMatchObject({step:'unavailable'})
+    expect((await setup.overview()).items[0]).toEqual({id:'phone',title:'Use Wizard on your phone',state:'in_progress'})
+  })
+
   it('is unavailable without the helper socket, never crashes, and tracks first run', async () => {
     const dir = tempDir()
     const settingsPath = join(dir, 'settings.json')
@@ -181,6 +213,13 @@ describe('setup API (box-local listener)', () => {
     expect(notYet.body.step).toBe('serving')
     expect(notYet.body.phones).toEqual([{ name: 'pixel', os: 'android', online: false }])
     helper.state.peers.push({ id: 'c', name: 'iphone', os: 'iOS', online: true, last_seen: null })
+    // A phone that is online on the tailnet has not opened Wizard yet: still serving, listed as a hint.
+    const online = await call(port, '/wizard/v1/setup/phone')
+    expect(online.body.step).toBe('serving')
+    expect(online.body.phones).toContainEqual({ name: 'iphone', os: 'iOS', online: true })
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe('')
+    // The phone opens Wizard through Serve (recorded by noteOwnerRequest, covered below).
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: new Date().toISOString() } })
     const seen = await call(port, '/wizard/v1/setup/phone')
     expect(seen.body.step).toBe('phone_seen')
     expect(readSettings(settingsPath).settings.setup.phone_seen_at).toMatch(/Z$/)
@@ -196,6 +235,66 @@ describe('setup API (box-local listener)', () => {
     expect(cleared.setup.phone_seen_at).toBe('')
     expect(cleared.setup.seen_at).toBe('')
     expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('todo')
+  })
+
+  it('stops saying connected once the last phone leaves the tailnet, until a phone opens Wizard again', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath })
+    await call(port, '/wizard/v1/setup/phone/start', jsonPost())
+    helper.signIn()
+    helper.state.https_enabled = true
+    expect((await call(port, '/wizard/v1/setup/phone/start', jsonPost())).body.step).toBe('serving')
+    helper.state.peers = [{ id: 'c', name: 'iphone', os: 'iOS', online: true, last_seen: null }]
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: new Date().toISOString() } })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+
+    // An offline phone is still on the tailnet: still connected.
+    helper.state.peers = [{ id: 'c', name: 'iphone', os: 'iOS', online: false, last_seen: '2026-10-01T10:00:00Z' }]
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+
+    // The owner removes the phone in Tailscale's admin (a laptop stays): it can't reach Wizard any more.
+    helper.state.peers = [{ id: 'a', name: 'laptop', os: 'macOS', online: true, last_seen: null }]
+    const removed = await call(port, '/wizard/v1/setup/phone')
+    expect(removed.body).toMatchObject({ step: 'serving', phones: [] })
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe('')
+    expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('in_progress')
+
+    // The phone rejoins the tailnet: only a hint, as the first time, until it opens Wizard.
+    helper.state.peers.push({ id: 'd', name: 'iphone', os: 'iOS', online: true, last_seen: null })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('serving')
+  })
+
+  it('keeps a visit recorded through environment-pinned access, whatever the helper lists', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath, tailnetAccessPinned: true })
+    helper.signIn()
+    helper.state.https_enabled = true
+    const seen = new Date().toISOString()
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: seen } })
+    helper.state.peers = [{ id: 'a', name: 'laptop', os: 'macOS', online: true, last_seen: null }]
+    await call(port, '/wizard/v1/setup/phone')
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe(seen)
+  })
+
+  it('keeps connected when the helper peer list is full, since an offline phone may be past its 32-peer cap', async () => {
+    const dir = tempDir()
+    const settingsPath = join(dir, 'settings.json')
+    const helper = await fakeHelper(dir)
+    const { port } = await startLocal({ settingsPath, privateAccessSocket: helper.socketPath })
+    await call(port, '/wizard/v1/setup/phone/start', jsonPost())
+    helper.signIn()
+    helper.state.https_enabled = true
+    expect((await call(port, '/wizard/v1/setup/phone/start', jsonPost())).body.step).toBe('serving')
+    const seen = new Date().toISOString()
+    updateSettings(settingsPath, (raw: any) => { raw.setup = { ...raw.setup, phone_seen_at: seen } })
+    // 32 online laptops fill the helper's list; the owner's offline iPhone sorts after them and is cut off.
+    helper.state.peers = Array.from({ length: 32 }, (_, i) => ({ id: `l${i}`, name: `laptop-${String(i).padStart(2, '0')}`, os: 'macOS', online: true, last_seen: null }))
+    await call(port, '/wizard/v1/setup/phone')
+    expect(readSettings(settingsPath).settings.setup.phone_seen_at).toBe(seen)
   })
 
   it('never turns Serve on or records anything from a poll before the owner pressed start', async () => {
@@ -357,6 +456,37 @@ describe('setup API (box-local listener)', () => {
     expect((await call(port, '/wizard/v1/setup', { headers: { host: `${DNS}:8796` } })).status).toBe(403)
   })
 
+  it('alongside box with host Tailscale and no helper: phone setup shows the shell link from apps.json', async () => {
+    const dir = tempDir()
+    const appsJsonPath = join(dir, 'apps.json')
+    const shell = `https://${DNS}:8796/wizard-os-home/`
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url: shell } }] }))
+    const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
+    const phone = await call(port, '/wizard/v1/setup/phone')
+    expect(phone.body.step).toBe('serving')
+    expect(phone.body.wizard_url).toBe(shell)
+    expect(phone.body.device_name).toBe(DNS)
+    expect(phone.body.managed).toBe('host')
+    const overview = (await call(port, '/wizard/v1/setup')).body
+    expect(overview.items[0]).toMatchObject({ state: 'done', phone_ready: true })
+    expect(readSettings(join(dir, 'settings.json')).settings.setup.phone_seen_at).toBe('')
+    updateSettings(join(dir, 'settings.json'), (raw: any) => { raw.setup = { phone_seen_at: new Date().toISOString() } })
+    expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('phone_seen')
+    // phone_ready is only a hint for ready-before-first-visit copy, not an availability capability.
+    expect((await call(port, '/wizard/v1/setup')).body.items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
+  })
+
+  it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {
+    const dir = tempDir()
+    for (const url of ['http://127.0.0.1:8796/wizard-os-home/', 'https://example.com/wizard-os-home/', 'https://u:p@box.tail1234.ts.net/']) {
+      const appsJsonPath = join(dir, 'apps.json')
+      writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url } }] }))
+      const { port } = await startLocal({ settingsPath: join(dir, 'settings.json'), appsJsonPath, privateAccessSocket: join(dir, 'missing.sock') })
+      expect((await call(port, '/wizard/v1/setup/phone')).body.step).toBe('unavailable')
+      expect((await call(port, '/wizard/v1/setup')).body.items[0].state).toBe('todo')
+    }
+  })
+
   it('is owner-only when the listener requires access', async () => {
     const dir = tempDir()
     const helper = await fakeHelper(dir)
@@ -398,7 +528,7 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
       onVerified: (request: IncomingMessage) => (server as any)?.phoneSetup?.noteOwnerRequest(request),
     })
     server = createWizardServer({
-      requireAccess: false, ownerProof, tailnetVerifier, settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
+      requireAccess: false, ownerProof, tailnetVerifier, tailnetAccessPinned: Boolean(tailnetVerifier.pinned), settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'),
       mcpToken: 'fixture-mcp', wizardOsHome: dir, bridgeWriteSkills: false, bridgeWatchMs: 0,
       followThrough: false, archivedSessionReader: () => [], ...(shellOrigin ? { tailnetShellOrigin: shellOrigin } : {}),
     })
@@ -520,9 +650,9 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
     expect((await call(s.tailnet, '/wizard/v1/agents', { headers: owner })).status).toBe(200)
   })
 
-  it('records phone_seen when the owner arrives through Serve from a phone', async () => {
-    const s = await stack()
-    s.enroll()
+  it.each([false,true])('records phone_seen on verified settings or pinned access (pinned=%s)', async (pinned) => {
+    const s = await stack(pinned ? {env:{origin:ORIGIN,logins:OWNER}} : {})
+    if (!pinned) s.enroll()
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'user-agent': DESKTOP_UA } })
     await call(s.local, '/wizard/v1/apps', { headers: { 'user-agent': IPHONE_UA } })  // box-local phones do not count
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'tailscale-user-login': 'someone@example.com', 'user-agent': IPHONE_UA } })
@@ -530,6 +660,8 @@ describe('tailnet listener with settings-driven Tailscale access', () => {
     expect(readSettings(s.settingsPath).settings.setup.phone_seen_at).toBe('')
     await call(s.tailnet, '/wizard/v1/apps', { headers: { ...owner, 'user-agent': IPHONE_UA } })
     await expect.poll(() => readSettings(s.settingsPath).settings.setup.phone_seen_at).toMatch(/Z$/)
+    expect(readSettings(s.settingsPath).settings.access.tailscale.origin).toBe(pinned ? '' : ORIGIN)
+    expect((await call(s.tailnet, '/wizard/v1/setup', {headers:owner})).body.items[0]).toEqual({id:'phone',title:'Use Wizard on your phone',state:'done'})
   })
 
   it('serves the shell to a verified phone without forwarding identity or credentials', async () => {

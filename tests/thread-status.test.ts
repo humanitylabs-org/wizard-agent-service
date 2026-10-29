@@ -2,8 +2,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
+import { CONCISE_REPLY_INSTRUCTIONS, SUMMARY_REPLY_INSTRUCTIONS, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, latestVisibleSessionMessages, runInstructions } from '../server/service.mjs'
+import { AGENT_RUN_INSTRUCTIONS } from '../server/agents-http.mjs'
 
 const tag = (o: object) => `[WIZARD_STATUS_V1]${JSON.stringify(o)}[/WIZARD_STATUS_V1]`
 const dirs: string[] = []
@@ -44,15 +45,59 @@ describe('thread status tag', () => {
     // reported as done. The QA ones for me should be like, you need me to see if this is what I meant or if I like it."
     expect(STATUS_INSTRUCTIONS).toContain('done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check)')
     expect(STATUS_INSTRUCTIONS).toContain('check (only when the user\'s own judgment is the missing piece')
+    expect(STATUS_INSTRUCTIONS).toContain('confirmed installed on their device')
+    expect(STATUS_INSTRUCTIONS).toContain('send check only after it has landed')
     expect(STATUS_INSTRUCTIONS).toContain('whether they like it (look, feel, wording, taste)')
     expect(STATUS_INSTRUCTIONS).toContain('never "Test that X works"')
     expect(STATUS_INSTRUCTIONS).not.toMatch(/should try or QA/)
+  })
+
+  it('keeps Ready asks understandable cold, situation-first, and free of internal jargon', () => {
+    expect(STATUS_INSTRUCTIONS).toContain('140 characters')
+    expect(STATUS_INSTRUCTIONS).toContain('read cold')
+    expect(STATUS_INSTRUCTIONS).toContain('no PR')
+    expect(STATUS_INSTRUCTIONS).toContain('first say what is waiting in everyday words, then the exact thing to do')
+    expect(STATUS_INSTRUCTIONS).toContain('if the action is a reply word, the sentence says what that word does')
+    expect(STATUS_INSTRUCTIONS).toContain('For check, say what changed and what to judge')
+    expect(STATUS_INSTRUCTIONS).toContain('The reply itself ends with the same ask in plain words.')
+    expect(STATUS_INSTRUCTIONS).not.toContain('under 90 characters')
   })
 
   it('is part of every Wizard run instruction set', () => {
     expect(WIZARD_RUN_INSTRUCTIONS).toContain(STATUS_INSTRUCTIONS)
     expect(runInstructions({ join: false })).toContain('[WIZARD_STATUS_V1]')
   })
+})
+
+describe('finish-report prompt', () => {
+  it('summary style replies restate what we are doing', () => {
+    expect(FINISH_REPORT_INSTRUCTIONS).toBe(SUMMARY_REPLY_INSTRUCTIONS)
+    expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('Briefly restate what we are doing')
+    expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('a reply that fits in three sentences never uses this format')
+    // Summary/Concise are retired from the run contract: every saved style gets Wizard OS facts only.
+    for (const response_style of [undefined, 'summary', 'concise', 'own'] as const) {
+      const sent = runInstructions({ join: true, response_style })
+      expect(sent).not.toContain(SUMMARY_REPLY_INSTRUCTIONS)
+      expect(sent).not.toContain(CONCISE_REPLY_INSTRUCTIONS)
+      expect(sent).not.toContain('briefly recover the original request')
+    }
+  })
+  it('asks for concise prose with no fixed report template', () => {
+    expect(CONCISE_REPLY_INSTRUCTIONS).toBe('Keep final replies as short as the content allows. Lead with the answer or result in plain prose; mention what was verified, what is still open, or what the user must do only when it matters. Never use a fixed template or labelled sections (such as What I did / Does it work / Still open); add lists, tables or headings only when the content genuinely needs them.')
+  })
+
+  for (const [kind, instructions] of [
+    ['main', WIZARD_RUN_INSTRUCTIONS],
+    ['host-profile', AGENT_RUN_INSTRUCTIONS],
+    ['container', AGENT_RUN_INSTRUCTIONS],
+    ['restricted', AGENT_RUN_INSTRUCTIONS],
+  ]) {
+    it(`puts the shared finish report immediately before the final status rule for ${kind}`, () => {
+      expect(instructions).toContain(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`)
+      expect(instructions.endsWith(STATUS_INSTRUCTIONS)).toBe(true)
+      expect(instructions.split(FINISH_REPORT_INSTRUCTIONS)).toHaveLength(2)
+    })
+  }
 })
 
 describe('session list status projection', () => {

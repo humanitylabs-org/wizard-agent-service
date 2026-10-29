@@ -73,6 +73,18 @@ it.each([
   expect(execFile).not.toHaveBeenCalled()
 })
 
+it('forwards configured Forum identity and leaves the default Thales SSH command byte-identical', async () => {
+  const config = { host: 'fixture-worker', script: '/worker.py', root: '/spool', lock: '/worker.lock', workRoot: '/worker', python: 'python3' }
+  await heavySshTransport(config)({ action: 'status' })
+  const legacy = (vi.mocked(execFile).mock.calls[0][1] as string[]).at(-1)!
+  expect(legacy).toBe("'env' 'WIZARD_HEAVY_ROOT=/worker' 'python3' '/worker.py' '--root' '/spool' '--lock' '/worker.lock'")
+  await heavySshTransport({ ...config, workerHost: 'forum' })({ action: 'status' })
+  const forum = (vi.mocked(execFile).mock.calls[1][1] as string[]).at(-1)!
+  expect(forum).toBe(legacy.replace("'python3'", "'WIZARD_HEAVY_HOST=forum' 'python3'"))
+  await expect(heavySshTransport({ ...config, workerHost: 'invalid' })({ action: 'status' })).rejects.toThrow('invalid heavy worker host')
+  expect(execFile).toHaveBeenCalledTimes(2)
+})
+
 it('forwards the configured remote root over SSH with shell-safe quoting', async () => {
   vi.stubEnv('WIZARD_HEAVY_ROOT', "/worker/root with 'quote")
   const rpc = heavySshTransport({ host: 'build-fixture', script: '/worker.py', root: '/spool', lock: '/worker.lock', python: 'python3' })
