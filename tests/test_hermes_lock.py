@@ -29,7 +29,7 @@ class SharedLockTests(unittest.TestCase):
         self.assertIn('@sha256:', env['AGENT_IMAGE'])
 
     def test_existing_agent_is_never_silently_upgraded_or_downgraded(self):
-        driver = runtime.ComposeDriver(SimpleNamespace(), runtime.DEFAULT_IMAGE, 'proxy')
+        driver = runtime.ComposeDriver(SimpleNamespace(root=Path('/nonexistent-fixture'), providers=SimpleNamespace(is_private=lambda _agent: False)), runtime.DEFAULT_IMAGE, 'proxy')
         agent = {'id': 'fixture', 'runtime': {'app_id': 'agent-fixture'}}
         image = 'sha256:' + 'a' * 64
         def result(value):
