@@ -561,12 +561,14 @@
       "id": "helper-continuation",
       "description": "Complete a background helper",
       "layer": "runtime",
-      "how_to_test": "Complete a background helper; verify its result resumes the exact originating thread once, including after restart.",
+      "how_to_test": "Complete a background helper; verify its result resumes the exact originating thread once, including after restart. Across main, host-profile, container and restricted client rows, keep the originating thread in Working after the parent turn ends, while the helper runs and after it returns until the parent answers. Hydrate a status-less detail response across list refresh and send-hold expiry; assert no Ready blip, then verify the answered list projection releases it.",
       "source_refs": [
-        "server/service.mjs"
+        "server/service.mjs",
+        "wizard-ux/web/live.js"
       ],
       "reference_tests": [
-        "tests/helper-continuation-evidence.test.ts"
+        "tests/helper-continuation-evidence.test.ts",
+        "wizard-ux/tests/helper-working-no-ready-blip.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []
