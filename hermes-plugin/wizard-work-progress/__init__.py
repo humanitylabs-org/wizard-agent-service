@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import re
 
-_WIZARD_SESSION = re.compile(r"^(?:wizard_[0-9]+_[A-Za-z0-9]+|wizard-assistant-[A-Za-z0-9_-]+|wizardop_user_[A-Za-z0-9_-]+)$")
+# Same direct-human session namespace as the Agent Service (service.mjs isDirectHumanSessionIdentity):
+# any wizard_ or wizard-assistant- id, including explicit and historical ones (wizard_grab). Delegated
+# children are excluded by Hermes's parent_session_id, not by the shape of the id.
+_WIZARD_SESSION = re.compile(r"^(?:wizard_|wizard-assistant-|wizardop_user_)[A-Za-z0-9_-]+$")
 
 # Use the existing private-context envelope understood by Wizard's multimodal
 # display projection. This is recalled standing user preference, not human text.
@@ -19,8 +22,10 @@ The owner wants meaningful task milestones in Wizard's Working drop-down on ever
 </memory-context>"""
 
 
-def turn_context(*, session_id="", platform="", **kwargs):
+def turn_context(*, session_id="", platform="", parent_session_id="", **kwargs):
     if platform not in {"api_server", "wizard", "wizard-mobile"}:
+        return None
+    if parent_session_id:
         return None
     if not _WIZARD_SESSION.fullmatch(str(session_id)):
         return None

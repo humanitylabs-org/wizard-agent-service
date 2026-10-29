@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { post, png } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -217,6 +218,25 @@ export const serverChecks = {
       assert.equal(r.status, 200); assert.deepEqual(Buffer.from(await r.arrayBuffer()), expected)
     }
     s.mediaItems = items
+  },
+  'working-context': async s => {
+    // The wizard-work-progress pre_llm_call hook, run for this runtime's own Wizard session, injects the Working
+    // contract into the user turn. History on every kind shows only the human words (text and multimodal).
+    const plugin = new URL('../../hermes-plugin/wizard-work-progress/__init__.py', import.meta.url).pathname
+    const hook = (sid, parent = '') => execFileSync('python3', ['-c', "import json,runpy,sys; r=runpy.run_path(sys.argv[1])['turn_context'](session_id=sys.argv[2], platform='api_server', parent_session_id=sys.argv[3]); print(json.dumps(r))", plugin, sid, parent], { encoding: 'utf8' })
+    const injected = JSON.parse(hook('wizard_parity'))
+    assert.ok(injected?.context?.includes('Working progress contract'), 'the Wizard session receives the Working contract')
+    assert.equal(JSON.parse(hook('wizard_parity_child', 'wizard_parity')), null, 'delegated children do not')
+    const human = 'Synthetic: build the preview and verify playback.'
+    const image = { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }
+    const now = Date.now() / 1000, row = s.sessions.get('wizard_parity')
+    row.messages.push({ id: 'working-text', role: 'user', timestamp: now, content: `${human}\n\n${injected.context}` })
+    row.messages.push({ id: 'working-image', role: 'user', timestamp: now + 1, content: [{ type: 'text', text: human }, image, { type: 'text', text: injected.context }] })
+    const rows = await history(s)
+    const text = rows.find(m => m.id === 'working-text'), multi = rows.find(m => m.id === 'working-image')
+    assert.equal(text.content, human, 'text history shows the human words only')
+    assert.ok(!JSON.stringify(multi.content).includes('Working progress contract'), 'multimodal history hides the contract')
+    assert.ok(JSON.stringify(multi.content).includes(human))
   },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)

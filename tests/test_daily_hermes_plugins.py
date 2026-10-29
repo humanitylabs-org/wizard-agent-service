@@ -151,8 +151,15 @@ class ProgressContracts(unittest.TestCase):
             self.assertEqual(progress.turn_context(session_id='wizard_123_abc', platform='api_server', is_first_turn=fresh), {'context': progress.CONTEXT})
 
     def test_scope(self):
-        for sid, platform in [('telegram_123', 'telegram'), ('wizard_123_abc', 'subagent'), ('wizard_123_abc-child', 'api_server'), ('wizard_123_abc\n', 'api_server'), ('other', 'api_server')]:
+        for sid, platform in [('telegram_123', 'telegram'), ('wizard_123_abc', 'subagent'), ('wizard_123_abc\n', 'api_server'), ('other', 'api_server'), ('wizardop_internal', 'api_server')]:
             self.assertIsNone(progress.turn_context(session_id=sid, platform=platform))
+        # A delegated child is excluded by its parent, whatever its id looks like.
+        self.assertIsNone(progress.turn_context(session_id='wizard_123_abc-child', platform='api_server', parent_session_id='wizard_123_abc'))
+
+    def test_explicit_and_historical_wizard_ids_get_the_contract(self):
+        # The service treats every wizard_ / wizard-assistant- id as a direct human session (isDirectHumanSessionIdentity).
+        for sid in ('wizard_grab', 'wizard_parity', 'wizard_123_abc-def', 'wizard-assistant-legacy_1'):
+            self.assertEqual(progress.turn_context(session_id=sid, platform='api_server', parent_session_id=''), {'context': progress.CONTEXT})
         for sid in ('wizard-assistant-example', 'wizardop_user_example'):
             for platform in ('wizard', 'wizard-mobile', 'api_server'):
                 self.assertIsNotNone(progress.turn_context(session_id=sid, platform=platform))

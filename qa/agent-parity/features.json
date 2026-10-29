@@ -612,6 +612,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "working-context",
+      "description": "The wizard-work-progress plugin adds the Working milestone contract to Wizard turns without it showing in chat history",
+      "layer": "server",
+      "how_to_test": "Run the plugin's pre_llm_call hook for the kind's Wizard session (and a delegated child, which gets nothing), store the injected text and multimodal user turns, and assert history shows only the human words on every kind.",
+      "source_refs": [
+        "hermes-plugin/wizard-work-progress/__init__.py",
+        "server/memory-context-projection.mjs"
+      ],
+      "reference_tests": [
+        "tests/daily-hermes-plugins.test.ts",
+        "tests/test_daily_hermes_plugins.py"
+      ],
+      "fixture": "working-context",
+      "policy_exemptions": []
+    },
+    {
       "id": "download-links",
       "description": "Download assistant and user attachments through authenticated public URLs; the owner's browser caches attachments for good and revalidates owner files",
       "layer": "server",
