@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { post, png } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
+const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '../../hermes-plugin/wizard-os')
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
   const r = await s.request('/api/sessions/wizard_parity/messages?view=wizard&order=oldest')
@@ -217,6 +220,29 @@ export const serverChecks = {
       assert.equal(r.status, 200); assert.deepEqual(Buffer.from(await r.arrayBuffer()), expected)
     }
     s.mediaItems = items
+  },
+  'sent-media-snapshot': async s => {
+    // Run the real wizard-os media hook with this runtime's own home, then serve what it wrote through the Service.
+    const scratch = join(s.agentHome, 'cache/scratch/run'); mkdirSync(scratch, { recursive: true })
+    mkdirSync(join(s.agentHome, 'cache/images'), { recursive: true })
+    writeFileSync(join(scratch, 'screenshot.png'), png)
+    const visible = p => ['container', 'restricted'].includes(s.kind) ? p.replace(s.agentHome, '/opt/data') : p
+    const hook = `import importlib.util,sys\nspec=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nprint(m.transform_llm_output(response_text=sys.argv[2],platform='api_server'))`
+    const out = execFileSync('python3', ['-c', hook, join(pluginRoot, 'media.py'), `Synthetic screenshot\nMEDIA:${join(scratch, 'screenshot.png')}`],
+      { encoding: 'utf8', env: { ...process.env, HERMES_HOME: s.agentHome, WIZARD_FILES_ROOT: join(s.root, 'no-files') } }).trimEnd()
+    const line = out.split('\n').find(l => l.startsWith('MEDIA:'))
+    assert.ok(line && line.includes('/cache/images/wizard-sent/'), 'hook copies the scratch file into a shown folder')
+    s.sessions.get('wizard_parity').messages.push({ id: 'snapshot-reply', role: 'assistant', timestamp: Date.now() / 1000, content: visible(out) })
+    // History re-projects the stored reply on every open, so serve what a fresh open shows.
+    const served = async () => {
+      const [item] = envelope((await history(s)).find(m => m.id === 'snapshot-reply').content)
+      assert.ok(item, 'sent snapshot is attached on every runtime')
+      const r = await s.raw(`/wizard/attachments/${item.id}`); assert.equal(r.status, 200)
+      return Buffer.from(await r.arrayBuffer())
+    }
+    assert.deepEqual(await served(), png)
+    writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
+    assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
   },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)
