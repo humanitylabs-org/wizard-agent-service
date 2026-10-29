@@ -173,6 +173,8 @@ export const serverChecks = {
       await tool(name, { space_id: 'missing-space', ...args }, 'not_found')
     }
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
+    // One Space per chat: adding moved it out of parity-space.
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === space.id).count, 0, 'spaces_add moves, never a second Space')
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
     const run = await admit(s, { input: 'Synthetic Space fill' })
     assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
@@ -183,7 +185,7 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'durable agent-scoped membership')
     await tool('spaces_delete', { space_id: created.id })
-    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [space, foreign])
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [{ ...space, threads: [] }, foreign])
     assert.equal((await put([])).status, 200)
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
