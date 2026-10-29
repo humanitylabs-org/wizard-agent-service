@@ -30,6 +30,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--upstream-contract', type=Path, required=True)
+    parser.add_argument('--inherited-semantics', type=Path, help='Verified prior six-phase evidence; run only remaining refusal acceptance')
     args = parser.parse_args()
     assert os.environ.get('WIZARD_WORKER_LANE') == 'heavy', 'parent-admitted Forum heavy execution required'
     assert Path.cwd().is_relative_to('/srv/work'), 'Forum stage required'
@@ -45,7 +46,16 @@ def main():
     before_probes = set(h.run(['docker', 'ps', '-aq', '--filter', 'name=^/wizard-import-schema-']).splitlines())
     before_volumes = set(h.run(['docker', 'volume', 'ls', '-q']).splitlines())
 
+    current_case = {}
+
     class ObservedDockerRuntime(h.DockerRuntime):
+        def check_history(self, home):
+            observe_step('before_history_guard')
+            try:
+                return super().check_history(home)
+            finally:
+                observe_step('after_history_guard')
+
         def history_schema_version(self):
             # Preserve the actual product subprocess result before h.run discards
             # stderr on refusal. Only this fixed public/synthetic probe is logged.
@@ -190,7 +200,39 @@ raise SystemExit(17)
     def snapshot(home):
         return {p.name: {'inode': p.stat().st_ino, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
                 for p in home.iterdir() if p.is_file()}
+    def observe_step(step):
+        if not current_case:
+            return
+        after = snapshot(current_case['home'])
+        previous = current_case.get('previous', current_case['before'])
+        delta = lambda left, right: {k: {'before': left.get(k), 'after': right.get(k)}
+                for k in sorted(set(left) | set(right)) if left.get(k) != right.get(k)}
+        row = {'case': current_case['kind'], 'step': step, 'snapshot': after,
+               'delta_from_previous': delta(previous, after),
+               'delta_from_original': delta(current_case['before'], after)}
+        if current_case.get('archive'):
+            archive = current_case['archive']
+            row['archive'] = {'inode': archive.stat().st_ino,
+                              'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
+            row['archive_delta_from_original'] = delta(current_case['archive_before'], row['archive'])
+        with (evidence / 'snapshot-steps.jsonl').open('a') as out:
+            out.write(json.dumps(row) + '\n')
+            out.flush()
+            os.fsync(out.fileno())
+        current_case['previous'] = after
+
     try:
+        if args.inherited_semantics:
+            prior = json.loads((args.inherited_semantics / 'result.json').read_text())
+            assert prior['status'] == 'failed' and prior['image'] == image
+            assert [p['name'] for p in prior['phases']] == ['image-source', 'equal-create', 'equal-roundtrip', 'newer-create', 'newer-synthetic31', 'unguarded-write-negative']
+            assert [p['container_exit'] for p in prior['phases']] == [0, 0, 0, 0, 0, 17]
+            assert prior['fresh_target_schema'] == 30 and prior['scratch_removed'] and prior['all_test_containers_removed']
+            assert prior['docker_volume_census_unchanged'] and not prior['cleanup_errors']
+            for rel, digest in prior['artifact_sha256'].items():
+                assert hashlib.sha256((args.inherited_semantics / rel).read_bytes()).hexdigest() == digest
+            report['inherited_semantics_sha256'] = hashlib.sha256((args.inherited_semantics / 'result.json').read_bytes()).hexdigest()
+            report['six_semantic_phases_inherited_not_rerun'] = True
         report['image_inspect'] = json.loads(h.run(['docker', 'image', 'inspect', image]))[0]
         digest = image.split('@', 1)[1]
         assert any(x.endswith('@' + digest) for x in report['image_inspect']['RepoDigests'])
@@ -203,20 +245,25 @@ raise SystemExit(17)
         source_check = ('import hashlib,json; from pathlib import Path; expected=' + repr(contract['source_sha256']) + '; '
                         'observed={name:hashlib.sha256((Path("/opt/hermes")/name).read_bytes()).hexdigest() for name in expected}; '
                         'print(json.dumps({"source_sha256":observed}),flush=True); assert observed==expected')
-        run_image('image-source', equal, source_check)
-        run_image('equal-create', equal, create)
-        ObservedDockerRuntime({'image': image}, scratch, 'fixture').check_history(equal)
-        run_image('equal-roundtrip', equal, reopen)
         owner = scratch / 'owner'
         newer = owner / '.hermes'
         newer.mkdir(parents=True)
         (newer / 'config.yaml').write_text('model:\n  provider: synthetic\n  default: synthetic\n')
-        run_image('newer-create', newer, create)
-        run_image('newer-synthetic31', newer, 'identity_contract=' + repr(contract) + '\n' + upgrade)
-        # Keep the negative on a separate synthetic copy; never mutate the refused source.
-        negative = scratch / 'unguarded'
-        shutil.copytree(newer, negative)
-        run_image('unguarded-write-negative', negative, unsafe, 17)
+        if args.inherited_semantics:
+            # Recreate only the disposable refusal input in the pinned image.
+            # The six consequential semantics retain their original hashes.
+            run_image('refusal-fixture31', newer, source_check + '\n' + create + '\nidentity_contract=' + repr(contract) + '\n' + upgrade)
+        else:
+            run_image('image-source', equal, source_check)
+            run_image('equal-create', equal, create)
+            ObservedDockerRuntime({'image': image}, scratch, 'fixture').check_history(equal)
+            run_image('equal-roundtrip', equal, reopen)
+            run_image('newer-create', newer, create)
+            run_image('newer-synthetic31', newer, 'identity_contract=' + repr(contract) + '\n' + upgrade)
+            # Keep the negative on a separate synthetic copy; never mutate the refused source.
+            negative = scratch / 'unguarded'
+            shutil.copytree(newer, negative)
+            run_image('unguarded-write-negative', negative, unsafe, 17)
         before = snapshot(newer)
         factory = lambda *a: ObservedDockerRuntime(*a)  # unchanged real adapter, result observation only
         refused = []
@@ -230,17 +277,28 @@ raise SystemExit(17)
                         if p.is_file():
                             z.write(p, p.name)
                 archive_before = hashlib.sha256(source.read_bytes()).hexdigest()
+            current_case.clear()
+            current_case.update(kind=kind, home=newer, before=before)
+            if kind == 'archive':
+                current_case.update(archive=source, archive_before={
+                    'inode': source.stat().st_ino, 'sha256': archive_before})
+            observe_step('before_scan')
             plan = h.scan(source, owner_home=owner)
+            observe_step('after_scan')
+            assert snapshot(newer) == before
+            assert plan['summary']['sessions'] in (None, 'unavailable')
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', 0))
                 port = listener.getsockname()[1]
             plan.update(move=kind == 'move', gateway_url='http://edge:8923/wizard/mcp', network='bridge', port=port)
             h.approve(plan)
+            observe_step('after_approve')
             agent_id = 'schema-' + token + '-' + kind
             wizard = scratch / ('wizard-' + kind)
             try:
                 h.apply(plan, agent_id, wizard, runtime_factory=factory)
             except h.ImportFailure as exc:
+                observe_step('after_apply_refusal')
                 assert str(exc) == 'history_schema_newer_than_runtime', str(exc)
             else:
                 raise AssertionError('newer history was not refused')
@@ -253,13 +311,24 @@ raise SystemExit(17)
             assert not (newer / 'WIZARD-IMPORTED.json').exists()
             assert not h.run(['docker', 'ps', '-aq', '--filter', 'name=^/agent-' + agent_id + '$'])
             (evidence / (kind + '.journal.json')).write_text(json.dumps(value, indent=2) + '\n')
-            h.undo(journal, runtime_factory=factory)
+            undone = h.undo(journal, runtime_factory=factory)
+            observe_step('after_undo')
+            assert json.loads(Path(undone['journal']).read_text())['state'] == 'undone'
+            assert not journal.parent.exists()
             assert snapshot(newer) == before
+            if kind == 'archive':
+                assert source.stat().st_ino == current_case['archive_before']['inode']
+                assert hashlib.sha256(source.read_bytes()).hexdigest() == archive_before
             refused.append(kind)
         report['refusal_paths'] = refused
         report['source_snapshot_before_after'] = before
         report['status'] = 'passed'
     finally:
+        # Persist even a failed boundary's exact file/inode deltas before cleanup.
+        try:
+            observe_step('final_before_cleanup')
+        except Exception as error:
+            report['cleanup_errors'].append('final diagnostic: ' + str(error))
         for name in names:
             try:
                 remaining = h.run(['docker', 'ps', '-aq', '--filter', 'name=^/' + name + '$'])

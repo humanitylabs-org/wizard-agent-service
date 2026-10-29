@@ -323,16 +323,12 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
     jobs = jobs_doc if isinstance(jobs_doc, list) else jobs_doc.get('jobs', [])
     platforms = (cfg.get('gateway') or {}).get('platforms') or cfg.get('platforms') or {}
     env_names = sorted(set(re.findall(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', texts.get('.env', ''), re.M)))
-    sessions = None
-    if not is_zip and (source / 'state.db').exists():
-        try:
-            # A SQLite connection context only commits/rolls back; it does NOT
-            # close descriptors. A leaked read-only WAL reader can retain an
-            # O_RDWR -shm fd and make the subsequent stopped-writer census fail.
-            with contextlib.closing(sqlite3.connect((source / 'state.db').as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
-                sessions = db.execute('SELECT count(*) FROM sessions').fetchone()[0]
-        except sqlite3.Error:
-            sessions = 'unavailable'
+    # This optional estimate must not open the source SQLite database: mode=ro
+    # can create WAL/SHM sidecars even after closing, while immutable=1 ignores
+    # pending WAL and bypasses locks. Scan has no proof of source quiescence,
+    # including for rollback-journal homes; leave the count explicitly unknown.
+    # Keep the existing None (absent/archive) and unavailable (present) shapes.
+    sessions = 'unavailable' if not is_zip and (source / 'state.db').exists() else None
     paths = [r for r, _, _ in rows]
     plan = {'schema': SCHEMA, 'source': str(source), 'source_kind': 'archive' if is_zip else 'home',
             'owner_home': str(owner_home), 'source_identity': identity, 'approved': False,
