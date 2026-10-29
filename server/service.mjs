@@ -61,6 +61,7 @@ import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination }
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
 import { createSkins, SkinsError } from './skins.mjs'
 import { serveAppView } from './app-views.mjs'
+import { createAppOwnerRoutes } from './app-owner-routes.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
@@ -4820,6 +4821,10 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  // Only trusted bootstrap can register executable owner routes. Never read code/config from apps.json.
+  const appOwnerRegistrations = options.appOwnerRoutes ?? []
+  const appOwnerRoute = createAppOwnerRoutes(appOwnerRegistrations)
+  const appOwnerApiRoutes = new Map(appOwnerRegistrations.map(r => [r.appId, new Set(r.routes)]))
   const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
@@ -4854,6 +4859,12 @@ function buildWizardServer(options, lifetime) {
           return
         }
       }
+      // Owner extensions run after the ordinary principal/agent/access gates, with the original
+      // raw path and headers. Even authenticated Service calls and box-only fallback are not owners.
+      if (await appOwnerRoute(request, response, {
+        accessAllowed: async () => !requireAccess || Boolean(accessVerifier && await accessVerified(request, accessVerifier)),
+        installed: id => readApps({ appsJsonPath, launcherPath }).apps.some(a => a.id === id && a.source === 'apps.json'),
+      })) return
       // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
       if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
         if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
@@ -5130,7 +5141,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname.startsWith('/wizard/views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (serveAppView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps.filter(a => a.source === 'apps.json') })) return
+        if (serveAppView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps.filter(a => a.source === 'apps.json'), appOwnerApiRoutes })) return
       }
       if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }

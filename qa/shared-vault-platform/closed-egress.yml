@@ -1,0 +1,11 @@
+# Test overlay ONLY, never a deploy file. Requires Compose !override support.
+# Independently remove every uplink BEFORE start; do not trust app DNS/egress code.
+services:
+  agent:
+    dns: [127.0.0.1]
+  edge:
+    dns: [127.0.0.1]
+  egress:
+    networks: !override [sandbox]
+    dns: [127.0.0.1]
+    command: [python3, -c, 'import time; time.sleep(86400)']

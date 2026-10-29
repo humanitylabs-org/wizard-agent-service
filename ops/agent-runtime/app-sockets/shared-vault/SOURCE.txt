@@ -1,0 +1,9 @@
+Credential-free plugin, unmodified from:
+https://github.com/humanitylabs-org/wizard-shared-vault
+commit 2dc1a84b1e9985f904542121ff20e57a0f4ba681
+path plugin/__init__.py
+SHA256 ee6dc8c0b40b8c4860429b9db0cdd63bc7073d7cb2a1c3387160b32935aef416
+License GPL-3.0-only; see LICENSE. The surrounding Service is MIT-licensed;
+this staged dependency retains its own license. Combined-distribution terms require
+independent review before publication/activation.
+Explicit host grant required. No ordinary install or metadata enables this mount.
