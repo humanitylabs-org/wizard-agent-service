@@ -95,7 +95,7 @@ export const PRESETS = [
   },
   {
     id: 'standard', label: 'Standard',
-    summary: 'Hermes defaults: outside tools on, shared files, apps you pick.',
+    summary: 'Hermes defaults: outside tools on, shared files, every installed app on (turn any off per agent).',
     privacy: 'standard',
     permissions: { outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', wizard_apps: [], agent_apps: [], other_agents: 'read', shared_with_agents: true },
   },
@@ -987,6 +987,15 @@ export function createAgentRegistry(options = {}) {
     if (!preset) fail(400, 'unknown_preset', 'agent.permissions.preset')
     const { preset: _ignored, ...overrides } = body.permissions ?? {}
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
+    if (preset.privacy !== 'private' && overrides.wizard_apps === undefined && overrides.agent_apps === undefined) {
+      // Miguel, 29 Oct 2026: a new standard agent starts with everything on: every installed app the main agent would
+      // get (private apps still need a tick). The owner turns items off per agent in Connections → Agents. A client
+      // that sends either app list picks the apps itself.
+      const hidden = privateApps()
+      const { wizardApps, agentApps } = installedApps()
+      permissions.wizard_apps = wizardApps.filter((app) => !hidden.has(app.id)).map((app) => app.id)
+      permissions.agent_apps = agentApps.filter((app) => !hidden.has(app.id)).map((app) => app.id)
+    }
     if (preset.privacy === 'private') {
       const kinds = appKinds()
       for (const app of privateApps()) {

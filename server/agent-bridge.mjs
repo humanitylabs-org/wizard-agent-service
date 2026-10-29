@@ -64,6 +64,8 @@ export function bridgeApps(registry, { mcpAddress = 'url' } = {}) {
       status: clean(app.status, 24) || 'unknown', jobs: provides.filter((p) => !SKIP_PROVIDES.has(p)),
       url, address: url.replace(/^(https?:\/\/[^/]+).*$/u, '$1'), transport: clean(mcp?.transport, 40) || 'streamable-http',
       skill: typeof app.skill === 'string' && app.skill && !app.skill.includes('..') ? app.skill : '',
+      // `privacy: private` apps stay unnamed to an agent that may not use them (#58/#59 seal)
+      ...(app.privacy === 'private' ? { private: true } : {}),
     })
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -406,6 +408,13 @@ export function createAgentBridge({
     return allowed ? apps.filter((app) => allowed.has(app.id)) : apps
   }
 
+  /** The agent's own name for a refusal ("Oscar is not allowed to use Money"); the registry's label, else a plain word. */
+  const agentLabel = (agentId) => {
+    let label = ''
+    try { label = agents()?.read?.(agentId)?.label || '' } catch { label = '' }
+    return clean(label, 60) || 'This agent'
+  }
+
   async function collectNames(list = apps) {
     const out = {}
     await Promise.all(list.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
@@ -470,9 +479,16 @@ export function createAgentBridge({
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
       return r
     }
-    // An app this agent may not use is answered exactly like an app that is not installed (#58).
     const app = visible(agentId).find((a) => typeof name === 'string' && name.startsWith(`${a.prefix}__`))
     const tool = app ? name.slice(app.prefix.length + 2) : ''
+    // An installed app the owner turned off for this agent (Connections → Agents, Miguel 29 Oct 2026): say so plainly,
+    // so the agent can tell the owner where to turn it on. A private app stays answered exactly like an app that is
+    // not installed (#58/#59: nothing tells a standard agent that a private app is there).
+    const off = app ? null : apps.find((a) => !a.private && typeof name === 'string' && name.startsWith(`${a.prefix}__`))
+    if (off) {
+      log(JSON.stringify({ event: 'call', app: off.id, tool: clean(String(name).slice(off.prefix.length + 2), 80), agent: agentId, ms: 0, ok: false, denied: true }))
+      return failure(`${agentLabel(agentId)} is not allowed to use ${off.name}. The owner can turn it on in Connections.`)
+    }
     if (!app || !tool) {
       log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
       return failure(`No installed app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
