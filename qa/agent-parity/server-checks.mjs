@@ -531,11 +531,12 @@ export const serverChecks = {
     await finishedRunLeavesWorking(s)
     if (s.kind !== 'main') return
     // Main admits through the durable run queue too (this scene runs it direct): both leave at once.
-    const queued = await scene('main', { canonicalSessionListing: true, fixtureSessionStatus: true })
+    // Fresh-mode box: no state.db and no Wizard Inbox, so only the queue revision can tell the cached
+    // listing that the queued run finished; the row must come from the finished listing.
+    const queued = await scene('main', { canonicalSessionListing: true, fixtureSessionStatus: true, hermesStatePath: '' })
     try {
       assert.equal((await queued.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile' }))).status, 201)
-      // The queue's own projection ends Working; its row count still comes from the cached listing.
-      await finishedRunLeavesWorking(queued, false)
+      await finishedRunLeavesWorking(queued)
     } finally { await queued.close() }
   },
   'status-list-state': async s => {

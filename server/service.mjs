@@ -2982,6 +2982,7 @@ function buildWizardServer(options, lifetime) {
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let mainCatalogCensus = null, mainCatalogCensusAt = 0
   let canonicalSessionInFlight = null
+  let canonicalSessionInFlightRevision = ''
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
@@ -3719,6 +3720,7 @@ function buildWizardServer(options, lifetime) {
     if (!canonicalSessionReader) return Promise.resolve(null)
     if (!canonicalSessionInFlight) {
       const assistantRevision = canonicalListingRevision()
+      canonicalSessionInFlightRevision = assistantRevision
       canonicalSessionInFlight = Promise.resolve()
         .then(() => canonicalSessionReader())
         .then((sessions) => {
@@ -3746,8 +3748,13 @@ function buildWizardServer(options, lifetime) {
       // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
       // short moment, then serve the last listing; the refresh bumps the generation and the list
       // snapshot rebuilds as soon as it lands.
-      if (canonicalSessionCache.assistantRevision !== canonicalListingRevision()) {
-        const fresh = refreshCanonicalSessions()
+      const revision = canonicalListingRevision()
+      if (canonicalSessionCache.assistantRevision !== revision) {
+        // A read already in flight from before this reply or queue move may have captured the
+        // thread without it; joining it would answer this poll with that stale listing.
+        const fresh = canonicalSessionInFlight && canonicalSessionInFlightRevision !== revision
+          ? refreshCanonicalSessionsAfterNow()
+          : refreshCanonicalSessions()
         const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
         let timer
         const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
