@@ -251,6 +251,16 @@ def _rank(row):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _manual(row):
+    return str(row.get('source', '')).startswith('manual:')
+
+
+def _can_lead(slug, own, pool):
+    # Stock Hermes keeps manually added anthropic grants ahead of seeded ones (the Claude Code mirror), so a
+    # seeded grant cannot be moved first while any manual grant exists; never offer an action that cannot work.
+    return slug != 'anthropic' or any(_manual(r) for r in own) or not any(_manual(r) for r in pool)
+
+
 def provider_accounts(provider, read=None, fetch=None, renew=None):
     slug = PROVIDERS[provider]
     renew = renew or _renew
@@ -323,7 +333,7 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
                                  'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
                                  'priority': _rank(r)}
                                 for r, _ in aliases if r.get('id')],
-                'actions': {'reconnect': True, 'remove': True, 'prefer': True}}
+                'actions': {'reconnect': True, 'remove': True, 'prefer': _can_lead(slug, [r for r, _ in aliases], rows)}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))

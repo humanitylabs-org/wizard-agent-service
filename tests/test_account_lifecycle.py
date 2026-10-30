@@ -81,10 +81,13 @@ class LifecycleTests(unittest.TestCase):
         rows=self.original+[{'id':'cc55dd','auth_type':'oauth','source':'claude_code','label':'claude_code'}]
         for i,r in enumerate(rows): r['priority']=i
         self.path.write_text(json.dumps(rows))
-        out=self.wait(self.b.start('claude','prefer','cc55dd',confirmed=True))
+        # Stock Hermes pins added anthropic grants ahead of the seeded Claude Code login: refuse, change nothing.
+        with self.assertRaises(m.BrokerError): self.b.start('claude','prefer','cc55dd',confirmed=True)
+        self.assertEqual(json.loads(self.path.read_text()),rows)
+        out=self.wait(self.b.start('claude','prefer','ee55ff',confirmed=True))
         self.assertEqual(out['status'],'succeeded')
         after=json.loads(self.path.read_text())
-        self.assertEqual([r['id'] for r in after],['cc55dd','aa11bb','ee55ff'])
+        self.assertEqual([r['id'] for r in after],['ee55ff','aa11bb','cc55dd'])
         self.assertEqual(after[0]['priority'],0)
         for target in ('1','missing','claude_code',None):
             with self.assertRaises(m.BrokerError): self.b.start('claude','prefer',target,confirmed=True)
