@@ -65,8 +65,12 @@ class Broker:
         inventory = self.rows(provider)
         if any(str(r.get('label', '')).strip().lower() == target.lower() for r in inventory):
             raise BrokerError('Credential ID conflicts with a label; resolve in Hermes first')
-        if sum(1 for r in inventory if r.get('id') == target) != 1:
+        rows = [r for r in inventory if r.get('id') == target]
+        if len(rows) != 1:
             raise BrokerError('Credential changed; refresh inventory')
+        manual = lambda r: str(r.get('source', '')).startswith('manual:')
+        if PROVIDERS[provider] == 'anthropic' and not manual(rows[0]) and any(manual(r) for r in inventory):
+            raise BrokerError('Hermes keeps added Claude sign-ins ahead of the Claude Code login')
 
     def start(self, provider, action, target=None, label='', confirmed=False):
         if provider not in PROVIDERS or action not in {'add', 'reconnect', 'remove', 'prefer'}:
