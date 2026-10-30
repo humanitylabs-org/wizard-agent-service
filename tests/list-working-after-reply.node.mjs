@@ -68,3 +68,89 @@ test('finished direct run re-reads after a listing read already in flight', {tim
   assert.equal(reads,before+2,'a fresh read follows the held one');
   assert.equal((await list()).status,'completed');
 });
+// Fresh-mode box (no state.db, runs go through the durable queue as wizardq_ ids): the new chat is
+// left out of the listing while it has no messages, and nothing re-read the cached listing when the
+// queued run finished, so the reply was on screen while the thread stayed "Starting…"/Working until
+// the 30 s cache expired (seen live on the demo: reply at 00:20:07, Working until 00:20:53).
+test('finished queued run refreshes the cached listing at once', {timeout:20000}, async t=>{
+  const root=mkdtempSync(join(tmpdir(),'working-lag-'));const servers=[];
+  t.after(async()=>{for(const s of servers.reverse())await close(s);rmSync(root,{recursive:true,force:true})});
+  const now=Date.now()/1000;let done=false,reads=0;
+  const row=()=>({id:'wizard_fresh',source:'api_server',title:'hi',hidden:false,parent_session_id:null,message_count:2,last_active:now,started_at:now,
+    latest_message:{role:'assistant',content:'Hello!',timestamp:now}});
+  const up=createServer(async(req,res)=>{
+    res.setHeader('Content-Type','application/json');const url=new URL(req.url,'http://fixture');
+    if(req.method==='POST'&&url.pathname==='/v1/runs'){for await(const _ of req);res.end(JSON.stringify({run_id:'run_q',status:'running',session_id:'wizard_fresh'}));return}
+    if(url.pathname==='/v1/runs/run_q'){res.end(JSON.stringify({run_id:'run_q',status:done?'completed':'running',session_id:'wizard_fresh',output:done?'Hello!':''}));return}
+    res.end('{}');
+  });servers.push(up);const u=await listen(up);mkdirSync(join(root,'os'));
+  const svc=createWizardServer({upstreamOrigin:`http://127.0.0.1:${u.port}`,hermesKey:'fixture-hermes-key',requireAccess:false,agents:false,agentBridge:false,followThrough:false,joinedDelegation:'off',
+    requireJoinedDelegationCapability:false,wizardOsHome:join(root,'os'),runQueueStatePath:join(root,'queue.sqlite3'),runQueuePollIntervalMs:0,
+    activeSessionReader:async()=>[],dispatchHealthReader:()=>true,
+    // The Hermes HTTP listing skips a thread with no messages; it lists it once the reply is in.
+    canonicalSessionReader:async()=>{reads++;return done?[row()]:[]}});
+  servers.push(svc);const base=`http://127.0.0.1:${(await listen(svc)).port}`;
+  const list=async()=>{const j=await (await fetch(base+"/wizard/hermes/api/sessions?limit=100")).json();if(!j.data)throw new Error(JSON.stringify(j));return j.data.find(r=>r.id==="wizard_fresh")};
+  assert.equal(await list(),undefined);
+  const post=await fetch(base+'/wizard/hermes/v1/runs',{method:'POST',headers:{'content-type':'application/json','Idempotency-Key':'wos-key-1'},body:JSON.stringify({input:'hi',session_id:'wizard_fresh'})});
+  const admitted=await post.json();assert.ok([200,202].includes(post.status),JSON.stringify(admitted));
+  assert.match(admitted.run_id,/^wizardq_/);
+  assert.equal(await list(),undefined);
+  // The Chats list view is already open (and cached) before the reply lands.
+  const viewUrl=base+'/wizard/hermes/api/sessions?view=list&window=archive-50&limit=100&offset=0&include_children=false&overrides=%7B%7D';
+  const viewRow=async()=>(await (await fetch(viewUrl)).json()).data.find(r=>r.id==='wizard_fresh');
+  assert.equal(await viewRow(),undefined);
+  done=true;
+  let run;for(let n=0;n<40;n++){run=await (await fetch(base+`/wizard/hermes/v1/runs/${admitted.run_id}`)).json();if(run.status==='completed')break;await new Promise(r=>setTimeout(r,25))}
+  assert.equal(run.status,'completed');
+  const firstView=await viewRow();
+  assert.equal(firstView?.lastRunKey,'wos-key-1','the first list-view poll after the reply lists the finished thread');
+  let item;for(let n=0;n<10&&!item;n++){item=await list();if(!item)await new Promise(r=>setTimeout(r,100))}
+  assert.ok(item,`the finished thread is listed within 1 s (listing reads: ${reads})`);
+  assert.equal(item.wizard_last_run_idempotency_key,'wos-key-1');
+  assert.ok(!['queued','running'].includes(item.status),`status ${item.status}`);
+  // The Chats list view (what the UI's Working hold releases on) agrees on its very next poll.
+  const view=await viewRow();
+  assert.equal(view?.lastRunKey,'wos-key-1');
+  assert.equal(view?.lastRunStatus,'completed');
+  assert.ok(!['queued','running','submitting'].includes(view?.status),`list view status ${view?.status}`);
+});
+// A listing read already in flight when the queued run finishes captured the thread without its
+// reply. The first poll after completion must wait for it and read again, not answer with it.
+test('finished queued run re-reads after a listing read already in flight', {timeout:20000}, async t=>{
+  const root=mkdtempSync(join(tmpdir(),'working-lag-'));const servers=[];
+  t.after(async()=>{for(const s of servers.reverse())await close(s);rmSync(root,{recursive:true,force:true})});
+  const now=Date.now()/1000;let done=false,reads=0,hold=null;
+  const row=()=>({id:'wizard_fresh',source:'api_server',title:'hi',hidden:false,parent_session_id:null,message_count:2,last_active:now,started_at:now,
+    latest_message:{role:'assistant',content:'Hello!',timestamp:now}});
+  const up=createServer(async(req,res)=>{
+    res.setHeader('Content-Type','application/json');const url=new URL(req.url,'http://fixture');
+    if(req.method==='POST'&&url.pathname==='/v1/runs'){for await(const _ of req);res.end(JSON.stringify({run_id:'run_q',status:'running',session_id:'wizard_fresh'}));return}
+    if(url.pathname==='/v1/runs/run_q'){res.end(JSON.stringify({run_id:'run_q',status:done?'completed':'running',session_id:'wizard_fresh',output:done?'Hello!':''}));return}
+    res.end('{}');
+  });servers.push(up);const u=await listen(up);mkdirSync(join(root,'os'));
+  const svc=createWizardServer({upstreamOrigin:`http://127.0.0.1:${u.port}`,hermesKey:'fixture-hermes-key',requireAccess:false,agents:false,agentBridge:false,followThrough:false,joinedDelegation:'off',
+    requireJoinedDelegationCapability:false,wizardOsHome:join(root,'os'),runQueueStatePath:join(root,'queue.sqlite3'),runQueuePollIntervalMs:0,
+    activeSessionReader:async()=>[],dispatchHealthReader:()=>true,
+    canonicalSessionReader:async()=>{reads++;const seen=done?[row()]:[];if(hold)await hold;return seen}});
+  servers.push(svc);const base=`http://127.0.0.1:${(await listen(svc)).port}`;
+  const viewUrl=base+'/wizard/hermes/api/sessions?view=list&window=archive-50&limit=100&offset=0&include_children=false&overrides=%7B%7D';
+  const viewRow=async()=>(await (await fetch(viewUrl)).json()).data.find(r=>r.id==='wizard_fresh');
+  const post=await fetch(base+'/wizard/hermes/v1/runs',{method:'POST',headers:{'content-type':'application/json','Idempotency-Key':'wos-key-2'},body:JSON.stringify({input:'hi',session_id:'wizard_fresh'})});
+  const admitted=await post.json();assert.match(admitted.run_id,/^wizardq_/);
+  assert.equal(await viewRow(),undefined);
+  // A rename starts a listing read before the reply lands; it is held open.
+  let release;hold=new Promise(r=>{release=r});const before=reads;
+  assert.equal((await fetch(base+'/wizard/hermes/api/sessions/wizard_fresh',{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({title:'hi again'})})).status,200);
+  for(let n=0;n<50&&reads===before;n++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(reads,before+1,'the held read started before the run ended');
+  done=true;
+  let run;for(let n=0;n<40;n++){run=await (await fetch(base+`/wizard/hermes/v1/runs/${admitted.run_id}`)).json();if(run.status==='completed')break;await new Promise(r=>setTimeout(r,25))}
+  assert.equal(run.status,'completed');
+  // The plain listing reads the cached Hermes listing once per request (the list view's failed
+  // snapshot build happens to read it twice on a fresh-mode box, which hides this).
+  const poll=fetch(base+'/wizard/hermes/api/sessions?limit=100').then(r=>r.json()).then(j=>j.data.find(r=>r.id==='wizard_fresh'));
+  await new Promise(r=>setTimeout(r,50));hold=null;release();
+  const item=await poll;
+  assert.equal(item?.wizard_last_run_idempotency_key,'wos-key-2','the first poll after the reply waits out the older read and lists the finished thread');
+});

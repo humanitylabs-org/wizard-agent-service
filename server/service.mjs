@@ -2982,6 +2982,7 @@ function buildWizardServer(options, lifetime) {
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let mainCatalogCensus = null, mainCatalogCensusAt = 0
   let canonicalSessionInFlight = null
+  let canonicalSessionInFlightRevision = ''
   const inboxOrigin = confinedUpstream(options.inboxOrigin ?? 'http://127.0.0.1:8941')
   const inboxToken = options.inboxToken ?? ''
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
@@ -3704,11 +3705,22 @@ function buildWizardServer(options, lifetime) {
   if (runQueue) runQueueReady = runQueue.initialize()
   if (heavyWork) void runQueueReady.then(() => { if (!lifetime.closing) heavyWork.start() }).catch(() => undefined)
 
+  // What makes the cached Hermes listing stale before it expires: a new Wizard Inbox reply, or a
+  // queued run admitted or moving status (run-queue.mjs listRevision). A fresh-mode box has no inbox
+  // database and sends every run through the queue as a wizardq_ id, so without the queue revision a
+  // finished reply waited out the 30 s cache with its thread still in Working (and a new chat, which
+  // the listing skips while it has no messages, stayed "Starting…").
+  const canonicalListingRevision = () => {
+    let queue = ''
+    try { queue = runQueue?.listRevision() ?? '' } catch { /* the queue is optional for the listing */ }
+    return `${readWizardAssistantRevision(inboxDbPath)}|${queue}`
+  }
   const sessionListCollections = (payload) => ['data', 'sessions'].filter((key) => Array.isArray(payload?.[key]))
   const refreshCanonicalSessions = () => {
     if (!canonicalSessionReader) return Promise.resolve(null)
     if (!canonicalSessionInFlight) {
-      const assistantRevision = readWizardAssistantRevision(inboxDbPath)
+      const assistantRevision = canonicalListingRevision()
+      canonicalSessionInFlightRevision = assistantRevision
       canonicalSessionInFlight = Promise.resolve()
         .then(() => canonicalSessionReader())
         .then((sessions) => {
@@ -3736,8 +3748,13 @@ function buildWizardServer(options, lifetime) {
       // (3.5-6.7 s seen under load), and every reply anywhere would make every Chats list wait. Wait a
       // short moment, then serve the last listing; the refresh bumps the generation and the list
       // snapshot rebuilds as soon as it lands.
-      if (canonicalSessionCache.assistantRevision !== readWizardAssistantRevision(inboxDbPath)) {
-        const fresh = refreshCanonicalSessions()
+      const revision = canonicalListingRevision()
+      if (canonicalSessionCache.assistantRevision !== revision) {
+        // A read already in flight from before this reply or queue move may have captured the
+        // thread without it; joining it would answer this poll with that stale listing.
+        const fresh = canonicalSessionInFlight && canonicalSessionInFlightRevision !== revision
+          ? refreshCanonicalSessionsAfterNow()
+          : refreshCanonicalSessions()
         const waitMs = Number(options.canonicalSessionWaitMs ?? 500)
         let timer
         const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); timer.unref?.() })
