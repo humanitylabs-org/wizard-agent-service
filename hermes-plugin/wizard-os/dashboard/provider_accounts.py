@@ -221,6 +221,36 @@ def _quota(provider, row, fetch):
     return value
 
 
+def claude_model_cooldowns(read=None, inventory=None):
+    """Fresh secret-free raw grant projection; never fetch provider usage or cache."""
+    if inventory is None:
+        if read is None:
+            from hermes_cli.auth import read_credential_pool
+            read = read_credential_pool
+        inventory = read('anthropic')
+    if not isinstance(inventory, list):
+        return None
+    grants = []
+    for r in inventory:
+        if not isinstance(r, dict) or r.get('auth_type') != 'oauth' or not isinstance(r.get('id'), str) or not r['id']:
+            return None
+        values = r.get('model_cooldowns') or {}
+        if not isinstance(values, dict):
+            return None
+        safe = {model: until for model, until in values.items()
+                if isinstance(model, str) and re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model)
+                and isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)}
+        if len(safe) != len(values):
+            return None
+        grants.append({'id': hashlib.sha256(r['id'].encode()).hexdigest()[:24], 'models': safe})
+    return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
+
+
+def _rank(row):
+    value = row.get('priority')
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def provider_accounts(provider, read=None, fetch=None, renew=None):
     slug = PROVIDERS[provider]
     renew = renew or _renew
@@ -288,13 +318,19 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
                 'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
                 'status': state, 'usage': usage, 'credentialCount': len(aliases),
                 'usageStatus': 'ok' if usage else 'unavailable',
+                'priority': min((v for v in (_rank(r) for r, _ in aliases) if v is not None), default=None),
                 'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
-                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit()}
+                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
+                                 'priority': _rank(r)}
                                 for r, _ in aliases if r.get('id')],
-                'actions': {'reconnect': True, 'remove': True}}
+                'actions': {'reconnect': True, 'remove': True, 'prefer': True}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
+    # Hermes tries the lowest priority first (fill_first); the projection keeps that order explicit.
+    first = min((a['priority'] for a in accounts if a['priority'] is not None), default=None)
+    for a in accounts:
+        a['preferred'] = first is not None and a['priority'] == first
     # No full response cache: additions/removals are visible on every request.
     # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
     # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
@@ -303,8 +339,9 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
             'management': {'contract': 'wizard.account-management/1', 'status': 'available',
-                           'message': ('Reconnect signs in again and retains existing grants. Use a different OpenAI account to add quota; signing in to the same account can invalidate its older grants.'
-                                       if provider == 'chatgpt' else
-                                       'Add signs in to a separate Claude subscription in the Hermes Anthropic pool. The existing Claude Code login is unchanged.'),
+                           'message': 'Reconnect signs in again and retains existing grants. Use a different '
+                                      + ('Claude' if provider == 'claude' else 'OpenAI')
+                                      + ' account to add quota; signing in to the same account can invalidate its older grants.',
+                           'order': 'priority',
                            'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
             'error': None}

@@ -150,6 +150,19 @@ def get_chatgpt_usage():
     return value
 
 
+@router.get('/provider-accounts/claude/model-cooldowns')
+def get_claude_model_cooldowns():
+    # Cheap fresh store read; the account listing fetches live usage and can take
+    # tens of seconds when cold. No provider requests or credentials cross this API.
+    try:
+        result = _accounts.claude_model_cooldowns()
+    except Exception:
+        result = None
+    if result is None:
+        raise HTTPException(503, 'Cooldown inventory unavailable')
+    return result
+
+
 @router.get('/provider-accounts/{provider}')
 def get_provider_accounts(provider: str):
     if provider not in _accounts.PROVIDERS:
