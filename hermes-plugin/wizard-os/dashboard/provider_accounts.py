@@ -206,6 +206,11 @@ def claude_model_cooldowns(read=None, inventory=None):
     return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
 
 
+def _rank(row):
+    value = row.get('priority')
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def provider_accounts(provider, read=None, fetch=None):
     slug = PROVIDERS[provider]
     if read is None:
@@ -260,13 +265,19 @@ def provider_accounts(provider, read=None, fetch=None):
                 'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
                 'status': state, 'usage': usage, 'credentialCount': len(aliases),
                 'usageStatus': 'ok' if usage else 'unavailable',
+                'priority': min((v for v in (_rank(r) for r, _ in aliases) if v is not None), default=None),
                 'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
-                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit()}
+                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
+                                 'priority': _rank(r)}
                                 for r, _ in aliases if r.get('id')],
-                'actions': {'reconnect': True, 'remove': True}}
+                'actions': {'reconnect': True, 'remove': True, 'prefer': True}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
+    # Hermes tries the lowest priority first (fill_first); the projection keeps that order explicit.
+    first = min((a['priority'] for a in accounts if a['priority'] is not None), default=None)
+    for a in accounts:
+        a['preferred'] = first is not None and a['priority'] == first
     # No full response cache: additions/removals are visible on every request.
     # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
     # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
@@ -275,6 +286,9 @@ def provider_accounts(provider, read=None, fetch=None):
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
             'management': {'contract': 'wizard.account-management/1', 'status': 'available',
-                           'message': 'Reconnect signs in again and retains existing grants. Use a different OpenAI account to add quota; signing in to the same account can invalidate its older grants.',
+                           'message': 'Reconnect signs in again and retains existing grants. Use a different '
+                                      + ('Claude' if provider == 'claude' else 'OpenAI')
+                                      + ' account to add quota; signing in to the same account can invalidate its older grants.',
+                           'order': 'priority',
                            'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
             'error': None}

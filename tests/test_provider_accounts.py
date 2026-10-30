@@ -39,6 +39,20 @@ class AccountsTest(unittest.TestCase):
         for secret in ('SECRET', 'private@example.com', 'access_token', 'refresh_token'):
             self.assertNotIn(secret, text)
 
+    def test_priority_order_marks_the_sign_in_hermes_tries_first(self):
+        rows = [row('a', 'r1', 'Work'), row('b', 'r2', 'Home')]
+        rows[0]['priority'], rows[1]['priority'] = 1, 0
+        out = m.provider_accounts('chatgpt', lambda _: rows, self.fetch)
+        self.assertEqual([(a['priority'], a['preferred']) for a in out['accounts']], [(1, False), (0, True)])
+        self.assertEqual([c['priority'] for a in out['accounts'] for c in a['credentials']], [1, 0])
+        self.assertTrue(all(a['actions']['prefer'] for a in out['accounts']))
+        self.assertEqual(out['management']['order'], 'priority')
+        for item in rows: item.pop('priority')
+        out = m.provider_accounts('chatgpt', lambda _: rows, self.fetch)
+        self.assertEqual([a['preferred'] for a in out['accounts']], [False, False])
+        claude = m.provider_accounts('claude', lambda _: [], self.fetch)
+        self.assertIn('different Claude account', claude['management']['message'])
+
     def test_legacy_labels_never_merge_unproven_accounts(self):
         rows = [row('a', 'r1', 'CODEX'), row('b', 'r2', 'CODEX-2'), row('c', 'r3', 'CODEX-3')]
         out = m.provider_accounts('chatgpt', lambda _: rows, self.fetch)
