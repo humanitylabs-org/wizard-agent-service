@@ -41,6 +41,12 @@ class StagingRuntime:
         pass
     def remove(self):
         pass
+    def check_history(self, home):
+        from hermes_import import DockerRuntime
+        return DockerRuntime(self.plan, self.directory, 'staging-only').check_history(home)
+    def check_archive_history(self, archive):
+        from hermes_import import DockerRuntime
+        return DockerRuntime(self.plan, self.directory, 'staging-only').check_archive_history(archive)
     def import_archive(self, archive):
         # Validated transport only, never untrusted links/special files. Native
         # import occurs in a stopped uid-10000 helper, then staging is returned

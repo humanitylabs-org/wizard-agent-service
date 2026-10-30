@@ -206,23 +206,25 @@ class ImportTests(unittest.TestCase):
         self.undo(result)
         self.assertFalse(directory.exists())
 
-    def test_scan_closes_sqlite_reader_before_writer_census(self):
+    def test_scan_never_opens_sqlite_reader_before_writer_census(self):
         import sqlite3
         with contextlib.closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('PRAGMA journal_mode=WAL')
             db.execute('CREATE TABLE sessions (id TEXT)')
             db.commit()
-        connections = []
-        real_connect = m.sqlite3.connect
-        def tracked(*args, **kwargs):
-            connection = real_connect(*args, **kwargs)
-            connections.append(connection)
-            return connection
-        with patch.object(m.sqlite3, 'connect', side_effect=tracked):
-            self.plan()
-        self.assertTrue(connections)
-        for connection in connections:
-            with self.assertRaises(sqlite3.ProgrammingError):
-                connection.execute('SELECT 1')
+        # Even a closed read-only WAL reader can create sidecars. Scan has no
+        # quiescence proof, so it must leave the count unavailable without opening.
+        snapshot = lambda: {str(p.relative_to(self.home)): (p.stat().st_ino, p.read_bytes())
+                            for p in self.home.rglob('*') if p.is_file()}
+        before = snapshot()
+        self.assertNotIn('state.db-wal', before)
+        self.assertNotIn('state.db-shm', before)
+        with patch.object(m.sqlite3, 'connect',
+                          side_effect=AssertionError('scan must not open source SQLite')) as connect:
+            plan = self.plan()
+        connect.assert_not_called()
+        self.assertEqual(plan['summary']['sessions'], 'unavailable')
+        self.assertEqual(snapshot(), before)
 
     def test_scoped_credential_source_preserves_logical_destination(self):
         ssh = self.owner / '.ssh'
