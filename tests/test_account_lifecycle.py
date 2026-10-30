@@ -20,6 +20,11 @@ assert args[:1]==['auth']
 if args[1]=='remove':
     assert args[3]=='aa11bb'
     rows=[r for r in rows if r['id']!=args[3]]
+elif args[1]=='priority':
+    assert args[2]=='anthropic' and args[4]=='0' and len(args)==5
+    moved=[r for r in rows if r['id']==args[3]]
+    rows=moved+[r for r in rows if r['id']!=args[3]]
+    for i,r in enumerate(rows): r['priority']=i
 else:
     assert args[1]=='add' and '--type' in args and '--no-browser' in args
     assert '--label' not in args
@@ -72,6 +77,18 @@ class LifecycleTests(unittest.TestCase):
     def test_remove_exact_id_not_position(self):
         out=self.wait(self.b.start('chatgpt','remove','aa11bb',confirmed=True))
         self.assertEqual(out['status'],'succeeded'); self.assertEqual(json.loads(self.path.read_text()),self.original[1:])
+    def test_prefer_moves_any_exact_sign_in_first_without_loss(self):
+        rows=self.original+[{'id':'cc55dd','auth_type':'oauth','source':'claude_code','label':'claude_code'}]
+        for i,r in enumerate(rows): r['priority']=i
+        self.path.write_text(json.dumps(rows))
+        out=self.wait(self.b.start('claude','prefer','cc55dd',confirmed=True))
+        self.assertEqual(out['status'],'succeeded')
+        after=json.loads(self.path.read_text())
+        self.assertEqual([r['id'] for r in after],['cc55dd','aa11bb','ee55ff'])
+        self.assertEqual(after[0]['priority'],0)
+        for target in ('1','missing','claude_code',None):
+            with self.assertRaises(m.BrokerError): self.b.start('claude','prefer',target,confirmed=True)
+        with self.assertRaises(m.BrokerError): self.b.start('claude','prefer','aa11bb')
     def test_confirmation_and_target_validation(self):
         for target in ('1','missing','aa11bb;touch',None):
             with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove',target,confirmed=True)
