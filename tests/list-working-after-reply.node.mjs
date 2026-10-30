@@ -96,15 +96,21 @@ test('finished queued run refreshes the cached listing at once', {timeout:20000}
   const admitted=await post.json();assert.ok([200,202].includes(post.status),JSON.stringify(admitted));
   assert.match(admitted.run_id,/^wizardq_/);
   assert.equal(await list(),undefined);
+  // The Chats list view is already open (and cached) before the reply lands.
+  const viewUrl=base+'/wizard/hermes/api/sessions?view=list&window=archive-50&limit=100&offset=0&include_children=false&overrides=%7B%7D';
+  const viewRow=async()=>(await (await fetch(viewUrl)).json()).data.find(r=>r.id==='wizard_fresh');
+  assert.equal(await viewRow(),undefined);
   done=true;
   let run;for(let n=0;n<40;n++){run=await (await fetch(base+`/wizard/hermes/v1/runs/${admitted.run_id}`)).json();if(run.status==='completed')break;await new Promise(r=>setTimeout(r,25))}
   assert.equal(run.status,'completed');
+  const firstView=await viewRow();
+  assert.equal(firstView?.lastRunKey,'wos-key-1','the first list-view poll after the reply lists the finished thread');
   let item;for(let n=0;n<10&&!item;n++){item=await list();if(!item)await new Promise(r=>setTimeout(r,100))}
   assert.ok(item,`the finished thread is listed within 1 s (listing reads: ${reads})`);
   assert.equal(item.wizard_last_run_idempotency_key,'wos-key-1');
   assert.ok(!['queued','running'].includes(item.status),`status ${item.status}`);
-  // The Chats list view (what the UI's Working hold releases on) agrees.
-  const view=(await (await fetch(base+'/wizard/hermes/api/sessions?view=list&window=archive-50&limit=100&offset=0&include_children=false&overrides=%7B%7D')).json()).data.find(r=>r.id==='wizard_fresh');
+  // The Chats list view (what the UI's Working hold releases on) agrees on its very next poll.
+  const view=await viewRow();
   assert.equal(view?.lastRunKey,'wos-key-1');
   assert.equal(view?.lastRunStatus,'completed');
   assert.ok(!['queued','running','submitting'].includes(view?.status),`list view status ${view?.status}`);
