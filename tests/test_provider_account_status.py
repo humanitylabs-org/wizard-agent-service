@@ -15,7 +15,7 @@ spec.loader.exec_module(projection)
 class StatusTests(unittest.TestCase):
     def test_healthy_hermes_grant_is_ready_for_connection_app(self):
         entry = {'id': 'synthetic', 'label': 'Synthetic', 'auth_type': 'oauth',
-                 'last_status': 'ok', 'access_token': 'synthetic-access-token'}
+                 'last_status': 'ok', 'access_token': 't1'}
         window = types.SimpleNamespace(used_percent=10, label='Weekly', reset_at=None)
         snapshot = types.SimpleNamespace(windows=[window], plan='Pro', fetched_at=None,
                                          unavailable_reason=None)
