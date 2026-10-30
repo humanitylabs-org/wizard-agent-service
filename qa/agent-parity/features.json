@@ -1084,6 +1084,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "multiline-composer-editability",
+      "description": "A three-line mobile draft keeps every editing row selectable and Send reachable without the model control intercepting either target",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run qa-composer-multiline.cjs against the actual mobile DOM with synthetic main, host-profile, container and restricted agent records. For each route, open its New chat through the supported shell path, enter a three-line draft, select the lower lines, and use elementFromPoint to require the second-last row to hit the textarea and Send to hit the Send button. The full matrix also covers phone/native widths 360 and 412, Nebula and Grove, plus native landscape. All requests are locally fixtured; foreign origins and agent-message writes fail the run. This is browser-level synthetic route and hit-testing evidence, not physical-device selection-handle proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-composer-multiline.cjs",
+        "wizard-ux/tests/composer-model-label.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "error-recovery",
       "description": "Interrupt a run/connection and reload",
       "layer": "ux",
