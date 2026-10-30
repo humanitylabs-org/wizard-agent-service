@@ -303,13 +303,15 @@ describe('owner vs agent authentication', () => {
 
   it('owner-only side lists omit private sessions for other callers', async () => {
     const s = await scene()
-    const put = (sessionId: string) => fetch(`${s.base}/wizard/thread-dispositions`, send('PUT', { runtime: 'direct', sessionId, deferred: true }, OWNER))
+    const put = (sessionId: string) => fetch(`${s.base}/wizard/thread-dispositions`, send('PUT', { runtime: 'direct', sessionId, deferred: true, ...(sessionId === CANARY ? { device: 'Private Fixture Device' } : {}) }, OWNER))
     expect((await put(CANARY)).status).toBe(200)
     expect((await put('wizard_main_1')).status).toBe(200)
     const owner = await (await fetch(`${s.base}/wizard/thread-dispositions`, { headers: OWNER })).json()
     expect(Object.keys(owner.state)).toEqual(expect.arrayContaining([`agent/${s.privateId}/direct:${CANARY}`, 'direct:wizard_main_1']))
+    expect(owner.state[`agent/${s.privateId}/direct:${CANARY}`].device).toBe('Private Fixture Device')
     const other = await (await fetch(`${s.base}/wizard/thread-dispositions`)).json()
     expect(Object.keys(other.state)).toEqual(['direct:wizard_main_1'])
+    expect(JSON.stringify(other)).not.toContain('Private Fixture Device')
   })
 })
 
