@@ -50,6 +50,11 @@ class AccountsTest(unittest.TestCase):
         for item in rows: item.pop('priority')
         out = m.provider_accounts('chatgpt', lambda _: rows, self.fetch)
         self.assertEqual([a['preferred'] for a in out['accounts']], [False, False])
+        seeded = dict(row('c', 'r9', 'claude_code'), source='claude_code')
+        mixed = m.provider_accounts('claude', lambda _: [row('a', 'r1', 'Work'), seeded], self.fetch)
+        self.assertEqual([a['actions']['prefer'] for a in mixed['accounts']], [True, False])
+        alone = m.provider_accounts('claude', lambda _: [seeded], self.fetch)
+        self.assertTrue(alone['accounts'][0]['actions']['prefer'])
         claude = m.provider_accounts('claude', lambda _: [], self.fetch)
         self.assertIn('different Claude account', claude['management']['message'])
 
