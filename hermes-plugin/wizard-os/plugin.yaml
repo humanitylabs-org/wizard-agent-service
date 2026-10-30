@@ -1,4 +1,4 @@
 name: wizard-os
-version: "0.4.1"
+version: "0.4.2"
 description: "Wizard OS: routes jobs through installed apps, keeps wizard-job-* pointer skills current, and guards app workflows against private or installed skill-copy edits."
 author: "Humanity Labs"

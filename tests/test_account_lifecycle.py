@@ -170,4 +170,30 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(j['management']['status'],'off'); self.assertEqual(j['actions'],{'add':False})
         self.assertEqual(j['accounts'][0]['actions'],{'reconnect':False,'remove':False}); self.assertEqual(j['accounts'][0]['id'],'aa11bb')
 
+    def test_changes_can_be_on_for_chatgpt_only(self):
+        """Fresh Wizard OS: WIZARD_ACCOUNT_CHANGES=chatgpt lets the ChatGPT app add sign-ins while Claude stays
+        read-only (its sign-in is the Claude Code page the agent's subscription provider uses)."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        s=importlib.util.spec_from_file_location('api3',ROOT/'hermes-plugin/wizard-os/dashboard/plugin_api.py')
+        api=importlib.util.module_from_spec(s); s.loader.exec_module(api)
+        api._lifecycle.broker=self.b
+        api._accounts.provider_accounts=lambda p:{'provider':p,'accounts':[],'actions':{'add':True},'management':{'contract':'wizard.account-management/1','status':'available'}}
+        os.environ['WIZARD_ACCOUNT_CHANGES']='chatgpt'
+        self.addCleanup(os.environ.pop,'WIZARD_ACCOUNT_CHANGES',None)
+        import sys
+        from types import SimpleNamespace
+        with patch.dict(sys.modules, {'hermes_cli.config': SimpleNamespace(load_config_readonly=lambda: {})}):
+            c=TestClient((lambda a:(a.include_router(api.router),a)[1])(FastAPI()))
+            chatgpt=c.get('/provider-accounts/chatgpt').json(); claude=c.get('/provider-accounts/claude').json()
+        self.assertEqual((chatgpt['management']['status'],chatgpt['actions']),('available',{'add':True}))
+        self.assertEqual((claude['management']['status'],claude['actions']),('off',{'add':False}))
+        headers={'X-Wizard-Account-Action':'1'}
+        self.assertEqual(c.post('/provider-accounts/claude/operations',json={'action':'add','confirmed':True},headers=headers).status_code,403)
+        self.assertEqual(self.b.jobs,{})
+        # '1' still means every provider; anything else (e.g. '0', 'yes') means none.
+        self.assertTrue(api._changes_on('claude') is False)
+        os.environ['WIZARD_ACCOUNT_CHANGES']='1'; self.assertTrue(api._changes_on('claude') and api._changes_on('chatgpt'))
+        os.environ['WIZARD_ACCOUNT_CHANGES']='yes'; self.assertFalse(api._changes_on('chatgpt'))
+
 if __name__=='__main__': unittest.main()
