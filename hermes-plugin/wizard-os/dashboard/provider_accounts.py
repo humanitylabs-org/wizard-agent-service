@@ -248,7 +248,10 @@ def provider_accounts(provider, read=None, fetch=None):
         if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
             extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
         state = str(row.get('last_status') or 'ready')
-        state = state if state in {'ready', 'ok', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
+        # Hermes calls a healthy OAuth grant "ok"; the connection apps use "ready".
+        if state == 'ok':
+            state = 'ready'
+        state = state if state in {'ready', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
         if slug == 'anthropic' and all(str(r.get('source', '')) == 'claude_code' for r, _ in aliases):
             # Hermes' mirror of the host Claude Code login: the Claude app already shows that login
             # (with its usage) as its own row, so it folds this pool grant into that row.
