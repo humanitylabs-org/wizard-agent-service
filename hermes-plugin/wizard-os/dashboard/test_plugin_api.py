@@ -139,6 +139,17 @@ class RouteTests(unittest.TestCase):
     def post(self, **changes):
         return self.client.post(PREFIX + "/infer/chatgpt", json={**BODY, **changes})
 
+    def test_claude_cooldowns_http_is_fresh_and_never_calls_usage(self):
+        evidence = {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(),
+                    'grants': [{'id': 'a' * 24, 'models': {'claude-opus-5-5': time.time() + 3600}}]}
+        with patch.object(api._accounts, 'claude_model_cooldowns', return_value=evidence) as read:
+            response = self.client.get(PREFIX + '/provider-accounts/claude/model-cooldowns')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), evidence)
+        read.assert_called_once_with()
+        with patch.object(api._accounts, 'claude_model_cooldowns', return_value=None):
+            self.assertEqual(self.client.get(PREFIX + '/provider-accounts/claude/model-cooldowns').status_code, 503)
+
     def test_exact_payload_effective_model_and_usage(self):
         response = self.post()
         self.assertEqual(response.status_code, 200, response.text)

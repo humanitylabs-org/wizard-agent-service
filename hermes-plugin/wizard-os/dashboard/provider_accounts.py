@@ -181,6 +181,31 @@ def _quota(provider, row, fetch):
     return value
 
 
+def claude_model_cooldowns(read=None, inventory=None):
+    """Fresh secret-free raw grant projection; never fetch provider usage or cache."""
+    if inventory is None:
+        if read is None:
+            from hermes_cli.auth import read_credential_pool
+            read = read_credential_pool
+        inventory = read('anthropic')
+    if not isinstance(inventory, list):
+        return None
+    grants = []
+    for r in inventory:
+        if not isinstance(r, dict) or r.get('auth_type') != 'oauth' or not isinstance(r.get('id'), str) or not r['id']:
+            return None
+        values = r.get('model_cooldowns') or {}
+        if not isinstance(values, dict):
+            return None
+        safe = {model: until for model, until in values.items()
+                if isinstance(model, str) and re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model)
+                and isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)}
+        if len(safe) != len(values):
+            return None
+        grants.append({'id': hashlib.sha256(r['id'].encode()).hexdigest()[:24], 'models': safe})
+    return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
+
+
 def provider_accounts(provider, read=None, fetch=None):
     slug = PROVIDERS[provider]
     if read is None:

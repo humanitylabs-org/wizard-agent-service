@@ -36,6 +36,7 @@ import { createRoutedQueues } from './routed-run-queue.mjs'
 import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
 import { createAiUsageReader } from './ai-usage.mjs'
+import { confirmedClaudePoolExhaustion, CLAUDE_POOL_SAFE_ERROR } from './claude-cooldown-bridge.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
@@ -3563,6 +3564,23 @@ function buildWizardServer(options, lifetime) {
           await heavyWork.validate(record)
         } else if (!manualRecovery && record.continuation?.kind !== 'watch' && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
           await requireHelperContinuation(record.continuation)
+        }
+      }
+      // Only a new, never-dispatched locked Claude turn may be failed locally.
+      // Re-admission of a frozen/uncertain send must reconcile with Hermes under
+      // its original idempotency key; a quota snapshot cannot settle delivery.
+      if (!record.dispatchAttempted && !record.dispatchBody) {
+        const selected = parseJsonBody(queuedBody)
+        const route = selected.model && selected.provider ? selected : lockedBridge.sessionRoute(selected.session_id)
+        if (route?.provider === 'anthropic' && /^claude-/i.test(route.model || '')
+          && (selected.require_model_lock === true || Boolean(lockedBridge.sessionRoute(selected.session_id)))
+          && await (options.claudePoolExhausted ?? confirmedClaudePoolExhaustion)(
+            { ...route, require_model_lock: true },
+            { appsJsonPath, address: options.aiConnectionAddress || (options.appsMcpAddress === 'internal' ? 'internal' : 'local'), fetchImpl })) {
+          return { upstreamRunId: '', capacityStatus: 'failed', payload: {
+            status: 'failed', safe_error: CLAUDE_POOL_SAFE_ERROR,
+            error: { type: 'wizard_claude_pool_exhausted', message: CLAUDE_POOL_SAFE_ERROR },
+          } }
         }
       }
       // Persist the actual decorated wire payload, not just the UI input: capability and

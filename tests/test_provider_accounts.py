@@ -70,6 +70,27 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(m.provider_accounts('chatgpt', lambda _: [empty], self.fetch)['accounts'][0]['usageStatus'], 'unavailable')
         self.assertEqual(self.calls, [])
 
+    def test_claude_cooldown_projection_is_fresh_complete_and_secret_free(self):
+        import time
+        rows = [row(id='oscar'), row(id='claude_code')]
+        for r in rows:
+            r['source'] = 'claude_code' if r['id'] == 'claude_code' else 'manual:hermes_pkce'
+            r['model_cooldowns'] = {'claude-opus-5-5': time.time() + 3600}
+        first = m.claude_model_cooldowns(read=lambda _: rows)
+        evidence = first
+        self.assertEqual(evidence['contract'], 'wizard.model-cooldowns/1')
+        self.assertEqual(len(evidence['grants']), 2)
+        self.assertEqual(len({r['id'] for r in evidence['grants']}), 2)
+        self.assertNotIn('SECRET', json.dumps(evidence))
+        self.assertNotIn('access_token', json.dumps(evidence))
+        rows[1]['model_cooldowns'].clear()  # Hermes auth reset, not stale cached usage.
+        second = m.claude_model_cooldowns(read=lambda _: rows)
+        self.assertEqual(second['grants'][1]['models'], {})
+        rows.append(row(id='third'))
+        self.assertEqual(len(m.claude_model_cooldowns(read=lambda _: rows)['grants']), 3)
+        rows[-1]['auth_type'] = 'api_key'  # Unknown alternate grant: no authoritative projection.
+        self.assertIsNone(m.claude_model_cooldowns(read=lambda _: rows))
+
     def test_claude_is_not_invented_from_another_volume(self):
         out = m.provider_accounts('claude', lambda _: [], self.fetch)
         self.assertEqual(out['accountCount'], 0)
