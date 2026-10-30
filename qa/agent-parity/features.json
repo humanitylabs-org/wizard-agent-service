@@ -692,6 +692,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "thread-device-markers",
+      "description": "A thread's optional device marker persists alongside its deferred state without stale clients erasing either field.",
+      "layer": "server",
+      "how_to_test": "For main, host-profile, container and restricted synthetic agent routes, PUT a deferred/device record, then deferred-only and device-only updates. Require trimmed case-preserving device text, merged returned records, restart persistence, empty-device clearing, invalid-input no-write behavior, and exact agent/session ownership.",
+      "source_refs": [
+        "server/thread-dispositions.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/thread-dispositions.test.ts",
+        "qa/agent-parity/server-checks.mjs",
+        "qa/agent-parity/fixture.test.mjs"
+      ],
+      "fixture": "thread-device-markers",
+      "policy_exemptions": []
+    },
+    {
       "id": "read-receipts",
       "description": "Mark one thread seen or unread",
       "layer": "server",

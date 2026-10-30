@@ -324,6 +324,35 @@ export const serverChecks = {
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))
   },
+  'thread-device-markers': async s => {
+    const put = body => s.raw('/wizard/thread-dispositions', { ...post(body), method: 'PUT' })
+    const wireRecord = ({ deferred, device, agent_id, session_id }) => ({ deferred, device, agent_id, session_id })
+    const base = { runtime: 'direct', session_id: 'wizard_parity', agent_id: s.id }
+    const seeded = await put({ ...base, deferred: true, device: '  Parity   Tablet  ' })
+    assert.equal(seeded.status, 200)
+    assert.deepEqual(wireRecord((await seeded.json()).record), { deferred: true, device: 'Parity Tablet', agent_id: s.id, session_id: 'wizard_parity' })
+
+    const deferredOnly = await put({ ...base, deferred: false })
+    assert.equal(deferredOnly.status, 200)
+    assert.deepEqual(wireRecord((await deferredOnly.json()).record), { deferred: false, device: 'Parity Tablet', agent_id: s.id, session_id: 'wizard_parity' })
+    const deviceOnly = await put({ ...base, device: '  Parity Phone  ' })
+    assert.equal(deviceOnly.status, 200)
+    assert.deepEqual(wireRecord((await deviceOnly.json()).record), { deferred: false, device: 'Parity Phone', agent_id: s.id, session_id: 'wizard_parity' })
+
+    await s.restart()
+    const persisted = await (await s.raw('/wizard/thread-dispositions')).json()
+    const record = Object.values(persisted.state).find(item => item.agent_id === s.id && item.session_id === 'wizard_parity')
+    assert.deepEqual(wireRecord(record), { deferred: false, device: 'Parity Phone', agent_id: s.id, session_id: 'wizard_parity' })
+
+    const cleared = await put({ ...base, device: '   ' })
+    assert.equal(cleared.status, 200)
+    assert.deepEqual(wireRecord((await cleared.json()).record), { deferred: false, device: undefined, agent_id: s.id, session_id: 'wizard_parity' })
+    const beforeInvalid = await (await s.raw('/wizard/thread-dispositions')).json()
+    for (const body of [base, { ...base, deferred: 'false' }, { ...base, device: 7 }, { ...base, device: 'x'.repeat(61) }]) {
+      assert.equal((await put(body)).status, 400)
+    }
+    assert.deepEqual(await (await s.raw('/wizard/thread-dispositions')).json(), beforeInvalid)
+  },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
     const retiredKey = 'agent/retired/direct:retired-thread'

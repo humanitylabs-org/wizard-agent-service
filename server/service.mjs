@@ -6037,7 +6037,7 @@ function buildWizardServer(options, lifetime) {
         // A private thread's side state is the owner's: refused before anything is stored.
         if (hiddenSession(request, body?.sessionId) || hiddenSession(request, `${body?.runtime}:${body?.sessionId}`)) { sendJson(response, 404, { error: 'not_found' }); return }
         const agentId = sideAgent(request, body.session_id ?? body.sessionId, body.agent_id ?? '')
-        const record = threadDispositionStore.set(scope, body.runtime, body.session_id ?? body.sessionId, body.deferred, agentId)
+        const record = threadDispositionStore.set(scope, body.runtime, body.session_id ?? body.sessionId, body, agentId)
         sendJson(response, 200, { record }); return
       }
 
