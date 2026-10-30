@@ -139,6 +139,13 @@ export class DurableHeavyQueue {
     return row ? JSON.parse(row.data) : null
   }
   rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
+  // Status decoration owns one qualified thread, not the whole historical ledger.
+  // The existing UNIQUE(agent_id,session,origin,key) index bounds this fresh read;
+  // retain arrival order and every matching job for the unchanged delivery guard.
+  rowsForThread(agentId, sessionId) {
+    return this.db.prepare('SELECT data FROM heavy_jobs WHERE agent_id=? AND session=? ORDER BY rowid')
+      .all(agentId, sessionId).map(row => JSON.parse(row.data))
+  }
   save(job) {
     if (heavyCompletionDropped(job) && !job.completion_notice) job = { ...job,
       completion_notice: { job_id: job.job_id, state: job.state } }

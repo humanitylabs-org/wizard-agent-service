@@ -2716,16 +2716,20 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
-    agentId, sessionId, jobs,
-    // The guard only changes check; done returns unchanged. Do not synchronously
-    // read transcript evidence that this guard cannot consume on cached list rows.
-    isDelivered: job => {
-      if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
-      const run = agents?.runThread(agentId, job.resume)
-      return run?.session_id === sessionId && run?.heavy_origin === job.origin
-    },
-  })
+  const heavyStatus = (agentId, sessionId, status, jobs) => {
+    // Match the guard's early return before reading any ledger. Routed callers
+    // without an explicit phase snapshot need only this exact agent/thread pair.
+    if (status?.state !== 'check') return status
+    return guardHeavyStatus(status, {
+      agentId, sessionId,
+      jobs: jobs === undefined ? heavyWork?.queue.rowsForThread(agentId, sessionId) : jobs,
+      isDelivered: job => {
+        if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
+        const run = agents?.runThread(agentId, job.resume)
+        return run?.session_id === sessionId && run?.heavy_origin === job.origin
+      },
+    })
+  }
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
