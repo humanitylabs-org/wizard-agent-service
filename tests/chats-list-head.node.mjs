@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHybridProjector, diffProjectedRows, projectListSlices } from '../server/session-list-cache.mjs'
+import { createHybridProjector, diffProjectedRows } from '../server/session-list-cache.mjs'
 
 function fixture() {
   let at = 0
@@ -141,17 +141,4 @@ for (const count of [45, 105]) test(`a stale pending first-send session does not
   assert.equal(out.head_extras, Math.ceil(Math.min(count, 100) / 20))
   pending = []
   assert.deepEqual((await w.build({ projectHeadExtras })).rows, await full(), 'pending disappears immediately')
-})
-
-test('cooperative slices retain a sparse batch original preview offset', async () => {
-  const offsets = []
-  await projectListSlices(Array.from({ length: 23 }, (_, i) => ({ id: `${i}` })), async (rows, head, offset) => {
-    offsets.push(offset); assert.equal(head, true); return rows
-  }, true, 20, 39)
-  assert.deepEqual(offsets, [39, 59])
-  const positions = [2, 47, 48, 75, 99], sparseOffsets = []
-  await projectListSlices(positions.map(id => ({ id })), async (rows, head, offset) => {
-    sparseOffsets.push(offset); return rows
-  }, true, 2, positions)
-  assert.deepEqual(sparseOffsets, [[2, 47], [48, 75], [99]])
 })

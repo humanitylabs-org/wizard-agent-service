@@ -4278,18 +4278,18 @@ function buildWizardServer(options, lifetime) {
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      // Legacy enrichment appends pending rows to EACH original 20-row head slice.
-      // Project those exceptions fresh, separately from cacheable canonical rows,
-      // retaining duplicates, order and preview positions (including partial slices).
+      // Legacy enrichment appends pending first-send rows once, after the 100-row head batch.
+      // Project those exceptions fresh, separately from cacheable canonical rows, keeping
+      // their order and preview positions.
       let reuseHead = true, pending = []
       try { if (runQueue) pending = pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)) } catch { reuseHead = false }
       const projectHeadExtras = async () => {
         const extras = new Map()
-        if (pending.length) for (let offset = 0; offset < Math.min(100, all.length); offset += 20) {
-          const slice = all.slice(offset, Math.min(offset + 20, 100))
-          const known = new Set(slice.map(session => session.id))
+        if (pending.length) {
+          const head = all.slice(0, 100)
+          const known = new Set(head.map(session => session.id))
           const appended = pending.filter(session => !known.has(session.id))
-          if (appended.length) extras.set(offset + slice.length, await projectSlice(appended, true, offset + slice.length, false))
+          if (appended.length) extras.set(head.length, await projectBatch(appended, true, head.length, false))
         }
         return extras
       }
