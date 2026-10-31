@@ -222,6 +222,15 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 }
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
+// An installed app's own launcher silhouette (apps.json `icon`, resolved by the App Manager from the running app):
+// a same-origin file under the app's own view path, so one app can never wear another's file or a remote image.
+const APP_ICON = /^\/(?!\/)[A-Za-z0-9._~/-]+\.(?:svg|png|webp)$/u
+function appIcon(icon, view) {
+  if (typeof icon !== 'string' || !APP_ICON.test(icon) || icon.split('/').includes('..')) return ''
+  if (typeof view !== 'string' || !/^\/(?!\/)/u.test(view)) return ''
+  const base = view.split(/[?#]/u)[0].replace(/\/*$/u, '/')
+  return icon.startsWith(base) && icon.length > base.length ? icon : ''
+}
 const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
 const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
@@ -256,6 +265,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
       ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
       ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
+      ...(appIcon(app.icon, view) ? { icon: app.icon } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
