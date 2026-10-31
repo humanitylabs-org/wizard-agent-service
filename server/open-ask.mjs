@@ -41,7 +41,7 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   const decision = resolveThreadSection({ replies, lastUserAt, background, heavyPending })
   const row = { ...session }
   delete row.wizard_background
-  if (['failed', 'interrupted', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
+  if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {

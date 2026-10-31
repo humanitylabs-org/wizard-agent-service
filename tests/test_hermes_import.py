@@ -75,6 +75,199 @@ class ImportTests(unittest.TestCase):
         return m.apply(p or self.plan(), 'fixture-agent', self.wizard, runtime_factory=FakeRuntime)
     def undo(self, result):
         return m.undo(result['journal'], runtime_factory=FakeRuntime)
+    def host_fixture(self):
+        for rel in ['data/apps/inbox/data', 'hermes-agent/venv/bin/python', 'scripts/host.sh', 'state/host/data']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('host fixture: ' + rel)
+        return m.approve(dict(self.plan(), host_shared_paths=['scripts', 'state/host']))
+
+    def tree_identity(self):
+        return {'.': (self.home.stat().st_ino, None), **{
+            p.relative_to(self.home).as_posix(): (p.lstat().st_ino, p.read_bytes() if p.is_file() else None)
+            for p in self.home.rglob('*')}}
+
+    def test_host_shared_move_keeps_host_inodes_and_bytes(self):
+        plan = self.host_fixture()
+        before = self.tree_identity()
+        result = self.apply(plan)
+        for rel in ['data/apps', 'data/apps/inbox/data', 'hermes-agent', 'hermes-agent/venv/bin/python', 'scripts', 'state/host/data']:
+            p = self.home / rel
+            self.assertTrue(p.exists(), rel)
+            self.assertEqual((p.stat().st_ino, p.read_bytes() if p.is_file() else None), before[rel])
+        self.assertEqual((self.home / 'data').stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.home / 'state').stat().st_mode & 0o777, 0o700)
+        self.undo(result)
+        self.assertEqual(self.tree_identity(), before)
+
+    def test_host_shared_absent_from_sealed_home_and_mounts(self):
+        plan = self.host_fixture()
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            mounted = m.approve(dict(plan, dependencies=[{'kind': 'folder', 'path': str(self.home / rel),
+                'proposal': 'mount ro', 'action': 'mount ro', 'approved': True}]))
+            with self.assertRaisesRegex(m.ImportFailure, 'home_mount_override|mount_sealed'):
+                m.validate_plan(mounted, self.wizard)
+        result = self.apply(plan)
+        directory = self.wizard / 'agents/fixture-agent'
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            self.assertFalse((directory / 'home' / rel).exists(), rel)
+            self.assertFalse((directory / 'quarantine' / rel).exists(), rel)
+        with patch.object(m, 'run', return_value='') as called:
+            m.DockerRuntime(plan, directory, 'fixture-agent').start()
+        args = called.call_args.args[0]
+        mounts = [args[i + 1] for i, a in enumerate(args[:-1]) if a == '--mount']
+        self.assertFalse(any('src=' + str(self.home) in x for x in mounts))
+        self.undo(result)
+
+    def test_host_shared_writer_allowed_but_state_db_writer_refused(self):
+        import subprocess
+        plan = self.host_fixture()
+        for rel in ['data/apps-other/file', 'cron/writer', 'sessions/writer', 'memories/writer', 'skills/writer']:
+            p = self.home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('agent fixture')
+        for rel, blocked in [('data/apps/inbox/data', False), ('scripts/host.sh', False), ('state/host/data', False),
+                             ('state.db', True), ('data/apps-other/file', True), ('cron/writer', True),
+                             ('sessions/writer', True), ('memories/writer', True), ('skills/writer', True)]:
+            with self.subTest(rel=rel):
+                child = subprocess.Popen([sys.executable, '-c',
+                    'import sys,time; f=open(sys.argv[1],"a"); print("ready",flush=True); time.sleep(30)',
+                    str(self.home / rel)], stdout=subprocess.PIPE, text=True)
+                try:
+                    assert child.stdout is not None
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    # Exercise both /proc fd names and the fail-closed lease
+                    # fallback used for non-dumpable systemd service processes.
+                    selected = m.host_shared_paths(plan)
+                    real_iterdir = Path.iterdir
+                    def denied(path):
+                        if path == Path('/proc') / str(child.pid) / 'fd':
+                            raise PermissionError('fixture denied')
+                        return real_iterdir(path)
+                    with patch.object(Path, 'iterdir', denied):
+                        if blocked:
+                            with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                                self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                        else:
+                            self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                    with patch.object(m, 'assert_no_writers', lambda source, **kw: self.census_real(source, _pids=[child.pid], **kw)):
+                        if blocked:
+                            with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                                self.apply(plan)
+                        else:
+                            result = self.apply(plan)
+                finally:
+                    child.terminate(); child.wait()
+                    if child.stdout is not None:
+                        child.stdout.close()
+                    journal = self.wizard / 'agents/fixture-agent/import-journal.json'
+                    if journal.exists():
+                        self.undo({'journal': str(journal)})
+                plan = m.approve(dict(self.plan(), host_shared_paths=['scripts', 'state/host']))
+
+    def test_host_shared_writer_anchored_in_moved_home_refused(self):
+        # Codex P1 on #255: a shared-subtree writer whose cwd or open directory is in the moved part of
+        # the home would resolve relative/openat writes into the agent's home after the rename.
+        import subprocess
+        plan = self.host_fixture()
+        selected = m.host_shared_paths(plan)
+        script = ('import os,sys,time; os.chdir(sys.argv[1]); f=open(sys.argv[2],"a"); '
+                  'd=os.open(sys.argv[3],os.O_RDONLY|os.O_DIRECTORY) if sys.argv[3] else None; print("ready",flush=True); time.sleep(30)')
+        cases = [(self.home, '', True), (self.home / 'memories', '', True), (Path('/'), str(self.home), True),
+                 (self.home / 'data/apps/inbox', '', False), (Path('/'), str(self.home / 'scripts'), False), (Path('/'), '', False)]
+        (self.home / 'memories').mkdir(exist_ok=True)
+        for cwd, directory, blocked in cases:
+            with self.subTest(cwd=str(cwd), directory=directory):
+                child = subprocess.Popen([sys.executable, '-c', script, str(cwd), str(self.home / 'data/apps/inbox/data'), directory],
+                                         stdout=subprocess.PIPE, text=True)
+                try:
+                    assert child.stdout is not None
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    if blocked:
+                        with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
+                            self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                    else:
+                        self.census_real(self.home, host_shared=selected, _pids=[child.pid])
+                finally:
+                    child.terminate(); child.wait()
+                    if child.stdout is not None:
+                        child.stdout.close()
+
+    def test_host_shared_undo_crash_between_renames_exact_tree(self):
+        plan = self.host_fixture()
+        before = self.tree_identity()
+        real_rename = Path.rename
+        count = [0]
+        def crash(src, dst):
+            value = real_rename(src, dst)
+            if Path(dst) == self.home / 'data/apps':
+                count[0] += 1
+                raise SystemExit('host-shared-rename-crash')
+            return value
+        with patch.object(Path, 'rename', crash):
+            with self.assertRaisesRegex(SystemExit, 'host-shared-rename-crash'):
+                self.apply(plan)
+        self.assertEqual(count[0], 1)
+        self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+        self.assertEqual(self.tree_identity(), before)
+        # All shared intent/completion writes, plus undo death after the actual
+        # reverse rename (before completion is durable), must reconcile too.
+        original_dump = m.dump
+        writes = []
+        def count_writes(path, value):
+            original_dump(path, value)
+            if Path(path).name == 'import-journal.json':
+                writes.append(1)
+        with patch.object(m, 'dump', count_writes):
+            result = self.apply(plan)
+        self.undo(result)
+        for boundary in range(1, len(writes) + 1):
+            with self.subTest(boundary=boundary):
+                seen = [0]
+                def crash_write(path, value):
+                    original_dump(path, value)
+                    if Path(path).name == 'import-journal.json':
+                        seen[0] += 1
+                        if seen[0] == boundary:
+                            raise SystemExit('journal-crash')
+                with patch.object(m, 'dump', crash_write), self.assertRaises(SystemExit):
+                    self.apply(plan)
+                self.undo({'journal': str(self.wizard / 'agents/fixture-agent/import-journal.json')})
+                self.assertEqual(self.tree_identity(), before)
+        for rel in ['data/apps', 'hermes-agent', 'scripts', 'state/host']:
+            with self.subTest(undo_crash=rel):
+                result = self.apply(plan)
+                def crash_undo(src, dst):
+                    value = real_rename(src, dst)
+                    if src == self.home / rel:
+                        raise SystemExit('undo-rename-crash')
+                    return value
+                with patch.object(Path, 'rename', crash_undo), self.assertRaises(SystemExit):
+                    self.undo(result)
+                self.undo(result)
+                self.assertEqual(self.tree_identity(), before)
+
+    def test_host_shared_invalid_paths_rejected(self):
+        self.host_fixture()
+        for rel in ['state.db', 'memories', 'skills', 'sessions', 'cron', 'config.yaml', '.env',
+                    '.', '..', '../outside', '/absolute', 'state/../skills', 'missing', 'data/../../outside', 'scripts//host.sh']:
+            with self.subTest(rel=rel):
+                p = m.approve(dict(self.plan(), host_shared_paths=[rel]))
+                with self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+                    m.validate_plan(p, self.wizard)
+        for value in ['scripts', [1], None]:
+            with self.subTest(value=value), self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+                m.validate_plan(m.approve(dict(self.plan(), host_shared_paths=value)), self.wizard)
+        alias = self.home / 'alias'
+        alias.symlink_to(self.home / 'skills', target_is_directory=True)
+        with self.assertRaisesRegex(m.ImportFailure, 'host_shared'):
+            m.validate_plan(m.approve(dict(self.plan(), host_shared_paths=['alias'])), self.wizard)
+
+        p = self.host_fixture()
+        p['host_shared_paths'].append('data')
+        with self.assertRaisesRegex(m.ImportFailure, 'plan_not_approved'):
+            m.validate_plan(p, self.wizard)
+
     def test_credential_named_documentation_is_not_a_secret_file(self):
         d = self.home / 'skills/agent-credential-provisioning'
         d.mkdir(parents=True)
@@ -123,10 +316,9 @@ class ImportTests(unittest.TestCase):
         plan = self.plan()
         for entry in plan['credentials']:
             if entry['kind'] == 'config-field': entry['approved'] = True
-        result = self.apply(m.approve(plan))
-        imported = m.load_yaml((self.wizard / 'agents/fixture-agent/home/config.yaml').read_text())
-        self.assertNotIn('WIZARD_HEAVY_TOKEN', imported.get('env', {}))
-        self.undo(result)
+        with self.assertRaisesRegex(m.ImportFailure, 'inline_credentials_require_secret_store'):
+            self.apply(m.approve(plan))
+        self.assertFalse((self.wizard / 'agents').exists())
         self.assertEqual(m.load_yaml((self.home / 'config.yaml').read_text()), config)
 
     def test_corrupt_backup_fails_before_any_rollback_mutation(self):
@@ -207,23 +399,25 @@ class ImportTests(unittest.TestCase):
         self.undo(result)
         self.assertFalse(directory.exists())
 
-    def test_scan_closes_sqlite_reader_before_writer_census(self):
+    def test_scan_never_opens_sqlite_reader_before_writer_census(self):
         import sqlite3
         with contextlib.closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('PRAGMA journal_mode=WAL')
             db.execute('CREATE TABLE sessions (id TEXT)')
             db.commit()
-        connections = []
-        real_connect = m.sqlite3.connect
-        def tracked(*args, **kwargs):
-            connection = real_connect(*args, **kwargs)
-            connections.append(connection)
-            return connection
-        with patch.object(m.sqlite3, 'connect', side_effect=tracked):
-            self.plan()
-        self.assertTrue(connections)
-        for connection in connections:
-            with self.assertRaises(sqlite3.ProgrammingError):
-                connection.execute('SELECT 1')
+        # Even a closed read-only WAL reader can create sidecars. Scan has no
+        # quiescence proof, so it must leave the count unavailable without opening.
+        snapshot = lambda: {str(p.relative_to(self.home)): (p.stat().st_ino, p.read_bytes())
+                            for p in self.home.rglob('*') if p.is_file()}
+        before = snapshot()
+        self.assertNotIn('state.db-wal', before)
+        self.assertNotIn('state.db-shm', before)
+        with patch.object(m.sqlite3, 'connect',
+                          side_effect=AssertionError('scan must not open source SQLite')) as connect:
+            plan = self.plan()
+        connect.assert_not_called()
+        self.assertEqual(plan['summary']['sessions'], 'unavailable')
+        self.assertEqual(snapshot(), before)
 
     def test_scoped_credential_source_preserves_logical_destination(self):
         ssh = self.owner / '.ssh'
@@ -376,7 +570,7 @@ class ImportTests(unittest.TestCase):
                 continue
             m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
             actual = m.load_yaml((self.home / 'config.yaml').read_text())
-            expected = None if value is None else [*value, 'wizard-agent-heavy']
+            expected = None if value is None else [*value, 'wizard-agent-heavy', 'memory']
             self.assertEqual(actual['platform_toolsets']['api_server'], expected)
             self.assertEqual(actual['platform_toolsets']['telegram'], ['memory'])
 
@@ -394,7 +588,7 @@ class ImportTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, '-c', 'import sys,time; f=open(sys.argv[1],"a"); print("ready",flush=True); time.sleep(30)', str(self.home / '.env')], stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
-            with patch.object(m, 'assert_no_writers', lambda source: self.census_real(source, _pids=[child.pid])):
+            with patch.object(m, 'assert_no_writers', lambda source, **kw: self.census_real(source, _pids=[child.pid], **kw)):
                 with self.assertRaisesRegex(m.ImportFailure, 'source_has_writers'):
                     self.apply()
         finally:
@@ -595,6 +789,67 @@ class ImportTests(unittest.TestCase):
         m.approve(p)
         with self.assertRaisesRegex(m.ImportFailure, 'home_mount_override|mount_sealed'):
             m.validate_plan(p, self.wizard)
+    def test_holographic_default_and_absolute_home_store_survive_import_and_undo(self):
+        import sqlite3
+        database = self.home / 'memory_store.db'
+        with sqlite3.connect(database) as db:
+            db.execute('CREATE TABLE facts(content TEXT)')
+            db.execute('INSERT INTO facts VALUES (?)', ('Throwaway fixture prefers cobalt notebooks',))
+        before = database.read_bytes()
+        cfg = m.load_yaml((self.home / 'config.yaml').read_text())
+        cfg['memory'].pop('provider')  # Wizard supplies the absent default.
+        cfg['plugins'] = {'hermes-memory-store': {'db_path': str(database), 'hrr_dim': 2048}}
+        (self.home / 'config.yaml').write_text(yaml.safe_dump(cfg))
+        self.assertEqual(self.plan()['summary']['memory_provider'], 'holographic')
+        result = self.apply()
+        target = self.wizard / 'agents/fixture-agent/home'
+        wired = m.load_yaml((target / 'config.yaml').read_text())
+        self.assertEqual(wired['memory']['provider'], 'holographic')
+        self.assertIn('holographic', wired['plugins']['enabled'])
+        self.assertEqual(wired['plugins']['hermes-memory-store']['db_path'], '$HERMES_HOME/memory_store.db')
+        self.assertEqual(wired['plugins']['hermes-memory-store']['hrr_dim'], 2048)
+        self.assertEqual((target / 'memory_store.db').read_bytes(), before)
+        with sqlite3.connect(target / 'memory_store.db') as db:
+            self.assertEqual(db.execute('SELECT content FROM facts').fetchone()[0], 'Throwaway fixture prefers cobalt notebooks')
+        self.undo(result)
+        self.assertEqual(database.read_bytes(), before)
+
+    def test_holographic_path_rebasing_is_idempotent_and_confined(self):
+        import copy
+        plan = self.plan()
+        for path in ('$HERMES_HOME/facts/custom.db', '${HERMES_HOME}/facts/custom.db',
+                     '~/.hermes/facts/custom.db', 'facts/custom.db', str(self.home / 'facts/custom.db')):
+            cfg = {'plugins': {'enabled': ['other'], 'hermes-memory-store': {'db_path': path}}}
+            m.configure_memory(cfg, plan)
+            self.assertEqual(cfg['plugins']['hermes-memory-store']['db_path'], '$HERMES_HOME/facts/custom.db')
+            before = copy.deepcopy(cfg)
+            m.configure_memory(cfg, dict(plan, path_preserving=False))
+            self.assertEqual(cfg, before)
+        for path in ('/outside/facts.db', '../facts.db', '$HERMES_HOME/../facts.db', '$UNKNOWN/facts.db'):
+            cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
+            with self.assertRaisesRegex(m.ImportFailure, 'memory_path_outside_home'):
+                m.configure_memory(cfg, plan)
+
+    def test_holographic_rejects_paths_that_import_quarantines_or_prunes(self):
+        for path in ('cache/facts.db', 'backups/facts.db', 'plugins/unapproved/facts.db',
+                     'profiles/other/facts.db', 'hooks/facts.db', 'data/apps/facts.db'):
+            cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
+            with self.assertRaisesRegex(m.ImportFailure, 'memory_path_not_portable'):
+                m.configure_memory(cfg, self.plan())
+
+    def test_holographic_is_exposed_in_an_imported_api_allowlist(self):
+        cfg = {'plugins': {'enabled': ['other']}, 'platform_toolsets': {'api_server': ['terminal'], 'cli': ['skills']}}
+        m.configure_memory(cfg, self.plan())
+        self.assertEqual(cfg['platform_toolsets'], {'api_server': ['terminal', 'memory'], 'cli': ['skills']})
+        m.configure_memory(cfg, self.plan())
+        self.assertEqual(cfg['platform_toolsets']['api_server'].count('memory'), 1)
+
+    def test_import_keeps_explicit_alternative_memory_provider(self):
+        for provider in ('builtin', 'honcho'):
+            cfg = {'memory': {'provider': provider}, 'plugins': {'enabled': []}}
+            m.configure_memory(cfg, self.plan())
+            self.assertEqual(cfg, {'memory': {'provider': provider}, 'plugins': {'enabled': []}})
+
     def test_native_memory_plugin_settings_survive_wiring(self):
         cfg = m.load_yaml((self.home / 'config.yaml').read_text())
         settings = {'db_path': '$HERMES_HOME/memory_store.db', 'hrr_dim': 2048, 'min_trust_threshold': 0.4}

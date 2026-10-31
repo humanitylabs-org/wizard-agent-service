@@ -2,7 +2,7 @@ import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
 import { existsSync, readFileSync } from 'node:fs'
 
@@ -130,6 +130,12 @@ server = createWizardServer({
   supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
+  // Host-only, opt-in: never infer host authority from an agent's Hermes home.
+  systemJobsStatePath: process.env.WIZARD_SYSTEM_JOBS_STATE_PATH || '',
+  systemJobsHermesHome: process.env.WIZARD_SYSTEM_JOBS_IMPORT_HOME || '',
+  systemJobsSocketPath: process.env.WIZARD_SYSTEM_JOBS_SOCKET || '',
+  systemJobsUnitDir: process.env.WIZARD_SYSTEM_JOBS_UNIT_DIR || '',
+  systemJobsEnabled: process.env.WIZARD_SYSTEM_JOBS === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
   providerAccessRecovery: process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
@@ -153,6 +159,7 @@ server = createWizardServer({
   joinedDelegation,
   settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  phoneFeedDir: process.env.WIZARD_PHONE_FEED_DIR || resolve(process.env.WIZARD_APPS_JSON_PATH ? dirname(process.env.WIZARD_APPS_JSON_PATH) : osHome, 'phone'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
@@ -198,6 +205,11 @@ server = createWizardServer({
   },
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
+  // Pages (spec/PAGES.md): <Files root>/Pages/ served at /pages/, history in <state>/pages-history.git.
+  // WIZARD_PAGES_ROOT / WIZARD_PAGES_GIT_DIR override the two paths; WIZARD_PAGES=off turns Pages off.
+  ...(process.env.WIZARD_PAGES_ROOT ? { pagesRoot: process.env.WIZARD_PAGES_ROOT } : {}),
+  ...(process.env.WIZARD_PAGES_GIT_DIR ? { pagesGitDir: process.env.WIZARD_PAGES_GIT_DIR } : {}),
+  ...(process.env.WIZARD_PAGES === 'off' ? { pages: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).

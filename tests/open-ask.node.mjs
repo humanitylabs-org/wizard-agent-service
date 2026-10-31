@@ -133,3 +133,11 @@ test('QR delivered while helper builds button survives real main HTTP and slim l
     assert.deepEqual(listRow(row).attention, qr)
   } finally { if (server.listening) await new Promise(r => server.close(r)); db.close(); rmSync(root, { recursive: true, force: true }) }
 })
+
+test('owner-stopped, cancelled and expired runs keep their terminal status while background is recorded', () => {
+  for (const status of ['cancelled', 'expired', 'stopping', 'failed']) {
+    const row = projectOpenAskSession({ id: 'stopped', status }, { replies: [reply({ state: 'fyi', ask: 'Helper still working' })], background: 'helper', lastUserAt: 10 })
+    assert.equal(row.status, status)
+    assert.equal(row.wizard_waiting_on, undefined)
+  }
+})

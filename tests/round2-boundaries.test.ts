@@ -126,8 +126,9 @@ it('DEFAULT_STOPPED_SNAPSHOT: no setting + stopped catalogued secondary preserve
         // The added capability is explicitly false for main and standard agents.
         for (const agent of catalog.agents) expect(agent.incognito_available).toBe(false)
       }
-      const agents = JSON.parse(JSON.stringify(catalog, (k, v) => k === 'incognito_available' || k === 'created_at' || (k === 'read_standard_chats' && v === false) || k === 'other_agents' || k === 'shared_with_agents' ? undefined : v))
+      const agents = JSON.parse(JSON.stringify(catalog, (k, v) => k === 'incognito_available' || k === 'created_at' || (k === 'read_standard_chats' && v === false) || k === 'other_agents' || k === 'shared_with_agents' || k === 'wizard_apps' || k === 'agent_apps' ? undefined : v))
       // other_agents/shared_with_agents defaults changed on purpose (standard agents share read-only, 24 Oct 2026); asserted in shared-agent-state.test.ts
+      // wizard_apps/agent_apps too: a new standard agent starts with every installed app on (29 Oct 2026); asserted in agents-sealed-apps.test.ts
       const binding = await (await s.call('/wizard/v1/apps/notes/binding')).json()
       const chosen = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_client_fresh', source: 'wizard-mobile' })
       const offset = s.calls.length, minted = await s.call('/wizard/hermes/api/sessions', 'POST', { source: 'wizard-mobile' })

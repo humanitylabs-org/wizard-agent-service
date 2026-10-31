@@ -1,7 +1,11 @@
 """Read-only account projection. Runs INSIDE Hermes; never exports credentials.
 
 Use the stock store reader, not load_pool(): enumeration must not seed or persist
-credentials. Quota requests explicitly name each credential and forbid refresh.
+credentials. Quota requests explicitly name each credential and forbid refresh. The one
+exception is an already-expired grant: Hermes renews tokens only when it uses them, so an idle
+subscription's meter would go blank. That grant is renewed through Hermes' own pool
+(`try_refresh_matching`, which holds the cross-process single-use refresh lock), at most once per
+grant per _RENEW_EVERY seconds; a grant Hermes cannot renew is reported as `expired`.
 No provider-wide OAuth start/logout routes are exposed as account operations.
 """
 from __future__ import annotations
@@ -20,6 +24,8 @@ PROVIDERS = {"chatgpt": "openai-codex", "claude": "anthropic"}
 _NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 _CACHE = {}
 _LOCK = threading.Lock()
+_RENEW_EVERY = 600
+_RENEWED = {}   # credential id -> monotonic time of the last renewal attempt
 
 
 def _claims(token):
@@ -29,6 +35,40 @@ def _claims(token):
         return result if isinstance(result, dict) else {}
     except (ValueError, IndexError, TypeError):
         return {}
+
+
+def _expired(row, claims):
+    """True when the stored access token is already past its expiry (never a guess)."""
+    ms = row.get('expires_at_ms')
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return ms <= time.time() * 1000
+    exp = claims.get('exp')
+    if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+        return exp <= time.time()
+    return False
+
+
+def _renew(slug, row, read):
+    """Renew one expired grant through stock Hermes. Returns (fresh row or None, renewal failed)."""
+    cid = row.get('id')
+    if not cid:
+        return None, True
+    now = time.monotonic()
+    with _LOCK:
+        last = _RENEWED.get(cid)
+        if last is not None and now - last < _RENEW_EVERY:
+            return None, None          # tried recently: report what the store says, no new attempt
+        _RENEWED[cid] = now
+    try:
+        from agent.credential_pool import load_pool
+        if not load_pool(slug).try_refresh_matching(credential_id=cid):
+            return None, True
+        fresh = next((r for r in read(slug) if isinstance(r, dict) and r.get('id') == cid), None)
+        if fresh and fresh.get('access_token') and fresh.get('access_token') != row.get('access_token'):
+            return fresh, False
+        return None, True
+    except Exception:
+        return None, True   # never leak provider errors or tokens
 
 
 def _masked(value):
@@ -181,8 +221,49 @@ def _quota(provider, row, fetch):
     return value
 
 
-def provider_accounts(provider, read=None, fetch=None):
+def claude_model_cooldowns(read=None, inventory=None):
+    """Fresh secret-free raw grant projection; never fetch provider usage or cache."""
+    if inventory is None:
+        if read is None:
+            from hermes_cli.auth import read_credential_pool
+            read = read_credential_pool
+        inventory = read('anthropic')
+    if not isinstance(inventory, list):
+        return None
+    grants = []
+    for r in inventory:
+        if not isinstance(r, dict) or r.get('auth_type') != 'oauth' or not isinstance(r.get('id'), str) or not r['id']:
+            return None
+        values = r.get('model_cooldowns') or {}
+        if not isinstance(values, dict):
+            return None
+        safe = {model: until for model, until in values.items()
+                if isinstance(model, str) and re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model)
+                and isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)}
+        if len(safe) != len(values):
+            return None
+        grants.append({'id': hashlib.sha256(r['id'].encode()).hexdigest()[:24], 'models': safe})
+    return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
+
+
+def _rank(row):
+    value = row.get('priority')
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _manual(row):
+    return str(row.get('source', '')).startswith('manual:')
+
+
+def _can_lead(slug, own, pool):
+    # Stock Hermes keeps manually added anthropic grants ahead of seeded ones (the Claude Code mirror), so a
+    # seeded grant cannot be moved first while any manual grant exists; never offer an action that cannot work.
+    return slug != 'anthropic' or any(_manual(r) for r in own) or not any(_manual(r) for r in pool)
+
+
+def provider_accounts(provider, read=None, fetch=None, renew=None):
     slug = PROVIDERS[provider]
+    renew = renew or _renew
     if read is None:
         from hermes_cli.auth import read_credential_pool
         read = read_credential_pool
@@ -206,6 +287,14 @@ def provider_accounts(provider, read=None, fetch=None):
         key, aliases = item
         # Prefer an independent manual login over a singleton mirror.
         row, claims = sorted(reversed(aliases), key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
+        renew_failed = False
+        # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI).
+        if _expired(row, claims) and str(row.get('source', '')) != 'claude_code':
+            fresh, renew_failed = renew(slug, row, read)
+            if fresh:
+                row, claims = fresh, _claims(fresh.get('access_token') or '')
+            elif renew_failed is None:
+                renew_failed = str(row.get('last_status') or '') not in ('', 'ok', 'ready')
         plan, usage = _quota(slug, row, fetch)
         auth = claims.get('https://api.openai.com/auth') or {}
         profile = claims.get('https://api.openai.com/profile') or {}
@@ -223,7 +312,14 @@ def provider_accounts(provider, read=None, fetch=None):
         if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
             extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
         state = str(row.get('last_status') or 'ready')
-        state = state if state in {'ready', 'ok', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
+        # Hermes calls a healthy OAuth grant "ok"; the connection apps use "ready".
+        if state == 'ok':
+            state = 'ready'
+        state = state if state in {'ready', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
+        if renew_failed or state == 'invalid':
+            # The grant can't be renewed: the owner must sign in again (the app offers Reconnect).
+            state = 'expired'
+            extra['error'] = {'code': 'expired', 'message': 'This sign-in expired. Reconnect it to keep using it.'}
         if slug == 'anthropic' and all(str(r.get('source', '')) == 'claude_code' for r, _ in aliases):
             # Hermes' mirror of the host Claude Code login: the Claude app already shows that login
             # (with its usage) as its own row, so it folds this pool grant into that row.
@@ -232,13 +328,19 @@ def provider_accounts(provider, read=None, fetch=None):
                 'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
                 'status': state, 'usage': usage, 'credentialCount': len(aliases),
                 'usageStatus': 'ok' if usage else 'unavailable',
+                'priority': min((v for v in (_rank(r) for r, _ in aliases) if v is not None), default=None),
                 'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
-                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit()}
+                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
+                                 'priority': _rank(r)}
                                 for r, _ in aliases if r.get('id')],
-                'actions': {'reconnect': True, 'remove': True}}
+                'actions': {'reconnect': True, 'remove': True, 'prefer': _can_lead(slug, [r for r, _ in aliases], rows)}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
+    # Hermes tries the lowest priority first (fill_first); the projection keeps that order explicit.
+    first = min((a['priority'] for a in accounts if a['priority'] is not None), default=None)
+    for a in accounts:
+        a['preferred'] = first is not None and a['priority'] == first
     # No full response cache: additions/removals are visible on every request.
     # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
     # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
@@ -247,6 +349,9 @@ def provider_accounts(provider, read=None, fetch=None):
             'accounts': accounts, 'accountCount': len(accounts),
             'actions': {'add': True},
             'management': {'contract': 'wizard.account-management/1', 'status': 'available',
-                           'message': 'Reconnect signs in again and retains existing grants. Use a different OpenAI account to add quota; signing in to the same account can invalidate its older grants.',
+                           'message': 'Reconnect signs in again and retains existing grants. Use a different '
+                                      + ('Claude' if provider == 'claude' else 'OpenAI')
+                                      + ' account to add quota; signing in to the same account can invalidate its older grants.',
+                           'order': 'priority',
                            'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
             'error': None}

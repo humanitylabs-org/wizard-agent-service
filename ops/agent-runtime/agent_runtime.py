@@ -349,6 +349,29 @@ class ComposeDriver:
         return {"ok": True}
 
 
+def machines_override(agents: "Agents", agent: dict) -> Path | None:
+    """Wizard Machines (ops/machines): mount this agent's own relay directory, read-only, at /run/wizard-machines.
+
+    Only for a restricted standard agent whose Service-owned agent.json carries grants.machines = true. The directory
+    holds the agent's relay socket and the `machine` client, never keys or addresses; which machines it reaches is the
+    owner's Machines registry. Created here (owner uid) so Docker never auto-creates it as root."""
+    if not (restricted(agent) and agent.get("privacy") == "standard" and (agent.get("grants") or {}).get("machines") is True):
+        return None
+    root = Path(os.environ.get("WIZARD_MACHINES_ROOT") or agents.root.parent / "machines")
+    sockets = root / "sockets"
+    for path, mode in ((root, 0o700), (sockets, 0o711), (sockets / agent["id"], 0o755)):
+        path.mkdir(mode=mode, exist_ok=True)
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise RuntimeFailure("machines_dir_unsafe", 500)
+    doc = {"services": {RESTRICTED_SERVICE: {"volumes": [{"type": "bind", "source": str(sockets / agent["id"]),
+                                                          "target": "/run/wizard-machines", "read_only": True}]}}}
+    path = agents.root / agent["id"] / "runtime" / "machines.json"
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.write_text(json.dumps(doc))
+    return path
+
+
 class RestrictedDriver:
     """Runs the pinned restricted runtime, optionally with its reviewed Claude grant override.
     Kept off Runtipi's shared network; the project holds the agent and its sidecars."""
@@ -409,6 +432,9 @@ class RestrictedDriver:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             path.write_text(json.dumps(module.compose_override(source)))  # mount metadata only
             files += ["-f", str(self.runtime_dir / "compose.claude-login.yml"), "-f", str(path)]
+        machines = machines_override(self.agents, agent)
+        if machines:
+            files += ["-f", str(machines)]
         override = self.agents.root / agent["id"] / "import-runtime.json"
         if agent.get("imported") and override.is_file():
             files += ["-f", str(override)]
@@ -523,7 +549,10 @@ class RestrictedDriver:
                     raise RuntimeFailure("import_harness_update_failed")
         else:
             self.agents.add_provider_keys(agent)
-            self._compose(agent, "build", timeout=1800)
+            labels = sidecar_source_labels(self.runtime_dir)
+            docker(["build", "--label", "org.opencontainers.image.source=" + labels["source"],
+                    "--label", "org.opencontainers.image.revision=" + labels["revision"],
+                    "-t", SIDECAR_IMAGE, str(self.runtime_dir / "sidecars")], timeout=1800)
         # A running agent could swap paths in its home while the root helper works there, so stop it first; `up`
         # starts it again with the new files.
         self._compose(agent, "stop", RESTRICTED_SERVICE, timeout=300)
@@ -565,6 +594,16 @@ class RestrictedDriver:
         self._compose(agent, "stop", timeout=300)
         self._remove_claude_seeder(agent)
         return {"ok": True}
+
+
+def sidecar_source_labels(runtime_dir: Path) -> dict[str, str]:
+    """Label the reviewed upstream runtime, not the Service's unrelated HEAD."""
+    text = (runtime_dir / "SOURCE.txt").read_text()
+    source = re.search(r"^Source: (https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", text, re.M)
+    revision = re.search(r"^Commit: ([0-9a-f]{40})$", text, re.M)
+    if source is None or revision is None:
+        raise RuntimeFailure("sidecar_source_receipt_invalid")
+    return {"source": source.group(1), "revision": revision.group(1)}
 
 
 def verify_vendored(runtime_dir: Path) -> None:
