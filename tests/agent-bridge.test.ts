@@ -1,10 +1,10 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync, statSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bridgeApps, createAgentBridge, renderKernel, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
+import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const PLUGIN = resolve(__dirname, '../hermes-plugin/wizard-os')
@@ -17,7 +17,7 @@ function fakeApp(tools = [{ name: 'wizard_time', description: 'Current UTC time.
     let body = ''
     for await (const c of req) body += c
     const msg = JSON.parse(body || '{}')
-    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '', auth: req.headers.authorization || '', agent: req.headers['x-wizard-agent'] || '', label: req.headers['x-wizard-agent-label'] || '' })
+    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '', auth: req.headers.authorization || '', grant: req.headers['x-wizard-grant'] || '', agent: req.headers['x-wizard-agent'] || '', label: req.headers['x-wizard-agent-label'] || '' })
     const send = (result) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'app-s1' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })) }
     if (msg.id === undefined) { res.writeHead(202); res.end(); return }
     if (msg.method === 'initialize') return send({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake' } })
@@ -275,26 +275,58 @@ describe('agent bridge: MCP gateway', () => {
     expect(logs.join('\n')).not.toContain('secret-arg')
   })
 
-  it('authenticates to an app with its optional per-app key and names the calling agent only to that app', async () => {
-    const keyed = fakeApp(); const plain = fakeApp()
-    servers.push(keyed.server, plain.server)
-    const dir = box([app('messenger', (await listen(keyed.server)).port), app('hello-wizard', (await listen(plain.server)).port)])
-    mkdirSync(join(dir, 'app-mcp-keys'))
-    const KEY = 'k'.repeat(40)
-    writeFileSync(join(dir, 'app-mcp-keys', 'messenger'), KEY + '\n', { mode: 0o600 })
-    writeFileSync(join(dir, 'app-mcp-keys', 'hello-wizard'), 'short\n') // malformed keys are ignored, never sent
+  it('sends the gateway grant key from grants/agent-service.json and names the calling agent only to that app', async () => {
+    const keyed = fakeApp(); const plain = fakeApp(); const bad = fakeApp()
+    servers.push(keyed.server, plain.server, bad.server)
+    const dir = box([app('messenger', (await listen(keyed.server)).port), app('hello-wizard', (await listen(plain.server)).port), app('odd-app', (await listen(bad.server)).port)])
+    mkdirSync(join(dir, 'grants'))
+    const KEY = 'a1'.repeat(32) // what the App Manager mints: 32 random bytes, hex
+    const file = join(dir, 'grants', 'agent-service.json')
+    writeFileSync(file, JSON.stringify({ outgoing: { messenger: KEY, 'odd-app': 'short' } }), { mode: 0o600 }) // malformed keys are never sent
     const base = await start(dir)
     const init = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
     await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
     await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_time', arguments: {} } }, init.session)
+    await rpc(base, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'odd_app__wizard_time', arguments: {} } }, init.session)
     expect(keyed.calls.length).toBeGreaterThan(0)
-    expect(keyed.calls.every((c) => c.auth === `Bearer ${KEY}`)).toBe(true)
+    expect(keyed.calls.every((c) => c.grant === KEY && c.auth === '')).toBe(true) // Authorization is left alone
     const call = keyed.calls.find((c) => c.method === 'tools/call')
     expect(call.agent).toBe('hermes')
     expect(decodeURIComponent(call.label).length).toBeGreaterThan(0)
     expect(keyed.calls.filter((c) => c.method !== 'tools/call').every((c) => c.agent === '')).toBe(true)
-    expect(plain.calls.length).toBeGreaterThan(0)
-    expect(plain.calls.every((c) => c.auth === '' && c.agent === '' && c.label === '')).toBe(true)
+    for (const other of [plain, bad]) {
+      expect(other.calls.length).toBeGreaterThan(0)
+      expect(other.calls.every((c) => c.grant === '' && c.auth === '' && c.agent === '' && c.label === '')).toBe(true)
+    }
+    // A revoke (the App Manager drops the key) applies to the next call, without a restart.
+    writeFileSync(file, JSON.stringify({ outgoing: {} }), { mode: 0o600 })
+    const t = new Date(Date.now() + 5000); utimesSync(file, t, t)
+    const before = keyed.calls.length
+    await rpc(base, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
+    expect(keyed.calls.slice(before).every((c) => c.grant === '' && c.agent === '')).toBe(true)
+  })
+
+  it('reads no grant keys from a symlinked, oversized or malformed gateway grants file, and never from the old app-mcp-keys files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wz-grants-'))
+    mkdirSync(join(dir, 'grants'))
+    const KEY = 'b2'.repeat(32)
+    const real = join(dir, 'elsewhere.json')
+    writeFileSync(real, JSON.stringify({ outgoing: { messenger: KEY } }))
+    symlinkSync(real, join(dir, 'grants', 'agent-service.json'))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    rmSync(join(dir, 'grants', 'agent-service.json'))
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), '{not json')
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY }, pad: 'x'.repeat(70 * 1024) }))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    mkdirSync(join(dir, 'app-mcp-keys'))
+    writeFileSync(join(dir, 'app-mcp-keys', 'messenger'), KEY + '\n', { mode: 0o600 })
+    rmSync(join(dir, 'grants', 'agent-service.json'))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY, '../x': KEY } }))
+    const g = createGatewayGrants({ osHome: dir })
+    expect(g.key('messenger')).toBe(KEY)
+    expect(g.key('../x')).toBe('')
   })
 
   it('a down app returns a clear tool error and the gateway keeps serving', async () => {

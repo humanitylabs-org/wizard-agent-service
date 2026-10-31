@@ -266,10 +266,11 @@ class AppClient {
     try {
       const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL_VERSIONS[0] }
       if (this.session) headers['Mcp-Session-Id'] = this.session
-      // Optional per-app gateway key: the app can then tell the gateway from any other local caller and trust
-      // the agent named in X-Wizard-Agent. Agent headers go only to an app that holds such a key.
+      // The gateway's per-app grant key (wizard-os spec/PERMISSIONS.md layer 2): the app checks it against the
+      // `agent-service` row of its own grants file, so it can tell the gateway from any other local caller and trust
+      // the agent named in X-Wizard-Agent. `Authorization` is left alone. Agent headers go only with the key.
       const key = this.appKey()
-      if (key) Object.assign(headers, { Authorization: `Bearer ${key}` }, extra)
+      if (key) Object.assign(headers, { 'X-Wizard-Grant': key }, extra)
       const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal })
       const sid = response.headers.get('mcp-session-id')
       if (sid) this.session = sid
@@ -311,6 +312,41 @@ function safeEqual(a, b) {
   const x = Buffer.from(String(a))
   const y = Buffer.from(String(b))
   return x.length === y.length && timingSafeEqual(x, y)
+}
+
+export const GATEWAY_GRANTS_FILE = join('grants', 'agent-service.json')
+const GRANT_KEY = /^[A-Za-z0-9_-]{32,256}$/u
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u
+
+/**
+ * The gateway's side of the app grant keys (wizard-os spec/PERMISSIONS.md layer 2, "The gateway is a consumer too"):
+ * `key(appId)` is the key to send as X-Wizard-Grant to that app, or '' when it holds none. The file is re-read when it
+ * changes (an App Manager rewrite or a revoke takes effect on the next call); a symlink, an oversized or malformed file
+ * and malformed keys give no keys, never an error.
+ */
+export function createGatewayGrants({ osHome, file = osHome ? join(osHome, GATEWAY_GRANTS_FILE) : '' }) {
+  let stamp = null
+  let keys = new Map()
+  const load = () => {
+    let st
+    try { st = lstatSync(file) } catch { stamp = null; keys = new Map(); return }
+    const next = `${st.mtimeMs}:${st.size}:${st.ino}`
+    if (next === stamp) return
+    stamp = next
+    keys = new Map()
+    if (!st.isFile() || st.size > 64 * 1024) return
+    let doc
+    try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { return }
+    const out = doc && typeof doc === 'object' && doc.outgoing && typeof doc.outgoing === 'object' && !Array.isArray(doc.outgoing) ? doc.outgoing : {}
+    for (const [id, key] of Object.entries(out)) if (APP_ID.test(id) && typeof key === 'string' && GRANT_KEY.test(key)) keys.set(id, key)
+  }
+  return {
+    key(appId) {
+      if (!file || !APP_ID.test(String(appId || ''))) return ''
+      load()
+      return keys.get(appId) || ''
+    },
+  }
 }
 
 /** The gateway token: $WIZARD_MCP_TOKEN, else <osHome>/mcp-token (created 0600 on first start). */
@@ -386,28 +422,13 @@ export function createAgentBridge({
   const onChange = () => { if (refresh()) notifyChanged() }
   if (appsJsonPath && watchIntervalMs > 0) watchFile(appsJsonPath, { interval: watchIntervalMs, persistent: false }, onChange)
 
-  // Per-app gateway keys (optional): <wizard-os home>/app-mcp-keys/<app id>, written 0600 by the box operator for
-  // an app that gives each agent its own owner-chosen level (Messenger). Absent = the app is called exactly as before.
-  const keysHome = appsJsonPath ? dirname(appsJsonPath) : osHome
-  const appKeys = new Map()
-  const appKey = (appId) => {
-    if (!keysHome || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(appId)) return ''
-    const path = join(keysHome, 'app-mcp-keys', appId)
-    let st
-    try { st = statSync(path) } catch { appKeys.delete(appId); return '' }
-    const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`
-    const hit = appKeys.get(appId)
-    if (hit?.stamp === stamp) return hit.key
-    let key = ''
-    try { if (st.isFile() && st.size <= 512) key = readFileSync(path, 'utf8').trim() } catch { key = '' }
-    if (!/^[A-Za-z0-9_-]{32,256}$/u.test(key)) key = ''
-    appKeys.set(appId, { stamp, key })
-    return key
-  }
-
+  // The gateway's grant keys (wizard-os spec/PERMISSIONS.md layer 2): <wizard-os home>/grants/agent-service.json,
+  // `{"outgoing": {"<app id>": "<key>"}}`, written 0600 by the App Manager (the same key system as app-to-app grants).
+  // An app without a key is called exactly as before.
+  const gatewayGrants = createGatewayGrants({ osHome: appsJsonPath ? dirname(appsJsonPath) : osHome })
   const client = (app) => {
     let c = clients.get(app.id)
-    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs, appKey: () => appKey(app.id) }); clients.set(app.id, c) }
+    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs, appKey: () => gatewayGrants.key(app.id) }); clients.set(app.id, c) }
     return c
   }
 
