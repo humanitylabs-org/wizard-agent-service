@@ -78,6 +78,7 @@ import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } f
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
+import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
@@ -2605,13 +2606,15 @@ function buildWizardServer(options, lifetime) {
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
+  // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
+  let reachOut = null
   let spacesTools = null
   let supervisorTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
-        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -2803,7 +2806,7 @@ function buildWizardServer(options, lifetime) {
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
-    followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
+    followUpNote: (sessionId) => (scheduler?.running() && bridge ? [followUpThreadNote(sessionId), reachOutNote()].filter(Boolean).join(' ') : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -4792,6 +4795,12 @@ function buildWizardServer(options, lifetime) {
   followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
     // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
     ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
+  // Same ownership rule, but routed agents only: the main agent never reaches these tools (it has its plugin), so
+  // a routed agent cannot target a main thread and a private agent's jobs and threads stay its own.
+  reachOut = scheduler ? agentReachOutTools({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    ownsThread: (agentId, sessionId) => agentId !== GATEWAY_MAIN_AGENT && Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
