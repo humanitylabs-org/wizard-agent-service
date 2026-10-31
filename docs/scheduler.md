@@ -174,6 +174,21 @@ agent on any box (container agents included, which never load the host-only `wiz
   agent's current thread (spec/thread-follow-up-watchers.md). A routed agent may watch only a thread it owns; the
   main agent reaches it through the `wizard-os` plugin, which injects its session id, so it is unlisted for main.
 
+- `wizard_start_thread` and `wizard_schedule` (`server/agent-reach-out.mjs`, routed agents only; the main agent
+  keeps its `wizard-schedule` Hermes plugin). `wizard_start_thread {title, instructions, from_session_id?}` opens
+  a new thread now: a paused one-shot `run` job (`group: agent-start-thread`, thread `wizard_agent_<uuid>`) plus
+  Run now, so its opening turn is admitted outside the background trickle; the scheduler creates the thread with
+  `?agent=<id>`, which pins it, so the owner's reply goes to the same agent. It answers
+  `{opened, state, session_id, title, link: "/wizard-os-home/?session=<id>"}`; a retried identical call within ten
+  minutes returns the same thread. `wizard_schedule {action create|list|cancel, kind message|run|remind, text,
+  when, session_id | title, name?, id?}`: `when` is `morning`, `every morning`, `overnight`, `daily HH:MM`,
+  `weekdays HH:MM`, an ISO timestamp with offset, or a five-field cron, in the owner's clock timezone; the answer
+  carries `nextRun` and `nextRunLocal`. `session_id` must be a thread the agent owns (the follow-up rule:
+  pinned to it); `title` gives the schedule its own new thread (`group: agent-schedule`). list/cancel see only the
+  calling agent's jobs; the agent is always the key's agent, never an argument. `kind: message` (the default)
+  is the agent writing to the owner: no Reporter status format; a repeating message may answer `[SILENT]`.
+  Routed run instructions carry one line (`reachOutNote`) so agents stop telling the owner they cannot.
+
 The thread, title and group are set by the service (`Scheduler.create(input, placement)`); the HTTP body cannot
 supply them. When the timer is off (`WIZARD_SCHEDULER` is not `1`) both tools answer with an error instead of
 saving a job nothing would deliver. The Runtipi package sets `WIZARD_SCHEDULER=1`. The `wizard-guide` system
