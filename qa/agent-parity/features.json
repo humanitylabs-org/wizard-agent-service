@@ -898,12 +898,17 @@
       "id": "notifications",
       "description": "Complete background work in an unread thread",
       "layer": "ux",
-      "how_to_test": "Complete background work in an unread thread; verify notification, agent attribution, click navigation and safe reply routing.",
+      "how_to_test": "Complete background work in an unread thread; verify notification, agent attribution, click navigation and safe reply routing. For main, host-profile, container and restricted Chats windows, long-press a synthetic Ready alert: one Archive completion action (no Done button), optional Mark unread for read alerts, exact global Notifications mark payload, no accidental open on lift, outside/Back dismissal. Thread Archive controls keep their window scope; Done remains an agent/status label. Record fixture results separately from browser and live evidence.",
       "source_refs": [
-        "wizard-ux/web/live.js"
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/notif-bell.js"
       ],
       "reference_tests": [
-        "wizard-ux/tests/notification-reply-send.test.mjs"
+        "wizard-ux/tests/notification-reply-send.test.mjs",
+        "wizard-ux/tests/alert-row-actions.test.mjs",
+        "wizard-ux/tests/archive-action-wording.test.mjs",
+        "wizard-ux/tests/browser/alert-row-actions.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []
