@@ -43,4 +43,5 @@ test('matrix includes every declared feature and kind exactly once', () => {
   assert.equal(report.summary.pass + report.summary.fail + report.summary['policy-exempt'], report.cells.length)
   const exemptions = manifest.features.flatMap(f => f.policy_exemptions.map(e => [f.id, e.kind]))
   assert.deepEqual(report.cells.filter(c => c.status === 'policy-exempt').map(c => [c.feature, c.kind]), exemptions)
+  assert.equal(result.status, 0, 'the executable matrix must finish without failed fixtures')
 })

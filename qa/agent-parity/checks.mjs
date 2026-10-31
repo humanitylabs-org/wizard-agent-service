@@ -14,6 +14,13 @@ const featureScenes = { 'scheduler-notifications': kind => notificationScene(kin
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'private-incognito-policy': async s => {
+    const init = post({})
+    const response = await fetch(`${s.origin()}/wizard/v1/agents/${s.id || 'main'}/incognito`, { ...init, headers: { ...init.headers, ...s.ownerHeaders } })
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error, 'incognito_private_only')
+    assert.ok(!s.seen.some(r => r.path.includes('/incognito')), 'private-only refusal must happen before any upstream request')
+  },
   'scheduler-notifications': checkBoundNotification,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))

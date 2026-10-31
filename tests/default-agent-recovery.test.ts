@@ -169,6 +169,7 @@ describe('persisted default and recovery contract', () => {
           "created_at": null,
           "harness": "hermes",
           "id": "hermes",
+          "incognito_available": false,
           "is_default": true,
           "label": "Hermes",
           "model": {
