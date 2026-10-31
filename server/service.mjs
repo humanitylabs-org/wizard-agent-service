@@ -3835,7 +3835,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
+  const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -3859,7 +3859,9 @@ function buildWizardServer(options, lifetime) {
       }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
-          try { return await listCache.served() }
+          // The window selector normalizes into separate objects and never mutates
+          // these rows. Keep identity so its selection can be shared across polls.
+          try { return await listCache.served(true) }
           catch (error) { listCache.fellBack(error) }
         }
         const q = searchParams.get('q')
@@ -4351,9 +4353,9 @@ function buildWizardServer(options, lifetime) {
         }
         return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
       },
-      served: async () => {
+      served: async (shared = false) => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
-        return rows.map((row) => ({ ...row }))
+        return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {
         stats.fallbacks++
@@ -5052,7 +5054,11 @@ function buildWizardServer(options, lifetime) {
     // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
     // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
-    if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
+    // A durable idempotency replay admits no work. Delay invalidation for this
+    // route until its outcome is known; real admissions still expire the snapshot.
+    const deferredListTouch = request.method === 'POST' && request.url === '/wizard/hermes/v1/runs'
+    let readOnlyRunReplay = false
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !deferredListTouch) listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
@@ -6415,6 +6421,7 @@ function buildWizardServer(options, lifetime) {
             const replay = runQueue.replay(runtime, sessionId, idempotencyKey, requestHash)
             if (replay) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
+              readOnlyRunReplay = true
               return
             }
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
@@ -6809,7 +6816,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { meterDone(); requestDone() }
+    } finally {
+      if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
+      meterDone(); requestDone()
+    }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {
