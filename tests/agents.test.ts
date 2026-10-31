@@ -297,6 +297,42 @@ describe('agents registry and API', () => {
     expect(payload.data[0].run_context.original).toContain('[private attachment]')
   })
 
+  it('shows a routed agent\'s notes paths as its notebook while other home paths stay private', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const host = join(dir, 'agents/private/home')
+    const priv = await fakeHermes('private', ['wizard_private_notes'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'The handoff is at /opt/data/wiki/for-review/2026-01-02-synthetic.md' },
+      { id: 2, role: 'assistant', timestamp: 2, content: `Also ${host}/wiki/index.md, /opt/data/inbox/2026-01-02/brief.pdf and /opt/data/config.yaml` },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const file = join(dir, 'agents', 'private', 'agent.json')
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), notes_dir: 'wiki' }))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_notes/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const text = JSON.stringify(await response.json())
+    expect(text).toContain('The handoff is at Private notes › for-review/2026-01-02-synthetic.md')
+    expect(text).toContain('Also Private notes › index.md, [private attachment: brief.pdf] and [private attachment]')
+    expect(text).not.toContain('/opt/data')
+    expect(text).not.toContain(host)
+  })
+
+  it('still refuses a routed history that exposes a credential next to a notes path', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_leak'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Notes at /opt/data/wiki/a.md and fixture-key' },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const file = join(dir, 'agents', 'private', 'agent.json')
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), notes_dir: 'wiki' }))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_leak/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: 'unsafe_upstream_response' })
+  })
+
   it('turns a routed agent\'s own MEDIA files into openable attachments kept in that agent\'s folder', async () => {
     const dir = box()
     const main = await fakeHermes('main')

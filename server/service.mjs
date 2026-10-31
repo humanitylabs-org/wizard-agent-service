@@ -18,7 +18,7 @@ import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
-import { projectPrivateFilePaths } from './private-file-projection.mjs'
+import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
@@ -2794,8 +2794,10 @@ function buildWizardServer(options, lifetime) {
       }
       // Routed agents have a host-side home and the runtime mounts it at /opt/data.
       // Shared inbox roots still apply when a note mentions a main-agent attachment.
-      const roots = [...inboxTrustedRoots, join(agents.agentsDir, agent.id, 'home'), '/opt/data']
-      const projected = projectPrivateFilePaths(result, roots)
+      // Its declared notes folder is owner-visible and reads as "<Agent> notes › path".
+      const home = join(agents.agentsDir, agent.id, 'home')
+      const roots = [...inboxTrustedRoots, home, '/opt/data']
+      const projected = projectPrivateFilePaths(result, roots, { readable: agentReadablePaths(agent, home) })
       if (roots.some(root => projected.includes(Buffer.from(root)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
       return projected
     },
