@@ -133,8 +133,8 @@ export function createHermesTextSearcher(path) {
   }
   if (db) {
     db.exec('PRAGMA mmap_size=2147483648; PRAGMA cache_size=-200000; CREATE TEMP TABLE wizard_roots(session_id TEXT PRIMARY KEY) WITHOUT ROWID')
-    columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(x => x.name))
-    insert = preparedRead(db, 'INSERT INTO temp.wizard_roots VALUES (?)')
+    columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(x => x.name))
+    insert = db.prepare('INSERT INTO temp.wizard_roots VALUES (?)')
   }
   return {
     close() { db?.close() },
@@ -150,7 +150,7 @@ export function createHermesTextSearcher(path) {
         try { for (const id of ids) insert.run(id); db.exec('COMMIT'); rootsKey=key }
         catch (error) { db.exec('ROLLBACK'); throw error }
       }
-      const version=preparedRead(db, 'PRAGMA data_version').get().data_version
+      const version=db.prepare('PRAGMA data_version').get().data_version
       if(version!==dataVersion) { bodies.clear(); bodyBytes=0; dataVersion=version }
       const start = performance.now()
       let rows, partial
@@ -158,7 +158,7 @@ export function createHermesTextSearcher(path) {
         // Hermes' word index first: one small posting list per word (20-80 ms cold) instead of three trigram lists,
         // where common trigrams like "str" in "nostr" cost 1-3 s cold (James, 25 Oct 2026: still 5 s on the phone).
         // Words match from their start ("nos" finds "nostr"); the JS check below stays the authority.
-        wordCandidates ||= preparedRead(db, 'SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rowid DESC LIMIT 8000')
+        wordCandidates ||= db.prepare('SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rowid DESC LIMIT 8000')
         const tokens=words.flatMap(w=>w.split(/[^a-z0-9]+/)).filter(t=>t.length>=3)
         const ftsIds=tokens.length ? wordCandidates.all(`content : (${tokens.map(t=>`"${t}"*`).join(' AND ')})`).map(r=>r.id) : []
         const roots=new Set(ids), sessions=new Set(); rows=[]; partial=ftsIds.length>=8000
@@ -167,7 +167,7 @@ export function createHermesTextSearcher(path) {
         let at=0
         for(; at<ftsIds.length && sessions.size<60; at+=200) {
           const chunk=ftsIds.slice(at,at+200)
-          if(!heads.has(chunk.length)) heads.set(chunk.length,preparedRead(db, `SELECT id,session_id,role FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
+          if(!heads.has(chunk.length)) heads.set(chunk.length,db.prepare(`SELECT id,session_id,role FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
           for(const r of heads.get(chunk.length).all(...chunk)) if(roots.has(r.session_id) && (r.role==='user'||r.role==='assistant')) { rows.push(r); sessions.add(r.session_id) }
         }
         if(at<ftsIds.length) partial=true
@@ -175,7 +175,7 @@ export function createHermesTextSearcher(path) {
       } else {
         // Newest 8,000 matching messages only: each is a random lookup in a 30 GB store, and a common 3-letter word
         // ("nos": 30k rows) blew the deadline. Older matches still come from titles; the response says partial.
-        candidates ||= preparedRead(db, `WITH c AS MATERIALIZED (
+        candidates ||= db.prepare(`WITH c AS MATERIALIZED (
           SELECT rowid AS id FROM messages_fts_trigram WHERE messages_fts_trigram MATCH ? ORDER BY rowid DESC LIMIT 8000
         ) SELECT m.session_id AS session_id, m.id AS id, (SELECT count(*) FROM c) AS candidate_count
           FROM c JOIN messages m ON m.id=c.id JOIN temp.wizard_roots r ON r.session_id=m.session_id
@@ -197,7 +197,7 @@ export function createHermesTextSearcher(path) {
         for(const id of wanted) { const cached=bodies.get(id); if(cached) found.set(id,cached.row); else missing.push(id) }
         for(let at=0; at<missing.length; at+=500) {
           const chunk=missing.slice(at,at+500)
-          if(!reads.has(chunk.length)) reads.set(chunk.length,preparedRead(db, `SELECT id,session_id,role,content,${columns.has('display_kind')?'display_kind':'NULL AS display_kind'},${columns.has('finish_reason')?'finish_reason':'NULL AS finish_reason'} FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
+          if(!reads.has(chunk.length)) reads.set(chunk.length,db.prepare(`SELECT id,session_id,role,content,${columns.has('display_kind')?'display_kind':'NULL AS display_kind'},${columns.has('finish_reason')?'finish_reason':'NULL AS finish_reason'} FROM messages WHERE id IN (${chunk.map(()=>'?').join(',')})`))
           for(const row of reads.get(chunk.length).all(...chunk)) { found.set(row.id,row); remember(row) }
         }
         for(const [id, values] of grouped) {
@@ -229,7 +229,7 @@ export function createHermesSessionTruthReader(path) {
     read: (ids, nowSeconds = Date.now() / 1000, options = {}) => readHermesSessionTruth(path, ids, nowSeconds, { ...options, db: connection.get() }),
     busy(id, nowSeconds = Date.now() / 1000) {
       const db = connection.get()
-      if (!db) return false
+      if (!db || !/^(?:wizard_|wizard-assistant-)/.test(String(id))) return false
       try { return !!preparedRead(db, 'SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(id, nowSeconds) }
       catch { return false }
     },
@@ -456,7 +456,7 @@ export function readHelmActivitySessionIds(path, activityIds) {
   if (!db) return sessions
   try {
     const placeholders = ids.map(() => '?').join(',')
-    const rows = preparedRead(db, `SELECT activity_id, session_id FROM activities WHERE activity_id IN (${placeholders})`).all(...ids)
+    const rows = db.prepare(`SELECT activity_id, session_id FROM activities WHERE activity_id IN (${placeholders})`).all(...ids)
     for (const row of rows) {
       const sessionId = String(row.session_id || '')
       if (sessionId) sessions.set(String(row.activity_id), sessionId)
@@ -480,7 +480,7 @@ export function readWizardAssistantRunReferences(path, sessionIds, nowSeconds = 
   if (!db) return []
   try {
     const placeholders = ids.map(() => '?').join(',')
-    const rows = preparedRead(db, `
+    const rows = db.prepare(`
       SELECT session_id, run_id, admission_status, created_at
       FROM assistant_requests
       WHERE session_id IN (${placeholders})
@@ -514,7 +514,7 @@ export function readWizardAssistantRevision(path) {
   const db = openReadOnly(path)
   if (!db) return ''
   try {
-    const row = preparedRead(db, `
+    const row = db.prepare(`
       SELECT COUNT(*) AS total,
              COALESCE(SUM(run_id IS NULL), 0) AS pending,
              COALESCE(MAX(rowid), 0) AS latest_id,
@@ -538,7 +538,7 @@ export function readPendingWizardAssistantAdmissions(path, sessionIds, nowSecond
   if (!db) return []
   try {
     const placeholders = ids.map(() => '?').join(',')
-    const rows = preparedRead(db, `
+    const rows = db.prepare(`
       SELECT session_id, run_id, admission_status, created_at
       FROM assistant_requests
       WHERE session_id IN (${placeholders})
@@ -571,14 +571,14 @@ export function readHermesListRevision(path) {
   if (!db) return null
   try {
     const parts = []
-    const sessions = preparedRead(db, 'SELECT COUNT(*) AS n, MAX(COALESCE(last_activity_at, started_at)) AS at, MAX(message_count) AS m FROM sessions').get()
+    const sessions = db.prepare('SELECT COUNT(*) AS n, MAX(COALESCE(last_activity_at, started_at)) AS at, MAX(message_count) AS m FROM sessions').get()
     parts.push(sessions.n, sessions.at, sessions.m)
-    parts.push(preparedRead(db, 'SELECT MAX(rowid) AS id FROM messages').get().id)
+    parts.push(db.prepare('SELECT MAX(rowid) AS id FROM messages').get().id)
     for (const sql of [
       'SELECT COUNT(*) AS n, MAX(expires_at) AS at FROM session_turn_leases',
       'SELECT COUNT(*) AS n, MAX(rowid) AS id, SUM(state IN (\'running\', \'stalling\', \'finalizing\')) AS live FROM async_delegations',
     ]) {
-      try { parts.push(...Object.values(preparedRead(db, sql).get())) } catch { parts.push('-') }
+      try { parts.push(...Object.values(db.prepare(sql).get())) } catch { parts.push('-') }
     }
     return parts.map((value) => String(value ?? '')).join(':')
   } catch {
@@ -589,7 +589,7 @@ export function readHermesListRevision(path) {
 }
 
 function lineageRoots(db, ids) {
-  const parentOf = preparedRead(db, 'SELECT parent_session_id FROM sessions WHERE id = ?')
+  const parentOf = db.prepare('SELECT parent_session_id FROM sessions WHERE id = ?')
   const parents = new Map()
   const roots = new Set()
   for (const start of ids) {
@@ -619,7 +619,7 @@ export function readRecentHermesRootIds(path, sinceSeconds) {
   const db = openReadOnly(path)
   if (!db) return null
   try {
-    const recent = preparedRead(db, 'SELECT id FROM sessions WHERE COALESCE(last_activity_at, started_at) >= ?').all(Number(sinceSeconds))
+    const recent = db.prepare('SELECT id FROM sessions WHERE COALESCE(last_activity_at, started_at) >= ?').all(Number(sinceSeconds))
     return lineageRoots(db, recent.map((row) => row.id))
   } catch {
     return null
@@ -636,10 +636,10 @@ export function readHermesMessageDelta(path, afterId, maxRows = 20_000) {
   const db = openReadOnly(path)
   if (!db) return null
   try {
-    const maxId = Number(preparedRead(db, 'SELECT MAX(id) AS id FROM messages').get().id ?? 0)
+    const maxId = Number(db.prepare('SELECT MAX(id) AS id FROM messages').get().id ?? 0)
     if (!Number.isFinite(afterId) || afterId > maxId || maxId - afterId > maxRows) return { maxId, roots: null }
     // Walk the primary key range; DISTINCT/GROUP BY here makes SQLite scan the session index.
-    const sessions = new Set(preparedRead(db, 'SELECT session_id FROM messages WHERE id > ? AND id <= ? ORDER BY id').all(afterId, maxId).map((row) => String(row.session_id)))
+    const sessions = new Set(db.prepare('SELECT session_id FROM messages WHERE id > ? AND id <= ? ORDER BY id').all(afterId, maxId).map((row) => String(row.session_id)))
     return { maxId, roots: lineageRoots(db, sessions) }
   } catch {
     return null
