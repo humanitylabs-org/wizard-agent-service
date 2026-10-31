@@ -503,18 +503,18 @@ export class DurableRunQueue {
     return `${newest?.id ?? 0}:${newest?.n ?? 0}:${rows.map((row) => `${row.public_run_id}=${row.status}`).sort().join(',')}`
   }
 
-  // Per-thread fingerprint of every queue row (id=status), for the Chats list cache: a thread
+  // Per-thread fingerprint of every queue row (rowid/id/status/update), for the Chats list cache: a thread
   // whose rows were added, changed or pruned by retention must be re-projected. Reads status
   // from the index and session_id from the row head, never the body (~10 ms for ~1,800 rows).
   sessionStamps() {
     const rows = this.database.prepare(`
-      SELECT session_id, public_run_id, status FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+      SELECT rowid, session_id, public_run_id, status, updated_at FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
     `).all()
     const parts = new Map()
     for (const row of rows) {
       const id = String(row.session_id)
       if (!parts.has(id)) parts.set(id, [])
-      parts.get(id).push(`${row.public_run_id}=${row.status}`)
+      parts.get(id).push(`${row.rowid}:${row.public_run_id}=${row.status}:${row.updated_at}`)
     }
     return new Map([...parts].map(([id, list]) => [id, list.sort().join(',')]))
   }

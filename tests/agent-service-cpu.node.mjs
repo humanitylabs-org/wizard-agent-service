@@ -108,7 +108,7 @@ test('a direct run leaving the tracker re-projects its cached Chats row (list ca
   const row = result.rows.find(row => row.id === target)
   assert.equal(row.wizard_last_run_id, 'run_queued', 'the cached row must not keep the direct run projection')
   assert(!result.cachedIds.includes(target))
-  assert.equal(projections, 100 + 1, 'only the newest batch and the changed thread are re-projected')
+  assert.equal(projections, 1, 'only the changed thread is re-projected; unchanged head rows are reused')
   // Unchanged afterwards: served from cache again.
   result = await build(new Set())
   assert(result.cachedIds.includes(target))
