@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync, statSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync, statSync, symlinkSync, writeFileSync, chmodSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -311,7 +311,7 @@ describe('agent bridge: MCP gateway', () => {
     mkdirSync(join(dir, 'grants'))
     const KEY = 'b2'.repeat(32)
     const real = join(dir, 'elsewhere.json')
-    writeFileSync(real, JSON.stringify({ outgoing: { messenger: KEY } }))
+    writeFileSync(real, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o600 })
     symlinkSync(real, join(dir, 'grants', 'agent-service.json'))
     expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
     rmSync(join(dir, 'grants', 'agent-service.json'))
@@ -323,10 +323,34 @@ describe('agent bridge: MCP gateway', () => {
     writeFileSync(join(dir, 'app-mcp-keys', 'messenger'), KEY + '\n', { mode: 0o600 })
     rmSync(join(dir, 'grants', 'agent-service.json'))
     expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
-    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY, '../x': KEY } }))
+    // An in-place rewrite of the same size within one mtime tick (a rotation) is still seen: no utime here.
+    const f = join(dir, 'grants', 'agent-service.json')
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o600 })
+    const fresh = createGatewayGrants({ osHome: dir })
+    expect(fresh.key('messenger')).toBe(KEY)
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: 'c3'.repeat(32) } }))
+    expect(fresh.key('messenger')).toBe('c3'.repeat(32))
+    rmSync(f)
+    execFileSync('mkfifo', [f]) // a FIFO never blocks the gateway
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    rmSync(f)
+    // A file others may read or write holds no key (the spec says 0600).
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o644 })
+    chmodSync(f, 0o644)
+    const said: string[] = []
+    const loose = createGatewayGrants({ osHome: dir, log: (line: string) => said.push(line) })
+    expect(loose.key('messenger')).toBe('')
+    expect(loose.key('messenger')).toBe('')
+    expect(said).toHaveLength(1) // said once, with the reason, not per call
+    expect(said[0]).toContain('0600')
+    chmodSync(f, 0o600) // the operator's fix is seen without a restart (ctime is in the stamp)
+    expect(loose.key('messenger')).toBe(KEY)
+    rmSync(f)
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY, '../x': KEY } }), { mode: 0o600 })
     const g = createGatewayGrants({ osHome: dir })
     expect(g.key('messenger')).toBe(KEY)
     expect(g.key('../x')).toBe('')
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('a down app returns a clear tool error and the gateway keeps serving', async () => {
