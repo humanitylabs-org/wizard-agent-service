@@ -130,13 +130,14 @@ const serviceHeavyStatus = async () => {
   const start = source.indexOf('  const heavyStatus = '), end = source.indexOf('\n  const heavyNotices = ', start)
   assert.ok(start >= 0 && end > start, 'service heavy-status closure must be found')
   const expression = source.slice(start + '  const heavyStatus = '.length, end).trim()
-  const { guardHeavyStatus } = await import('../server/thread-status.mjs')
+  const { guardHeavyStatus, createHeavyStatusGuard } = await import('../server/thread-status.mjs')
+  const { heavyJobsForSession } = await import('../server/heavy-wait.mjs')
   let reads = 0
   const read = () => { reads++; return new Set(['synthetic']) }
-  const wrap = new Function('guardHeavyStatus', 'heavyWork', 'readNonHoldingFollowUps', 'hermesStatePath', 'runQueue', 'agents', `return (${expression})`)
+  const wrap = new Function('guardHeavyStatus', 'createHeavyStatusGuard', 'heavyJobsForSession', 'heavyWork', 'readNonHoldingFollowUps', 'hermesStatePath', 'runQueue', 'agents', `return (${expression})`)
   const runQueue = { get: id => id === 'delivered' ? { upstreamRunId: 'synthetic-delivery' } : null }
   const agents = { runThread: (_agent, id) => id === 'delivered' ? { session_id: 'synthetic', heavy_origin: 'synthetic-origin' } : null }
-  return { run: wrap(guardHeavyStatus, undefined, read, 'synthetic-only-unused', runQueue, agents), reads: () => reads, guardHeavyStatus }
+  return { run: wrap(guardHeavyStatus, createHeavyStatusGuard, heavyJobsForSession, undefined, read, 'synthetic-only-unused', runQueue, agents), reads: () => reads, guardHeavyStatus }
 }
 
 test('heavy status decoration never reads discarded follow-up evidence for done rows', async () => {

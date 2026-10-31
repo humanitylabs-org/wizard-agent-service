@@ -130,6 +130,21 @@ export function mergeStamps(base, extra) {
   return out
 }
 
+/** Per-thread fingerprint of in-memory direct (unqueued) run admissions. A thread is hot only while
+ * its direct run is tracked; when the run ends and leaves the map, its fingerprint changes once more
+ * so the cached row is re-projected without that run (wizard_last_run_*), instead of serving it stale
+ * until a self-check catches the difference and switches the whole cache off. */
+export function directRunStamps(runs) {
+  const parts = new Map()
+  for (const run of runs ?? []) {
+    const id = typeof run?.sessionId === 'string' ? run.sessionId : ''
+    if (!id) continue
+    if (!parts.has(id)) parts.set(id, [])
+    parts.get(id).push(`${run.publicRunId ?? run.runId ?? ''}=${run.status ?? ''}`)
+  }
+  return new Map([...parts].map(([id, list]) => [id, `direct:${list.sort().join(',')}`]))
+}
+
 /** Per-thread differences between two projected lists, ignoring order. */
 export function diffProjectedRows(expected, actual) {
   const key = (row) => JSON.stringify(row, Object.keys(row ?? {}).sort())
