@@ -13,7 +13,9 @@ const strip = ({ snapshot, archive_cursor, ...rest }) => rest
 test('Chats window: the shared list cache serves exactly what the full rebuild serves', { timeout: 30000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'list-cache-')); const servers = []
   t.after(async () => { for (const s of servers.reverse()) await close(s); rmSync(root, { recursive: true, force: true }) })
-  const now = Date.now() / 1000
+  let wall = Date.now()
+  t.mock.method(Date, 'now', () => wall)
+  const now = wall / 1000
   const rows = Array.from({ length: 260 }, (_, i) => ({ id: `wizard_synthetic_${i}`, source: 'api_server', title: `Synthetic ${i}`, hidden: false,
     parent_session_id: null, message_count: 4, last_active: now - 20 * 86400 - i, started_at: now - 20 * 86400 - i, archived: i % 2 === 0,
     latest_message: { role: 'assistant', content: `preview ${i}`, timestamp: now - 20 * 86400 - i } }))
@@ -34,7 +36,7 @@ test('Chats window: the shared list cache serves exactly what the full rebuild s
   }); servers.push(up); const u = await listen(up); mkdirSync(join(root, 'os'))
   const options = { upstreamOrigin: `http://127.0.0.1:${u.port}`, hermesKey: 'synthetic-api-key', requireAccess: false, agents: false, agentBridge: false,
     followThrough: false, joinedDelegation: 'off', wizardOsHome: join(root, 'os'), hermesStatePath: state, canonicalSessionReader: () => rows, runQueue: false }
-  const cached = createWizardServer({ ...options, listCacheMode: 'on' }); servers.push(cached)
+  const cached = createWizardServer({ ...options, listCacheMode: 'on', listCacheStaleMs: 0, listCacheCheckMs: 1_000 }); servers.push(cached)
   const full = createWizardServer({ ...options, listCacheMode: 'off' }); servers.push(full)
   const [a, b] = [await listen(cached), await listen(full)]
   const get = async (port, suffix) => (await fetch(`http://127.0.0.1:${port}${suffix}`)).json()
@@ -47,6 +49,15 @@ test('Chats window: the shared list cache serves exactly what the full rebuild s
     return left
   }
   await same('first load')
+  wall += 31_000 // expire the shared 30-s snapshot without an owner-write/global invalidation
+  await same('unchanged head is reused')
+  const reused = await get(a.port, '/wizard/list-cache')
+  assert(reused.head_reused > 0 && reused.head_projected < 100, JSON.stringify(reused))
+  assert.equal(reused.check_differences, 0)
+  // Exercise the real joined periodic full-projection safety net, not just the
+  // initial zero-valued diagnostic counters.
+  for (let attempt = 0; attempt < 50 && !(await get(a.port, '/wizard/list-cache')).checks; attempt++) await new Promise(resolve => setTimeout(resolve, 100))
+  assert((await get(a.port, '/wizard/list-cache')).checks > 0)
   // Owner action (any write) makes the next list rebuild immediately, never from the snapshot.
   rows[180] = { ...rows[180], title: 'Renamed far down the list', archived: false, last_active: now }
   await fetch(`http://127.0.0.1:${a.port}/wizard/nothing-here`, { method: 'POST' }).catch(() => undefined)
@@ -62,6 +73,8 @@ test('Chats window: the shared list cache serves exactly what the full rebuild s
   const routes = Object.entries(stats.speed.routes)
   assert(routes.some(([key, row]) => key.includes('/wizard/:id/api/sessions') && row.count >= 1 && row.total_ms >= 0))
   assert.equal(stats.fallbacks, 0, JSON.stringify(stats))
+  assert.equal(stats.check_differences, 0, JSON.stringify(stats))
+  assert.equal(stats.check_live_differences, 0, JSON.stringify(stats))
   assert(stats.builds >= 3 && stats.last_cached > 100, JSON.stringify(stats))
   const check = await get(b.port, '/wizard/list-cache')
   assert.equal(check.mode, 'off')
