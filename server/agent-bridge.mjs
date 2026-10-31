@@ -709,7 +709,7 @@ function statePath(home, relative) {
 }
 
 /** Bounded descriptor reads; special files and hardlinks cannot masquerade as notes. */
-function stateText(home, relative) {
+export function stateText(home, relative) {
   const file = statePath(home, relative)
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -727,7 +727,7 @@ function stateText(home, relative) {
   } finally { closeSync(fd) }
 }
 
-function stateList(home, folder, skills = false) {
+export function stateList(home, folder, skills = false) {
   const entries = []
   let visited = 0, truncated = false
   function walk(relative, depth) {
