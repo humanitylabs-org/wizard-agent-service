@@ -1,3 +1,4 @@
+import { createSpeedMeter } from './speed-meter.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -3474,13 +3475,8 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
-  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
-  let heavyRowsAt = 0, heavyRowsCache = []
-  const heavyJobRows = () => {
-    if (!heavyWork?.queue?.rows) return []
-    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
-    return heavyRowsCache
-  }
+  // The queue owns the data-version snapshot; every projection sees writes immediately.
+  const heavyJobRows = () => heavyWork?.queue.rows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -4185,7 +4181,7 @@ function buildWizardServer(options, lifetime) {
     let messageMark = Number.NaN
     let lastFallbackLogAt = 0
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
-      last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+      last_build_ms: 0, head_ms: 0, hot_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
     const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
@@ -4239,6 +4235,7 @@ function buildWizardServer(options, lifetime) {
       const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
+        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms),
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
@@ -4987,8 +4984,11 @@ function buildWizardServer(options, lifetime) {
   })
   lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
+  const speedMeter = createSpeedMeter()
+  lifetime.own(() => speedMeter.close(), () => speedMeter.close())
   const server = createServer(async (request, response) => {
-    if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+    const meterDone = speedMeter.begin(request)
+    if (lifetime.closing) { try { sendJson(response, 503, { error: 'service_unavailable' }) } finally { meterDone() }; return }
     const requestDone = lifetime.request()
     const tailnetIngress = request[TAILNET_INGRESS] === true
     const requireAccess = tailnetIngress || baseRequireAccess
@@ -5111,7 +5111,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, listCache.stats())
+        sendJson(response, 200, { ...listCache.stats(), speed: speedMeter.stats() })
         return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
@@ -6757,7 +6757,7 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { requestDone() }
+    } finally { meterDone(); requestDone() }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {
