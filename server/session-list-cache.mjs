@@ -89,7 +89,7 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
   // Raw canonical rows include timestamps/count/title/pin/agent metadata. Stamps cover
   // outside queue/background/direct/heavy state. Hot and non-cacheable rows stay fresh.
   // headContext invalidates global owner changes; index preserves head preview enrichment.
-  const project = async ({ sessions, hot = new Set(), warm = new Set(), stamps = null, epoch: nextEpoch = '', headContext = '', reuseHead = true, projectBatch }) => {
+  const project = async ({ sessions, hot = new Set(), warm = new Set(), stamps = null, epoch: nextEpoch = '', headContext = '', reuseHead = true, projectBatch, projectHeadExtras = async () => new Map() }) => {
     if (nextEpoch !== epoch) { cache = new Map(); epoch = nextEpoch; sweptAt = null }
     const at = now()
     const head = sessions.slice(0, batchSize)
@@ -98,12 +98,22 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
     const raws = new Map(sessions.map(session => [session.id, JSON.stringify(session)]))
     const stamp = id => stamps === null ? undefined : (stamps.get(id) ?? '')
     const changed = (session, entry) => hot.has(session.id) || !entry || entry.raw !== raws.get(session.id)
-      || !cacheableRow(entry.row) || entry.stamp !== stamp(session.id)
+      || !cacheableRow(entry.row) || entry.stamp !== stamp(session.id) || entry.headContext !== headContext
     const fresh = new Map()
-    const headNeed = head.map((session, index) => !reuseHead || changed(session, cache.get(session.id))
-      || cache.get(session.id)?.headIndex !== index || cache.get(session.id)?.headContext !== headContext
-      || at - cache.get(session.id).builtAt >= headRefreshAge(session.id, Math.min(60_000, headMaxAgeMs)))
-    let headRows
+    const head_blocked = {}
+    const headNeed = head.map((session, index) => {
+      const entry = cache.get(session.id)
+      const reason = !reuseHead ? 'pending_first_send'
+        : !entry ? 'missing'
+        : entry.headContext !== headContext ? 'context'
+        : hot.has(session.id) ? 'hot'
+        : !cacheableRow(entry.row) ? 'live'
+        : entry.raw !== raws.get(session.id) || entry.stamp !== stamp(session.id) || entry.headIndex !== index ? 'changed'
+        : at - entry.builtAt >= headRefreshAge(session.id, Math.min(60_000, headMaxAgeMs)) ? 'age' : ''
+      if (reason) head_blocked[reason] = (head_blocked[reason] ?? 0) + 1
+      return Boolean(reason)
+    })
+    let headRows, head_extras = 0
     if (!reuseHead) {
       // Pending first-send enrichment can append rows to each original slice. Preserve
       // that exact legacy output rather than keying/reordering/inventing those rows.
@@ -118,7 +128,9 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
         const id = head[index].id
         if (fresh.has(id)) cache.set(id, { raw: raws.get(id), row: fresh.get(id), builtAt: at, stamp: stamp(id), headIndex: index, headContext })
       }
-      headRows = head.map(session => cache.get(session.id).row).filter(Boolean)
+      const extras = await projectHeadExtras()
+      head_extras = [...extras.values()].reduce((count, rows) => count + rows.length, 0)
+      headRows = head.flatMap((session, index) => [cache.get(session.id).row, ...(extras.get(index + 1) ?? [])]).filter(Boolean)
     }
     const head_projected = headNeed.filter(Boolean).length
     const head_reused = head.length - head_projected
@@ -139,7 +151,7 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
     })
     const coldFresh = new Map()
     await projectInBatches(need, projectBatch, coldFresh)
-    for (const [id, row] of coldFresh) cache.set(id, { raw: raws.get(id), row, builtAt: at, stamp: stamp(id) })
+    for (const [id, row] of coldFresh) cache.set(id, { raw: raws.get(id), row, builtAt: at, stamp: stamp(id), headContext })
     for (const id of cache.keys()) if (!raws.has(id)) cache.delete(id)
     const rows = [...headRows]
     const cachedIds = head.filter((_, index) => !headNeed[index]).map(session => session.id)
@@ -149,7 +161,7 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
       if (row) rows.push(row)
     }
     const hot_ms = performance.now() - hotStarted
-    return { rows, cachedIds, head_ms, hot_ms, head_reused, head_projected, projected: head_projected + need.length, cached: cachedIds.length, swept: sweep.size }
+    return { rows, cachedIds, head_ms, hot_ms, head_reused, head_projected, head_blocked, head_extras, projected: head_projected + need.length, cached: cachedIds.length, swept: sweep.size }
   }
   return { project, size: () => cache.size, clear: () => { cache = new Map(); epoch = null; sweptAt = null } }
 }

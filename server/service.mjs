@@ -4075,11 +4075,11 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
-  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0) => {
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0, includePendingFirstSend = true) => {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
-          if (!operator && runQueue && firstPage) {
+          if (!operator && runQueue && firstPage && includePendingFirstSend) {
             try {
               const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
               result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
@@ -4202,7 +4202,7 @@ function buildWizardServer(options, lifetime) {
     let messageMark = Number.NaN
     let lastFallbackLogAt = 0
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
-      last_build_ms: 0, head_ms: 0, hot_ms: 0, head_reused: 0, head_projected: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+      last_build_ms: 0, head_ms: 0, hot_ms: 0, head_reused: 0, head_projected: 0, head_blocked: {}, head_extras: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
     const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
@@ -4211,9 +4211,18 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectSlice = async (sessions, firstPage, previewOffset) =>
-      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, previewOffset)).toString('utf8')).data
-    const projectBatch = (sessions, firstPage, previewOffset = 0) => projectListSlices(sessions, projectSlice, firstPage, 20, previewOffset)
+    const projectSlice = async (sessions, firstPage, previewOffset, includePendingFirstSend = true) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, previewOffset, includePendingFirstSend)).toString('utf8')).data
+    const projectBatch = (sessions, firstPage, previewOffset = 0, includePendingFirstSend = true) =>
+      projectListSlices(sessions, (batch, first, offset) => projectSlice(batch, first, offset, includePendingFirstSend), firstPage, 20, previewOffset)
+    // Owner-controlled global inputs read by the direct core. Titles/pins/model are in
+    // raw canonical rows; subjects, spaces, agent metadata and follow-ups are decorated
+    // on every snapshot build. Operator workers are read only for operator lists.
+    // Keep the broad owner revision for snapshot freshness, NOT per-row invalidation.
+    const headContext = () => JSON.stringify([
+      appCatalog().map(app => app.id).sort(),
+      [...dismissedFailureStore.dismissals].filter(([, record]) => record.agent_id === 'hermes').sort(([a], [b]) => a.localeCompare(b)),
+    ])
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
@@ -4258,14 +4267,26 @@ function buildWizardServer(options, lifetime) {
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      // First-send enrichment may append noncanonical rows to each head slice;
-      // keep its exact full-head behavior until those rows enter the canonical list.
-      let reuseHead = true
-      try { if (runQueue) reuseHead = !pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)).length } catch { reuseHead = false }
-      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', headContext: localRevision, reuseHead, projectBatch })
+      // Legacy enrichment appends pending rows to EACH original 20-row head slice.
+      // Project those exceptions fresh, separately from cacheable canonical rows,
+      // retaining duplicates, order and preview positions (including partial slices).
+      let reuseHead = true, pending = []
+      try { if (runQueue) pending = pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)) } catch { reuseHead = false }
+      const projectHeadExtras = async () => {
+        const extras = new Map()
+        if (pending.length) for (let offset = 0; offset < Math.min(100, all.length); offset += 20) {
+          const slice = all.slice(offset, Math.min(offset + 20, 100))
+          const known = new Set(slice.map(session => session.id))
+          const appended = pending.filter(session => !known.has(session.id))
+          if (appended.length) extras.set(offset + slice.length, await projectSlice(appended, true, offset + slice.length, false))
+        }
+        return extras
+      }
+      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', headContext: headContext(), reuseHead,
+        projectBatch: (batch, first, offset) => projectBatch(batch, first, offset, !reuseHead), projectHeadExtras })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
-        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms), head_reused: result.head_reused, head_projected: result.head_projected,
+        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms), head_reused: result.head_reused, head_projected: result.head_projected, head_blocked: result.head_blocked, head_extras: result.head_extras,
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
