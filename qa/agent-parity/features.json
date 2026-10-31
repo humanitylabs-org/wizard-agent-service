@@ -41,6 +41,16 @@
   ],
   "features": [
     {
+      "id": "holographic-fact-memory",
+      "description": "Stock local fact_store and prefetch recall survive process/container restart in each runtime's own Hermes home without crossing agent/profile homes.",
+      "layer": "runtime",
+      "how_to_test": "Run tests/holographic_container_proof.py on an isolated Docker worker. Real stock gateway containers model main-home, named-profile, managed-container and restricted-home scopes; the stock memory initializer must inject fact_store/fact_feedback, add/search/prefetch a canary, restart only its disposable gateway and recall again for every kind. Restricted proof also backs up via native SQLite-safe backup, imports into a second home, applies Wizard import wiring, and recalls. This is stock runtime home/tool behavior, not live Wizard routing or model adherence. Never use existing private agents or owner homes. The Holographic memory workflow saves the per-kind JSON results; an empty report or failed command fails CI.",
+      "source_refs": ["server/agents.mjs", "ops/agent-runtime/hermes_import.py"],
+      "reference_tests": ["tests/holographic-memory.test.ts", "tests/holographic_container_proof.py", "tests/test_hermes_import.py", "tests/managed-harness-upgrade.test.ts"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "owned-open-work",
       "description": "Owner-scoped Hermes-only owned follow-up processing without imposed style instructions; routed kinds retain done state and admission behavior.",
       "layer": "server",
@@ -56,12 +66,12 @@
     },
     {
       "id": "provider-signin-recovery",
-      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route.",
+      "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route; a stale picker retry on another model is refused, not misacknowledged or duplicated.",
       "layer": "server",
       "fixture": "provider-signin-recovery",
       "how_to_test": "Fail a real HTTP admission with a controlled zero-token sign-in error, observe unavailable then ready, and assert one same-model source-preserving resend on main, host-profile, container and restricted queues.",
       "source_refs": ["server/run-queue.mjs", "server/routed-run-queue.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "tests/provider-saved-retry-route-race.node.mjs", "qa/agent-parity/server-checks.mjs"],
       "policy_exemptions": []
     },
     {
@@ -137,7 +147,7 @@
       "id": "chats-spaces",
       "description": "Agent-owned thread collections persist independently of agent runtime kind and hydrate all visible members outside global archive windows",
       "layer": "server",
-      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces, refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway), list/search/create/add/remove/delete own Spaces (spaces_add and full PUT snapshots keep a chat in one Space per agent), refuse foreign Spaces as not_found, project assistant-only subject metadata, file by status-line space, restart and verify durable membership. Managed-container startup upgrades are covered in tests/managed-harness-upgrade.test.ts. In wizard-ux, qa-chats-focus.cjs pickerAcceptance verifies main and routed New Space fills use the scoped Spaces tool instruction (never a main-only CLI), exactly once through the normal outbox with the selected agent. In wizard-ux, node --test tests/space-members.test.mjs checks missing-member hydration for main, host-profile, container and restricted routes, scope changes, hidden/private discovery, 500 members and bounded polling. QA_SPACE_MEMBERS_ONLY=1 node qa-chats-focus.cjs <origin> verifies phone/desktop Focus shows 82 visible members with 62 archived beyond the global archive-50, keeps All windowed and preserves Back. These are fixture/browser checks, not live runtime proof.",
       "source_refs": [
         "server/ui-preferences.mjs",
         "server/spaces-tools.mjs",
@@ -149,6 +159,7 @@
         "tests/thread-spaces-http.test.ts",
         "tests/spaces-tools.test.ts",
         "tests/spaces-search-status.test.ts",
+        "tests/one-space-per-thread.test.ts",
         "tests/managed-harness-upgrade.test.ts",
         "qa/agent-parity/server-checks.mjs",
         "wizard-ux/qa-chats-focus.cjs:pickerAcceptance"
@@ -430,12 +441,13 @@
       "id": "media-contract",
       "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
       "layer": "server",
-      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering.",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB, cache/images placement) and the status-line contract. This alone does not prove media rendering.",
       "source_refs": [
         "server/chat-presentation.mjs"
       ],
       "reference_tests": [
-        "tests/markdown-hint.test.ts"
+        "tests/markdown-hint.test.ts",
+        "tests/owner-file-handoff.test.ts"
       ],
       "fixture": "media-contract",
       "policy_exemptions": []
@@ -518,15 +530,36 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Emit needs_you/done/working status with ask, subject and title; assert the list projects those fields without raw tags. tests/heavy-status.test.ts exercises the real list and notice delivery routes for all four runtime kinds: done/check become fyi while heavy results are unfinished or undelivered. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
-        "server/thread-status.mjs"
+        "server/thread-status.mjs",
+        "server/open-ask.mjs",
+        "server/session-list-view.mjs",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
         "tests/thread-status-backfill-list.test.ts",
-        "tests/heavy-status.test.ts"
+        "tests/heavy-status.test.ts",
+        "tests/open-ask.node.mjs",
+        "wizard-ux/tests/ready-open-ask.test.mjs"
       ],
       "fixture": "status-list-state",
+      "policy_exemptions": []
+    },
+    {
+      "id": "finished-run-leaves-working",
+      "description": "A thread leaves Working as soon as its run finishes, not when the cached listing expires",
+      "layer": "server",
+      "how_to_test": "Admit a run, make the list read Hermes while the run is live, finish the run and read its status as the browser does, then list again: the thread must stop listing as Working within 1 s, well inside main's 30 s cached Hermes listing, and its row must come from the finished listing (two messages). Main runs the direct admission path (fails without the re-read) and the durable-queue path on a fresh-mode box without state.db (fails unless the queue revision re-reads the listing: the row must come from the finished listing too); host-profile, container and restricted list live through their agent and are asserted the same way. tests/list-working-after-reply.node.mjs also covers a listing read already in flight when a direct or queued run ends, and a new queued chat the listing skipped until its reply. Fixture HTTP evidence only, not browser or live-model acceptance.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/list-working-after-reply.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "finished-run-leaves-working",
       "policy_exemptions": []
     },
     {
@@ -609,6 +642,37 @@
         "tests/agent-media.test.ts"
       ],
       "fixture": "assistant-media",
+      "policy_exemptions": []
+    },
+    {
+      "id": "sent-media-snapshot",
+      "description": "A file an agent sends is a snapshot: rewriting the source later never changes an earlier chat message",
+      "layer": "server",
+      "how_to_test": "Run the wizard-os media hook with each runtime's own home on a scratch file, store the rewritten reply, serve the attachment, rewrite the source in place and assert the served bytes are unchanged.",
+      "source_refs": [
+        "hermes-plugin/wizard-os/media.py",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/test_wizard_os_media_plugin.py"
+      ],
+      "fixture": "sent-media-snapshot",
+      "policy_exemptions": []
+    },
+    {
+      "id": "working-context",
+      "description": "The wizard-work-progress plugin adds the Working milestone contract to Wizard turns without it showing in chat history",
+      "layer": "server",
+      "how_to_test": "Run the plugin's pre_llm_call hook for the kind's Wizard session (and a delegated child, which gets nothing), store the injected text and multimodal user turns, and assert history shows only the human words on every kind.",
+      "source_refs": [
+        "hermes-plugin/wizard-work-progress/__init__.py",
+        "server/memory-context-projection.mjs"
+      ],
+      "reference_tests": [
+        "tests/daily-hermes-plugins.test.ts",
+        "tests/test_daily_hermes_plugins.py"
+      ],
+      "fixture": "working-context",
       "policy_exemptions": []
     },
     {
@@ -994,12 +1058,13 @@
       "id": "model-lock",
       "description": "Queue/steer/retry on one route while changing global default",
       "layer": "server",
-      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked.",
+      "how_to_test": "Queue/steer/retry on one route while changing global default; verify the accepted route stays locked. In wizard-ux, node --test tests/agent-held-take-model.test.mjs checks that a take or Retry bound to a host-profile, container, restricted or Private agent rides on that agent's own route (an explicit pick on its provider is kept; a main-agent route is replaced by the agent default) while a main-thread take keeps its own route. These are fixture checks, not live runtime proof.",
       "source_refs": [
         "server/run-queue.mjs"
       ],
       "reference_tests": [
-        "tests/proxy-queue.test.ts"
+        "tests/proxy-queue.test.ts",
+        "wizard-ux/tests/agent-held-take-model.test.mjs"
       ],
       "fixture": "model-lock",
       "policy_exemptions": []
@@ -1014,6 +1079,21 @@
       ],
       "reference_tests": [
         "wizard-ux/tests/claude-default-pool.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "multiline-composer-editability",
+      "description": "A three-line mobile draft keeps every editing row selectable and Send reachable without the model control intercepting either target",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run qa-composer-multiline.cjs against the actual mobile DOM with synthetic main, host-profile, container and restricted agent records. For each route, open its New chat through the supported shell path, enter a three-line draft, select the lower lines, and use elementFromPoint to require the second-last row to hit the textarea and Send to hit the Send button. The full matrix also covers phone/native widths 360 and 412, Nebula and Grove, plus native landscape. All requests are locally fixtured; foreign origins and agent-message writes fail the run. This is browser-level synthetic route and hit-testing evidence, not physical-device selection-handle proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/qa-composer-multiline.cjs",
+        "wizard-ux/tests/composer-model-label.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []
@@ -1087,6 +1167,16 @@
         "tests/history-compaction-replay.test.ts"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "scheduler-notifications",
+      "description": "Scheduled notifications preserve silent output, agent app authority and thread visibility",
+      "layer": "server",
+      "how_to_test": "Run a notification schedule through the real Service and each runtime route with a bound notifications MCP app (main is denied in routed cases). Assert the scheduler's internal read retains the silent answer, owner proof plus the raw header still scrubs it, the app receives one notify as the job agent, and the agent's thread is hidden. Remove the app grant and run again: the same thread is unhidden, fallback is recorded and no notification is sent. Restricted uses a mode-0600 Unix ingress; host-profile uses /p/parity-profile.",
+      "source_refs": ["server/scheduler.mjs", "server/service.mjs", "server/agents-http.mjs", "server/agent-bridge.mjs"],
+      "reference_tests": ["tests/scheduler-notify-parity.test.ts", "qa/agent-parity/scheduler-notify.mjs"],
+      "fixture": "scheduler-notifications",
       "policy_exemptions": []
     },
     {
@@ -1167,6 +1257,16 @@
         "wizard-ux/tests/synced-lists.test.mjs"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "agent-app-access",
+      "description": "The owner's per-agent app switch (Connections → Agents): an app turned off for an agent leaves that agent's tool list and its calls are refused in plain words at once; turned on again it is callable, without a restart.",
+      "layer": "server",
+      "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway) with a synthetic app on its own list (main: .main-agent.json, others: agent.json). The call is not refused; with the app off the call returns '<agent> is not allowed to use Synthetic Video. The owner can turn it on in Connections.' and tools/list has none of its tools; back on, the call is not refused, with no restart. tests/agents-sealed-apps.test.ts covers the owner API path, the private-app seal and new-agent defaults. Fixture HTTP evidence, not live runtime proof.",
+      "source_refs": ["server/agent-bridge.mjs", "server/agents.mjs"],
+      "reference_tests": ["tests/agents-sealed-apps.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "fixture": "agent-app-access",
       "policy_exemptions": []
     }
   ]

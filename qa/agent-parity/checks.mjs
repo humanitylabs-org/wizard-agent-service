@@ -3,10 +3,18 @@ import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
+
+const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true),
+  // Main's cached Hermes listing with the stock running status; main admits direct here (the
+  // check runs main's durable-queue path in a second scene) and without state.db, whose live
+  // truth would otherwise hide a stale cached listing.
+  'finished-run-leaves-working': kind => scene(kind, { canonicalSessionListing: true, fixtureSessionStatus: true, ...(kind === 'main' ? { runQueueStatePath: '', hermesStatePath: '' } : {}) }) }
 
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'scheduler-notifications': checkBoundNotification,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')
@@ -190,6 +198,8 @@ export const checks = {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic media request' })); assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('MEDIA:/absolute/path'), 'every agent must know how Wizard renders delivery media')
+    for (const piece of ['PDF', 'up to 256 MB', 'the 5 MB limit is for images only', 'copy it into your own cache/images first', 'non-image files are not intercepted'])
+      assert.ok(sent.instructions.includes(piece), `every agent kind is told the file-card contract: ${piece}`)
     assert.ok(sent.instructions.includes('WIZARD_STATUS_V1'))
   },
 }
@@ -201,7 +211,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : feature === 'app-job-routing' ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
+  const s = featureScenes[feature] ? await featureScenes[feature](kind) : await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : ['app-job-routing', 'agent-app-access'].includes(feature) ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)

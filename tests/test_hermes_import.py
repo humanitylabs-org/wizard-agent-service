@@ -399,23 +399,25 @@ class ImportTests(unittest.TestCase):
         self.undo(result)
         self.assertFalse(directory.exists())
 
-    def test_scan_closes_sqlite_reader_before_writer_census(self):
+    def test_scan_never_opens_sqlite_reader_before_writer_census(self):
         import sqlite3
         with contextlib.closing(sqlite3.connect(self.home / 'state.db')) as db:
+            db.execute('PRAGMA journal_mode=WAL')
             db.execute('CREATE TABLE sessions (id TEXT)')
             db.commit()
-        connections = []
-        real_connect = m.sqlite3.connect
-        def tracked(*args, **kwargs):
-            connection = real_connect(*args, **kwargs)
-            connections.append(connection)
-            return connection
-        with patch.object(m.sqlite3, 'connect', side_effect=tracked):
-            self.plan()
-        self.assertTrue(connections)
-        for connection in connections:
-            with self.assertRaises(sqlite3.ProgrammingError):
-                connection.execute('SELECT 1')
+        # Even a closed read-only WAL reader can create sidecars. Scan has no
+        # quiescence proof, so it must leave the count unavailable without opening.
+        snapshot = lambda: {str(p.relative_to(self.home)): (p.stat().st_ino, p.read_bytes())
+                            for p in self.home.rglob('*') if p.is_file()}
+        before = snapshot()
+        self.assertNotIn('state.db-wal', before)
+        self.assertNotIn('state.db-shm', before)
+        with patch.object(m.sqlite3, 'connect',
+                          side_effect=AssertionError('scan must not open source SQLite')) as connect:
+            plan = self.plan()
+        connect.assert_not_called()
+        self.assertEqual(plan['summary']['sessions'], 'unavailable')
+        self.assertEqual(snapshot(), before)
 
     def test_scoped_credential_source_preserves_logical_destination(self):
         ssh = self.owner / '.ssh'
@@ -568,7 +570,7 @@ class ImportTests(unittest.TestCase):
                 continue
             m.wire(self.home, p, 'api-fixture', 'gateway-fixture')
             actual = m.load_yaml((self.home / 'config.yaml').read_text())
-            expected = None if value is None else [*value, 'wizard-agent-heavy']
+            expected = None if value is None else [*value, 'wizard-agent-heavy', 'memory']
             self.assertEqual(actual['platform_toolsets']['api_server'], expected)
             self.assertEqual(actual['platform_toolsets']['telegram'], ['memory'])
 
@@ -787,6 +789,67 @@ class ImportTests(unittest.TestCase):
         m.approve(p)
         with self.assertRaisesRegex(m.ImportFailure, 'home_mount_override|mount_sealed'):
             m.validate_plan(p, self.wizard)
+    def test_holographic_default_and_absolute_home_store_survive_import_and_undo(self):
+        import sqlite3
+        database = self.home / 'memory_store.db'
+        with sqlite3.connect(database) as db:
+            db.execute('CREATE TABLE facts(content TEXT)')
+            db.execute('INSERT INTO facts VALUES (?)', ('Throwaway fixture prefers cobalt notebooks',))
+        before = database.read_bytes()
+        cfg = m.load_yaml((self.home / 'config.yaml').read_text())
+        cfg['memory'].pop('provider')  # Wizard supplies the absent default.
+        cfg['plugins'] = {'hermes-memory-store': {'db_path': str(database), 'hrr_dim': 2048}}
+        (self.home / 'config.yaml').write_text(yaml.safe_dump(cfg))
+        self.assertEqual(self.plan()['summary']['memory_provider'], 'holographic')
+        result = self.apply()
+        target = self.wizard / 'agents/fixture-agent/home'
+        wired = m.load_yaml((target / 'config.yaml').read_text())
+        self.assertEqual(wired['memory']['provider'], 'holographic')
+        self.assertIn('holographic', wired['plugins']['enabled'])
+        self.assertEqual(wired['plugins']['hermes-memory-store']['db_path'], '$HERMES_HOME/memory_store.db')
+        self.assertEqual(wired['plugins']['hermes-memory-store']['hrr_dim'], 2048)
+        self.assertEqual((target / 'memory_store.db').read_bytes(), before)
+        with sqlite3.connect(target / 'memory_store.db') as db:
+            self.assertEqual(db.execute('SELECT content FROM facts').fetchone()[0], 'Throwaway fixture prefers cobalt notebooks')
+        self.undo(result)
+        self.assertEqual(database.read_bytes(), before)
+
+    def test_holographic_path_rebasing_is_idempotent_and_confined(self):
+        import copy
+        plan = self.plan()
+        for path in ('$HERMES_HOME/facts/custom.db', '${HERMES_HOME}/facts/custom.db',
+                     '~/.hermes/facts/custom.db', 'facts/custom.db', str(self.home / 'facts/custom.db')):
+            cfg = {'plugins': {'enabled': ['other'], 'hermes-memory-store': {'db_path': path}}}
+            m.configure_memory(cfg, plan)
+            self.assertEqual(cfg['plugins']['hermes-memory-store']['db_path'], '$HERMES_HOME/facts/custom.db')
+            before = copy.deepcopy(cfg)
+            m.configure_memory(cfg, dict(plan, path_preserving=False))
+            self.assertEqual(cfg, before)
+        for path in ('/outside/facts.db', '../facts.db', '$HERMES_HOME/../facts.db', '$UNKNOWN/facts.db'):
+            cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
+            with self.assertRaisesRegex(m.ImportFailure, 'memory_path_outside_home'):
+                m.configure_memory(cfg, plan)
+
+    def test_holographic_rejects_paths_that_import_quarantines_or_prunes(self):
+        for path in ('cache/facts.db', 'backups/facts.db', 'plugins/unapproved/facts.db',
+                     'profiles/other/facts.db', 'hooks/facts.db', 'data/apps/facts.db'):
+            cfg = {'plugins': {'enabled': [], 'hermes-memory-store': {'db_path': path}}}
+            with self.assertRaisesRegex(m.ImportFailure, 'memory_path_not_portable'):
+                m.configure_memory(cfg, self.plan())
+
+    def test_holographic_is_exposed_in_an_imported_api_allowlist(self):
+        cfg = {'plugins': {'enabled': ['other']}, 'platform_toolsets': {'api_server': ['terminal'], 'cli': ['skills']}}
+        m.configure_memory(cfg, self.plan())
+        self.assertEqual(cfg['platform_toolsets'], {'api_server': ['terminal', 'memory'], 'cli': ['skills']})
+        m.configure_memory(cfg, self.plan())
+        self.assertEqual(cfg['platform_toolsets']['api_server'].count('memory'), 1)
+
+    def test_import_keeps_explicit_alternative_memory_provider(self):
+        for provider in ('builtin', 'honcho'):
+            cfg = {'memory': {'provider': provider}, 'plugins': {'enabled': []}}
+            m.configure_memory(cfg, self.plan())
+            self.assertEqual(cfg, {'memory': {'provider': provider}, 'plugins': {'enabled': []}})
+
     def test_native_memory_plugin_settings_survive_wiring(self):
         cfg = m.load_yaml((self.home / 'config.yaml').read_text())
         settings = {'db_path': '$HERMES_HOME/memory_store.db', 'hrr_dim': 2048, 'min_trust_threshold': 0.4}

@@ -29,7 +29,8 @@ class RestrictedImportTests(unittest.TestCase):
         (self.home / 'config.yaml').write_text('model:\n  provider: anthropic\n  default: claude-opus-5-5\nmemory:\n  backend: native\n')
         (self.home / 'SOUL.md').write_text('original')
         with sqlite3.connect(self.home / 'state.db') as db:
-            db.executescript('create table sessions(id text); create table messages(id integer);')
+            db.executescript('create table sessions(id text); create table messages(id integer); '
+                             'create table schema_version(version integer); insert into schema_version values (30);')
         db.close()
         self.root = self.tmp / 'wizard'
         self.plan = h.scan(self.home, owner_home=self.owner)
@@ -43,7 +44,8 @@ class RestrictedImportTests(unittest.TestCase):
             return type('Result', (), {'stdout': '', 'returncode': 0})()
         self.mocks = [patch.object(r.rt, 'docker', side_effect=fake_docker), patch.object(r, 'reown', return_value={'entries': 1, 'changed': 1}), patch.object(r, 'helper'),
                       patch.object(r.rt.RestrictedDriver, 'start', return_value={'ok': True}),
-                      patch.object(r, 'health'), patch.object(r, 'prepare_socket')]
+                      patch.object(r, 'health'), patch.object(r, 'prepare_socket'),
+                      patch.object(h.DockerRuntime, 'history_schema_version', return_value=30)]
         for p in self.mocks:
             p.start()
     def tearDown(self):

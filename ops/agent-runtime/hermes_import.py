@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import import_credentials as credential_policy
 import hermes_lock
 import import_tree
+import history_schema
 
 SCHEMA = 1
 IMAGE = hermes_lock.load()['runtime_image']
@@ -332,16 +333,12 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
     jobs = jobs_doc if isinstance(jobs_doc, list) else jobs_doc.get('jobs', [])
     platforms = (cfg.get('gateway') or {}).get('platforms') or cfg.get('platforms') or {}
     env_names = sorted(set(re.findall(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', texts.get('.env', ''), re.M)))
-    sessions = None
-    if not is_zip and (source / 'state.db').exists():
-        try:
-            # A SQLite connection context only commits/rolls back; it does NOT
-            # close descriptors. A leaked read-only WAL reader can retain an
-            # O_RDWR -shm fd and make the subsequent stopped-writer census fail.
-            with contextlib.closing(sqlite3.connect((source / 'state.db').as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
-                sessions = db.execute('SELECT count(*) FROM sessions').fetchone()[0]
-        except sqlite3.Error:
-            sessions = 'unavailable'
+    # This optional estimate must not open the source SQLite database: mode=ro
+    # can create WAL/SHM sidecars even after closing, while immutable=1 ignores
+    # pending WAL and bypasses locks. Scan has no proof of source quiescence,
+    # including for rollback-journal homes; leave the count explicitly unknown.
+    # Keep the existing None (absent/archive) and unavailable (present) shapes.
+    sessions = 'unavailable' if not is_zip and (source / 'state.db').exists() else None
     paths = [r for r, _, _ in rows]
     plan = {'schema': SCHEMA, 'source': str(source), 'source_kind': 'archive' if is_zip else 'home',
             'owner_home': str(owner_home), 'source_identity': identity, 'approved': False,
@@ -362,7 +359,7 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
                         'profiles_archived': profile_roots,
                         'ownership_source_dry_run': ownership_count,
                         'sessions': sessions, 'state_db_bytes': next((n for r, n, _ in rows if r == 'state.db'), 0),
-                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'builtin'),
+                        'memory_provider': (cfg.get('memory') or {}).get('provider', 'holographic'),
                         'skills': sum(p.startswith('skills/') and p.endswith('/SKILL.md') for p in paths),
                         'model': {k: v for k, v in (cfg.get('model') or {}).items() if k in {'provider', 'default'}},
                         'plugins': sorted({p.split('/')[1] for p in paths if p.startswith('plugins/') and len(p.split('/')) > 2}),
@@ -519,6 +516,58 @@ class DockerRuntime:
     def __init__(self, plan, directory, agent_id):
         self.plan, self.directory, self.id = plan, Path(directory), agent_id
         self.name = 'agent-' + agent_id
+
+    def history_schema_version(self):
+        # No source/config/credential mounts and no gateway/model startup. Probe
+        # this exact approved image in a fresh disposable, networkless home.
+        name = 'wizard-import-schema-' + secrets.token_hex(6)
+        code = ('import json,sqlite3; from pathlib import Path; from hermes_state import SessionDB; '
+                'db=SessionDB(Path("/opt/data/state.db")); '
+                'c=sqlite3.connect("/opt/data/state.db"); '
+                'print(json.dumps(c.execute("SELECT version FROM schema_version").fetchall())); '
+                'c.close(); db.close()')
+        try:
+            out = run(['docker', 'run', '--rm', '--name', name, '--network', 'none', '--read-only',
+                       '--user', '10000:10000', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                       '--pids-limit', '64', '--memory', '512m',
+                       '--tmpfs', '/opt/data:rw,nosuid,nodev,size=64m,uid=10000,gid=10000',
+                       '--tmpfs', '/tmp:rw,nosuid,nodev,size=32m,mode=1777',
+                       '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-e', 'PYTHONDONTWRITEBYTECODE=1',
+                       '--entrypoint', '/opt/hermes/.venv/bin/python', self.plan['image'], '-c', code], timeout=120)
+            try:
+                rows = json.loads(out)
+            except (ValueError, TypeError):
+                raise ImportFailure('runtime_history_schema_unknown') from None
+            require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list)
+                    and len(rows[0]) == 1 and type(rows[0][0]) is int and rows[0][0] > 0,
+                    'runtime_history_schema_unknown')
+            return rows[0][0]
+        finally:
+            # An interrupted Docker client does not prove its container stopped.
+            if run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}']).strip():
+                run(['docker', 'rm', '-f', '-v', name])
+            require(not run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$',
+                             '--format', '{{.Names}}']).strip(), 'history_schema_probe_cleanup_failed')
+
+    def check_history(self, home):
+        try:
+            return history_schema.require_supported(home, self.history_schema_version())
+        except history_schema.HistorySchemaFailure as exc:
+            raise ImportFailure(str(exc)) from None
+
+    def check_archive_history(self, archive):
+        entries = archive_entries(archive)
+        for _, rel, size in entries:
+            require(rel not in {'state.db-wal', 'state.db-journal'} or not size,
+                    'history_schema_checkpoint_required')
+        database = next((name for name, rel, _ in entries if rel == 'state.db'), None)
+        if database is not None:
+            # Archives already contain a detached snapshot. Read metadata only
+            # before the stock import CLI can initialize or rewrite that history.
+            with tempfile.TemporaryDirectory(prefix='wizard-history-schema-') as tmp:
+                with zipfile.ZipFile(archive) as z, z.open(database) as src, open(Path(tmp) / 'state.db', 'wb') as dst:
+                    shutil.copyfileobj(src, dst, 1024**2)
+                self.check_history(tmp)
 
     def preflight(self):
         require(not run(['docker', 'ps', '-a', '--filter', 'name=^/' + self.name + '$', '--format', '{{.Names}}']).strip(), 'container_exists')
@@ -693,6 +742,50 @@ def managed_path(home, relative):
     return path
 
 
+def configure_memory(cfg, plan):
+    """Default to stock local facts; keep explicit alternative providers intact.
+
+    Rebase only this provider's own-home paths. An outside DB cannot be carried
+    implicitly: refusing it is safer than starting with an empty replacement.
+    No database bytes are opened or rewritten by configuration wiring.
+    """
+    memory = cfg.setdefault('memory', {})
+    require(isinstance(memory, dict), 'memory_config_invalid')
+    memory.setdefault('provider', 'holographic')
+    if memory['provider'] != 'holographic':
+        return
+    plugins = cfg['plugins']
+    plugins['enabled'] = list(dict.fromkeys([*plugins['enabled'], 'holographic']))
+    # Imported API allowlists can otherwise activate the provider but hide all
+    # of its tools. Hermes gates external provider schemas on the memory toolset.
+    api_tools = (cfg.get('platform_toolsets') or {}).get('api_server')
+    if isinstance(api_tools, list) and 'memory' not in api_tools:
+        api_tools.append('memory')
+    settings = plugins.setdefault('hermes-memory-store', {})
+    require(isinstance(settings, dict), 'memory_config_invalid')
+    path = settings.get('db_path') or '$HERMES_HOME/memory_store.db'
+    require(isinstance(path, str), 'memory_path_invalid')
+    # Support portable placeholders plus absolute paths under the source home
+    # (a normal Hermes setup), including a second restricted-admission wire().
+    relative = None
+    for root in ('$HERMES_HOME', '${HERMES_HOME}', '~/.hermes',
+                 str(plan['source']).rstrip('/'), str(logical_home(plan)).rstrip('/')):
+        if path.startswith(root + '/'):
+            relative = path[len(root) + 1:]
+            break
+    if relative is None and not path.startswith(('/', '~', '$')):
+        relative = path
+    require(relative and '..' not in Path(relative).parts and not Path(relative).is_absolute()
+            and '$' not in relative, 'memory_path_outside_home')
+    assert isinstance(relative, str)  # require() above raises for None
+    parts = Path(relative).parts
+    require(parts and not excluded(relative) and parts[0] not in {'profiles', 'hooks'}
+            and parts[:2] != ('data', 'apps')
+            and (parts[0] != 'plugins' or (len(parts) > 2 and parts[1] in plan.get('approved_plugins', []))),
+            'memory_path_not_portable')
+    settings['db_path'] = '$HERMES_HOME/' + relative
+
+
 def wire(home, plan, api_key, gateway_key):
     """Only passive data enters a paused rehearsal; originals are journalled by apply."""
     home = Path(home)
@@ -734,6 +827,7 @@ def wire(home, plan, api_key, gateway_key):
         cfg['platform_toolsets'] = platforms
     if isinstance(memory_plugin, dict):
         cfg['plugins']['hermes-memory-store'] = memory_plugin
+    configure_memory(cfg, plan)
     (home / 'config.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
     os.chmod(home / 'config.yaml', 0o600)
     env_path = home / '.env'
@@ -977,6 +1071,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                     dump(journal_path, journal)
                     run(['systemctl', '--user', 'stop', unit])
             assert_no_writers(source, host_shared=shared)
+            if hasattr(runtime, 'check_history'):
+                runtime.check_history(source)  # BEFORE rename, wiring, chown or SessionDB open
             journal['state'] = 'moving'
             journal['home_inode'] = source.stat().st_ino
             dump(journal_path, journal)
@@ -992,6 +1088,8 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
             safe_zip = directory / 'transport.zip'
             entries = archive_entries(source)
             require(shutil.disk_usage(directory).free > sum(n for _, _, n in entries) * 3 + 256 * 1024**2, 'disk_reserve')
+            if hasattr(runtime, 'check_archive_history'):
+                runtime.check_archive_history(source)  # BEFORE filtering sidecars or stock CLI
             with zipfile.ZipFile(source) as z, zipfile.ZipFile(safe_zip, 'w', compression=zipfile.ZIP_DEFLATED) as out:
                 for name, rel, _ in entries:
                     if not excluded(rel):

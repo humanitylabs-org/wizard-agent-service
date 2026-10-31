@@ -2,6 +2,8 @@
 
 Reconnect is a fresh login, not refresh: old grants are retained for explicit
 removal. A successful login is reconciled against the read-only pool inventory.
+Prefer moves one existing sign-in to priority 0 with stock `hermes auth priority`
+(tried first under fill_first); it never signs in, out or removes anything.
 """
 import atexit
 import fcntl
@@ -56,8 +58,22 @@ class Broker:
             raise BrokerError('Credential changed or is an externally managed source; refresh inventory')
         return rows[0]
 
+    def preferable(self, provider, target):
+        # Reordering is not destructive, so any exact OAuth sign-in (including the Claude Code mirror) qualifies.
+        if not isinstance(target, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', target) or target.isdigit():
+            raise BrokerError('Exact nonnumeric credential ID required')
+        inventory = self.rows(provider)
+        if any(str(r.get('label', '')).strip().lower() == target.lower() for r in inventory):
+            raise BrokerError('Credential ID conflicts with a label; resolve in Hermes first')
+        rows = [r for r in inventory if r.get('id') == target]
+        if len(rows) != 1:
+            raise BrokerError('Credential changed; refresh inventory')
+        manual = lambda r: str(r.get('source', '')).startswith('manual:')
+        if PROVIDERS[provider] == 'anthropic' and not manual(rows[0]) and any(manual(r) for r in inventory):
+            raise BrokerError('Hermes keeps added Claude sign-ins ahead of the Claude Code login')
+
     def start(self, provider, action, target=None, label='', confirmed=False):
-        if provider not in PROVIDERS or action not in {'add', 'reconnect', 'remove'}:
+        if provider not in PROVIDERS or action not in {'add', 'reconnect', 'remove', 'prefer'}:
             raise BrokerError('Unsupported action')
         if confirmed is not True:
             raise BrokerError('Explicit confirmation required')
@@ -74,11 +90,16 @@ class Broker:
         with self.lock:
             if any(j['status'] not in TERMINAL for j in self.jobs.values()):
                 raise BrokerError('Another account operation is active')
-            row = self.target(provider, target) if action != 'add' else None
+            if action == 'prefer':
+                self.preferable(provider, target)
+                row = None
+            else:
+                row = self.target(provider, target) if action != 'add' else None
             if action == 'add' and target is not None:
                 raise BrokerError('Add does not accept a target')
             before = {r['id'] for r in self.rows(provider)}
-            args = ['auth', 'remove', PROVIDERS[provider], target] if action == 'remove' else [
+            args = ['auth', 'priority', PROVIDERS[provider], target, '0'] if action == 'prefer' else \
+                ['auth', 'remove', PROVIDERS[provider], target] if action == 'remove' else [
                 'auth', 'add', PROVIDERS[provider], '--type', 'oauth', '--label=' + (label or (row or {}).get('label') or 'Subscription'), '--no-browser']
             env = dict(os.environ, PYTHONUNBUFFERED='1', BROWSER='/bin/true')
             # No shell, no output files, no provider tokens in arguments.
@@ -90,7 +111,9 @@ class Broker:
             lease = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
                 fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if action != 'add':
+                if action == 'prefer':
+                    self.preferable(provider, target)
+                elif action != 'add':
                     self.target(provider, target)
                 before = {r['id'] for r in self.rows(provider)}
                 # Inherited lock survives a dashboard crash until the CLI exits.
@@ -197,12 +220,16 @@ class Broker:
             proc.wait(timeout=5)
             # Kill any descendants left by a wrapper before releasing single-flight.
             self._kill(proc)
-            after = {r['id'] for r in self.rows(job['provider'])}
+            rows = self.rows(job['provider'])
+            after = {r['id'] for r in rows}
             added = sorted(after - job['before'])
             with self.lock:
                 job['credentialIds'] = added
                 if job['action'] == 'remove':
                     ok = job['target'] not in after
+                elif job['action'] == 'prefer':
+                    first = min((r.get('priority', 0) for r in rows), default=None)
+                    ok = any(r['id'] == job['target'] and r.get('priority') == first for r in rows) and not added
                 else:
                     ok = bool(added)
                 unexpected_loss = job['before'] - after - ({job['target']} if job['action'] == 'remove' else set())

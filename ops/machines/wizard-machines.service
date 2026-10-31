@@ -1,0 +1,14 @@
+[Unit]
+Description=Wizard Machines relay: agent-owned computers over per-agent sockets (ops/machines)
+After=network-online.target
+
+[Service]
+# %h/.local/share/wizard-machines/current -> a release of ops/machines (machines.py + machine)
+ExecStart=/usr/bin/python3 %h/.local/share/wizard-machines/current/machines.py serve
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

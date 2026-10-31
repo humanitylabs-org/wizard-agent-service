@@ -20,6 +20,11 @@ assert args[:1]==['auth']
 if args[1]=='remove':
     assert args[3]=='aa11bb'
     rows=[r for r in rows if r['id']!=args[3]]
+elif args[1]=='priority':
+    assert args[2]=='anthropic' and args[4]=='0' and len(args)==5
+    moved=[r for r in rows if r['id']==args[3]]
+    rows=moved+[r for r in rows if r['id']!=args[3]]
+    for i,r in enumerate(rows): r['priority']=i
 else:
     assert args[1]=='add' and '--type' in args and '--no-browser' in args
     assert '--label' not in args
@@ -72,6 +77,21 @@ class LifecycleTests(unittest.TestCase):
     def test_remove_exact_id_not_position(self):
         out=self.wait(self.b.start('chatgpt','remove','aa11bb',confirmed=True))
         self.assertEqual(out['status'],'succeeded'); self.assertEqual(json.loads(self.path.read_text()),self.original[1:])
+    def test_prefer_moves_any_exact_sign_in_first_without_loss(self):
+        rows=self.original+[{'id':'cc55dd','auth_type':'oauth','source':'claude_code','label':'claude_code'}]
+        for i,r in enumerate(rows): r['priority']=i
+        self.path.write_text(json.dumps(rows))
+        # Stock Hermes pins added anthropic grants ahead of the seeded Claude Code login: refuse, change nothing.
+        with self.assertRaises(m.BrokerError): self.b.start('claude','prefer','cc55dd',confirmed=True)
+        self.assertEqual(json.loads(self.path.read_text()),rows)
+        out=self.wait(self.b.start('claude','prefer','ee55ff',confirmed=True))
+        self.assertEqual(out['status'],'succeeded')
+        after=json.loads(self.path.read_text())
+        self.assertEqual([r['id'] for r in after],['ee55ff','aa11bb','cc55dd'])
+        self.assertEqual(after[0]['priority'],0)
+        for target in ('1','missing','claude_code',None):
+            with self.assertRaises(m.BrokerError): self.b.start('claude','prefer',target,confirmed=True)
+        with self.assertRaises(m.BrokerError): self.b.start('claude','prefer','aa11bb')
     def test_confirmation_and_target_validation(self):
         for target in ('1','missing','aa11bb;touch',None):
             with self.assertRaises(m.BrokerError): self.b.start('chatgpt','remove',target,confirmed=True)
@@ -169,5 +189,31 @@ class LifecycleTests(unittest.TestCase):
             app=FastAPI(); app.include_router(api.router); j=TestClient(app).get('/provider-accounts/chatgpt').json()
         self.assertEqual(j['management']['status'],'off'); self.assertEqual(j['actions'],{'add':False})
         self.assertEqual(j['accounts'][0]['actions'],{'reconnect':False,'remove':False}); self.assertEqual(j['accounts'][0]['id'],'aa11bb')
+
+    def test_changes_can_be_on_for_chatgpt_only(self):
+        """Fresh Wizard OS: WIZARD_ACCOUNT_CHANGES=chatgpt lets the ChatGPT app add sign-ins while Claude stays
+        read-only (its sign-in is the Claude Code page the agent's subscription provider uses)."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        s=importlib.util.spec_from_file_location('api3',ROOT/'hermes-plugin/wizard-os/dashboard/plugin_api.py')
+        api=importlib.util.module_from_spec(s); s.loader.exec_module(api)
+        api._lifecycle.broker=self.b
+        api._accounts.provider_accounts=lambda p:{'provider':p,'accounts':[],'actions':{'add':True},'management':{'contract':'wizard.account-management/1','status':'available'}}
+        os.environ['WIZARD_ACCOUNT_CHANGES']='chatgpt'
+        self.addCleanup(os.environ.pop,'WIZARD_ACCOUNT_CHANGES',None)
+        import sys
+        from types import SimpleNamespace
+        with patch.dict(sys.modules, {'hermes_cli.config': SimpleNamespace(load_config_readonly=lambda: {})}):
+            c=TestClient((lambda a:(a.include_router(api.router),a)[1])(FastAPI()))
+            chatgpt=c.get('/provider-accounts/chatgpt').json(); claude=c.get('/provider-accounts/claude').json()
+        self.assertEqual((chatgpt['management']['status'],chatgpt['actions']),('available',{'add':True}))
+        self.assertEqual((claude['management']['status'],claude['actions']),('off',{'add':False}))
+        headers={'X-Wizard-Account-Action':'1'}
+        self.assertEqual(c.post('/provider-accounts/claude/operations',json={'action':'add','confirmed':True},headers=headers).status_code,403)
+        self.assertEqual(self.b.jobs,{})
+        # '1' still means every provider; anything else (e.g. '0', 'yes') means none.
+        self.assertTrue(api._changes_on('claude') is False)
+        os.environ['WIZARD_ACCOUNT_CHANGES']='1'; self.assertTrue(api._changes_on('claude') and api._changes_on('chatgpt'))
+        os.environ['WIZARD_ACCOUNT_CHANGES']='yes'; self.assertFalse(api._changes_on('chatgpt'))
 
 if __name__=='__main__': unittest.main()

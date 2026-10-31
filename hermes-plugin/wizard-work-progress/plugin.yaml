@@ -1,0 +1,5 @@
+name: wizard-work-progress
+version: "1.0.0"
+description: Supply the standing Working milestone contract on each personal Wizard turn without changing cached prompts or calling another model.
+provides_hooks:
+  - pre_llm_call

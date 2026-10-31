@@ -1,0 +1,7 @@
+name: wizard-schedule
+version: 0.1.0
+description: Schedule reminders and deferred agent work into the calling Wizard thread via the Wizard scheduler.
+provides_tools:
+  - wizard_schedule
+  - wizard_schedule_list
+  - wizard_schedule_cancel
