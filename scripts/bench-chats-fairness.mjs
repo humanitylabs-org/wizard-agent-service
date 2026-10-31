@@ -65,6 +65,7 @@ try {
       // Seed subject/space catalogs outside the measurement, as on an existing
       // install. The measured rebuild explicitly clears BOTH projection caches.
       await run.core.snapshot()
+      run.core.resetMetrics()
       delay.enable(); hook.enable(); await pause(15)
       const at = performance.now()
       guardedLoad(async () => {
@@ -87,7 +88,13 @@ try {
         }
       })
       await new Promise(resolve => setImmediate(resolve))
-      const [rows] = await Promise.all([run.core.rebuild(), run.core.check()])
+      let rows, cycles = 0
+      // Fast machines may finish one full cycle before enough HTTP samples
+      // arrive. Keep projecting, not padding the sample with idle requests.
+      do {
+        ;[rows] = await Promise.all([run.core.rebuild(), run.core.check()])
+        cycles++
+      } while (!errors.length && (proxy.length < minRequests || sends.length < minRequests) && cycles < 50)
       const workMs = performance.now() - at
       workDone = true
       // Sample the delayed callback after the last synchronous projector returns.
@@ -100,7 +107,7 @@ try {
       if (!oracle) oracle = rows
       else assert.deepEqual(rows, oracle, 'every output field must equal the unmodified base at the same semantic time')
       assert.equal(stats.check_differences, 0)
-      report.results[label] = { work_ms: workMs, rebuild_ms: stats.last_build_ms, check_ms: stats.last_check_ms,
+      report.results[label] = { work_ms: workMs, full_rebuild_check_cycles: cycles, rebuild_ms: stats.last_build_ms, check_ms: stats.last_check_ms,
         event_loop_p99_ms: delay.percentile(99) / 1e6, max_main_callback_ms: maxCallback,
         direct_voice_p95_ms: percentile(direct, .95), proxy_voice_p95_ms: percentile(proxy, .95), voice_overhead_p95_ms: percentile(overhead, .95),
         post_runs_p95_ms: percentile(sends, .95), voice_samples: proxy.length, run_samples: sends.length,

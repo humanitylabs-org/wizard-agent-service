@@ -87,7 +87,7 @@ export async function instrumentProjection(source, archive, fixture, { legacy = 
       .replace('backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth)', 'backgroundResults.project(result)')
   }
   assert(service.includes('    const gate = () => {'))
-  service = service.replace('    const gate = () => {', '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore(), snapshot: () => listCache.served(), rebuild: () => { snapshot.clear(); projector.clear(); if (typeof projectionSlices !== "undefined") Object.assign(projectionSlices, { slices: 0, total_ms: 0, max_ms: 0 }); return listCache.served() } })\n    const gate = () => {')
+  service = service.replace('    const gate = () => {', '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore(), snapshot: () => listCache.served(), resetMetrics: () => { if (typeof projectionSlices !== "undefined") Object.assign(projectionSlices, { slices: 0, total_ms: 0, max_ms: 0 }) }, rebuild: () => { snapshot.clear(); projector.clear(); return listCache.served() } })\n    const gate = () => {')
   writeFileSync(servicePath, service)
   const { createWizardServer, listen } = await import(pathToFileURL(servicePath))
   const truth = await import(pathToFileURL(truthPath))
