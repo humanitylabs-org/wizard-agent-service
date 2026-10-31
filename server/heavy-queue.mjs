@@ -1,3 +1,4 @@
+import { createSlowTickLogger } from './speed-meter.mjs'
 import { heavyHost, heavyHostConfigs } from './heavy-hosts.mjs'
 import { heavyCompletionDropped } from './heavy-wait.mjs'
 import { DatabaseSync } from 'node:sqlite'
@@ -7,6 +8,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { validAgentId, withSqliteMigration } from './thread-reference.mjs'
 
+const freezeJob = value => {
+  if (value && typeof value === 'object') { for (const child of Object.values(value)) freezeJob(child); Object.freeze(value) }
+  return value
+}
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const fail = (message, status = 400) => Object.assign(new Error(message), { status })
@@ -132,16 +137,28 @@ export class DurableHeavyQueue {
       try { this.db.close() } catch { /* preserve original */ }
       throw error
     }
+    this.logSlowTick = createSlowTickLogger('heavy-queue')
+    this.rowsDirty = true
     Object.assign(this, { transport, continuation, current, observe, canDispatch, intervalMs, closed: false, busy: null, timer: null })
   }
   get(id) {
     const row = this.db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get(id)
     return row ? JSON.parse(row.data) : null
   }
-  rows() { return this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => JSON.parse(r.data)) }
+  rows() {
+    // data_version detects other connections, not our writes; invalidate those explicitly.
+    const version = this.db.prepare('PRAGMA data_version').get().data_version
+    if (this.rowsDirty || this.rowsVersion !== version) {
+      this.rowsCache = Object.freeze(this.db.prepare('SELECT data FROM heavy_jobs ORDER BY rowid').all().map(r => freezeJob(JSON.parse(r.data))))
+      this.rowsVersion = version
+      this.rowsDirty = false
+    }
+    return this.rowsCache
+  }
   save(job) {
     if (heavyCompletionDropped(job) && !job.completion_notice) job = { ...job,
       completion_notice: { job_id: job.job_id, state: job.state } }
+    this.rowsDirty = true
     this.db.prepare('UPDATE heavy_jobs SET data=? WHERE id=?').run(JSON.stringify(job), job.job_id)
     return job
   }
@@ -194,6 +211,7 @@ export class DurableHeavyQueue {
       ...(routeState ? { route_state: routeState } : {}),
       ...(routeState === 'unavailable' ? { continuation_reason: 'origin_route_unavailable',
         continuation_invalidated: true, resume: 'suppressed' } : {}) }
+    this.rowsDirty = true
     this.db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run(job.job_id, sessionId, origin, key, requestHash, JSON.stringify(job), agent_id)
     return job
   }
@@ -241,7 +259,10 @@ export class DurableHeavyQueue {
   }
   tick() {
     if (this.closed) return Promise.resolve()
-    if (!this.busy) this.busy = this._tick().finally(() => { this.busy = null })
+    if (!this.busy) {
+      const started = performance.now()
+      this.busy = this._tick().finally(() => { this.busy = null; this.logSlowTick(started) })
+    }
     return this.busy
   }
   async _pollHost(snapshots, host) {
@@ -249,6 +270,8 @@ export class DurableHeavyQueue {
     const transport = payload => this.transport(host === 'thales' ? payload : { ...payload, host })
     for (const snapshot of snapshots) {
       if (this.closed) return
+      // Terminal snapshots cannot return to active. Keep fresh reads around every awaited RPC.
+      if (terminal.has(snapshot.state)) continue
       let job = this.get(snapshot.job_id)
       if (!terminal.has(job.state)) {
         if (!this.canDispatch(job)) job = this.cancel(job.job_id, job.sessionId, job.agent_id ?? 'hermes')
@@ -291,6 +314,8 @@ export class DurableHeavyQueue {
     }))
     for (const snapshot of this.rows()) {
       if (this.closed) return
+      // These fences are monotonic. Avoid parsing every old delivered receipt each poll.
+      if (!terminal.has(snapshot.state) || snapshot.resume || snapshot.cancel_requested || snapshot.continuation_invalidated) continue
       let job = this.get(snapshot.job_id)
       if (terminal.has(job.state) && !job.resume && !job.cancel_requested && !job.continuation_invalidated) {
         try {

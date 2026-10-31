@@ -84,7 +84,10 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
     const at = now()
     const head = sessions.slice(0, batchSize)
     const rest = sessions.slice(batchSize)
+    const headStarted = performance.now()
     const headRows = await projectBatch(head, true)
+    const head_ms = performance.now() - headStarted
+    const hotStarted = performance.now()
     const raws = new Map(rest.map((session) => [session.id, JSON.stringify(session)]))
     const budget = sweptAt === null ? 0 : Math.min(batchSize, Math.floor((at - sweptAt) / 60_000 * sweepPerMinute))
     const sweep = new Set(rest
@@ -112,7 +115,8 @@ export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60
       if (fromCache) cachedIds.push(session.id)
       if (row) rows.push(row)
     }
-    return { rows, cachedIds, projected: head.length + need.length, cached: cachedIds.length, swept: sweep.size }
+    const hot_ms = performance.now() - hotStarted
+    return { rows, cachedIds, head_ms, hot_ms, projected: head.length + need.length, cached: cachedIds.length, swept: sweep.size }
   }
   return { project, size: () => cache.size, clear: () => { cache = new Map(); epoch = null; sweptAt = null } }
 }
