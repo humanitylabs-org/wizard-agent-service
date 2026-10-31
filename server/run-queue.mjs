@@ -188,6 +188,7 @@ export class DurableRunQueue {
     this.onPendingSteerReplay = onPendingSteerReplay
     this.leaselessSince = new Map()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
+    this.refreshing = new Map() // status polls share only this run's lookup, never the global tick
     // Retain only preview text and the provider hint, never attachment-bearing requests.
     this.projectionInputs = new Map()
     this.timer = null
@@ -305,9 +306,9 @@ export class DurableRunQueue {
   close() {
     if (this.closePromise) return this.closePromise
     this.quiesce()
-    // With no in-flight tick preserve synchronous close for existing callers.
-    if (!this.tickPromise) { this.database.close(); return this.closePromise = Promise.resolve() }
-    return this.closePromise = this.tickPromise.catch(() => undefined).then(() => this.database.close())
+    // With no in-flight work preserve synchronous close for existing callers.
+    if (!this.tickPromise && !this.refreshing.size) { this.database.close(); return this.closePromise = Promise.resolve() }
+    return this.closePromise = Promise.allSettled([this.tickPromise, ...this.refreshing.values()]).then(() => this.database.close())
   }
 
   _record(row) {
@@ -1028,7 +1029,23 @@ export class DurableRunQueue {
     return this.tickPromise
   }
 
+  // Status reads refresh only their run, never join a whole-queue reconciliation
+  // (provider probes, unrelated upstream runs and recovery may take seconds).
+  async refreshRun(publicRunId) {
+    const record = this.get(publicRunId)
+    if (!record || this.closed) return record
+    return this._refresh(record, true)
+  }
+
   async _refresh(record, force) {
+    const id = record.publicRunId
+    if (this.refreshing.has(id)) return this.refreshing.get(id)
+    const work = this._refreshOne(record, force).finally(() => this.refreshing.delete(id))
+    this.refreshing.set(id, work)
+    return work
+  }
+
+  async _refreshOne(record, force) {
     if (!record.upstreamRunId || TERMINAL.has(record.status)) return record
     if (!force && nowSeconds() - (this.refreshedAt.get(record.publicRunId) ?? record.updatedAt) < 0.7) return record
     this.refreshedAt.set(record.publicRunId, nowSeconds())
