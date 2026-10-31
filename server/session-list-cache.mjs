@@ -3,7 +3,7 @@
 // Every offset-0 window poll used to re-project every listed thread (~950, 5-6 s of mostly
 // synchronous work) for every visible client every 15 s. This module keeps one projected list
 // for all clients and re-projects only threads that can be changing:
-//   - the newest canonical batch (it carries enrichment and first-send rows),
+//   - changed newest canonical rows (preserving enrichment and first-send rows),
 //   - every thread the caller marks hot (queued/running work, live turns, helpers, Helm,
 //     background results, unresolved external runs), and recently active threads once a minute,
 //   - any thread whose canonical row changed, that has no cached row yet, or whose cached row
@@ -17,11 +17,11 @@
 
 // Yield to the HTTP loop, not merely the promise microtask queue. Preserve the
 // caller's head enrichment flag and global preview offset across that head.
-export async function projectListSlices(sessions, project, firstPage, sliceSize = 20) {
+export async function projectListSlices(sessions, project, firstPage, sliceSize = 20, previewOffset = 0) {
   const rows = []
   for (let at = 0; at < sessions.length; at += sliceSize) {
     await new Promise(resolve => setImmediate(resolve))
-    rows.push(...await project(sessions.slice(at, at + sliceSize), firstPage, at))
+    rows.push(...await project(sessions.slice(at, at + sliceSize), firstPage, (Array.isArray(previewOffset) ? previewOffset.slice(at, at + sliceSize) : previewOffset + at)))
   }
   return rows
 }
@@ -59,64 +59,109 @@ export function listCacheMode(value) {
 // warm: threads that were recently active but show no live signal now. They are re-projected at
 // most every `warmMaxAgeMs` instead of on every build: a new message, queue change, running turn or
 // live row still re-projects them at once through raw/stamps/hot/cacheableRow.
-export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60_000, sweepPerMinute = 100, warmMaxAgeMs = 60_000, now = Date.now } = {}) {
+// Stable per-id refresh phases spread even a simultaneously warmed head over 30-60 s.
+// Unknown transcript/helper/reconnect inputs are therefore bounded, never cached indefinitely.
+const headRefreshAge = (id, maxAge) => {
+  let hash = 2166136261
+  for (const char of id) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
+  return maxAge * (0.5 + (hash >>> 0) / 0x100000000 / 2)
+}
+
+export function createHybridProjector({ batchSize = 100, sweepMaxAgeMs = 10 * 60_000, sweepPerMinute = 100, warmMaxAgeMs = 60_000, headMaxAgeMs = 60_000, now = Date.now } = {}) {
   let cache = new Map()
   let epoch = null
   let sweptAt = null
-  const projectInBatches = async (sessions, projectBatch, out) => {
+  const keyed = (batch, projected) => {
+    const ids = new Set(batch.map(session => session.id)), byId = new Map()
+    for (const row of projected) {
+      if (!row || typeof row.id !== 'string' || !ids.has(row.id) || byId.has(row.id)) throw Object.assign(new Error('list projection is not per-thread'), { code: 'list_cache_unkeyed' })
+      byId.set(row.id, row)
+    }
+    return new Map(batch.map(session => [session.id, byId.get(session.id) ?? null]))
+  }
+  const projectInBatches = async (sessions, projectBatch, out, firstPage = false, offset = 0) => {
     for (let index = 0; index < sessions.length; index += batchSize) {
       const batch = sessions.slice(index, index + batchSize)
-      const ids = new Set(batch.map((session) => session.id))
-      const projected = await projectBatch(batch, false)
-      const byId = new Map()
-      for (const row of projected) {
-        // A projection that renames or invents a thread cannot be cached per thread.
-        if (!row || typeof row.id !== 'string' || !ids.has(row.id) || byId.has(row.id)) throw Object.assign(new Error('list projection is not per-thread'), { code: 'list_cache_unkeyed' })
-        byId.set(row.id, row)
-      }
-      for (const session of batch) out.set(session.id, byId.get(session.id) ?? null)
+      const positions = Array.isArray(offset) ? offset.slice(index, index + batchSize) : offset + index
+      for (const [id, row] of keyed(batch, await projectBatch(batch, firstPage, positions))) out.set(id, row)
     }
   }
-  // stamps: optional Map(thread id -> fingerprint of outside state the projection reads, e.g. its
-  // queue rows). A cached row whose fingerprint changed (including disappeared) is re-projected.
-  const project = async ({ sessions, hot = new Set(), warm = new Set(), stamps = null, epoch: nextEpoch = '', projectBatch }) => {
+  // Raw canonical rows include timestamps/count/title/pin/agent metadata. Stamps cover
+  // outside queue/background/direct/heavy state. Hot and non-cacheable rows stay fresh.
+  // headContext invalidates global owner changes; index preserves head preview enrichment.
+  const project = async ({ sessions, hot = new Set(), warm = new Set(), stamps = null, epoch: nextEpoch = '', headContext = '', reuseHead = true, projectBatch, projectHeadExtras = async () => new Map() }) => {
     if (nextEpoch !== epoch) { cache = new Map(); epoch = nextEpoch; sweptAt = null }
     const at = now()
     const head = sessions.slice(0, batchSize)
     const rest = sessions.slice(batchSize)
     const headStarted = performance.now()
-    const headRows = await projectBatch(head, true)
+    const raws = new Map(sessions.map(session => [session.id, JSON.stringify(session)]))
+    const stamp = id => stamps === null ? undefined : (stamps.get(id) ?? '')
+    const changed = (session, entry) => hot.has(session.id) || !entry || entry.raw !== raws.get(session.id)
+      || !cacheableRow(entry.row) || entry.stamp !== stamp(session.id) || entry.headContext !== headContext
+    const fresh = new Map()
+    const head_blocked = {}
+    const headNeed = head.map((session, index) => {
+      const entry = cache.get(session.id)
+      const reason = !reuseHead ? 'pending_first_send'
+        : !entry ? 'missing'
+        : entry.headContext !== headContext ? 'context'
+        : hot.has(session.id) ? 'hot'
+        : !cacheableRow(entry.row) ? 'live'
+        : entry.raw !== raws.get(session.id) || entry.stamp !== stamp(session.id) || entry.headIndex !== index ? 'changed'
+        : at - entry.builtAt >= headRefreshAge(session.id, Math.min(60_000, headMaxAgeMs)) ? 'age' : ''
+      if (reason) head_blocked[reason] = (head_blocked[reason] ?? 0) + 1
+      return Boolean(reason)
+    })
+    let headRows, head_extras = 0
+    if (!reuseHead) {
+      // Pending first-send enrichment can append rows to each original slice. Preserve
+      // that exact legacy output rather than keying/reordering/inventing those rows.
+      headRows = await projectBatch(head, true, 0)
+      for (const session of head) cache.delete(session.id)
+    } else {
+      // Batch sparse changes together (one truth read per slice), but carry each
+      // row's ORIGINAL offset: row 49 must never inherit row 1's 48-row preview cap.
+      const positions = head.flatMap((_, index) => headNeed[index] ? [index] : [])
+      await projectInBatches(positions.map(index => head[index]), projectBatch, fresh, true, positions)
+      for (let index = 0; index < head.length; index++) {
+        const id = head[index].id
+        if (fresh.has(id)) cache.set(id, { raw: raws.get(id), row: fresh.get(id), builtAt: at, stamp: stamp(id), headIndex: index, headContext })
+      }
+      const extras = await projectHeadExtras()
+      head_extras = [...extras.values()].reduce((count, rows) => count + rows.length, 0)
+      headRows = head.flatMap((session, index) => [cache.get(session.id).row, ...(extras.get(index + 1) ?? [])]).filter(Boolean)
+    }
+    const head_projected = headNeed.filter(Boolean).length
+    const head_reused = head.length - head_projected
     const head_ms = performance.now() - headStarted
     const hotStarted = performance.now()
-    const raws = new Map(rest.map((session) => [session.id, JSON.stringify(session)]))
     const budget = sweptAt === null ? 0 : Math.min(batchSize, Math.floor((at - sweptAt) / 60_000 * sweepPerMinute))
     const sweep = new Set(rest
-      .map((session) => ({ id: session.id, entry: cache.get(session.id) }))
+      .map(session => ({ id: session.id, entry: cache.get(session.id) }))
       .filter(({ entry }) => entry && at - entry.builtAt >= sweepMaxAgeMs)
       .sort((left, right) => left.entry.builtAt - right.entry.builtAt)
       .slice(0, budget)
       .map(({ id }) => id))
     if (sweptAt === null || budget > 0) sweptAt = at
-    const need = rest.filter((session) => {
+    const need = rest.filter(session => {
       const entry = cache.get(session.id)
-      return hot.has(session.id) || sweep.has(session.id) || !entry || entry.raw !== raws.get(session.id) || !cacheableRow(entry.row)
-        || (stamps !== null && entry.stamp !== (stamps.get(session.id) ?? ''))
+      return changed(session, entry) || sweep.has(session.id) || entry.headIndex !== undefined
         || (warm.has(session.id) && at - entry.builtAt >= warmMaxAgeMs)
     })
-    const fresh = new Map()
-    await projectInBatches(need, projectBatch, fresh)
-    for (const [id, row] of fresh) cache.set(id, { raw: raws.get(id), row, builtAt: at, stamp: stamps === null ? undefined : (stamps.get(id) ?? '') })
+    const coldFresh = new Map()
+    await projectInBatches(need, projectBatch, coldFresh)
+    for (const [id, row] of coldFresh) cache.set(id, { raw: raws.get(id), row, builtAt: at, stamp: stamp(id), headContext })
     for (const id of cache.keys()) if (!raws.has(id)) cache.delete(id)
     const rows = [...headRows]
-    const cachedIds = []
+    const cachedIds = head.filter((_, index) => !headNeed[index]).map(session => session.id)
     for (const session of rest) {
-      const fromCache = !fresh.has(session.id)
-      const row = fromCache ? cache.get(session.id)?.row : fresh.get(session.id)
-      if (fromCache) cachedIds.push(session.id)
+      if (!coldFresh.has(session.id)) cachedIds.push(session.id)
+      const row = cache.get(session.id)?.row
       if (row) rows.push(row)
     }
     const hot_ms = performance.now() - hotStarted
-    return { rows, cachedIds, head_ms, hot_ms, projected: head.length + need.length, cached: cachedIds.length, swept: sweep.size }
+    return { rows, cachedIds, head_ms, hot_ms, head_reused, head_projected, head_blocked, head_extras, projected: head_projected + need.length, cached: cachedIds.length, swept: sweep.size }
   }
   return { project, size: () => cache.size, clear: () => { cache = new Map(); epoch = null; sweptAt = null } }
 }
@@ -143,6 +188,20 @@ export function directRunStamps(runs) {
     parts.get(id).push(`${run.publicRunId ?? run.runId ?? ''}=${run.status ?? ''}`)
   }
   return new Map([...parts].map(([id, list]) => [id, `direct:${list.sort().join(',')}`]))
+}
+
+/** Heavy snapshot fields are cheap compared with transcript projection, and include
+ * delivery/resume/receipt changes, not only job state. Never persist these stamps. */
+export function heavyJobStamps(jobs) {
+  const parts = new Map()
+  for (const job of jobs ?? []) {
+    if (job.agent_id && job.agent_id !== 'hermes') continue
+    const id = job.sessionId ?? job.session_id
+    if (typeof id !== 'string') continue
+    if (!parts.has(id)) parts.set(id, [])
+    parts.get(id).push(JSON.stringify(job))
+  }
+  return new Map([...parts].map(([id, list]) => [id, JSON.stringify(list.sort())]))
 }
 
 /** Per-thread differences between two projected lists, ignoring order. */

@@ -121,3 +121,31 @@ test('latest session run uses indexed MAX rowid without a temporary sort and pre
   assert.match(plan, /USING COVERING INDEX wizard_run_queue_session_latest/)
   assert.doesNotMatch(plan, /TEMP B-TREE/)
 })
+
+
+test('run queue session stamp invalidates same-status updates as well as status changes', t => {
+  const q = new DurableRunQueue({ statePath: join(root(t), 'stamps.db'), pollIntervalMs: 0,
+    launch: async () => { throw Error('no dispatch') }, lookup: async () => ({}) })
+  t.after(() => q.close())
+  q.database.prepare(`INSERT INTO wizard_run_queue
+    (public_run_id,runtime,session_id,idempotency_key,request_hash,body,status,created_at,updated_at,agent_id)
+    VALUES ('stamp-run','direct','stamp-session','key','hash','{}','completed',100,100,'hermes')`).run()
+  const initial = q.sessionStamps().get('stamp-session')
+  q.database.prepare("UPDATE wizard_run_queue SET updated_at=101 WHERE public_run_id='stamp-run'").run()
+  const updated = q.sessionStamps().get('stamp-session')
+  assert.notEqual(updated, initial)
+  q.database.prepare("UPDATE wizard_run_queue SET status='failed' WHERE public_run_id='stamp-run'").run()
+  assert.notEqual(q.sessionStamps().get('stamp-session'), updated)
+  q.database.prepare("DELETE FROM wizard_run_queue WHERE public_run_id='stamp-run'").run()
+  assert(!q.sessionStamps().has('stamp-session'))
+})
+
+test('heavy head stamps include delivery/receipt changes and stay main-agent scoped', async t => {
+  const { heavyJobStamps } = await import('../server/session-list-cache.mjs')
+  const { q, job } = heavy(t)
+  const initial = heavyJobStamps(q.rows())
+  q.save({ ...job, resume: 'pending', receipt: { exit_code: 1 } })
+  assert.notDeepEqual(heavyJobStamps(q.rows()), initial)
+  assert.deepEqual(heavyJobStamps([{ ...job, agent_id: 'synthetic-other-agent' }]), new Map())
+  assert.deepEqual(heavyJobStamps([job, { ...job, job_id: 'second' }]), heavyJobStamps([{ ...job, job_id: 'second' }, job]))
+})

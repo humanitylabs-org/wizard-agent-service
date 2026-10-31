@@ -6,6 +6,7 @@ import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
 
 const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true),
+  'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
   // Main's cached Hermes listing with the stock running status; main admits direct here (the
   // check runs main's durable-queue path in a second scene) and without state.db, whose live
   // truth would otherwise hide a stale cached listing.

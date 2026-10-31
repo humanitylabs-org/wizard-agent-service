@@ -46,6 +46,16 @@
   ],
   "features": [
     {
+      "id": "head-row-owner-write-parity",
+      "description": "Chats retains exact projected row fields across unrelated owner writes and reflects row-affecting writes on main, host-profile, container and restricted runtimes; main reuses quiet head rows.",
+      "layer": "server",
+      "fixture": "head-row-owner-write-parity",
+      "how_to_test": "Seed a completed synthetic thread, compare list rows before and after eight owner read-state writes, require main head reuse without fallback, then rename through the exact runtime route and assert the changed title updates. Host-profile uses its profile API; restricted uses its mode-0600 ingress socket. Fixture evidence only, not live runtime/browser acceptance.",
+      "source_refs": ["server/service.mjs", "server/session-list-cache.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/chats-head-runtime-parity.node.mjs", "tests/session-list-cache-http.node.mjs", "tests/chats-list-head.node.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "private-incognito",
       "description": "Temporary private-agent chats never enter ordinary stores; standard agents are explicitly refused. This matrix fixture proves the privacy policy, not real-container or confidential-model operation.",
       "layer": "server",
