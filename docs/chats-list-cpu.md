@@ -121,3 +121,85 @@ All 1,100 outputs were deep-equal to the real full Service projection in every
 sample of both revisions. An initial contiguous-span implementation was slower
 for scattered changes; batching sparse rows with explicit positions removed that
 reader overhead. No live benchmark, service restart or activation is included.
+
+### Follow-up: owner-write churn and pending first sends
+
+The original head cache had two independent global blockers:
+
+- `localRevision` changed for **every** non-GET/HEAD request. Passing it as
+  `headContext` meant unrelated read-state/MCP/phone writes discarded all 100 head
+  entries. Snapshot invalidation still needs this broad revision; row reuse does not.
+- The copied queue returned six recent unfinished candidates; the read-only main
+  state lookup found one visible, unarchived, parentless **zero-message** session.
+  Its mere presence made `reuseHead=false` for every thread, indefinitely while
+  that failed first send remained in the seven-day candidate window.
+
+The direct core's owner-controlled global signature now contains installed app
+**IDs** (not catalog timestamps/names) and main failure-dismissal records. Raw
+canonical rows already carry title, pin, model and session changes. Operator
+workers affect only operator projection, which does not use this cache. Subjects,
+title history, spaces/UI filing, agent metadata and follow-ups are applied by
+shared decoration on every snapshot build, not retained in cached core rows.
+A changed core context also invalidates cold rows. Broad snapshot touch behavior,
+hot/live handling, outside stamps, rolling 30–60-second head ages and the joined
+ten-minute full self-check are retained.
+
+Pending first-send exceptions are projected fresh separately, inserted after
+exactly their original 20-row slices. The original slice order and even duplicate
+pending occurrences are deliberately retained: this patch does not silently fix
+that pre-existing difference between the cached/full-core slicer and the legacy
+cache-off 100-row HTTP path. Failed pending rows are not cached. Reader failure
+still falls back to the old full-head path.
+
+`head_blocked` counts the first reason for each re-projected canonical head row:
+`missing`, `context`, `hot`, `live`, `changed`, `age`, or the conservative
+`pending_first_send` reader-failure fallback. `head_extras` counts the separately
+projected exceptional rows; they are intentionally not included in canonical
+`head_projected`.
+
+Copy-only churn harness: `scripts/bench-chats-head-churn.mjs BASE_ARCHIVE
+CANDIDATE_ARCHIVE SCRATCH`. Both archives must be inside SCRATCH, and only they
+are instrumented. Before running, use SQLite's read-only source connection and
+backup API to make WAL-consistent `run-queue.sqlite3` and `heavy.sqlite3` copies.
+Create `scoped-state.db` with the source sessions/messages schemas and only the
+newest 1,100 visible root human-session shapes plus the candidate zero-message
+session; retain source identity/timestamp/count/flags, replace titles and prompt
+text, and insert two synthetic visible user/assistant messages per nonempty
+session. Create an index on messages(session_id). Keep leases/helper tables
+empty in this synthetic workload. Never copy or scan the full message corpus.
+All preparation reads of the source main state use `mode=ro`; no private agent
+home or state is accessed. This is a bounded shape fixture, **not** a complete
+owner-transcript or live-latency benchmark.
+
+The exercised fixture had 1,100 canonical rows, one pending first send, 319 queue
+session stamps and 1,104 main heavy jobs. Both ledger copies passed
+`quick_check`. Two consecutive real canonical-reader calls on the scoped copy
+were deep-equal; all 319 queue signatures and 1,104 heavy JSON inputs remained
+stable. Thus volatile signature generation was not an additional blocker on
+unchanged copies. Real active-job writes can still change their own sessions.
+Age expiry is expected rolling work, not an explanation for 100/100 every 10 s.
+
+Six ten-second builds per scenario, with 8/8/9 unrelated touches repeated twice
+(exactly 50 per simulated minute). Standard medians, including the mean of the
+middle pair for six samples:
+
+| Scenario | Before reused/projected | After reused/projected | Before head_ms | After head_ms |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged, no pending | 75 / 25 | 75 / 25 | 26.503 | 19.849 |
+| Owner touches only | 0 / 100 | 75 / 25 | 59.284 | 24.394 |
+| Pending first send only | 0 / 100 | 75 / 25 | 55.386 | 37.959 |
+| Both (realistic churn) | 0 / 100 | 75 / 25 | 59.240 | 63.124 |
+
+Every output is deep-equal to the **real full core** in all 48 measured builds
+(1,100 rows without pending; 1,105 with the retained pending duplicates). The
+first three churn builds after the fix reused 88 and projected 12 rows each
+(four hot, eight non-cacheable); later builds also exercised rolling expiry.
+The final noisy combined timing was slightly slower, despite much less row
+projection. Do not claim deployed latency or a wall-clock win from this fixture.
+
+Regression evidence: six focused new cases fail on 89be760c and pass after the
+fix. The real HTTP periodic self-check, including pending exceptions, reports
+zero cached/live differences and zero fallbacks. The declared
+`head-row-owner-write-parity` fixture covers main, host-profile, container and
+restricted HTTP/socket boundaries; it is synthetic evidence, not live or browser
+acceptance. No full suite, deployment or activation is part of this follow-up.

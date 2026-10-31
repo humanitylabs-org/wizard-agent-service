@@ -79,6 +79,16 @@ test('head cache invalidates global context, outside stamps, live state and expl
   assert.equal((await w.build({ headContext: 'after' })).head_projected, 100)
 })
 
+test('core context changes also re-project quiet cold rows', async () => {
+  const w = fixture()
+  await w.build({ headContext: 'catalog-and-dismissals-before' })
+  w.calls.length = 0
+  const out = await w.build({ headContext: 'catalog-and-dismissals-after' })
+  assert.equal(out.head_blocked.context, 100)
+  assert.equal(out.projected, 1100)
+  assert.equal(w.calls.length, 1100)
+})
+
 test('head cache retains filtered rows and drops deleted sessions', async () => {
   const w = fixture(), base = w.projectBatch
   w.projectBatch = async (...args) => (await base(...args)).filter(s => s.id !== 'synthetic-4')
@@ -102,6 +112,35 @@ test('first-send extra rows retain the original full-head projection when reuse 
     assert.equal(out.head_projected, 100)
     assert.equal(out.head_reused, 0)
   }
+})
+
+for (const count of [45, 105]) test(`a stale pending first-send session does not disable head reuse for other threads (${count} rows)`, async () => {
+  const w = fixture(); w.sessions.length = count
+  let pending = [{ id: 'pending', message_count: 0, wizard_pending_first_send: true }]
+  const projectHeadExtras = async () => {
+    const extras = new Map()
+    for (let offset = 0; offset < Math.min(count, 100); offset += 20) {
+      const end = Math.min(offset + 20, count, 100)
+      extras.set(end, await w.projectBatch(pending, true, end))
+    }
+    return extras
+  }
+  const full = async () => {
+    const rows = []
+    for (let offset = 0; offset < count; offset += 20) {
+      const batch = w.sessions.slice(offset, offset + 20)
+      rows.push(...await w.projectBatch([...batch, ...(offset < 100 ? pending : [])], offset < 100, offset < 100 ? offset : 0))
+    }
+    return rows
+  }
+  await w.build({ projectHeadExtras })
+  w.calls.length = 0
+  const out = await w.build({ projectHeadExtras })
+  assert.equal(out.head_reused, Math.min(count, 100))
+  assert.deepEqual(out.rows, await full(), 'same duplicate positions and preview offsets as legacy slices')
+  assert.equal(out.head_extras, Math.ceil(Math.min(count, 100) / 20))
+  pending = []
+  assert.deepEqual((await w.build({ projectHeadExtras })).rows, await full(), 'pending disappears immediately')
 })
 
 test('cooperative slices retain a sparse batch original preview offset', async () => {
