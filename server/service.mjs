@@ -13,11 +13,11 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
+import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -77,11 +77,13 @@ import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } f
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
+import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
+import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
@@ -2603,13 +2605,15 @@ function buildWizardServer(options, lifetime) {
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
+  // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
+  let reachOut = null
   let spacesTools = null
   let supervisorTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
-        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -2726,8 +2730,8 @@ function buildWizardServer(options, lifetime) {
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
     agentId, sessionId, jobs,
-    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
-      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
+    // The guard only changes check; done returns unchanged. Do not synchronously
+    // read transcript evidence that this guard cannot consume on cached list rows.
     isDelivered: job => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
@@ -2762,7 +2766,7 @@ function buildWizardServer(options, lifetime) {
       const path = home ? join(home, 'state.db') : ''
       const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
       truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' })?.state === 'fyi'
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'check', ask: 'pending' })?.state === 'fyi'
       truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
@@ -2779,8 +2783,9 @@ function buildWizardServer(options, lifetime) {
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
-    followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
+    followUpNote: (sessionId) => (scheduler?.running() && bridge ? [followUpThreadNote(sessionId), reachOutNote()].filter(Boolean).join(' ') : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -3991,13 +3996,13 @@ function buildWizardServer(options, lifetime) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
-  const enrichSessionListMessages = async (result, operator, sessionTruth = null) => {
+  const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
+          if (previewOffset + index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -4056,7 +4061,7 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
-  const projectSessionListCore = async (result, operator, canonicalPage, firstPage) => {
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0) => {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
@@ -4079,7 +4084,14 @@ function buildWizardServer(options, lifetime) {
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
+          // The list fingerprint is aggregate, not an exact transcript revision:
+          // in-place canonical edits can leave it unchanged. Do not reuse evidence
+          // across readers/phases. The ownJobs gate below avoids job-free reads.
+          const nonHoldingFor = id => readNonHoldingFollowUps(hermesStatePath, id)
           const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          // Heavy delivery can change without a new reply. Use one fresh ledger snapshot
+          // for this batch, never the age-cached rows used only to discover hot threads.
+          const heavyJobs = heavyWork?.queue.rows() ?? []
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
@@ -4087,12 +4099,14 @@ function buildWizardServer(options, lifetime) {
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
-              const followUps = new Map()
-              const holdingJobs = heavyJobRows().filter(job => {
+              // The ledger includes every historical job. Reject jobs that cannot
+              // affect this wait before reading a transcript, then read each candidate
+              // thread once in this synchronous phase (never across an await).
+              const pendingIds = new Set(pendingHeavyJobs(heavyJobs, listedSessionIds).keys())
+              const nonHolding = new Map([...pendingIds].map(id => [id, nonHoldingFor(id)]))
+              const holdingJobs = heavyJobs.filter(job => {
                 const id = job.sessionId ?? job.session_id
-                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
-                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
-                return !followUps.get(id).has(job.job_id ?? job.id)
+                return !pendingIds.has(id) || !nonHolding.get(id).has(job.job_id ?? job.id)
               })
               for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
@@ -4118,12 +4132,19 @@ function buildWizardServer(options, lifetime) {
             try { result = await backgroundResults.project(result) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
+          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
           if (!operator) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
-              if (heavyStatus('hermes', session.id, { state: 'done', ask: 'pending' })?.state === 'fyi') truth.heavyPending = true
+              const ownJobs = heavyJobs.filter(job => (job.agent_id ?? 'hermes') === 'hermes' && (job.sessionId ?? job.session_id) === session.id)
+              // Delivered history cannot change this guard. Only a still-owed
+              // result needs fresh optional-follow-up evidence in this later phase.
+              if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, ownJobs)?.state === 'fyi') {
+                const nonHolding = nonHoldingFor(session.id)
+                const holdingJobs = ownJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
+                if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
+              }
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
               let replies = useTruth ? truth.replies : messages?.replies
@@ -4176,8 +4197,9 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectBatch = async (sessions, firstPage) =>
-      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    const projectSlice = async (sessions, firstPage, previewOffset) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, previewOffset)).toString('utf8')).data
+    const projectBatch = (sessions, firstPage) => projectListSlices(sessions, projectSlice, firstPage)
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
@@ -4228,7 +4250,7 @@ function buildWizardServer(options, lifetime) {
     // A disabled cache keeps checking: it was serving the full rebuild on every poll forever, which
     // saturated the service (Chats list 12 s, a thread open ~5 s). A clean check that compared real
     // cached rows turns it back on.
-    const check = async () => {
+    const checkCore = async () => {
       if (!canonicalSessionReader || configured === 'off') return null
       const started = performance.now()
       const all = await humanSessions()
@@ -4253,6 +4275,9 @@ function buildWizardServer(options, lifetime) {
       }
       return { faults, differences }
     }
+    // Timer and diagnostic callers join the same self-check. Slow checks must
+    // not multiply full transcript projections on the shared HTTP loop.
+    const check = createJoinedListCheck(checkCore)
     return {
       mode: () => (disabled ? 'off' : configured),
       touch: () => { localRevision++ },
@@ -4743,6 +4768,12 @@ function buildWizardServer(options, lifetime) {
   followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
     // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
     ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
+  // Same ownership rule, but routed agents only: the main agent never reaches these tools (it has its plugin), so
+  // a routed agent cannot target a main thread and a private agent's jobs and threads stay its own.
+  reachOut = scheduler ? agentReachOutTools({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    ownsThread: (agentId, sessionId) => agentId !== GATEWAY_MAIN_AGENT && Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
@@ -4896,6 +4927,7 @@ function buildWizardServer(options, lifetime) {
   const withoutHiddenSeen = (request, state) => !state || typeof state !== 'object' || !state.threads || typeof state.threads !== 'object'
     ? state : { ...state, threads: withoutHiddenSessions(request, state.threads) }
   const sideAgent = (request, sessionId, explicit = '') => {
+    if (typeof sessionId === 'string' && /(?:^|[:/])incog_/u.test(sessionId)) throw new AgentError(410, 'incognito_closed', 'incognito')
     if (!agents) { if (explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'not_found', 'agent.id'); return MAIN_AGENT_ID }
     if (explicit) {
       const agent = agents?.read(explicit)
@@ -4952,6 +4984,17 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  const incognito = createIncognito({ registry: agents, runtime: agentRuntime, fetchImpl: rawFetchImpl,
+    upstreamHost: options.agentUpstreamHost || '',
+    proxyContext: { sendJson, isAllowedProxyRequest, secretGuard, mainSecrets: agentCtx?.mainSecrets || [],
+      readJson: async request => {
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new AgentError(415, 'json_required', 'incognito')
+        const value = parseJsonBody(await readBoundedBody(request, 70_000))
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentError(400, 'invalid_request', 'incognito')
+        return value
+      } },
+  })
+  lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
   const server = createServer(async (request, response) => {
     if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
@@ -4993,6 +5036,10 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (isIncognitoPath(url.pathname)) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (await incognito.handle(url, request, response)) return
       }
       // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
       if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {

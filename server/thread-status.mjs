@@ -81,7 +81,7 @@ export function parseStatus(text) {
 // Apply after parsing/backfill, including cached rows: heavy work can change
 // independently of the assistant's final reply. An owner decision still wins.
 export function guardHeavyStatus(status, { jobs = [], agentId = 'hermes', sessionId = '', isDelivered = () => false, nonHoldingIds = new Set() } = {}) {
-  if (!['done', 'check'].includes(status?.state)) return status
+  if (status?.state !== 'check') return status
   const pending = jobs?.some(job => (job.agent_id ?? 'hermes') === agentId
     && (job.sessionId ?? job.session_id) === sessionId && heavyResultOwed(job, isDelivered)
     && !(agentId === 'hermes' && status.state === 'done' && nonHoldingIds.has(job.job_id ?? job.id)))

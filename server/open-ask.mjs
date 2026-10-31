@@ -25,7 +25,7 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
     let status = reply.status ?? parseStatus(reply.content)
     if (!status) continue
     if (background && ASK_STATES.has(status.state) && FUTURE_ASK.test(status.ask)) status = { ...status, state: 'fyi' }
-    if (['check', 'done'].includes(status.state) && heavyPending) status = { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' }
+    if (status.state === 'check' && heavyPending) status = { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' }
     attention = status
     if (ASK_STATES.has(status.state)) ask = status
     else if (!background && ['done', 'fyi'].includes(status.state)) ask = null

@@ -15,6 +15,23 @@
 // on a confirmed difference; any error falls back to the full projection; WIZARD_LIST_CACHE=off
 // restores the old path without a code change.
 
+// Yield to the HTTP loop, not merely the promise microtask queue. Preserve the
+// caller's head enrichment flag and global preview offset across that head.
+export async function projectListSlices(sessions, project, firstPage, sliceSize = 20) {
+  const rows = []
+  for (let at = 0; at < sessions.length; at += sliceSize) {
+    await new Promise(resolve => setImmediate(resolve))
+    rows.push(...await project(sessions.slice(at, at + sliceSize), firstPage, at))
+  }
+  return rows
+}
+
+// A slow self-check has one owner; all callers observe the same result/failure.
+export function createJoinedListCheck(checkCore) {
+  let checking = null
+  return () => checking ?? (checking = Promise.resolve().then(checkCore).finally(() => { checking = null }))
+}
+
 export const LIVE_ROW_STATUSES = new Set(['submitting', 'queued', 'accepted', 'launching', 'running', 'stopping',
   'waiting_for_approval', 'unknown', 'failed', 'interrupted'])
 const LIVE_ROW_FIELDS = ['wizard_waiting_on', 'wizard_helper_status', 'wizard_background_result', 'wizard_run_id',
