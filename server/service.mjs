@@ -2887,6 +2887,10 @@ function buildWizardServer(options, lifetime) {
     return models[0] ?? null
   }
   let sttProbe = { value: null, at: 0 }
+  let sttLastReady = null
+  let sttRetry = null
+  let sttClosed = false
+  lifetime.own(() => { sttClosed = true; clearTimeout(sttRetry) })
   const sttProbeGet = async (path, timeoutMs) => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -2895,22 +2899,25 @@ function buildWizardServer(options, lifetime) {
       const raw = Buffer.from(await r.arrayBuffer())
       if (!r.ok || raw.length > 64 * 1024) return { reachable: true, ok: false, value: null }
       try { return { reachable: true, ok: true, value: JSON.parse(raw.toString('utf8')) } } catch { return { reachable: true, ok: true, value: null } }
-    } catch { return { reachable: false, ok: false, value: null } } finally { clearTimeout(timer) }
+    } catch (error) {
+      return { reachable: false, ok: false, value: null, unknown: controller.signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError' }
+    } finally { clearTimeout(timer) }
   }
   // Cached callers (bootstrap) probe briefly and share one in-flight probe; the status read probes fresh.
   let sttProbing = null
   const sttReadiness = async ({ fresh = false } = {}) => {
     if (!fresh && sttProbe.value && Date.now() - sttProbe.at < 30_000) return sttProbe.value
-    if (!fresh && sttProbing) return sttProbing
+    if (sttProbing) return sttProbing
     const probing = sttReadinessProbe(fresh ? 2000 : 800)
-    if (!fresh) sttProbing = probing.finally(() => { sttProbing = null })
-    return probing
+    sttProbing = probing.finally(() => { sttProbing = null })
+    return sttProbing
   }
   const sttReadinessProbe = async (timeoutMs) => {
     // WIZARD_STT_ENABLED=0 (sttConfigured: false) turns voice off outright; nothing is probed.
     if (options.sttConfigured === false) return { reachable: true, ready: false, provider: '', name: 'Voice off', model: '', attested: false }
     let value = { reachable: false, ready: false, provider: '', name: 'Voice unavailable', model: '', attested: false }
     const health = await sttProbeGet('/health', timeoutMs)
+    let unknown = health.unknown === true
     if (health.ok && health.value && typeof health.value === 'object' && typeof health.value.provider === 'string' && health.value.provider) {
       const provider = health.value.provider.slice(0, 80)
       value = {
@@ -2923,18 +2930,31 @@ function buildWizardServer(options, lifetime) {
       }
     } else if (health.reachable) {
       const models = await sttProbeGet('/v1/models', timeoutMs)
+      unknown = models.unknown === true
       const first = models.ok ? speechModelOf(models.value) : null
-      sttModelCache = first ? { id: first.id.slice(0, 200), segments: typeof first.task === 'string', at: Date.now() } : { id: '', segments: false, at: 0 }
+      if (!unknown) {
+        sttModelCache = first ? { id: first.id.slice(0, 200), segments: typeof first.task === 'string', at: Date.now() } : { id: '', segments: false, at: 0 }
+        if (first) sttModelConfirmed = { ...sttModelCache }
+      }
       if (first) {
         value = { reachable: true, ready: true, provider: 'local', name: VOICE_NAMES.local, model: first.id.slice(0, 200), attested: false }
       } else {
         value = { reachable: true, ready: false, provider: models.ok ? 'local' : '', name: models.ok ? 'No voice model installed' : 'Voice unavailable', model: '', attested: false }
       }
     }
-    // A brief (bootstrap) probe that times out while the transcriber is busy must not hide a voice that was
-    // ready moments ago; and an unreachable result is only trusted for 5 s, so voice returns quickly.
-    if (!value.reachable && timeoutMs < 2000 && sttProbe.value?.ready && Date.now() - sttProbe.at < 120_000) return sttProbe.value
-    sttProbe = { value, at: value.reachable ? Date.now() : Date.now() - 25_000 }
+    // A timeout/abort is unknown, not evidence that voice was removed. Keep only a confirmed
+    // ready answer for 15 minutes; neither failed probes nor serving the fallback renew that lease.
+    if (unknown) {
+      if (!sttRetry && !sttClosed) {
+        sttRetry = setTimeout(() => { sttRetry = null; void sttReadiness({ fresh: true }) }, 5000)
+        sttRetry.unref?.()
+      }
+      if (sttLastReady && Date.now() - sttLastReady.at <= 900_000) return sttLastReady.value
+    } else {
+      clearTimeout(sttRetry); sttRetry = null
+      sttLastReady = value.ready ? { value, at: Date.now() } : null
+    }
+    sttProbe = { value, at: value.reachable && !unknown ? Date.now() : Date.now() - 25_000 }
     return value
   }
   const sttAvailable = async () => (await sttReadiness()).ready
@@ -2944,11 +2964,14 @@ function buildWizardServer(options, lifetime) {
   // take ("you", "Thank you."), so those requests ask for verbose_json and the reply keeps only the segments
   // Whisper itself scores as speech (see speechText); a silent take is then reported as no speech.
   let sttModelCache = { id: '', segments: false, at: 0 }
+  // Last model a listing actually confirmed; a timed-out listing keeps it for the same 15 min grace as readiness.
+  let sttModelConfirmed = { id: '', segments: false, at: 0 }
   const sttModel = async () => (await sttModelInfo()).id
   const sttModelInfo = async () => {
     if (Date.now() - sttModelCache.at < 300_000) return sttModelCache
     let id = ''
     let segments = false
+    let timedOut = false
     try {
       const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
       if (r.ok) {
@@ -2957,8 +2980,14 @@ function buildWizardServer(options, lifetime) {
         id = first ? first.id.slice(0, 200) : ''
         segments = typeof first?.task === 'string'
       } else await r.body?.cancel().catch(() => undefined)
-    } catch { /* keep '' */ }
+    } catch (error) { timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError' /* else keep '' */ }
+    if (timedOut && sttModelConfirmed.id && Date.now() - sttModelConfirmed.at <= 900_000) {
+      // Unknown, not removed: keep the confirmed model and look again soon (cache expires in 10 s).
+      sttModelCache = { id: sttModelConfirmed.id, segments: sttModelConfirmed.segments, at: Date.now() - 290_000 }
+      return sttModelCache
+    }
     sttModelCache = { id, segments, at: Date.now() }
+    if (id) sttModelConfirmed = { ...sttModelCache }
     return sttModelCache
   }
   const router = options.router && options.router.url && options.router.model ? options.router : null
