@@ -32,6 +32,8 @@ jobs:
         run: |
           "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
           python3 ops/agent-runtime/test_agent_runtime.py
+      - name: Chats CPU and speed-meter regressions
+        run: node --test tests/chats-list-cpu.node.mjs tests/speed-meter.node.mjs
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
