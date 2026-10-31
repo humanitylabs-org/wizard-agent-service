@@ -42,6 +42,13 @@ TOOLS = 'git gh ssh node npm python3 uv sqlite3 curl jq rg bw op systemctl docke
 LOCAL = {'bin', 'hermes-agent', 'logs', 'cache', 'tmp', 'runtime', 'locks', 'backups',
          'state-snapshots', 'browser-profiles', 'terminal-sessions', '.pytest_cache',
          'venvs', 'node', 'installs', 'tools', 'vendor', 'lsp'}
+# Host applications execute these runtimes in place; they are not agent state.
+# Unlike other LOCAL inputs (quarantined for undo), these stay at the host path.
+HOST_SHARED = {'data/apps', 'bin', 'hermes-agent', 'venvs', 'tools', 'node',
+               'installs', 'runtime', 'vendor', 'lsp'}
+AGENT_STATE = {'state.db', 'sessions', 'memories', 'skills', 'cron', 'config.yaml',
+               '.env', 'auth.json', 'credentials', 'plugins', 'profiles', 'SOUL.md',
+               'AGENTS.md', 'memory_store.db', 'projects.db', 'gateway.json'}
 RUNTIME_NAMES = {'gateway.pid', 'gateway.lock', 'cron.pid', 'gateway_state.json',
                  'processes.json', '.backup.lock', 'active_profile'}
 PATH_RE = re.compile(r'(?<![\w:/])(?:~/(?:[\w.@+*/-]+)|/(?:[\w.@+*-]+/)*[\w.@+*-]+)')
@@ -150,13 +157,16 @@ def archive_entries(path, *, max_bytes=128 * 1024**3, max_members=300000):
         raise ImportFailure('archive_invalid') from None
 
 
-def files(root):
+def files(root, *, ignored=()):
     """No symlink traversal; permission failures make the inventory incomplete, not silently green."""
     errors = []
     for base, dirs, names in os.walk(root, followlinks=False, onerror=lambda e: errors.append(e)):
-        dirs[:] = sorted(d for d in dirs if not (Path(base) / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if not (Path(base) / d).is_symlink()
+                         and not under_shared((Path(base) / d).relative_to(root).as_posix(), ignored))
         for name in sorted(names):
             p = Path(base) / name
+            if under_shared(p.relative_to(root).as_posix(), ignored):
+                continue
             if p.is_symlink():
                 yield p, p.relative_to(root).as_posix(), p.lstat(), True
             else:
@@ -343,7 +353,7 @@ def scan(source, *, owner_home=None, profiles_policy='archive'):
             'gateway_url': '', 'approved_plugins': [], 'approved_mcp': [],
             'approved_env_names': [],  # deprecated; use per-path credentials entries
             'outside_tools': [],
-            'wizard_assets': [], 'source_units': [],
+            'wizard_assets': [], 'source_units': [], 'host_shared_paths': [],
             'dependencies': sorted(deps.values(), key=lambda d: (d['kind'], d['path'])),
             'summary': {'portable_bytes': sum(n for _, n, _ in rows), 'files': len(rows),
                         'profiles_archived': profile_roots,
@@ -401,9 +411,49 @@ def logical_home(plan):
     return plan.get('logical_home', plan['source']) if plan['path_preserving'] else '/opt/data'
 
 
+def under_shared(relative, paths):
+    return any(relative == p or relative.startswith(p + '/') for p in paths)
+
+
+def host_shared_paths(plan):
+    """Validate owner additions before any effects; defaults need not exist."""
+    additions = plan.get('host_shared_paths', [])
+    require(isinstance(additions, list), 'host_shared_paths_invalid')
+    require(not additions or plan.get('source_kind') == 'home', 'host_shared_archive')
+    source = Path(plan['source'])
+    for rel in additions:
+        require(isinstance(rel, str) and bool(rel) and not rel.startswith('/')
+                and not any(c in rel for c in '\\\x00\n\r:')
+                and all(p not in {'', '.', '..'} for p in rel.split('/')), 'host_shared_path_invalid')
+        # Never let a selection hide canonical state (including SQLite sidecars,
+        # secrets and profile state). Broad data/state roots need narrower review.
+        root = rel.split('/')[0]
+        require(root not in AGENT_STATE | RUNTIME_NAMES | {'data', 'state', 'WIZARD-IMPORTED.json'}
+                or (root in {'data', 'state'} and '/' in rel), 'host_shared_agent_state')
+        require(not root.startswith(('.env', 'config.yaml', 'state.db'))
+                and not root.endswith(('.db', '.db-wal', '.db-shm', '.db-journal')), 'host_shared_agent_state')
+        path = source
+        for part in rel.split('/'):
+            path = path / part
+            require(not path.is_symlink(), 'host_shared_symlink')
+        require(path.exists(), 'host_shared_missing')
+        require(path.is_dir() or (path.is_file() and path.stat().st_nlink == 1), 'host_shared_special_or_shared_file')
+    present = {p for p in HOST_SHARED if (source / p).exists() or (source / p).is_symlink()} if plan.get('source_kind') == 'home' else set()
+    paths = sorted(present | set(additions), key=lambda p: (len(PurePosixPath(p).parts), p))
+    selected = []
+    for rel in paths:
+        # A fixed nested default must not escape via an intermediate symlink.
+        path = source / rel
+        require(all(not parent.is_symlink() for parent in path.parents if parent != source and source in parent.parents), 'host_shared_symlink')
+        if not under_shared(rel, selected):
+            selected.append(rel)
+    return selected
+
+
 def validate_plan(plan, wizard_home):
     require(plan.get('schema') == SCHEMA and plan.get('approved') is True
             and secrets.compare_digest(str(plan.get('approval', '')), approval_hash(plan)), 'plan_not_approved')
+    host_shared_paths(plan)
     require(plan.get('mode') in {'paused', 'take-over'}, 'mode_invalid')
     require(plan.get('profiles_policy', 'archive') in {'archive', 'refuse'}, 'profiles_policy_invalid')
     require(plan.get('profiles_policy', 'archive') != 'refuse' or not plan['summary'].get('profiles_archived'), 'profiles_require_archive')
@@ -805,10 +855,17 @@ def wire(home, plan, api_key, gateway_key):
         doc = json.loads(cron.read_text())
         for job in doc if isinstance(doc, list) else doc.get('jobs', []):
             job.update(enabled=False, state='paused', paused_at='import-rehearsal', next_run_at=None)
-        dump(cron, doc)
+        # The stopped home has journalled original bytes. Keep its inode, as
+        # config/.env do, so move undo restores the exact original tree.
+        with cron.open('w') as out:
+            json.dump(doc, out, indent=2, sort_keys=True)
+            out.write('\n')
+            os.fchmod(out.fileno(), 0o600)
+            out.flush()
+            os.fsync(out.fileno())
 
 
-def assert_no_writers(source, *, _pids=None):
+def assert_no_writers(source, *, host_shared=(), _pids=None):
     """Fail closed if a process still has a writable descriptor into the source home."""
     root = str(Path(source).resolve()) + '/'
     processes = Path('/proc').iterdir() if _pids is None else (Path('/proc') / str(pid) for pid in _pids)
@@ -818,18 +875,35 @@ def assert_no_writers(source, *, _pids=None):
         try:
             if proc.stat().st_uid != os.getuid():
                 continue
+            # A host process admitted for writing under a shared subtree must not also be anchored
+            # (cwd or an open directory) in the moved part of the home: after the rename its
+            # relative/openat writes would land in the agent's home.
+            shared_writer, anchored = False, False
+            try:
+                cwd = os.readlink(proc / 'cwd') + '/'
+                anchored = cwd.startswith(root) and not under_shared(cwd[len(root):].rstrip('/'), host_shared)
+            except FileNotFoundError:
+                pass
             for fd in (proc / 'fd').iterdir():
                 try:
-                    target = os.readlink(fd)
-                    if target.startswith(root):
-                        info = (proc / 'fdinfo' / fd.name).read_text()
-                        match = re.search(r'^flags:\s+(\d+)', info, re.M)
-                        require(match is not None, 'source_writer_census_denied')
-                        assert match is not None
-                        flags = int(match[1], 8)
-                        require((flags & os.O_ACCMODE) == os.O_RDONLY, 'source_has_writers')
+                    target = os.readlink(fd).removesuffix(' (deleted)') + '/'
+                    if not target.startswith(root):
+                        continue
+                    relative = target[len(root):].rstrip('/')
+                    info = (proc / 'fdinfo' / fd.name).read_text()
+                    match = re.search(r'^flags:\s+(\d+)', info, re.M)
+                    require(match is not None, 'source_writer_census_denied')
+                    assert match is not None
+                    flags = int(match[1], 8)
+                    if under_shared(relative, host_shared):
+                        shared_writer = shared_writer or (flags & os.O_ACCMODE) != os.O_RDONLY
+                        continue
+                    if stat.S_ISDIR(os.stat(fd).st_mode):
+                        anchored = True
+                    require((flags & os.O_ACCMODE) == os.O_RDONLY, 'source_has_writers')
                 except FileNotFoundError:
                     continue
+            require(not (shared_writer and anchored), 'source_has_writers')
         except FileNotFoundError:
             continue
         except PermissionError:
@@ -837,7 +911,7 @@ def assert_no_writers(source, *, _pids=None):
             # with SYS_PTRACE. Kernel read leases test the FILE, not /proc: a
             # read lease is refused while any other process has it open writable.
             # No contents are read and every lease is released immediately.
-            for path, _, metadata, link in files(Path(source)):
+            for path, _, metadata, link in files(Path(source), ignored=host_shared):
                 if link or not stat.S_ISREG(metadata.st_mode):
                     continue
                 fd = None
@@ -896,6 +970,66 @@ def lifecycle_lock(function):
     return locked
 
 
+def durable_rename(source, dest):
+    source.rename(dest)
+    for parent in {source.parent, dest.parent}:
+        fd = os.open(parent, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def return_host_shared(source, home, shared, journal, journal_path):
+    """Write-ahead inode receipts reconcile death before or after each rename."""
+    for rel in shared:
+        original = home_path(home, rel)
+        dest = home_path(source, rel)
+        metadata = original.lstat()
+        entry = {'path': rel, 'device': metadata.st_dev, 'inode': metadata.st_ino, 'returned': False}
+        journal['host_shared'].append(entry)
+        dump(journal_path, journal)
+        parents = list(reversed(dest.relative_to(source).parents))[1:]
+        for parent in parents:
+            p = source / parent
+            if not p.exists():
+                journal['host_parents'].append(parent.as_posix())
+                dump(journal_path, journal)
+                p.mkdir(mode=0o700)
+        require(not dest.exists() and not dest.is_symlink(), 'host_shared_destination_exists')
+        durable_rename(original, dest)
+        entry['returned'] = True
+        dump(journal_path, journal)
+
+
+def restore_host_shared(source, home, journal, journal_path):
+    for entry in reversed(journal.get('host_shared', [])):
+        original = home_path(source, entry['path'])
+        dest = home_path(home, entry['path'])
+        def matches(path):
+            if not (path.exists() or path.is_symlink()):
+                return False
+            metadata = path.lstat()
+            return (metadata.st_dev, metadata.st_ino) == (entry['device'], entry['inode'])
+        if matches(dest):
+            # Intent was written, but apply's rename never happened (or undo did).
+            require(not original.exists() and not original.is_symlink(), 'host_shared_conflict')
+            continue
+        require(matches(original) and not dest.exists() and not dest.is_symlink(), 'host_shared_changed')
+        entry['restoring'] = True
+        dump(journal_path, journal)
+        durable_rename(original, dest)
+        entry['restored'] = True
+        dump(journal_path, journal)
+    # Remove only empty parents created by this import. Never recurse into host
+    # trees: a new sibling from a running service must cause an undo refusal.
+    for rel in reversed(journal.get('host_parents', [])):
+        p = home_path(source, rel)
+        if p.exists():
+            require(not p.is_symlink() and p.is_dir() and not any(p.iterdir()), 'source_pointer_changed')
+            p.rmdir()
+
+
 @lifecycle_lock
 def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_source_stop=False):
     if runtime_factory is DockerRuntime:
@@ -906,6 +1040,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
     require(ID_RE.fullmatch(agent_id) and agent_id not in {'hermes', 'main', 'default', 'options', 'new'}, 'agent_id')
     validate_plan(plan, wizard_home)
     source = Path(plan['source'])
+    shared = host_shared_paths(plan)
     assert_owner(source)
     require(source_identity(plan) == plan['source_identity'], 'source_changed_rescan')
     directory = wizard_home / 'agents' / agent_id
@@ -919,7 +1054,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
     directory.mkdir(parents=True, mode=0o700)
     # All journal data is outside home, inaccessible to the agent. Persist intent BEFORE effects.
     journal = {'schema': SCHEMA, 'id': agent_id, 'plan': plan, 'state': 'preparing', 'moved': False,
-               'quarantined': [], 'backups': [], 'managed_absent': [], 'assets_added': [], 'services_active': [], 'settings_before': None,
+               'host_shared': [], 'host_parents': [], 'quarantined': [], 'backups': [], 'managed_absent': [], 'assets_added': [], 'services_active': [], 'settings_before': None,
                'settings_after_hash': None, 'source': str(source), 'home_inode': None}
     journal_path = directory / 'import-journal.json'
     dump(journal_path, journal)
@@ -935,7 +1070,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
                     journal['services_active'].append(unit)
                     dump(journal_path, journal)
                     run(['systemctl', '--user', 'stop', unit])
-            assert_no_writers(source)
+            assert_no_writers(source, host_shared=shared)
             if hasattr(runtime, 'check_history'):
                 runtime.check_history(source)  # BEFORE rename, wiring, chown or SessionDB open
             journal['state'] = 'moving'
@@ -947,6 +1082,7 @@ def apply(plan, agent_id, wizard_home, *, runtime_factory=DockerRuntime, allow_s
             # Explicit pointer, NOT a symlink (old launchers must not follow into the new live home).
             source.mkdir(mode=0o700)
             dump(source / 'WIZARD-IMPORTED.json', {'agent': agent_id, 'journal': str(journal_path)})
+            return_host_shared(source, directory / 'home', shared, journal, journal_path)
         else:
             (directory / 'home').mkdir(mode=0o700)
             safe_zip = directory / 'transport.zip'
@@ -1189,6 +1325,7 @@ def undo(journal_path, *, runtime_factory=DockerRuntime):
                 else:
                     dest.unlink(missing_ok=True)
                 original.rename(dest)
+        restore_host_shared(source, home, journal, path)
         if source.exists():
             require(not source.is_symlink(), 'source_pointer_changed')
             entries = list(source.iterdir())
