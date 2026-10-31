@@ -2932,7 +2932,10 @@ function buildWizardServer(options, lifetime) {
       const models = await sttProbeGet('/v1/models', timeoutMs)
       unknown = models.unknown === true
       const first = models.ok ? speechModelOf(models.value) : null
-      if (!unknown) sttModelCache = first ? { id: first.id.slice(0, 200), segments: typeof first.task === 'string', at: Date.now() } : { id: '', segments: false, at: 0 }
+      if (!unknown) {
+        sttModelCache = first ? { id: first.id.slice(0, 200), segments: typeof first.task === 'string', at: Date.now() } : { id: '', segments: false, at: 0 }
+        if (first) sttModelConfirmed = { ...sttModelCache }
+      }
       if (first) {
         value = { reachable: true, ready: true, provider: 'local', name: VOICE_NAMES.local, model: first.id.slice(0, 200), attested: false }
       } else {
@@ -2961,11 +2964,14 @@ function buildWizardServer(options, lifetime) {
   // take ("you", "Thank you."), so those requests ask for verbose_json and the reply keeps only the segments
   // Whisper itself scores as speech (see speechText); a silent take is then reported as no speech.
   let sttModelCache = { id: '', segments: false, at: 0 }
+  // Last model a listing actually confirmed; a timed-out listing keeps it for the same 15 min grace as readiness.
+  let sttModelConfirmed = { id: '', segments: false, at: 0 }
   const sttModel = async () => (await sttModelInfo()).id
   const sttModelInfo = async () => {
     if (Date.now() - sttModelCache.at < 300_000) return sttModelCache
     let id = ''
     let segments = false
+    let timedOut = false
     try {
       const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
       if (r.ok) {
@@ -2974,8 +2980,14 @@ function buildWizardServer(options, lifetime) {
         id = first ? first.id.slice(0, 200) : ''
         segments = typeof first?.task === 'string'
       } else await r.body?.cancel().catch(() => undefined)
-    } catch { /* keep '' */ }
+    } catch (error) { timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError' /* else keep '' */ }
+    if (timedOut && sttModelConfirmed.id && Date.now() - sttModelConfirmed.at <= 900_000) {
+      // Unknown, not removed: keep the confirmed model and look again soon (cache expires in 10 s).
+      sttModelCache = { id: sttModelConfirmed.id, segments: sttModelConfirmed.segments, at: Date.now() - 290_000 }
+      return sttModelCache
+    }
     sttModelCache = { id, segments, at: Date.now() }
+    if (id) sttModelConfirmed = { ...sttModelCache }
     return sttModelCache
   }
   const router = options.router && options.router.url && options.router.model ? options.router : null

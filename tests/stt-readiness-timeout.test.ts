@@ -10,8 +10,14 @@ afterEach(async () => {
 
 async function fixture(extra = {}) {
   let mode = 'ready'
-  const fetchImpl = vi.fn(async (url: string, { signal }: RequestInit = {}) => {
+  const uploads: string[] = []
+  const fetchImpl = vi.fn(async function (url: string, init: RequestInit = {}) {
+    const { signal } = init
     if (!url.startsWith('http://127.0.0.1:8864/')) return Response.json({ features: {} })
+    if (url.endsWith('/v1/audio/transcriptions')) {
+      uploads.push(await new Response(init.body).formData().then((f: FormData) => String(f.get('model') ?? '')).catch(() => ''))
+      return Response.json({ text: 'hello' })
+    }
     if (mode === 'slow') return await new Promise<Response>((_resolve, reject) => {
       signal!.addEventListener('abort', () => reject(signal!.reason), { once: true })
     })
@@ -30,7 +36,7 @@ async function fixture(extra = {}) {
   const now = Date.now()
   let elapsed = 0
   vi.spyOn(Date, 'now').mockImplementation(() => now + elapsed)
-  return { boot, status, fetchImpl, mode: (next: string) => { mode = next }, age: (ms: number) => { elapsed = ms } }
+  return { boot, status, fetchImpl, uploads, base, mode: (next: string) => { mode = next }, age: (ms: number) => { elapsed = ms } }
 }
 
 describe('STT timeout is unknown, not a confirmed outage', () => {
@@ -62,6 +68,18 @@ describe('STT timeout is unknown, not a confirmed outage', () => {
     f.mode('models-timeout')
     f.age(180_000)
     expect((await f.boot()).capabilities.voice).toBe(true)
+  })
+
+  it('a models timeout after the 5-minute model cache keeps the confirmed model for transcription', async () => {
+    const f = await fixture()
+    f.mode('models-ready')
+    expect((await f.boot()).capabilities.voice).toBe(true)
+    f.mode('models-timeout')
+    f.age(400_000)
+    expect((await f.boot()).capabilities.voice).toBe(true)
+    const r = await fetch(`${f.base}/wizard/voice/transcribe`, { method: 'POST', headers: { 'Content-Type': 'audio/webm' }, body: new Uint8Array([1, 2, 3, 4]) })
+    expect(r.status).toBe(200)
+    expect(f.uploads.at(-1)).toBe('fixture-local')
   })
 
   it('bootstrap connection refused after cache expiry does not get timeout grace', async () => {
