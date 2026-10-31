@@ -53,7 +53,7 @@ export function truthFixture(root, count = 12, sec = Math.floor(Date.now() / 100
   return { path, sessions, messages, sec }
 }
 
-export async function instrumentProjection(source, archive, fixture, { legacy = false } = {}) {
+export async function instrumentProjection(source, archive, fixture, { legacy = false, serviceOptions = {} } = {}) {
   mkdirSync(archive, { recursive: true, mode: 0o700 })
   cpSync(join(source, 'server'), join(archive, 'server'), { recursive: true })
   cpSync(join(source, 'hermes-plugin'), join(archive, 'hermes-plugin'), { recursive: true })
@@ -64,23 +64,30 @@ export async function instrumentProjection(source, archive, fixture, { legacy = 
   globalThis[key] = probe
   const truthPath = join(archive, 'server/session-truth.mjs')
   let truthSource = readFileSync(truthPath, 'utf8')
-  truthSource = truthSource.replace(/(export function readHermesSessionTruth\([^\n]+\) \{)/, `$1\n globalThis['${key}'].truth_calls++; globalThis['${key}'].truth_sessions += sessionIds.length;`)
+  truthSource = truthSource.replace(/(export function readHermesSessionTruth\([^\n]+\) \{)/, `$1\n if (globalThis['${key}']) { globalThis['${key}'].truth_calls++; globalThis['${key}'].truth_sessions += sessionIds.length; }`)
   writeFileSync(truthPath, truthSource)
   const receiptPath = join(archive, 'server/delegation-receipts.mjs')
   writeFileSync(receiptPath, readFileSync(receiptPath, 'utf8')
-    .replace(/(export function receiptConsumed\([^)]*\) \{)/, `$1 globalThis['${key}'].receipt_queries++;`)
-    .replace('export function receiptsConsumed(db, receipts) {', `export function receiptsConsumed(db, receipts) { if (receipts.length) globalThis['${key}'].receipt_queries++;`))
+    .replace(/(export function receiptConsumed\([^)]*\) \{)/, `$1 if (globalThis['${key}']) globalThis['${key}'].receipt_queries++;`)
+    .replace('export function receiptsConsumed(db, receipts) {', `export function receiptsConsumed(db, receipts) { if (receipts.length) if (globalThis['${key}']) globalThis['${key}'].receipt_queries++;`))
   const ownedPath = join(archive, 'server/owned-open-work-follow-through.mjs')
-  writeFileSync(ownedPath, readFileSync(ownedPath, 'utf8').replace('export function readOwnedOpenWork(path, sessionId) {', `export function readOwnedOpenWork(path, sessionId) { globalThis['${key}'].owned_reads++;`))
+  writeFileSync(ownedPath, readFileSync(ownedPath, 'utf8').replace('export function readOwnedOpenWork(path, sessionId) {', `export function readOwnedOpenWork(path, sessionId) { if (globalThis['${key}']) globalThis['${key}'].owned_reads++;`))
   const servicePath = join(archive, 'server/service.mjs')
   let service = readFileSync(servicePath, 'utf8')
+  if (legacy && existsSync(join(archive, 'server/list-evidence.mjs'))) {
+    const evidencePath = join(archive, 'server/list-evidence.mjs')
+    writeFileSync(evidencePath, readFileSync(evidencePath, 'utf8')
+      .replace("import { createHermesSessionTruthReader }", "import { readHermesSessionTruth, createHermesSessionTruthReader }")
+      .replace('listTruthReader.read(ids, now / 1000, { nonHoldingFor })', 'readHermesSessionTruth(hermesStatePath, ids, now / 1000)')
+      .replace('{ now, nonHoldingFor, activeSessionIds:', '{ now, activeSessionIds:'))
+  }
   if (legacy) {
     service = service.replace('const sessionTruth = listTruthReader.read(listedSessionIds, Date.now() / 1000, { nonHoldingFor })', 'const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)')
       .replace('{ nonHoldingFor, activeSessionIds:', '{ activeSessionIds:')
       .replace('backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth)', 'backgroundResults.project(result)')
   }
   assert(service.includes('    const gate = () => {'))
-  service = service.replace('    const gate = () => {', '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore() })\n    const gate = () => {')
+  service = service.replace('    const gate = () => {', '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore(), snapshot: () => listCache.served(), resetMetrics: () => { if (typeof projectionSlices !== "undefined") Object.assign(projectionSlices, { slices: 0, total_ms: 0, max_ms: 0 }) }, rebuild: () => { snapshot.clear(); projector.clear(); return listCache.served() } })\n    const gate = () => {')
   writeFileSync(servicePath, service)
   const { createWizardServer, listen } = await import(pathToFileURL(servicePath))
   const truth = await import(pathToFileURL(truthPath))
@@ -104,13 +111,13 @@ export async function instrumentProjection(source, archive, fixture, { legacy = 
     requireAccess: false, agents: false, agentBridge: false, runQueue: false, followThrough: false, ownedOpenWork: false, joinedDelegation: 'off',
     canonicalSessionReader: () => fixture.sessions, pendingFirstSendReader: () => [], archivedSessionReader: () => [],
     wizardOsHome: join(archive, 'os'), listCacheMode: 'on', listCacheCheckMs: 3600000,
-    chatsBackground: background, chatsTruthProbe: value => { core = value },
-    fetchImpl: async (url, init = {}) => { assert.equal(init.method ?? 'GET', 'GET', 'no external writes'); return new Response(JSON.stringify(await request(url)), { headers: { 'content-type': 'application/json' } }) } })
+    listEvidenceWorker: false, chatsBackground: background, chatsTruthProbe: value => { core = value },
+    fetchImpl: async (url, init = {}) => { assert.equal(init.method ?? 'GET', 'GET', 'no external writes'); return new Response(JSON.stringify(await request(url)), { headers: { 'content-type': 'application/json' } }) }, ...serviceOptions })
   await listen(server)
   const prepare = DatabaseSync.prototype.prepare
   DatabaseSync.prototype.prepare = function(sql) { probe.prepares++; return prepare.call(this, sql) }
   return {
-    core, probe, background,
+    core, probe, background, server, origin: `http://127.0.0.1:${server.address().port}`,
     reset() { for (const name of Object.keys(probe)) probe[name] = 0 },
     async close() { DatabaseSync.prototype.prepare = prepare; server.closeAllConnections?.(); await new Promise(r => server.close(r)); await server.drained; delete globalThis[key] },
   }

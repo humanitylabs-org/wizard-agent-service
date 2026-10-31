@@ -19,6 +19,7 @@ import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
+import { createListEvidenceLane } from './list-evidence-lane.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -49,7 +50,7 @@ import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
-import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
+import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
@@ -57,7 +58,7 @@ import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, g
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
-import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
+import { readSupervisorBuildWaits, readSupervisorWaitRevision } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -3757,6 +3758,8 @@ function buildWizardServer(options, lifetime) {
 
   const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
   lifetime.own(() => listTruthReader.close())
+  const listEvidenceLane = createListEvidenceLane({ hermesStatePath, enabled: options.listEvidenceWorker !== false })
+  lifetime.own(() => listEvidenceLane.close(), () => listEvidenceLane.close())
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
@@ -4106,7 +4109,13 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
+  const projectionSlices = { slices: 0, total_ms: 0, max_ms: 0 }
+  const recordProjectionSlice = at => {
+    const ms = performance.now() - at
+    projectionSlices.slices++; projectionSlices.total_ms += ms; projectionSlices.max_ms = Math.max(projectionSlices.max_ms, ms)
+  }
   const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0, includePendingFirstSend = true) => {
+    let sliceStarted = performance.now()
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
@@ -4123,47 +4132,27 @@ function buildWizardServer(options, lifetime) {
             // out of Working merely because its request is more than five minutes old.
             ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
             : undefined
+          recordProjectionSlice(sliceStarted)
           const [helmActivities, externalRuns] = operator
             ? [[], []]
             : await Promise.all([
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          // Build-local only: never retain evidence by aggregate list signature.
-          // Truth and helper status share the same optional-follow-up witness.
-          const followUps = new Map()
-          const nonHoldingFor = id => {
-            if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
-            return followUps.get(id)
-          }
-          const sessionTruth = listTruthReader.read(listedSessionIds, Date.now() / 1000, { nonHoldingFor })
-          // Heavy delivery can change without a new reply. Use one fresh ledger snapshot
-          // for this batch, never the age-cached rows used only to discover hot threads.
+          sliceStarted = performance.now()
+          // SQLite transcript/helper/supervisor reads belong to the presentation
+          // lane, not the HTTP loop. Queue/direct/external runs remain controller-
+          // owned immutable snapshots; only their active ids cross the boundary.
           const heavyJobs = heavyWork?.queue.rows() ?? []
-          // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { nonHoldingFor, activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
-          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
-          if (!operator) {
-            // A thread whose own Thales job is still owed stays in Working, not Ready.
-            try {
-              // The ledger includes every historical job. Reject jobs that cannot
-              // affect this wait before reading a transcript, then read each candidate
-              // thread once in this synchronous phase (never across an await).
-              const pendingIds = new Set(pendingHeavyJobs(heavyJobs, listedSessionIds).keys())
-              const nonHolding = new Map([...pendingIds].map(id => [id, nonHoldingFor(id)]))
-              const holdingJobs = heavyJobs.filter(job => {
-                const id = job.sessionId ?? job.session_id
-                return !pendingIds.has(id) || !nonHolding.get(id).has(job.job_id ?? job.id)
-              })
-              for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
-                const t = sessionTruth.get(id); if (t) t.heavyPending = true
-              }
-            } catch { /* heavy queue unreadable: no wait projection */ }
-          }
-          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true })) {
-            const t = sessionTruth.get(id); if (t) t.supervisorPending = true
-          }
+          const wanted = new Set(listedSessionIds)
+          recordProjectionSlice(sliceStarted)
+          const { sessionTruth, followUps } = await listEvidenceLane.read({ ids: listedSessionIds,
+            activeSessionIds: [...queueProjections, ...directRuns.values(), ...externalRuns].filter(r => ACTIVE_RUN_STATUSES.has(r.status)).map(r => r.sessionId),
+            heavyJobs: heavyJobs.filter(job => wanted.has(job.sessionId ?? job.session_id)),
+            supervisorStatePath: options.supervisorStatePath, operator, now: Date.now() })
+          sliceStarted = performance.now()
+          const nonHoldingFor = id => followUps.get(id) ?? new Set()
           result = filterSessionList(
             result,
             operator,
@@ -4175,12 +4164,20 @@ function buildWizardServer(options, lifetime) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
-          if (!operator) result = await decorateReconnectRows(result)
-          if (backgroundResults) {
-            try { result = await backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth) }
-            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          if (!operator) {
+            const work = decorateReconnectRows(result); recordProjectionSlice(sliceStarted)
+            result = await work; sliceStarted = performance.now()
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
+          if (backgroundResults) {
+            try {
+              const work = backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth)
+              recordProjectionSlice(sliceStarted); result = await work
+            }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+            sliceStarted = performance.now()
+          }
+          const enriched = firstPage ? enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
+          recordProjectionSlice(sliceStarted); result = await enriched; sliceStarted = performance.now()
           if (!operator) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
@@ -4208,9 +4205,11 @@ function buildWizardServer(options, lifetime) {
             result = Buffer.from(JSON.stringify(payload))
           }
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
+    recordProjectionSlice(sliceStarted)
     return result
   }
   const decorateSessionList = (result, operator) => {
+    const sliceStarted = performance.now()
           result = decorateSessionTitles(result, operator)
           if (!operator) result = projectFollowUps(result, scheduler, { agent: 'main' })
           if (agents && !operator) {
@@ -4218,6 +4217,7 @@ function buildWizardServer(options, lifetime) {
             result = decorateThreadAgent(result, row => { ids.push(row.id); return agents.threadAgent(MAIN_AGENT_ID) })
             agents.observeSessions(MAIN_AGENT_ID, ids)
           }
+    recordProjectionSlice(sliceStarted)
     return result
   }
   const projectSessionList = async (result, operator, canonicalPage, firstPage) =>
@@ -4286,9 +4286,11 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
-      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
+      const supervisorSignals = await listEvidenceLane.read({ kind: 'signals', ids: [...recent],
+        supervisorStatePath: options.supervisorStatePath, now: Date.now() })
+      for (const id of supervisorSignals.supervisorWaitIds) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = mergeStamps(mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath)),
+      const stamps = mergeStamps(mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), supervisorSignals.supervisorStamps),
         directRunStamps(directRuns.values()))
       // One cheap per-thread signature over the queue-owned immutable snapshot.
       // Delivery/resume can change without a new Hermes message or run transition.
@@ -4296,7 +4298,8 @@ function buildWizardServer(options, lifetime) {
       const combinedStamps = mergeStamps(stamps, heavyStamps)
       return { hot, warm, stamps: combinedStamps, reset: delta.roots === null, mark: delta.maxId }
     }
-    const buildHybrid = async () => {
+    const buildHybrid = () => lifetime.track(buildHybridCore())
+    const buildHybridCore = async () => {
       const started = performance.now()
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
@@ -4356,11 +4359,11 @@ function buildWizardServer(options, lifetime) {
     }
     // Timer and diagnostic callers join the same self-check. Slow checks must
     // not multiply full transcript projections on the shared HTTP loop.
-    const check = createJoinedListCheck(checkCore)
+    const check = createJoinedListCheck(() => lifetime.track(checkCore()))
     return {
       mode: () => (disabled ? 'off' : configured),
       touch: () => { localRevision++ },
-      stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
+      stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age(), evidence: listEvidenceLane.stats(), projection_slices: { ...projectionSlices } }),
       check,
       searchSnapshot: async () => {
         const cached = snapshot.peek()
@@ -6342,7 +6345,7 @@ function buildWizardServer(options, lifetime) {
           return
         }
         if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
-          await runQueue.tick(true)
+          await runQueue.refreshRun(queuedProxyRecord.publicRunId)
           sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId), {}, scheduleRawRead(request))
           return
         }
@@ -6922,9 +6925,9 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
-    const listCacheTimer = setInterval(() => { void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
+    const listCacheTimer = setInterval(() => { if (!lifetime.closing) void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
     listCacheTimer.unref?.()
-    server.on('close', () => clearInterval(listCacheTimer))
+    lifetime.own(() => clearInterval(listCacheTimer), () => clearInterval(listCacheTimer))
   }
   return server
 }
