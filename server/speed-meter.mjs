@@ -3,10 +3,15 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks'
 // Only static route words survive: never retain thread/run ids, filenames or query strings.
 const identities = new Set(['sessions', 'runs', 'agents', 'threads', 'agent-heavy', 'background-results', 'attachments', 'devices'])
 const routeWords = new Set(('api wizard v1 v2 sessions messages runs events agents health list-cache check window search titles title status cancel stop retry saved-retry steer approve approvals files attachments audio voice recovery-receipt settings models options usage devices heavy agent-heavy submit background-results continue threads attention seen read archive unarchive preferences ui-preferences apps capabilities mcp inbox notifications schedules supervisor helpers').split(' '))
+// Keep fixed single-word Wizard v1 endpoints separate instead of merging unrelated
+// bootstrap/network probes and local workspace polls into /wizard/v1/:id.
+const wizardV1Routes = new Set('bootstrap workspaces setup system-jobs pages skins my-skin provider-recovery agent-options agent-context app-bindings user-files uploads shares'.split(' '))
 export function routeTemplate(url) {
   try {
     const parts = new URL(url, 'http://wizard.local').pathname.split('/')
-    return parts.map((part, index) => !part ? part : identities.has(parts[index - 1]) || !routeWords.has(part) ? ':id' : part).join('/')
+    return parts.map((part, index) => !part ? part
+      : index === 3 && parts[1] === 'wizard' && parts[2] === 'v1' && wizardV1Routes.has(part) ? part
+      : identities.has(parts[index - 1]) || !routeWords.has(part) ? ':id' : part).join('/')
   }
   catch { return '/:invalid' }
 }

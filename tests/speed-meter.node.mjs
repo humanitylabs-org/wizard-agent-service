@@ -3,6 +3,14 @@ import assert from 'node:assert/strict'
 import { createSpeedMeter, createSlowTickLogger, routeTemplate } from '../server/speed-meter.mjs'
 import { createHybridProjector } from '../server/session-list-cache.mjs'
 
+test('Wizard v1 fixed endpoints do not collapse bootstrap and workspace latency into one id bucket', () => {
+  for (const endpoint of ['bootstrap', 'workspaces', 'system-jobs', 'setup', 'skins', 'pages'])
+    assert.equal(routeTemplate(`/wizard/v1/${endpoint}`), `/wizard/v1/${endpoint}`)
+  assert.equal(routeTemplate('/wizard/v1/owner-secret?token=discarded'), '/wizard/v1/:id')
+  assert.equal(routeTemplate('/wizard/v1/pages/owner-secret'), '/wizard/v1/pages/:id')
+  assert.equal(routeTemplate('/wizard/v1/sessions/bootstrap'), '/wizard/v1/sessions/:id')
+  assert.equal(routeTemplate('/elsewhere/bootstrap'), '/:id/:id')
+})
 test('speed meter groups ids and queries, separates headless clients and hosts, and bounds route counters', t => {
   let time = 0
   const meter = createSpeedMeter({ now: () => time, maxRoutes: 4 })

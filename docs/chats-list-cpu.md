@@ -203,3 +203,24 @@ zero cached/live differences and zero fallbacks. The declared
 `head-row-owner-write-parity` fixture covers main, host-profile, container and
 restricted HTTP/socket boundaries; it is synthetic evidence, not live or browser
 acceptance. No full suite, deployment or activation is part of this follow-up.
+
+## Truth dedupe (follow-up to head-row reuse)
+
+Live profile, 30 s, main thread 90% busy: 48.7% in the list projector, 38.4% in
+`readHermesSessionTruth` (read once by the projector and again per row through
+background-results `isBusy`), 8.6% in per-receipt `receiptConsumed`, 6.3% in
+owned-open-work reads (once for helper status, once for follow-ups), and
+prepare/step overhead in SQLite. Changes, all output-identical:
+
+- one truth read per build, shared with `isBusy`; build-local follow-up memo
+  shared by truth and helper status (never kept between builds);
+- prepared statements cached per read-only handle (`server/read-only-sqlite.mjs`);
+  the service-owned truth connection reopens when the store file is replaced;
+- receipt consumption in one batched query per build, same 513-row fence;
+- automatic full self-check every 30 minutes (was 10), same oracle;
+- speed meter keeps fixed `/wizard/v1/<endpoint>` words separate from `:id`.
+
+Copy-only benchmark (`scripts/bench-chats-truth.mjs`, 1,100 synthetic sessions
+over copied queue/heavy ledgers; 100 head + 25 hot projected; median of 3, VPS
+under load): see the PR for the numbers. Every output deep-equals the original
+full projector across all 1,100 rows.
