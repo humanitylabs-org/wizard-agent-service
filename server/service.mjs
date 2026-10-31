@@ -17,7 +17,7 @@ import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
 import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
@@ -3755,11 +3755,13 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
   }
 
+  const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
+  lifetime.own(() => listTruthReader.close())
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
-    busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
+    busy: options.backgroundResultsBusyReader ?? (id => listTruthReader.busy(id)),
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
@@ -4127,17 +4129,20 @@ function buildWizardServer(options, lifetime) {
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          // The list fingerprint is aggregate, not an exact transcript revision:
-          // in-place canonical edits can leave it unchanged. Do not reuse evidence
-          // across readers/phases. The ownJobs gate below avoids job-free reads.
-          const nonHoldingFor = id => readNonHoldingFollowUps(hermesStatePath, id)
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          // Build-local only: never retain evidence by aggregate list signature.
+          // Truth and helper status share the same optional-follow-up witness.
+          const followUps = new Map()
+          const nonHoldingFor = id => {
+            if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+            return followUps.get(id)
+          }
+          const sessionTruth = listTruthReader.read(listedSessionIds, Date.now() / 1000, { nonHoldingFor })
           // Heavy delivery can change without a new reply. Use one fresh ledger snapshot
           // for this batch, never the age-cached rows used only to discover hot threads.
           const heavyJobs = heavyWork?.queue.rows() ?? []
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { nonHoldingFor, activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
@@ -4172,7 +4177,7 @@ function buildWizardServer(options, lifetime) {
           )
           if (!operator) result = await decorateReconnectRows(result)
           if (backgroundResults) {
-            try { result = await backgroundResults.project(result) }
+            try { result = await backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
           result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
@@ -4375,7 +4380,9 @@ function buildWizardServer(options, lifetime) {
         messageMark = Number.NaN
         if (Date.now() - lastFallbackLogAt > 60_000) { lastFallbackLogAt = Date.now(); console.log(`[list-cache] fell back to the full rebuild: ${error?.message ?? error}`) }
       },
-      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 10 * 60_000),
+      // Keep the independent full oracle and explicit check endpoint intact.
+      // Normal operation audits every 30 minutes; shadow rollout remains 2 minutes.
+      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 30 * 60_000),
     }
   })()
 

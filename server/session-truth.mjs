@@ -3,6 +3,7 @@ import { AGENT_TO_AGENT_PREFIX, isAgentToAgentRequest } from './owner-thread-wri
 import { visibleMemoryText } from './memory-context-projection.mjs'
 import { isSilentResult, SCHEDULE_INPUT } from './scheduler.mjs'
 import { DatabaseSync } from 'node:sqlite'
+import { preparedRead, createReadOnlySqlite } from './read-only-sqlite.mjs'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
@@ -100,16 +101,16 @@ function lockedRoute(modelConfig) {
 // (Hermes records rebuild progress in state_meta while backfilling).
 function wordIndexReady(db) {
   try {
-    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts'").get()) return false
-    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
-    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+    if (!preparedRead(db, "SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts'").get()) return false
+    const meta = preparedRead(db, "SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !preparedRead(db, "SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
   } catch { return false }
 }
 function trigramIndexReady(db) {
   try {
-    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
-    const meta = db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
-    return !meta || !db.prepare("SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
+    if (!preparedRead(db, "SELECT 1 FROM sqlite_schema WHERE name = 'messages_fts_trigram'").get()) return false
+    const meta = preparedRead(db, "SELECT 1 FROM sqlite_schema WHERE name = 'state_meta'").get()
+    return !meta || !preparedRead(db, "SELECT 1 FROM state_meta WHERE key IN ('fts_rebuild_high_water','fts_rebuild_progress')").get()
   } catch { return false }
 }
 
@@ -221,15 +222,28 @@ export function searchHermesSessionText(path, sessionIds, query) {
   const searcher=createHermesTextSearcher(path)
   try { return searcher.search(sessionIds,query) } finally { searcher.close() }
 }
-export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000) {
+export function createHermesSessionTruthReader(path) {
+  const connection = createReadOnlySqlite(path)
+  return {
+    close: connection.close,
+    read: (ids, nowSeconds = Date.now() / 1000, options = {}) => readHermesSessionTruth(path, ids, nowSeconds, { ...options, db: connection.get() }),
+    busy(id, nowSeconds = Date.now() / 1000) {
+      const db = connection.get()
+      if (!db || !/^(?:wizard_|wizard-assistant-)/.test(String(id))) return false
+      try { return !!preparedRead(db, 'SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(id, nowSeconds) }
+      catch { return false }
+    },
+  }
+}
+export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now() / 1000, options = {}) {
   const ids = boundedIds(sessionIds)
   const truth = new Map()
   if (!ids.length) return truth
-  const db = openReadOnly(path)
+  const db = Object.hasOwn(options, 'db') ? options.db : openReadOnly(path)
   if (!db) return truth
   try {
     const placeholders = ids.map(() => '?').join(',')
-    const sessionRows = db.prepare(`SELECT id, started_at FROM sessions WHERE id IN (${placeholders})`).all(...ids)
+    const sessionRows = preparedRead(db, `SELECT id, started_at FROM sessions WHERE id IN (${placeholders})`).all(...ids)
     for (const row of sessionRows) truth.set(String(row.id), {
       startedAt: Number.isFinite(Number(row.started_at)) ? Number(row.started_at) : 0,
       lastUserAt: 0,
@@ -242,7 +256,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // Hermes' session API omits provider. A thread's exact model lock is the only
     // trustworthy route; billing_provider can name a different account.
     try {
-      const routeRows = db.prepare(`SELECT id, model, model_config FROM sessions WHERE id IN (${placeholders})`).all(...ids)
+      const routeRows = preparedRead(db, `SELECT id, model, model_config FROM sessions WHERE id IN (${placeholders})`).all(...ids)
       for (const row of routeRows) {
         const current = truth.get(String(row.id))
         const lock = lockedRoute(row.model_config)
@@ -255,14 +269,14 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // Seek newest-first within each session's existing indexed range. Loading
     // every historical body for a whole Work page blocks the shared HTTP loop;
     // only the newest visible request and completed reply determine this view.
-    const messageColumns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
+    const messageColumns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(row => row.name))
     const metadataColumn = messageColumns.has('display_metadata') ? 'display_metadata' : 'NULL AS display_metadata'
     const toolsColumn = messageColumns.has('tool_calls') ? 'tool_calls' : 'NULL AS tool_calls'
     // Real Hermes tables have rowid for equal-timestamp arrival order. A view may
     // not; do not force a sort/materialization of old bodies in that fallback.
-    const messageTable = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name = 'messages'").get()
+    const messageTable = preparedRead(db, "SELECT type, sql FROM sqlite_schema WHERE name = 'messages'").get()
     const tieOrder = messageTable?.type === 'table' && !/WITHOUT ROWID/iu.test(messageTable.sql || '') ? ', rowid DESC' : ''
-    const recentMessages = db.prepare(`
+    const recentMessages = preparedRead(db, `
       SELECT role, finish_reason, timestamp, content, display_kind, ${metadataColumn}, ${toolsColumn}
       FROM messages
       WHERE session_id = ?
@@ -273,10 +287,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     `)
     // Separate active/inactive seeks preserve the (session,active,timestamp) index.
     // An OR here sorts/materializes obsolete bodies before the early-stop iterator.
-    const inactiveRequests = db.prepare(`SELECT content,display_kind,timestamp FROM messages
+    const inactiveRequests = preparedRead(db, `SELECT content,display_kind,timestamp FROM messages
       WHERE session_id=? AND active=0 AND ${messageColumns.has('compacted') ? 'compacted=1' : '0'} AND role='user' AND timestamp>?
       ORDER BY timestamp DESC${tieOrder}`)
-    const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name))
+    const sessionColumns = new Set(preparedRead(db, 'PRAGMA table_info(sessions)').all().map(row => row.name))
     // Select the newest timestamp before reading its body; inactive machine inputs
     // still determine whether this assistant reply was an automated continuation.
     const retained = retainedMessagesWhere(messageColumns)
@@ -290,12 +304,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     ]
     const newestRetainedUser = retainedRanges.map(range => `SELECT MAX(timestamp) AS timestamp FROM messages
       WHERE session_id=:sessionId AND role='user' AND ${range} AND timestamp<=:through`).join(' UNION ALL ')
-    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id=:sessionId AND role='user' AND ${retained}
+    const triggeringUser = preparedRead(db, `SELECT content FROM messages WHERE session_id=:sessionId AND role='user' AND ${retained}
       AND timestamp=(SELECT MAX(timestamp) FROM (${newestRetainedUser}))
       ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
-    const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
-    const lineageChildren = hasLineage ? db.prepare('SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
+    const lineageParent = hasLineage ? preparedRead(db, 'SELECT end_reason FROM sessions WHERE id = ?') : null
+    const lineageChildren = hasLineage ? preparedRead(db, 'SELECT id, source, model_config FROM sessions WHERE parent_session_id = ?') : null
     const provenanceTip = (id) => {
       if (!hasLineage) return id
       const seen = new Set()
@@ -382,11 +396,11 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // cannot pin a thread in Working forever.
     const followUps = new Map()
     const isFollowUp = (id, handle) => {
-      if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(path, id))
+      if (!followUps.has(id)) followUps.set(id, (options.nonHoldingFor ?? (id => readNonHoldingFollowUps(path, id)))(id))
       return followUps.get(id).has(handle)
     }
     try {
-      const helperRows = db.prepare(`
+      const helperRows = preparedRead(db, `
         SELECT origin_session_id AS id, delegation_id
         FROM async_delegations
         WHERE state IN ('running', 'stalling', 'finalizing') AND dispatched_at > ?
@@ -399,12 +413,12 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
     // Read delivery receipts independently of the latest transcript row and execution state.
-    for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000 })) {
+    for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000, db, sessionIds: ids })) {
       const current = truth.get(receipt.sessionId)
       if (current && !isFollowUp(receipt.sessionId, receipt.delegationId)) current.helperResultUnanswered = true
     }
     try {
-      const newestRow = db.prepare(`
+      const newestRow = preparedRead(db, `
         SELECT role, content, timestamp FROM messages
         WHERE session_id = ? AND active = 1
         ORDER BY timestamp DESC LIMIT 1
@@ -417,7 +431,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
           && !(delegationId && (receiptConsumed(db, id, delegationId) || isFollowUp(id, delegationId)))) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
-    const leaseRows = db.prepare(`
+    const leaseRows = preparedRead(db, `
       SELECT conversation_id
       FROM session_turn_leases
       WHERE expires_at > ? AND conversation_id IN (${placeholders})
@@ -429,7 +443,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
   } catch {
     return new Map()
   } finally {
-    try { db.close() } catch { /* read-only cleanup */ }
+    if (!Object.hasOwn(options, 'db')) try { db.close() } catch { /* read-only cleanup */ }
   }
   return truth
 }
