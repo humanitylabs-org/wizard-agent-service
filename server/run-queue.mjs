@@ -1,3 +1,4 @@
+import { createSlowTickLogger } from './speed-meter.mjs'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -161,6 +162,7 @@ export class DurableRunQueue {
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
     if (typeof agentId !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(agentId)) throw new Error('Wizard run queue agent is invalid')
     this.agentId = agentId
+    this.logSlowTick = createSlowTickLogger(`run-queue:${agentId}`)
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
     if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
@@ -599,7 +601,8 @@ export class DurableRunQueue {
 
   // Durable insertion order rather than UUID order for same-millisecond admissions.
   latestForSession(sessionId) {
-    const row = this.database.prepare('SELECT * FROM wizard_run_queue WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(sessionId)
+    const latest = this.database.prepare('SELECT MAX(rowid) AS rowid FROM wizard_run_queue WHERE session_id=?').get(sessionId)
+    const row = latest?.rowid == null ? null : this.database.prepare('SELECT * FROM wizard_run_queue WHERE rowid=?').get(latest.rowid)
     return row ? this._record(row) : null
   }
 
@@ -1020,7 +1023,8 @@ export class DurableRunQueue {
   async tick(force = false) {
     if (this.closed) return
     if (this.tickPromise) return this.tickPromise
-    this.tickPromise = this._tick(force).finally(() => { this.tickPromise = null })
+    const started = performance.now()
+    this.tickPromise = this._tick(force).finally(() => { this.tickPromise = null; this.logSlowTick(started) })
     return this.tickPromise
   }
 
