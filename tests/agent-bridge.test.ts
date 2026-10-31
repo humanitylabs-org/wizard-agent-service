@@ -17,7 +17,7 @@ function fakeApp(tools = [{ name: 'wizard_time', description: 'Current UTC time.
     let body = ''
     for await (const c of req) body += c
     const msg = JSON.parse(body || '{}')
-    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '' })
+    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '', auth: req.headers.authorization || '', agent: req.headers['x-wizard-agent'] || '', label: req.headers['x-wizard-agent-label'] || '' })
     const send = (result) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'app-s1' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })) }
     if (msg.id === undefined) { res.writeHead(202); res.end(); return }
     if (msg.method === 'initialize') return send({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake' } })
@@ -273,6 +273,28 @@ describe('agent bridge: MCP gateway', () => {
     expect(callLogs[0]).toMatchObject({ app: 'hello-wizard', tool: 'wizard_echo', ok: true })
     expect(typeof callLogs[0].ms).toBe('number')
     expect(logs.join('\n')).not.toContain('secret-arg')
+  })
+
+  it('authenticates to an app with its optional per-app key and names the calling agent only to that app', async () => {
+    const keyed = fakeApp(); const plain = fakeApp()
+    servers.push(keyed.server, plain.server)
+    const dir = box([app('messenger', (await listen(keyed.server)).port), app('hello-wizard', (await listen(plain.server)).port)])
+    mkdirSync(join(dir, 'app-mcp-keys'))
+    const KEY = 'k'.repeat(40)
+    writeFileSync(join(dir, 'app-mcp-keys', 'messenger'), KEY + '\n', { mode: 0o600 })
+    writeFileSync(join(dir, 'app-mcp-keys', 'hello-wizard'), 'short\n') // malformed keys are ignored, never sent
+    const base = await start(dir)
+    const init = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
+    await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_time', arguments: {} } }, init.session)
+    expect(keyed.calls.length).toBeGreaterThan(0)
+    expect(keyed.calls.every((c) => c.auth === `Bearer ${KEY}`)).toBe(true)
+    const call = keyed.calls.find((c) => c.method === 'tools/call')
+    expect(call.agent).toBe('hermes')
+    expect(decodeURIComponent(call.label).length).toBeGreaterThan(0)
+    expect(keyed.calls.filter((c) => c.method !== 'tools/call').every((c) => c.agent === '')).toBe(true)
+    expect(plain.calls.length).toBeGreaterThan(0)
+    expect(plain.calls.every((c) => c.auth === '' && c.agent === '' && c.label === '')).toBe(true)
   })
 
   it('a down app returns a clear tool error and the gateway keeps serving', async () => {

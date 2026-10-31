@@ -250,21 +250,26 @@ function decodeMcpBody(contentType, text, wantId) {
 }
 
 class AppClient {
-  constructor(app, { fetchImpl, timeoutMs }) {
+  constructor(app, { fetchImpl, timeoutMs, appKey = () => '' }) {
     this.app = app
     this.fetch = fetchImpl
     this.timeoutMs = timeoutMs
+    this.appKey = appKey
     this.session = ''
     this.ready = false
     this.nextId = 1
   }
 
-  async post(message, wantId) {
+  async post(message, wantId, extra = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
       const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL_VERSIONS[0] }
       if (this.session) headers['Mcp-Session-Id'] = this.session
+      // Optional per-app gateway key: the app can then tell the gateway from any other local caller and trust
+      // the agent named in X-Wizard-Agent. Agent headers go only to an app that holds such a key.
+      const key = this.appKey()
+      if (key) Object.assign(headers, { Authorization: `Bearer ${key}` }, extra)
       const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal })
       const sid = response.headers.get('mcp-session-id')
       if (sid) this.session = sid
@@ -286,12 +291,12 @@ class AppClient {
     this.ready = true
   }
 
-  async request(method, params) {
+  async request(method, params, extra = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await this.open()
         const id = this.nextId++
-        return await this.post({ jsonrpc: '2.0', id, method, params }, id)
+        return await this.post({ jsonrpc: '2.0', id, method, params }, id, extra)
       } catch (error) {
         if (!error?.retry || attempt) throw error
       }
@@ -381,9 +386,28 @@ export function createAgentBridge({
   const onChange = () => { if (refresh()) notifyChanged() }
   if (appsJsonPath && watchIntervalMs > 0) watchFile(appsJsonPath, { interval: watchIntervalMs, persistent: false }, onChange)
 
+  // Per-app gateway keys (optional): <wizard-os home>/app-mcp-keys/<app id>, written 0600 by the box operator for
+  // an app that gives each agent its own owner-chosen level (Messenger). Absent = the app is called exactly as before.
+  const keysHome = appsJsonPath ? dirname(appsJsonPath) : osHome
+  const appKeys = new Map()
+  const appKey = (appId) => {
+    if (!keysHome || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(appId)) return ''
+    const path = join(keysHome, 'app-mcp-keys', appId)
+    let st
+    try { st = statSync(path) } catch { appKeys.delete(appId); return '' }
+    const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`
+    const hit = appKeys.get(appId)
+    if (hit?.stamp === stamp) return hit.key
+    let key = ''
+    try { if (st.isFile() && st.size <= 512) key = readFileSync(path, 'utf8').trim() } catch { key = '' }
+    if (!/^[A-Za-z0-9_-]{32,256}$/u.test(key)) key = ''
+    appKeys.set(appId, { stamp, key })
+    return key
+  }
+
   const client = (app) => {
     let c = clients.get(app.id)
-    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs }); clients.set(app.id, c) }
+    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs, appKey: () => appKey(app.id) }); clients.set(app.id, c) }
     return c
   }
 
@@ -503,7 +527,8 @@ export function createAgentBridge({
       const saved = c.timeoutMs
       c.timeoutMs = callTimeoutMs
       try {
-        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} })
+        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} },
+          { 'X-Wizard-Agent': agentId, 'X-Wizard-Agent-Label': encodeURIComponent(agentLabel(agentId)) })
         ok = !result?.isError
       } catch (error) {
         const reason = error?.rpc ? clean(error.message, 200) : error?.name === 'AbortError' ? 'it did not answer in time' : 'it is not reachable'
