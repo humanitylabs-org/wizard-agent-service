@@ -297,16 +297,18 @@
       "id": "tool-progress",
       "description": "Read the SSE run stream",
       "layer": "server",
-      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing. For model-locked turns (Hermes chat/stream), GET /v1/runs/<id>/events must stream the bridge's tool and text events, queued and direct, without an upstream /events read.",
+      "how_to_test": "Read the SSE run stream; assert tool progress and terminal events survive routing. For model-locked turns (Hermes chat/stream), GET /v1/runs/<id>/events must stream the bridge's tool and text events, queued and direct, without an upstream /events read. The shell resumes a dropped stream by seq: a reconnect skips frames it already showed (no doubled words, steps kept), backs off, waits while offline, and drops a replay.truncated gap; main and routed threads alike.",
       "source_refs": [
         "server/agents-http.mjs",
         "server/locked-run-bridge.mjs",
-        "server/run-event-log.mjs"
+        "server/run-event-log.mjs",
+        "wizard-ux/web/live.js"
       ],
       "reference_tests": [
         "tests/agents.test.ts",
         "tests/locked-run-events.test.ts",
-        "tests/run-event-log.node.mjs"
+        "tests/run-event-log.node.mjs",
+        "wizard-ux/tests/run-streaming.test.mjs"
       ],
       "fixture": "tool-progress",
       "policy_exemptions": []
@@ -970,12 +972,15 @@
       "id": "outbox-offline",
       "description": "Send offline",
       "layer": "ux",
-      "how_to_test": "Send offline; reload and reconnect; verify one delivered turn, preserved file tray/voice recovery and safe retry state.",
+      "how_to_test": "Send offline; reload and reconnect; verify one delivered turn, preserved file tray/voice recovery and safe retry state. Offline start: after one online visit, an offline reload opens the shell from the scoped worker's copy (one release at a time; no /wizard/* or private media cached), and a thread read that gets no answer shows this device's saved copy, labelled; private and routed threads are never stored.",
       "source_refs": [
-        "wizard-ux/web/outbox.js"
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/sw.js",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "wizard-ux/tests/outbox-voice-reload-handoff.test.mjs"
+        "wizard-ux/tests/outbox-voice-reload-handoff.test.mjs",
+        "wizard-ux/tests/shell-offline-sw.test.mjs"
       ],
       "fixture": null,
       "policy_exemptions": []
