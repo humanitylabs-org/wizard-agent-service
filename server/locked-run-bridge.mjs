@@ -144,7 +144,7 @@ export class LockedRunBridge {
     try { value = JSON.parse(init.body.toString()) }
     catch { throw fail('Invalid model-route request', 400) }
     const stored = this.selections.current(value.session_id)
-    if (!value.require_model_lock && !stored) return this.rawFetch(url, init)
+    if (!value.require_model_lock && !stored && !value.model && !value.provider) return this.rawFetch(url, init)
     // Trusted queue custody is an init capability, never a field accepted from JSON.
     const route = init.wizardAdmittedRoute === true ? { model: value.model, provider: value.provider, selection_version: value.selection_version }
       : (value.model && value.provider ? { model: value.model, provider: value.provider } : stored)

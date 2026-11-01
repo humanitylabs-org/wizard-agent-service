@@ -56,12 +56,11 @@ test('no stored route and an exact existing lock keep their behavior',async()=>{
  for (const [stored,explicit] of [[null,opus],[opus,opus],[sonnet,sonnet]]) {
   const calls=[];const logs=[];const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(url,init)=>{
    const body=JSON.parse(init.body);calls.push({url,body});
-   if (!stored) return new Response('{}');
    return stream(frame('run.started',{run_id:'run_unchanged',runtime:{...explicit,model_lock:'accepted'}}))
   }});
   await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',...explicit}));
   assert.equal(calls[0].body.model,explicit.model);assert.equal(calls[0].body.provider,explicit.provider);assert.equal(logs.length,0);
-  if (!stored) assert.equal(calls[0].url,'http://localhost:8865/v1/runs')
+  assert.equal(calls[0].url,'http://localhost:8865/api/sessions/wizard_synthetic/chat/stream')
  }
 });
 test('mismatched requested route fails before runtime admission',async()=>{
