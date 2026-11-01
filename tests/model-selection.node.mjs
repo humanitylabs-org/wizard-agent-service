@@ -55,6 +55,15 @@ test('pending picker prevents sends and competing picker changes', async () => {
   await assert.rejects(s.change(sid, choice(A, 7, 'other'), async () => A), conflict)
   release(B); await pending
 })
+test('proven picker rejection restores and returns the exact prior choice for recovery', async () => {
+  const s = seeded()
+  await assert.rejects(s.change(sid, choice(), () => { throw Object.assign(new Error('synthetic pre-execution rejection'), { selectionNotApplied: true }) }), error => {
+    assert.equal(error.status, 409); assert.equal(error.payload.error.code, 'model_selection_not_applied')
+    assert.equal(error.payload.selection.model, A.model); assert.equal(error.payload.selection.provider, A.provider); assert.equal(error.payload.selection.version, 7)
+    return true
+  })
+  assert.equal(s.pending.size, 0); assert.equal(s.capture(message()).selection_version, 7)
+})
 test('lost response replays the same picker request without applying it twice', async () => {
   const s = seeded(); let applies = 0
   const apply = async () => { applies++; return B }

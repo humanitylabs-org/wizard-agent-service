@@ -88,6 +88,7 @@ export class ModelSelections {
         if (error.selectionNotApplied === true) {
           if (previous) this.rows.set(sessionId, previous); else this.rows.delete(sessionId)
           this.save()
+          throw new ModelSelectionConflict(this.current(sessionId), 'model_selection_not_applied')
         }
         throw error
       } finally { this.pending.delete(sessionId) }
