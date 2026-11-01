@@ -19,9 +19,9 @@ const ROUTE = /^\/wizard\/v1\/agent-notes(?:\/([a-z][a-z0-9-]{0,30})(?:\/(read|s
 const SEARCH_RESULTS = 50
 const SNIPPET = 160
 
-/** All registered notebooks, fresh on every call. No per-agent setup, privacy or hidden filter for the owner. */
-export function noteSources(registry) {
-  return registry.list().filter((agent) => agent && (agent.id !== MAIN_AGENT_ID || agent.runtime?.kind === 'container'))
+/** Fresh on every call. Private/hidden sources stay dark until the staged owner-view rollout is explicitly enabled. */
+export function noteSources(registry, includePrivate = false) {
+  return registry.list().filter((agent) => agent && (agent.id !== MAIN_AGENT_ID || agent.runtime?.kind === 'container') && (includePrivate || (agent.privacy === 'standard' && !agent.hidden)))
 }
 const notebookDir = (agent) => agent.notes_dir || 'wiki'
 
@@ -56,7 +56,7 @@ export async function handleAgentNotesApi(ctx, url, request, response) {
   }
   const noStore = { 'Cache-Control': 'no-store' }
   const [, id, action] = match
-  const sources = noteSources(registry)
+  const sources = noteSources(registry, ctx.ownerPrivateNotes === true)
   if (!id) { sendJson(response, 200, { sources: sources.map(sourceView) }, noStore); return true }
   const agent = sources.find((item) => item.id === id)
   // Missing ids answer 404; missing notebook folders answer an empty list through stateList.
