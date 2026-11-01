@@ -17,7 +17,8 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
   const agents=new Map(['first','second'].map(id=>[id,{id,kind,model:{provider,model:A.model,allowed_models:[A.model,B.model]}}]))
   for(const id of agents.keys())mkdirSync(join(root,id))
   const calls=[],runs=new Map(),disposers=[]; let unsafe=false, count=0
-  const registry={agentsDir:root,apiKey:()=> 'synthetic-no-authority',async fetchAgent(agent,path,init={}) {
+  // createAgentRegistry.list() is synchronous and returns full agent records.
+  const registry={agentsDir:root,list:()=>[...agents.values()],apiKey:()=> 'synthetic-no-authority',async fetchAgent(agent,path,init={}) {
     const body=init.body?JSON.parse(init.body):null;calls.push({agent:agent.id,path,body})
     if(path==='/api/model/options')return json({provider:unsafe?'openai-codex':transport,model:A.model,providers:[{slug:privateRoute?'tinfoil-operator':native,is_user_defined:privateRoute,authenticated:true,models:[A.model,B.model]}]})
     if(path.endsWith('/model'))return json({runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}})
@@ -32,7 +33,12 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
     throw Error('unhandled synthetic endpoint '+path)
   }}
   let queues
-  const start=()=>queues=createRoutedQueues({registry,pollIntervalMs:0,own:fn=>disposers.push(fn)})
+  const start=()=>{
+    const listed=registry.list()
+    assert.ok(Array.isArray(listed),'registry list is synchronous')
+    assert.deepEqual(listed,[...agents.values()],'registry list returns full agent records, not ids')
+    return queues=createRoutedQueues({registry,pollIntervalMs:0,own:fn=>disposers.push(fn)})
+  }
   start(); t.after(async()=>{for(const dispose of disposers.splice(0))await dispose()})
   return {agent:agents.get('first'),second:agents.get('second'),calls,registry,transport,provider,fetch:(a,path,init)=>queues.fetch(a,path,init),setUnsafe:()=>unsafe=true,
     async restart(){for(const dispose of disposers.splice(0))await dispose();start()}}
