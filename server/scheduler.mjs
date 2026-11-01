@@ -177,11 +177,25 @@ function latestInstant(job, now) {
 // Delivery is an outbox: only a confirmed ordinary chat admission acknowledges it.
 // There is deliberately no bounded seen-list and no log/file scanning for delivery.
 function scheduleInput(job, deliver = 'thread') {
+  // An agent's own message to the owner (wizard_start_thread / wizard_schedule kind message) is a conversation
+  // turn, not a status report: no Reporter format, no notification rewrite.
+  if (job.agentMessage && (job.kind ?? 'run') === 'run') return agentMessageInput(job)
   const base = scheduleBaseInput(job)
   if (job.kind === 'remind') return deliver === 'notification' ? base + NOTIFY_INSTRUCTION : base
   return (deliver === 'notification' ? base.replace(/ in this thread/g, '') : base)
     + `\n\nreport=${reportKind(job)}\n${REPORTER_INSTRUCTIONS}`
     + (deliver === 'notification' ? "\nThis report is for the owner's Notifications, not this chat. Do not send it yourself.\n" : '')
+}
+export const AGENT_MESSAGES = ['open', 'scheduled']
+function agentMessageInput(job) {
+  const skill = job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''
+  if (job.agentMessage === 'open') {
+    return `${SCHEDULE_INPUT} new thread\nYou opened this new chat thread with the owner, titled ${JSON.stringify(job.threadTitle || job.name)}. Your brief for the opening message:\n${skill}${job.prompt}\n`
+      + 'Write the opening message to the owner now, in your own voice, as the start of a conversation. Do any quick work the brief needs first. The owner\'s reply in this thread comes to you.'
+  }
+  return `${SCHEDULE_INPUT} scheduled message\nYou scheduled this message to the owner, in this thread:\n${skill}${job.prompt}\n`
+    + 'Write it to the owner now, in your own voice; do any work it needs first.'
+    + (job.when?.once ? '' : ' If there is genuinely nothing worth saying this time, respond exactly [SILENT].')
 }
 function scheduleBaseInput(job) {
   const skill = job.skill ? `Load and follow the skill ${JSON.stringify(job.skill)}.\n` : ''
@@ -447,6 +461,10 @@ export class Scheduler {
     }
     if (placement?.threadTitle) job.threadTitle = text(placement.threadTitle, 160, 'thread title')
     if (placement?.group) job.group = text(placement.group, 60, 'group')
+    if (placement?.agentMessage) {
+      if (!AGENT_MESSAGES.includes(placement.agentMessage) || job.kind !== 'run') throw fail('invalid agent message')
+      job.agentMessage = placement.agentMessage
+    }
     return this.save(job)
   }
   update(jobId, input) {
@@ -500,7 +518,7 @@ export class Scheduler {
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
-      kind: job.kind ?? 'run', report: reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
+      kind: job.kind ?? 'run', report: job.agentMessage ? 'message' : reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
     this.db.prepare('INSERT OR IGNORE INTO schedule_occurrences(key,job_id,instant,data) VALUES(?,?,?,?)').run(key, job.id, instant, JSON.stringify(occurrence))

@@ -1,0 +1,26 @@
+{
+  "core_revision": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+  "source_path": "agent/title_generator.py",
+  "source_sha256": "79ea5b2665787ce061501637ebafe084bee8da0fb4894af763666b9066ba7cd0",
+  "system_prompt_sha256": "3f1eef0616ddd2c13d45a3f8cef4ed648dadfdacdba7fbedceebf5a04d549998",
+  "system_prompt": "You name chat sessions. Given the user's opening message, write a title that lets them find this conversation again in a list.\n\nRules:\n- 3 to 7 words, sentence case (capitalize only the first word and proper nouns).\n- Name what the user wants DONE, not that they asked a question.\n- Keep technical terms, filenames, numbers, and error codes exact.\n- Drop filler words: the, this, my, a, an.\n- No trailing punctuation, no quotes, no tool names, no 'Title:' prefix.\n- Never answer the message. Name it.\n- Always produce something, even for a bare greeting.\n- Write the title in the same language as the user's message.\nGood: {\"title\": \"Fix login button on mobile\"}\nGood: {\"title\": \"Postgres connection pool exhaustion\"}\nGood: {\"title\": \"Friendly greeting\"}\nToo vague: {\"title\": \"Code changes\"}\nToo long: {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\n\nReply with JSON only: {\"title\": \"...\"}",
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "session_title",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

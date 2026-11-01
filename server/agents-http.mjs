@@ -51,6 +51,12 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
 export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
+  // One batched evidence read for the whole list (state.db, helper and supervisor waits, heavy
+  // ledger snapshot) instead of opening the agent's databases three times per row.
+  let openAsk = null
+  if (ctx.projectOpenAsk && ctx.prepareOpenAsk) {
+    try { openAsk = ctx.prepareOpenAsk(agent, rows.map(row => row?.id)) } catch { openAsk = null }
+  }
   let next = 0
   await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
     while (next < rows.length) {
@@ -100,7 +106,7 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
         }
         projected = attention ? { ...projected, wizard_attention: attention } : projected
         if (ctx.projectOpenAsk) {
-          projected = ctx.projectOpenAsk(agent, projected, askReplies, askUserAt)
+          projected = ctx.projectOpenAsk(agent, projected, askReplies, askUserAt, openAsk)
           attention = projected.wizard_attention ?? null
         }
         result[index] = ctx.routedPresentation ? await ctx.routedPresentation.project(agent, projected, attention, assistantAt, headers) : projected
@@ -218,7 +224,7 @@ export function decorateThreadAgent(result, agentInfo) {
  */
 export async function handleAgentsApi(ctx, url, request, response) {
   const { registry, sendJson } = ctx
-  const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [] })
+  const publicAgent = async (agent) => ({ ...await registry.publicAgent(agent), bound_apps: ctx.bindings ? ctx.bindings.appsFor(agent.id) : [], incognito_available: Boolean(ctx.incognitoAvailable?.(agent)) })
   const isOptions = url.pathname === '/wizard/v1/agent-options'
   const grantMatch = url.pathname.match(GRANT_ROUTE)
   if (grantMatch || url.pathname.startsWith('/wizard/v1/agent-grants')) {
@@ -515,6 +521,8 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     || (upstreamPath === '/v1/runs' && typeof bodyValue?.session_id === 'string' ? bodyValue.session_id : '')
     || (upstreamPath === '/api/sessions' && method === 'POST' && typeof (bodyValue?.id ?? bodyValue?.session_id) === 'string' ? (bodyValue.id ?? bodyValue.session_id) : '')
   const runId = runIdFromPath(upstreamPath)
+  // Reserved ephemeral namespace never discovers/pins a normal history, even after a Service restart.
+  if (/^incog_/u.test(sessionId) || /^incog_/u.test(runId)) throw new AgentError(410, 'incognito_closed', 'incognito')
   const knownPins = sessionId ? (registry.pinnedAgents?.(sessionId) ?? [registry.pinnedAgent(sessionId)].filter(Boolean)) : []
   if (principalOf(request).kind === 'agent' && !explicit && !knownPins.includes(principalOf(request).agentId) && !runId) {
     if (method !== 'GET') assertAgentTargets(registry, request, knownPins)
@@ -636,11 +644,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (isModelChange && !value.model) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
     if (!modelAllowed(agent, value)) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
     if (value.model || value.provider) {
-      // The agent's Hermes knows the model under its own provider; never forward a provider switch.
-      const { provider: _provider, ...rest } = value
-      value = typeof rest.model === 'string' && rest.model.includes('/') ? { ...rest, model: rest.model.split('/')[1] } : rest
-      // The agent's default model needs no per-request route.
-      if (!isModelChange && value.model === agent.model.model) delete value.model
+      // Preserve the displayed route through admission. The routed enforcing adapter
+      // resolves this agent's own configured transport; stripping it loses custody.
+      value = { ...value, provider: value.provider || agent.model.provider,
+        ...(typeof value.model === 'string' && value.model.includes('/') ? { model: value.model.split('/')[1] } : {}) }
     }
   }
   // Owner file ids are a service capability, not something an agent's Hermes understands.
@@ -666,7 +673,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
     const followUp = ctx.followUpNote?.(sessionId) || ''
-    value = { ...value, instructions: agentRunInstructions(ctx.responseStyle?.()) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
+    value = { ...value, instructions: (ctx.runInstructions || agentRunInstructions(ctx.responseStyle?.())) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }

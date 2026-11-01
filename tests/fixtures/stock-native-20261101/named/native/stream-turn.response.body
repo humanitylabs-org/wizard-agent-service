@@ -1,0 +1,21 @@
+event: run.started
+data: {"user_message": {"role": "user", "content": "Synthetic fixture response only."}, "runtime": {"provider": "", "model": "", "route_source": "raw_request", "requested": {"provider": "custom:fixture-local", "model": "fixture-alpha"}, "model_lock": "accepted"}, "session_id": "stock_contract_named_stream", "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 1, "ts": 1793544422.8620284}
+
+event: message.started
+data: {"message": {"id": "msg_60593608c67749cb8433c759ca0c8d80", "role": "assistant"}, "session_id": "stock_contract_named_stream", "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 2, "ts": 1793544422.862038}
+
+event: assistant.delta
+data: {"message_id": "msg_60593608c67749cb8433c759ca0c8d80", "delta": "Synthetic routing fixture verified.", "session_id": "stock_contract_named_stream", "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 3, "ts": 1793544422.907065}
+
+event: tool.progress
+data: {"message_id": "msg_60593608c67749cb8433c759ca0c8d80", "tool_name": "_thinking", "delta": "Synthetic routing fixture verified.", "session_id": "stock_contract_named_stream", "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 4, "ts": 1793544422.9077168}
+
+event: assistant.completed
+data: {"session_id": "stock_contract_named_stream", "message_id": "msg_60593608c67749cb8433c759ca0c8d80", "content": "Synthetic routing fixture verified.", "completed": true, "partial": false, "interrupted": false, "runtime": {"provider": "custom", "model": "fixture-alpha", "route_source": "raw_request", "requested": {"provider": "custom:fixture-local", "model": "fixture-alpha"}, "model_lock": "confirmed"}, "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 5, "ts": 1793544422.9147909}
+
+event: run.completed
+data: {"session_id": "stock_contract_named_stream", "message_id": "msg_60593608c67749cb8433c759ca0c8d80", "completed": true, "partial": false, "interrupted": false, "messages": [{"role": "assistant", "content": "Synthetic routing fixture verified.", "timestamp": 1793544422.907997, "finish_reason": "stop", "reasoning": null}], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "runtime": {"provider": "custom", "model": "fixture-alpha", "route_source": "raw_request", "requested": {"provider": "custom:fixture-local", "model": "fixture-alpha"}, "model_lock": "confirmed"}}, "runtime": {"provider": "custom", "model": "fixture-alpha", "route_source": "raw_request", "requested": {"provider": "custom:fixture-local", "model": "fixture-alpha"}, "model_lock": "confirmed"}, "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 6, "ts": 1793544422.9148}
+
+event: done
+data: {"session_id": "stock_contract_named_stream", "run_id": "run_25e789386ed648e293dc49ec643bfa40", "seq": 7, "ts": 1793544422.914823}
+
