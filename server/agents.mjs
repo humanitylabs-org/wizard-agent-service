@@ -1308,6 +1308,11 @@ export function createAgentRegistry(options = {}) {
     saveCatalog(agentId, { ...catalogs[agentId], complete: true, seal: census.generation })
   }
   function saveCatalog(agentId, row) {
+    const previous = catalogs[agentId]
+    // `at` is schema-validated metadata only, never a freshness/authority signal.
+    const ids = previous && new Set(previous.ids)
+    if (previous && previous.complete === row.complete && previous.seal === row.seal
+        && ids.size === new Set(row.ids).size && row.ids.every(id => ids.has(id))) return
     const next = { ...catalogs, [agentId]: row }
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
     writeJsonAtomic(catalogPath, { schema: 1, agents: next }); catalogs = next

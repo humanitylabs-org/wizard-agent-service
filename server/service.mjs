@@ -1,3 +1,4 @@
+import { createSpeedMeter } from './speed-meter.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -17,7 +18,7 @@ import { createDevices, devicesTool } from './devices.mjs'
 import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -28,7 +29,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -55,7 +56,7 @@ import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
-import { pendingHeavyJobs } from './heavy-wait.mjs'
+import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
@@ -2725,11 +2726,12 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
-    agentId, sessionId, jobs,
+  // The guard only reads this thread's jobs and only for check; never fetch or scan the whole
+  // ledger for other states. Callers projecting a list pass one snapshot for all rows.
+  const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
     // The guard only changes check; done returns unchanged. Do not synchronously
     // read transcript evidence that this guard cannot consume on cached list rows.
-    isDelivered: job => {
+    isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
       return run?.session_id === sessionId && run?.heavy_origin === job.origin
@@ -2755,16 +2757,35 @@ function buildWizardServer(options, lifetime) {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const routedOpenAskEvidence = (agent, ids) => {
+    const home = routedAgentMedia(agent)?.home
+    const path = home ? join(home, 'state.db') : ''
+    const wanted = [...new Set((ids ?? []).filter(id => typeof id === 'string' && id))]
+    const evidence = new Map(wanted.map(id => [id, { truth: undefined, helperStatus: undefined, supervisorPending: false }]))
+    const now = Date.now()
+    // Same 100-thread batches as the main list (readers cap at 200; helper evidence caps per batch).
+    for (let at = 0; at < wanted.length; at += 100) {
+      const batch = wanted.slice(at, at + 100)
+      for (const [id, truth] of readHermesSessionTruth(path, batch, now / 1000)) if (evidence.has(id)) evidence.get(id).truth = truth
+      for (const [id, status] of readHelperStatuses(path, batch, { now })) if (evidence.has(id)) evidence.get(id).helperStatus = status
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
+    }
+    // One heavy-ledger snapshot for the whole list as well.
+    evidence.heavyJobs = heavyWork?.queue.rows()
+    return evidence
+  }
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
-    projectOpenAsk: (agent, row, replies, lastUserAt) => {
-      const home = routedAgentMedia(agent)?.home
-      const path = home ? join(home, 'state.db') : ''
-      const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
-      truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'check', ask: 'pending' })?.state === 'fyi'
-      truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
+    // One read of the agent's state.db per 100 listed threads, not three opens per row:
+    // projectProfileSessions prepares this once per list and passes it to projectOpenAsk.
+    prepareOpenAsk: (agent, ids) => routedOpenAskEvidence(agent, ids),
+    projectOpenAsk: (agent, row, replies, lastUserAt, prepared) => {
+      const evidence = prepared?.get(row.id) ?? routedOpenAskEvidence(agent, [row.id]).get(row.id)
+      const truth = { ...(evidence?.truth ?? {}) }
+      truth.helperStatus = evidence?.helperStatus
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'check', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
+      truth.supervisorPending = !!evidence?.supervisorPending
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
@@ -3474,13 +3495,8 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
-  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
-  let heavyRowsAt = 0, heavyRowsCache = []
-  const heavyJobRows = () => {
-    if (!heavyWork?.queue?.rows) return []
-    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
-    return heavyRowsCache
-  }
+  // The queue owns the data-version snapshot; every projection sees writes immediately.
+  const heavyJobRows = () => heavyWork?.queue.rows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -4134,7 +4150,7 @@ function buildWizardServer(options, lifetime) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
-              const ownJobs = heavyJobs.filter(job => (job.agent_id ?? 'hermes') === 'hermes' && (job.sessionId ?? job.session_id) === session.id)
+              const ownJobs = heavyJobsForSession(heavyJobs, 'hermes', session.id)
               // Delivered history cannot change this guard. Only a still-owed
               // result needs fresh optional-follow-up evidence in this later phase.
               if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, ownJobs)?.state === 'fyi') {
@@ -4185,7 +4201,7 @@ function buildWizardServer(options, lifetime) {
     let messageMark = Number.NaN
     let lastFallbackLogAt = 0
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
-      last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+      last_build_ms: 0, head_ms: 0, hot_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
     const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
@@ -4228,7 +4244,8 @@ function buildWizardServer(options, lifetime) {
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
+      const stamps = mergeStamps(mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath)),
+        directRunStamps(directRuns.values()))
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
@@ -4239,6 +4256,7 @@ function buildWizardServer(options, lifetime) {
       const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
+        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms),
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
@@ -4987,8 +5005,11 @@ function buildWizardServer(options, lifetime) {
   })
   lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
+  const speedMeter = createSpeedMeter()
+  lifetime.own(() => speedMeter.close(), () => speedMeter.close())
   const server = createServer(async (request, response) => {
-    if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+    const meterDone = speedMeter.begin(request)
+    if (lifetime.closing) { try { sendJson(response, 503, { error: 'service_unavailable' }) } finally { meterDone() }; return }
     const requestDone = lifetime.request()
     const tailnetIngress = request[TAILNET_INGRESS] === true
     const requireAccess = tailnetIngress || baseRequireAccess
@@ -5111,7 +5132,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, listCache.stats())
+        sendJson(response, 200, { ...listCache.stats(), speed: speedMeter.stats() })
         return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
@@ -6757,7 +6778,7 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { requestDone() }
+    } finally { meterDone(); requestDone() }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {
