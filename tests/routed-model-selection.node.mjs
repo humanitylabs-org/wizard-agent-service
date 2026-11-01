@@ -8,6 +8,7 @@ import { LockedRunBridge } from '../server/locked-run-bridge.mjs'
 const A={model:'fixture-alpha',provider:'anthropic'}, B={model:'fixture-beta',provider:'anthropic'}
 const native='claude-subscription-directsdk-experimental'
 const frame=(name,value)=>`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`
+async function until(predicate){for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,5))}assert.fail('synthetic dispatch did not occur')}
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}})
 const request=(value,key='one')=>({method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify(value)})
 async function fixture(t,kind='host-profile',privateRoute=false) {
@@ -41,6 +42,7 @@ for(const [kind,privateRoute] of [['host-profile',false],['container',false],['r
     const f=await fixture(t,kind,privateRoute), route={model:A.model,provider:f.provider}
     const body={session_id:'wizard_shared',input:'synthetic owner turn',...route,selection_version:0,require_model_lock:true}
     const first=await f.fetch(f.agent,'/v1/runs',request(body));assert.equal(first.status,202);const admitted=await first.json()
+    await until(()=>f.calls.some(c=>c.path.endsWith('/chat/stream')))
     const wires=f.calls.filter(c=>c.path.endsWith('/chat/stream'));assert.equal(wires.length,1);assert.equal(wires[0].body.provider,f.transport);assert.equal(wires[0].body.require_model_lock,true)
     assert.equal(f.calls.filter(c=>c.path==='/v1/runs').length,0,'native unguarded run factory is never called')
     const selection=await f.fetch(f.agent,'/api/sessions/wizard_shared/model',request({model:B.model,provider:f.provider,selection_version:1,selection_request_id:'pick-b'}));assert.equal(selection.status,200);assert.equal((await selection.json()).selection.version,2)
@@ -51,10 +53,18 @@ for(const [kind,privateRoute] of [['host-profile',false],['container',false],['r
     assert.equal(f.calls.filter(c=>c.path.endsWith('/chat/stream')&&c.agent==='first').length,1)
   })
 }
+for(const provider of ['openai','openai-codex','google','nvidia','openrouter']) {
+  test(`provider-neutral configured-route proof: ${provider}`,()=>{
+    const agent={model:{provider,model:A.model,allowed_models:[A.model]}},options={provider,model:A.model,providers:[{slug:provider,authenticated:true,models:[A.model]}]}
+    assert.deepEqual(resolveAgentTransport(agent,options,{model:A.model,provider}),{model:A.model,provider})
+    assert.throws(()=>resolveAgentTransport(agent,{...options,provider:'different-provider'},{model:A.model,provider}),error=>error.status===409)
+  })
+}
 test('unproven private catalogue fails before inference; display metadata cannot select a public transport',async t=>{
   const f=await fixture(t,'restricted',true);f.setUnsafe()
   await assert.rejects(f.fetch(f.agent,'/v1/runs',request({session_id:'wizard_shared',input:'fixture',model:A.model,provider:'tinfoil',selection_version:0})),e=>e.status===409&&e.payload.error.code==='agent_model_route_unproven')
   assert.equal(f.calls.filter(c=>c.path.endsWith('/chat/stream')||c.path==='/v1/runs').length,0)
+  assert.throws(()=>resolveAgentTransport({model:{provider:'custom',allowed_models:[A.model]}},{provider:'custom',providers:[{slug:'custom',models:[A.model]}]},{model:A.model,provider:'custom'}),e=>e.status===409)
   assert.throws(()=>resolveAgentTransport(f.agent,{provider:'custom',providers:[{slug:'custom',models:[A.model]}]},{model:A.model,provider:'tinfoil'}),e=>e.status===409)
 })
 for(const actual of [{...A,model_lock:'accepted'},{...A,provider:'other-provider',model_lock:'confirmed'},null]) {
