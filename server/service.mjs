@@ -54,6 +54,7 @@ import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
+import { ModelSelectionConflict, readOptionalSessionSelectionRow } from './model-selection.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
@@ -2566,9 +2567,7 @@ function buildWizardServer(options, lifetime) {
       if (!hermesStatePath || !existsSync(hermesStatePath)) return null
       const db = new DatabaseSync(hermesStatePath, { readOnly: true })
       try {
-        let row
-        try { row = db.prepare('SELECT model, model_config FROM sessions WHERE id=?').get(String(sessionId)) }
-        catch (error) { if (/no such column/.test(error.message)) return null; throw error }
+        const row = readOptionalSessionSelectionRow(db, sessionId)
         const cfg = JSON.parse(row?.model_config || '{}')
         const lock = cfg.browser_model_lock
         if (lock?.confirmed && lock.model && lock.provider) return { model: lock.model, provider: lock.provider, version: Number(lock.updated_at) || 0 }
@@ -2754,6 +2753,12 @@ function buildWizardServer(options, lifetime) {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const fetchRoutedAgent = (agent, path, init = {}) => {
+    if (routedQueues) return routedQueues.fetch(agent, path, init)
+    if (init.method === 'POST' && (/^\/v1\/runs(?:$|\/[^/]+\/steer$)/.test(path.split('?')[0]) || /\/model$/.test(path.split('?')[0])))
+      throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
+    return agents.fetchAgent(agent, path, init)
+  }
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -2769,7 +2774,7 @@ function buildWizardServer(options, lifetime) {
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
     },
     acknowledgeHeavyNotices,
-    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    fetchAgent: fetchRoutedAgent,
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
       const body = JSON.stringify({ input: value.input })
@@ -3618,7 +3623,7 @@ function buildWizardServer(options, lifetime) {
       // Persist the actual decorated wire payload, not just the UI input: capability and
       // instruction changes across a restart must not change an attempted idempotency key.
       queuedBody = Buffer.from(runQueue.freezeDispatchBody(record.publicRunId, queuedBody.toString('utf8')))
-      const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
+      const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual', wizardAdmittedRoute: record.runtime === 'direct' })
       const raw = Buffer.from(await result.arrayBuffer())
       if (!result.ok) throw upstreamError(result.status, raw, result.headers.get('retry-after'))
       let payload
@@ -3746,7 +3751,7 @@ function buildWizardServer(options, lifetime) {
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
   heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents,
-    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    fetchAgent: fetchRoutedAgent,
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
@@ -6308,6 +6313,9 @@ function buildWizardServer(options, lifetime) {
           catch (error) { sendJson(response, error.status, { error: { code: error.code, message: error.message } }); return }
         }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
+          const guidanceRoute = parseJsonBody(body)
+          const captured = parseJsonBody(queuedProxyRecord.body)
+          lockedBridge.selections.assertQueuedGuidance(queuedProxyRecord.sessionId, guidanceRoute, captured)
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
@@ -6326,6 +6334,7 @@ function buildWizardServer(options, lifetime) {
             if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
             const { wizard_retry_run_id: sourceId, ...validation } = requested
             directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
+            if (!runQueue.byIdempotencyKey('direct', `wizard-saved-retry-${sourceId}`)) lockedBridge.selections.capture(requested)
             let retried
             try { retried = await runQueue.retrySaved(sourceId, requested.session_id, requested) }
             catch (error) {
@@ -6356,6 +6365,7 @@ function buildWizardServer(options, lifetime) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
               return
             }
+            if (!operator && (requested.require_model_lock || requested.model || requested.provider || lockedBridge.selections.current(sessionId))) lockedBridge.selections.capture(requested, false)
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
               ...(quietWatcherAdmission ? { continuation: { kind: 'watch', preserve_archived: request.headers['x-wizard-watcher-preserve'] === '1' } } : {}) }
           }
@@ -6381,6 +6391,13 @@ function buildWizardServer(options, lifetime) {
           if (retainedVoice) {
             sendQueuedRun(response, 202, retainedVoice, { 'Idempotency-Replayed': 'true' })
             return
+          }
+          if (queuedAdmission.runtime === 'direct') {
+            const requested = parseJsonBody(body)
+            if (requested.require_model_lock || requested.model || requested.provider || lockedBridge.selections.current(queuedAdmission.sessionId)) {
+              const captured = lockedBridge.selections.capture(requested)
+              body = Buffer.from(JSON.stringify({ ...requested, ...captured, require_model_lock: true }))
+            }
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
@@ -6458,11 +6475,8 @@ function buildWizardServer(options, lifetime) {
         }
         let result = Buffer.from(await upstream.arrayBuffer())
         if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
-        if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
-          const ack = JSON.parse(result.toString('utf8'))
-          const selected = lockedBridge.sessionRoute(decodeURIComponent(upstreamPath.split('/')[3]))
-          if (ack.runtime && selected?.version) { ack.runtime.selection_version = selected.version; result = Buffer.from(JSON.stringify(ack)) }
-        }
+        if (upstream.ok && request.method === 'GET' && /^\/api\/sessions(?:\/[^/]+)?$/.test(upstreamPath) && contentType.includes('application/json'))
+          result = Buffer.from(JSON.stringify(lockedBridge.selections.project(JSON.parse(result.toString('utf8')))))
         if (queuedProxyRecord && contentType.includes('application/json')) {
           const operatorRecord = queuedProxyRecord.runtime === 'operator'
             ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
@@ -6731,6 +6745,10 @@ function buildWizardServer(options, lifetime) {
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
       if (error instanceof OwnerThreadWriteError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
+      if (error instanceof ModelSelectionConflict && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
       }

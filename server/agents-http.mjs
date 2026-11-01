@@ -636,11 +636,10 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (isModelChange && !value.model) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
     if (!modelAllowed(agent, value)) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
     if (value.model || value.provider) {
-      // The agent's Hermes knows the model under its own provider; never forward a provider switch.
-      const { provider: _provider, ...rest } = value
-      value = typeof rest.model === 'string' && rest.model.includes('/') ? { ...rest, model: rest.model.split('/')[1] } : rest
-      // The agent's default model needs no per-request route.
-      if (!isModelChange && value.model === agent.model.model) delete value.model
+      // Preserve the displayed route through admission. The routed enforcing adapter
+      // resolves this agent's own configured transport; stripping it loses custody.
+      value = { ...value, provider: value.provider || agent.model.provider,
+        ...(typeof value.model === 'string' && value.model.includes('/') ? { model: value.model.split('/')[1] } : {}) }
     }
   }
   // Owner file ids are a service capability, not something an agent's Hermes understands.
