@@ -86,6 +86,7 @@ import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { createBrowserBoundary } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
+import { createBrowserAdapters, browserAdaptersHttp } from './browser-adapters.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -2538,6 +2539,10 @@ function buildWizardServer(options, lifetime) {
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const browserBoundary = createBrowserBoundary(options.browserBoundary)
+  // Prototype-only trusted resolver injection. No env/default, manifest self-grant,
+  // owner-fetch handler or production WAM registry integration is installed here.
+  const browserAdapters = browserBoundary.enabled && options.browserAdapterPrototype
+    ? createBrowserAdapters(options.browserAdapterPrototype) : null
   if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true
   const baseAccessVerifier = options.accessVerifier
@@ -5043,6 +5048,11 @@ function buildWizardServer(options, lifetime) {
           return
         }
       }
+      if (url.pathname.startsWith('/wizard/v1/browser-adapters/') && await browserAdaptersHttp(request, response, url, {
+        enabled: browserBoundary.enabled, principal,
+        access: !requireAccess || await accessVerified(request, accessVerifier),
+        adapters: browserAdapters, readBody: readBoundedBody, send: sendJson,
+      })) return
       // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
       if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
         if (principal.kind !== 'owner' || (requireAccess && !await accessVerified(request, accessVerifier))) { sendJson(response, 403, { error: 'owner_required' }); return }
