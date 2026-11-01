@@ -6367,7 +6367,7 @@ function buildWizardServer(options, lifetime) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
               return
             }
-            if (!operator && (requested.require_model_lock || lockedBridge.selections.current(sessionId))) lockedBridge.selections.capture(requested, false)
+            if (!operator && (requested.require_model_lock || requested.model || requested.provider || lockedBridge.selections.current(sessionId))) lockedBridge.selections.capture(requested, false)
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
               ...(quietWatcherAdmission ? { continuation: { kind: 'watch', preserve_archived: request.headers['x-wizard-watcher-preserve'] === '1' } } : {}) }
           }
@@ -6394,14 +6394,14 @@ function buildWizardServer(options, lifetime) {
             sendQueuedRun(response, 202, retainedVoice, { 'Idempotency-Replayed': 'true' })
             return
           }
-          heavyWork?.supersede(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct') {
             const requested = parseJsonBody(body)
-            if (requested.require_model_lock || lockedBridge.selections.current(queuedAdmission.sessionId)) {
+            if (requested.require_model_lock || requested.model || requested.provider || lockedBridge.selections.current(queuedAdmission.sessionId)) {
               const captured = lockedBridge.selections.capture(requested)
               body = Buffer.from(JSON.stringify({ ...requested, ...captured, require_model_lock: true }))
             }
           }
+          heavyWork?.supersede(queuedAdmission.sessionId)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
@@ -6750,7 +6750,7 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, error.payload)
         return
       }
-      if (error?.payload?.error?.code?.startsWith('model_selection_') && !response.headersSent) {
+      if (error instanceof ModelSelectionConflict && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
       }
