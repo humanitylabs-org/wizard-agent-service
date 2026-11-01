@@ -9,7 +9,7 @@
 //   GET /wizard/v1/agent-notes/<agent>/search?q=…     → {source, notes:[{path,title,snippet}], truncated}
 // Only the owner session may call; service and agent credentials never reach this surface (principals.mjs).
 // Every other method answers 405 read_only: an agent's notebook is its working memory, never edited from outside.
-// Privacy/hidden flags seal agent-to-agent reads, not the owner's human Notes view. Main Archimedes stays out
+// Private/hidden owner sources stay default-off until the staged shell boundary rollout. Agent-to-agent remains sealed. Main Archimedes stays out
 // while its home is the host Hermes profile; an eventual registered container appears like any other agent.
 import { principalOf } from './principals.mjs'
 import { MAIN_AGENT_ID } from './agents.mjs'
