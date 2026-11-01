@@ -1,0 +1,332 @@
+{
+  "classification": "diagnostic_only",
+  "full_acceptance": false,
+  "real_provider_verified": false,
+  "private_confidentiality_verified": false,
+  "complete": false,
+  "intents": [
+    {
+      "kind": "network",
+      "name": "rrsc-c6c4831e07-net",
+      "label": {
+        "wizard.routing.synthetic": "rrsc-c6c4831e07"
+      }
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-provider",
+      "label": {
+        "wizard.routing.synthetic": "rrsc-c6c4831e07"
+      }
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-generic",
+      "label": {
+        "wizard.routing.synthetic": "rrsc-c6c4831e07"
+      }
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-named",
+      "label": {
+        "wizard.routing.synthetic": "rrsc-c6c4831e07"
+      }
+    }
+  ],
+  "phases": [
+    {
+      "phase": "generic",
+      "ready": true,
+      "complete": false,
+      "raw_exit_code": 0,
+      "raw_wire_interval": {
+        "before_count": 0,
+        "after_count": 12,
+        "post_count": 12,
+        "inference_models": [
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha"
+        ],
+        "metadata_count": 6,
+        "metadata_schema_valid": true,
+        "unclassified_indices": []
+      },
+      "driver_exit_codes": [
+        {
+          "tree": "was",
+          "exit_code": 0,
+          "timeout": false
+        },
+        {
+          "tree": "was-main",
+          "exit_code": 0,
+          "timeout": false
+        }
+      ],
+      "driver_wire_intervals": [
+        {
+          "tree": "was",
+          "before_count": 12,
+          "after_count": 17,
+          "post_count": 5,
+          "inference_models": [
+            "fixture-alpha",
+            "fixture-alpha",
+            "fixture-beta"
+          ],
+          "metadata_count": 2,
+          "metadata_schema_valid": true,
+          "unclassified_indices": []
+        },
+        {
+          "tree": "was-main",
+          "before_count": 17,
+          "after_count": 22,
+          "post_count": 5,
+          "inference_models": [
+            "fixture-alpha",
+            "fixture-alpha",
+            "fixture-beta"
+          ],
+          "metadata_count": 2,
+          "metadata_schema_valid": true,
+          "unclassified_indices": []
+        }
+      ],
+      "original_driver_wire_interval": {
+        "before_count": 12,
+        "after_count": 22,
+        "post_count": 10,
+        "inference_models": [
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-beta",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-beta"
+        ],
+        "metadata_count": 4,
+        "metadata_schema_valid": true,
+        "unclassified_indices": []
+      },
+      "original_driver_inference_delta": 6,
+      "original_driver_wire_models": [
+        "fixture-alpha",
+        "fixture-beta"
+      ],
+      "original_adapter_acceptance_pass": false,
+      "projection_exit_codes": [
+        {
+          "tree": "was",
+          "exit_code": 0
+        },
+        {
+          "tree": "was-main",
+          "exit_code": 0
+        }
+      ],
+      "error_type": "AssertionError",
+      "error_code": "original_driver_requires_exactly_four_inferences_two_models_no_unknowns",
+      "capture_copied": true,
+      "adapter_copied": true
+    },
+    {
+      "phase": "named",
+      "ready": true,
+      "complete": true,
+      "raw_exit_code": 0,
+      "raw_wire_interval": {
+        "before_count": 22,
+        "after_count": 34,
+        "post_count": 12,
+        "inference_models": [
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha",
+          "fixture-alpha"
+        ],
+        "metadata_count": 6,
+        "metadata_schema_valid": true,
+        "unclassified_indices": []
+      },
+      "projection_exit_codes": [
+        {
+          "tree": "was",
+          "exit_code": 0
+        },
+        {
+          "tree": "was-main",
+          "exit_code": 0
+        }
+      ],
+      "capture_copied": true,
+      "adapter_copied": true
+    }
+  ],
+  "cleanup": [
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-generic",
+      "remove_rc": 0,
+      "absent": true
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-named",
+      "remove_rc": 0,
+      "absent": true
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-named",
+      "absent": true
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-generic",
+      "absent": true
+    },
+    {
+      "kind": "container",
+      "name": "rrsc-c6c4831e07-provider",
+      "remove_rc": 0,
+      "absent": true
+    },
+    {
+      "kind": "network",
+      "name": "rrsc-c6c4831e07-net",
+      "remove_rc": 0,
+      "absent": true
+    }
+  ],
+  "wire_counts": [
+    {
+      "label": "generic-raw-wire-before",
+      "count": 0,
+      "inference_count": 0,
+      "metadata_count": 0,
+      "unclassified_count": 0,
+      "snapshot_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "label": "generic-raw-wire-after",
+      "count": 12,
+      "inference_count": 6,
+      "metadata_count": 6,
+      "unclassified_count": 0,
+      "snapshot_sha256": "558ead7f8b48eae28cdebc40892da6b8e9b56741b24ae6ffaa6b068850205690"
+    },
+    {
+      "label": "original-drivers-wire-before",
+      "count": 12,
+      "inference_count": 6,
+      "metadata_count": 6,
+      "unclassified_count": 0,
+      "snapshot_sha256": "558ead7f8b48eae28cdebc40892da6b8e9b56741b24ae6ffaa6b068850205690"
+    },
+    {
+      "label": "was-original-wire-before",
+      "count": 12,
+      "inference_count": 6,
+      "metadata_count": 6,
+      "unclassified_count": 0,
+      "snapshot_sha256": "558ead7f8b48eae28cdebc40892da6b8e9b56741b24ae6ffaa6b068850205690"
+    },
+    {
+      "label": "was-original-wire-after",
+      "count": 17,
+      "inference_count": 9,
+      "metadata_count": 8,
+      "unclassified_count": 0,
+      "snapshot_sha256": "2a47690136926087314c0fcde9453683773e0bca98007fc05a00d5b065598d1b"
+    },
+    {
+      "label": "was-main-original-wire-before",
+      "count": 17,
+      "inference_count": 9,
+      "metadata_count": 8,
+      "unclassified_count": 0,
+      "snapshot_sha256": "2a47690136926087314c0fcde9453683773e0bca98007fc05a00d5b065598d1b"
+    },
+    {
+      "label": "was-main-original-wire-after",
+      "count": 22,
+      "inference_count": 12,
+      "metadata_count": 10,
+      "unclassified_count": 0,
+      "snapshot_sha256": "5c6fd14dd43d6ebc069ed8532d6f79cb43270bfb8b3b24bacb4aa06e0ec6af49"
+    },
+    {
+      "label": "original-drivers-wire-after",
+      "count": 22,
+      "inference_count": 12,
+      "metadata_count": 10,
+      "unclassified_count": 0,
+      "snapshot_sha256": "5c6fd14dd43d6ebc069ed8532d6f79cb43270bfb8b3b24bacb4aa06e0ec6af49"
+    },
+    {
+      "label": "named-raw-wire-before",
+      "count": 22,
+      "inference_count": 12,
+      "metadata_count": 10,
+      "unclassified_count": 0,
+      "snapshot_sha256": "5c6fd14dd43d6ebc069ed8532d6f79cb43270bfb8b3b24bacb4aa06e0ec6af49"
+    },
+    {
+      "label": "named-raw-wire-after",
+      "count": 34,
+      "inference_count": 18,
+      "metadata_count": 16,
+      "unclassified_count": 0,
+      "snapshot_sha256": "4f848dc132da33a3ee597803866596feb618e62d65b2a00a7723c2121f5763fc"
+    },
+    {
+      "label": "provider-final-wire",
+      "count": 34,
+      "inference_count": 18,
+      "metadata_count": 16,
+      "unclassified_count": 0,
+      "snapshot_sha256": "4f848dc132da33a3ee597803866596feb618e62d65b2a00a7723c2121f5763fc"
+    }
+  ],
+  "all_wire_classification": {
+    "before_count": 0,
+    "after_count": 34,
+    "post_count": 34,
+    "inference_models": [
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-beta",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-beta",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha",
+      "fixture-alpha"
+    ],
+    "metadata_count": 16,
+    "metadata_schema_valid": true,
+    "unclassified_indices": []
+  },
+  "provider_capture_copied": true,
+  "provider_final_copy": true,
+  "cleanup_verified": true,
+  "inputs_unchanged": true,
+  "evidence_manifest_sha256": "0326f165a1326b5f95fc46e4310b24d6caa816fc9932e66d2b96c66ddbafd28a"
+}
