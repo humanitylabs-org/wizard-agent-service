@@ -52,7 +52,7 @@ describe('browser owner boundary', () => {
       requireAccess, accessVerifier, tailnetVerifier: accessVerifier,
       upstreamOrigin: 'http://127.0.0.1:1', hermesKey: 'fixture-key', ownerProof: PROOF,
       browserBoundary: { enabled, token: TOKEN },
-      wizardOsHome: dir, settingsPath: join(dir, 'settings.json'), appsJsonPath: join(dir, 'apps.json'),
+      hermesHome: join(dir, 'synthetic-hermes'), wizardOsHome: dir, settingsPath: join(dir, 'settings.json'), appsJsonPath: join(dir, 'apps.json'),
       launcherPath: join(dir, 'launcher.json'), agentBridge: false, followThrough: false, joinedDelegation: 'off', ...extra,
     })
     const address = await listen(server)
