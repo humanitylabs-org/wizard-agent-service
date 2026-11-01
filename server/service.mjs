@@ -87,6 +87,9 @@ import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { createBrowserBoundary } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
 import { createBrowserAdapters, browserAdaptersHttp } from './browser-adapters.mjs'
+import { createWamInstallationResolver } from './browser-installations.mjs'
+import { createNotificationsOperations } from './browser-operations.mjs'
+import { createOperationReceipts } from './browser-operation-receipts.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -2541,8 +2544,17 @@ function buildWizardServer(options, lifetime) {
   const browserBoundary = createBrowserBoundary(options.browserBoundary)
   // Prototype-only trusted resolver injection. No env/default, manifest self-grant,
   // owner-fetch handler or production WAM registry integration is installed here.
-  const browserAdapters = browserBoundary.enabled && options.browserAdapterPrototype
-    ? createBrowserAdapters(options.browserAdapterPrototype) : null
+  // Production path (still default-off): the WAM-written apps.json `browser` facts plus durable outcome
+  // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
+  const browserAdapters = !browserBoundary.enabled ? null
+    : options.browserAdapterWam ? createBrowserAdapters({
+      ...createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
+      operations: createNotificationsOperations({
+        fetchImpl: options.browserAdapterWam.fetchImpl,
+        receipts: createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }),
+      }),
+    })
+    : options.browserAdapterPrototype ? createBrowserAdapters(options.browserAdapterPrototype) : null
   if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true
   const baseAccessVerifier = options.accessVerifier
