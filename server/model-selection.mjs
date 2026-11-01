@@ -4,6 +4,16 @@ import { atomicStoreWrite } from './thread-reference.mjs'
 
 const validRoute = r => typeof r?.model === 'string' && r.model.length > 0 && typeof r.provider === 'string' && r.provider.length > 0
 export const sameRoute = (a, b) => validRoute(a) && validRoute(b) && a.model === b.model && a.provider === b.provider
+
+// This fallback is optional metadata, not authority to invent a selection. Only
+// absence of this exact query's schema is compatible; corruption/IO still throw.
+export function readOptionalSessionSelectionRow(db, sessionId) {
+  try { return db.prepare('SELECT model, model_config FROM sessions WHERE id=?').get(String(sessionId)) }
+  catch (error) {
+    if (error.code === 'ERR_SQLITE_ERROR' && /^(?:no such table: sessions|no such column: (?:model|model_config|id))$/.test(error.message)) return null
+    throw error
+  }
+}
 export class ModelSelectionConflict extends Error {
   constructor(selection, code = 'model_selection_changed') {
     super(code.includes('unproven') ? 'The selected agent model/provider cannot be verified · message kept; nothing sent.' : code.includes('steer') ? 'The running reply uses another or unconfirmed model · send a new turn on the selected model.' : 'Model choice changed or is not confirmed · message kept. Refresh the model choice before sending.')
@@ -37,6 +47,20 @@ export class ModelSelections {
     const stored = this.sessionRoute(sessionId)
     return validRoute(stored) ? { model: stored.model, provider: stored.provider,
       version: Number(stored.version) || 1, state: 'confirmed', source: 'existing_lock' } : null
+  }
+  assertQueuedGuidance(sessionId, guidance, captured) {
+    const current = this.current(sessionId)
+    const envelope = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+    const unselected = value => envelope(value) && !Object.keys(value).some(key => /model|provider|lock|selection|version|route|runtime|transport|retry/i.test(key))
+    const pending = this.pending.has(sessionId) || current?.state === 'pending'
+    // Only two genuinely unselected legacy envelopes retain the old path. This
+    // exception is local to queued guidance, never admission/retry or migration.
+    if (!pending && !current && unselected(guidance) && unselected(captured)) return
+    if (pending || !envelope(guidance) || !envelope(captured) || !sameRoute(guidance, captured)
+      || guidance.selection_version !== captured.selection_version
+      || (Object.hasOwn(guidance, 'selection_version') !== Object.hasOwn(captured, 'selection_version'))
+      || (Object.hasOwn(captured, 'selection_version') && (!Number.isSafeInteger(captured.selection_version) || captured.selection_version < 0)))
+      throw new ModelSelectionConflict(current, 'model_selection_steer_mismatch')
   }
   // Capture happens before durable queue admission, without an intervening await.
   // A server-owned queue replay/dispatch does NOT call this again: its route is immutable.

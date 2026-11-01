@@ -13,14 +13,21 @@ const terminal = new Set(['completed','failed','cancelled','interrupted'])
 
 // Resolve only the agent's configured provider, not a catalogue 'best' or fallback.
 // A generic custom transport without a named configured route cannot prove privacy.
+const agentModelShape = agent => typeof agent?.model?.provider === 'string' && agent.model.provider.length > 0
+  && Array.isArray(agent.model.allowed_models)
+  && agent.model.allowed_models.every(model => typeof model === 'string' && model.length > 0)
 export function resolveAgentTransport(agent, options, route) {
+  if (!agentModelShape(agent) || typeof options?.provider !== 'string' || !options.provider
+    || !Array.isArray(options.providers) || typeof route?.model !== 'string' || !route.model
+    || typeof route.provider !== 'string' || !route.provider)
+    throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
   const provider = options?.provider
-  const p = options?.providers?.find(p => p.slug === provider || `custom:${p.slug}` === provider)
+  const p = options.providers.find(p => typeof p?.slug === 'string' && (p.slug === provider || `custom:${p.slug}` === provider))
   const canonical = p?.is_user_defined && !provider.startsWith('custom:') ? `custom:${provider}` : provider
   const display = agent.model?.provider
   const aliases = display === 'anthropic' ? ['anthropic', 'claude-subscription-directsdk-experimental']
     : display === 'tinfoil' ? ['tinfoil', 'custom:tinfoil', 'custom:wizard-tinfoil', 'custom:tinfoil-operator'] : [display]
-  const listed = p?.models?.some(m => (typeof m === 'string' ? m : m.value || m.id || m.model) === route.model)
+  const listed = Array.isArray(p?.models) && p.models.some(m => (typeof m === 'string' ? m : m?.value || m?.id || m?.model) === route.model)
   if (route.provider !== display || !agent.model.allowed_models.includes(route.model)
     || !canonical || canonical === 'custom' || !aliases.includes(canonical) || !listed)
     throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
@@ -39,10 +46,10 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       const bridge = new LockedRunBridge({ origin: 'http://routed', statePath: state,
         fetchImpl: (url, init) => raw(new URL(url).pathname + new URL(url).search, init) })
       const project = payload => {
-        for (const row of [payload?.id ? payload : null, payload?.session, ...(payload?.sessions || payload?.data || payload?.items || [])]) {
+        for (const row of [payload?.id ? payload : null, payload?.session, ...(Array.isArray(payload?.sessions) ? payload.sessions : []), ...(Array.isArray(payload?.data) ? payload.data : []), ...(Array.isArray(payload?.items) ? payload.items : [])]) {
           if (!row?.id || selections.current(row.id)) continue
           const model = row.wizard_model || row.model
-          if (agent.model.allowed_models.includes(model)) {
+          if (agentModelShape(agent) && agent.model.allowed_models.includes(model)) {
             selections.rows.set(row.id, { model, provider: agent.model.provider, version: 1, state: 'confirmed', source: 'existing_agent_lock' }); selections.save()
           }
         }
@@ -190,8 +197,8 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           const response=await raw(`/api/sessions/${encodeURIComponent(body.session_id)}`)
           if(response.ok) project(await response.json()); else await response.body?.cancel()
         }
-        body.model ||= selections.current(body.session_id)?.model || agent.model.model
-        body.provider ||= agent.model.provider
+        body.model ||= selections.current(body.session_id)?.model || agent.model?.model
+        body.provider ||= agent.model?.provider
         // Resolve before mutation; recheck CAS synchronously after the awaited catalogue read.
         const transport=await resolve(body)
         Object.assign(body,selections.capture(body),{require_model_lock:true})

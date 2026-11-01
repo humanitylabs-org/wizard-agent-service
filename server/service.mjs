@@ -54,7 +54,7 @@ import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
-import { ModelSelectionConflict, sameRoute } from './model-selection.mjs'
+import { ModelSelectionConflict, readOptionalSessionSelectionRow } from './model-selection.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
@@ -2567,9 +2567,7 @@ function buildWizardServer(options, lifetime) {
       if (!hermesStatePath || !existsSync(hermesStatePath)) return null
       const db = new DatabaseSync(hermesStatePath, { readOnly: true })
       try {
-        let row
-        try { row = db.prepare('SELECT model, model_config FROM sessions WHERE id=?').get(String(sessionId)) }
-        catch (error) { if (/no such column/.test(error.message)) return null; throw error }
+        const row = readOptionalSessionSelectionRow(db, sessionId)
         const cfg = JSON.parse(row?.model_config || '{}')
         const lock = cfg.browser_model_lock
         if (lock?.confirmed && lock.model && lock.provider) return { model: lock.model, provider: lock.provider, version: Number(lock.updated_at) || 0 }
@@ -6317,7 +6315,7 @@ function buildWizardServer(options, lifetime) {
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const guidanceRoute = parseJsonBody(body)
           const captured = parseJsonBody(queuedProxyRecord.body)
-          if (!sameRoute(guidanceRoute, captured)) throw new ModelSelectionConflict(lockedBridge.selections.current(queuedProxyRecord.sessionId), 'model_selection_steer_mismatch')
+          lockedBridge.selections.assertQueuedGuidance(queuedProxyRecord.sessionId, guidanceRoute, captured)
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
