@@ -100,6 +100,7 @@ const accessVerifier = authMode === 'tailscale' ? tailnetVerifier : authMode ===
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
 }) : undefined
 server = createWizardServer({
+  ownerPrivateNotes: process.env.WIZARD_OWNER_PRIVATE_NOTES === '1',
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',

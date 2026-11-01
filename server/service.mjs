@@ -2755,6 +2755,7 @@ function buildWizardServer(options, lifetime) {
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
   const agentCtx = agents ? {
+    ownerPrivateNotes: options.ownerPrivateNotes === true,
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     projectOpenAsk: (agent, row, replies, lastUserAt) => {

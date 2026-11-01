@@ -18,7 +18,7 @@ afterEach(async () => {
   for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true })
 })
 
-async function fixture() {
+async function fixture(options: any = { ownerPrivateNotes: true }) {
   const root = mkdtempSync(join(tmpdir(), 'agent-notes-http-')); roots.push(root)
   const mainHome = join(root, 'main-home'); mkdirSync(mainHome)
   const appsJsonPath = join(root, 'apps.json'); writeFileSync(appsJsonPath, JSON.stringify({ apps: [] }))
@@ -26,7 +26,7 @@ async function fixture() {
   const registry = createAgentRegistry({ agentsDir: join(root, 'agents'), mainHome, localModels: ['fixture-local'], runtime, fetchImpl: async () => new Response(JSON.stringify({ data: [], has_more: false })) })
   const create = async (label: string, extra: any = {}, preset = 'standard') => (await registry.create({ label, model, permissions: { preset }, ...extra })).agent
   const write = (id: string, relative: string, text: string) => { const path = join(registry.stateHome(id), relative); mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text); return path }
-  const svc = createWizardServer({ heavyToken: HEAVY, upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-hermes', requireAccess: false, ownerProof: PROOF, appsJsonPath, wizardOsHome: root, hermesHome: mainHome, agentRuntime: runtime, mcpToken: 'fixture-main', bridgeWatchMs: 0, bridgeWriteSkills: false, followThrough: false, bridgeLog: () => {} })
+  const svc = createWizardServer({ heavyToken: HEAVY, upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-hermes', requireAccess: false, ownerProof: PROOF, appsJsonPath, wizardOsHome: root, hermesHome: mainHome, agentRuntime: runtime, mcpToken: 'fixture-main', bridgeWatchMs: 0, bridgeWriteSkills: false, followThrough: false, bridgeLog: () => {}, ...options })
   servers.push(svc)
   const origin = `http://127.0.0.1:${((await listen(svc)) as any).port}`
   const get = (path: string, init: any = {}) => fetch(`${origin}/wizard/v1/agent-notes${path}`, { ...init, headers: { ...OWNER, ...(init.headers ?? {}) } })
@@ -34,6 +34,32 @@ async function fixture() {
 }
 
 describe('agent notebooks for the Notes app', () => {
+  it('default-off hides private and hidden notebooks from list, read, search and HEAD', async () => {
+    const f = await fixture({})
+    const standard = await f.create('Standard', { notes_dir: 'wiki' })
+    const priv = await f.create('Sealed', {}, 'private')
+    const hidden = await f.create('Hidden')
+    const recordPath = join(f.root, 'agents', hidden.id, 'agent.json')
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')); record.hidden = true
+    writeFileSync(recordPath, JSON.stringify(record))
+    f.write(standard.id, 'wiki/index.md', 'STANDARD-CANARY')
+    for (const agent of [priv, hidden]) f.write(agent.id, 'wiki/index.md', 'SEALED-DEFAULT-OFF-CANARY')
+    expect((await (await f.get('')).json()).sources.map((s: any) => s.id)).toEqual([standard.id])
+    expect((await f.get(`/${standard.id}/read?path=index.md`)).status).toBe(200)
+    for (const agent of [priv, hidden]) for (const suffix of ['', '/read?path=index.md', '/search?q=canary']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await f.get(`/${agent.id}${suffix}`, { method })
+        expect(response.status, `${method} ${suffix}`).toBe(404)
+        expect(await response.text()).not.toContain('SEALED-DEFAULT-OFF-CANARY')
+      }
+    }
+    // Reclassification is checked on every request: no stale list grants a later read.
+    const file = join(f.root, 'agents', standard.id, 'agent.json')
+    const changed = JSON.parse(readFileSync(file, 'utf8')); changed.privacy = 'private'
+    writeFileSync(file, JSON.stringify(changed))
+    expect((await f.get(`/${standard.id}/read?path=index.md`)).status).toBe(404)
+  })
+
   it('lists every registered agent for the owner: standard, private, hidden and notebook-less, with privacy labels', async () => {
     const f = await fixture()
     const sage = await f.create('Sage', { notes_dir: 'wiki' })
