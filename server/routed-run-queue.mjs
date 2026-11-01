@@ -31,7 +31,8 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
-      const raw = async (path,init={}) => { const headers=new Headers(init.headers);headers.set('Authorization', `Bearer ${registry.apiKey(agent.id)}`);return registry.fetchAgent(agent,path,{...init,headers,redirect:'manual',signal:init.signal||AbortSignal.timeout(10000)}) }
+      const lifecycle = new AbortController()
+      const raw = async (path,init={}) => { const headers=new Headers(init.headers);headers.set('Authorization', `Bearer ${registry.apiKey(agent.id)}`);return registry.fetchAgent(agent,path,{...init,headers,redirect:'manual',signal:init.signal||(path.endsWith('/chat/stream')?lifecycle.signal:AbortSignal.timeout(10000))}) }
       const state = join(registry.agentsDir,agent.id,'wizard-locked-runs.json')
       const selections = new ModelSelections({ statePath: state + '.display-selections' })
       const transports = new ModelSelections({ statePath: state + '.admitted-transports' })
@@ -105,7 +106,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       })
       const ready = queue.initialize()
       entries.set(agent.id,{queue,ready,direct,raw,selections,transports,resolve,bridge,project})
-      own?.(async()=>{await ready.catch(()=>{});await queue.close();await Promise.allSettled([...bridge.streams])})
+      own?.(async()=>{lifecycle.abort();await ready.catch(()=>{});await queue.close();await Promise.allSettled([...bridge.streams])})
     }
     const entry=entries.get(agent.id);await entry.ready;return entry
   }

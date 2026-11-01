@@ -6,7 +6,7 @@ const validRoute = r => typeof r?.model === 'string' && r.model.length > 0 && ty
 export const sameRoute = (a, b) => validRoute(a) && validRoute(b) && a.model === b.model && a.provider === b.provider
 export class ModelSelectionConflict extends Error {
   constructor(selection, code = 'model_selection_changed') {
-    super('Model choice changed or is not confirmed · message kept. Refresh the model choice before sending.')
+    super(code.includes('unproven') ? 'The selected agent model/provider cannot be verified · message kept; nothing sent.' : code.includes('steer') ? 'The running reply uses another or unconfirmed model · send a new turn on the selected model.' : 'Model choice changed or is not confirmed · message kept. Refresh the model choice before sending.')
     this.status = 409
     this.payload = { error: { code, message: this.message }, selection }
   }
@@ -79,7 +79,7 @@ export class ModelSelections {
     this.rows.set(sessionId, row); this.save() // Unknown apply outcomes stay fail-closed after restart.
     const task = (async () => {
       try {
-        const ack = await apply()
+        const ack = await Promise.resolve().then(apply)
         if (!sameRoute(ack, row)) throw new ModelSelectionConflict(row, 'model_selection_ack_mismatch')
         row.state = 'confirmed'; delete row.previous; this.rows.set(sessionId, row); this.save()
         return { ...row }
