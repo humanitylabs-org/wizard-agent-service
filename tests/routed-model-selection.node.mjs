@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRoutedQueues, resolveAgentTransport } from '../server/routed-run-queue.mjs'
 import { LockedRunBridge } from '../server/locked-run-bridge.mjs'
+import { ModelSelectionConflict } from '../server/model-selection.mjs'
 const A={model:'fixture-alpha',provider:'anthropic'}, B={model:'fixture-beta',provider:'anthropic'}
 const native='claude-subscription-directsdk-experimental'
 const frame=(name,value)=>`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`
@@ -16,11 +17,11 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
   const provider=privateRoute?'tinfoil':A.provider, transport=privateRoute?'custom:tinfoil-operator':native
   const agents=new Map(['first','second'].map(id=>[id,{id,kind,model:{provider,model:A.model,allowed_models:[A.model,B.model]}}]))
   for(const id of agents.keys())mkdirSync(join(root,id))
-  const calls=[],runs=new Map(),disposers=[]; let unsafe=false, count=0
+  const calls=[],runs=new Map(),disposers=[]; let unsafe=false, count=0, optionsOverride, hasOptionsOverride=false
   // createAgentRegistry.list() is synchronous and returns full agent records.
   const registry={agentsDir:root,list:()=>[...agents.values()],apiKey:()=> 'synthetic-no-authority',async fetchAgent(agent,path,init={}) {
     const body=init.body?JSON.parse(init.body):null;calls.push({agent:agent.id,path,body})
-    if(path==='/api/model/options')return json({provider:unsafe?'openai-codex':transport,model:A.model,providers:[{slug:privateRoute?'tinfoil-operator':native,is_user_defined:privateRoute,authenticated:true,models:[A.model,B.model]}]})
+    if(path==='/api/model/options')return json(hasOptionsOverride?optionsOverride:{provider:unsafe?'openai-codex':transport,model:A.model,providers:[{slug:privateRoute?'tinfoil-operator':native,is_user_defined:privateRoute,authenticated:true,models:[A.model,B.model]}]})
     if(path.endsWith('/model'))return json({runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}})
     if(path.endsWith('/chat/stream')) {
       const run_id='native_'+(++count),runtime={model:body.model,provider:privateRoute?'custom':transport,requested:{model:body.model,provider:body.provider},model_lock:'confirmed'}
@@ -41,6 +42,7 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
   }
   start(); t.after(async()=>{for(const dispose of disposers.splice(0))await dispose()})
   return {agent:agents.get('first'),second:agents.get('second'),calls,registry,transport,provider,fetch:(a,path,init)=>queues.fetch(a,path,init),setUnsafe:()=>unsafe=true,
+    setOptions(value){hasOptionsOverride=true;optionsOverride=value},
     async restart(){for(const dispose of disposers.splice(0))await dispose();start()}}
 }
 for(const [kind,privateRoute] of [['host-profile',false],['container',false],['restricted',false],['restricted',true]]) {
@@ -72,6 +74,32 @@ test('unproven private catalogue fails before inference; display metadata cannot
   assert.equal(f.calls.filter(c=>c.path.endsWith('/chat/stream')||c.path==='/v1/runs').length,0)
   assert.throws(()=>resolveAgentTransport({model:{provider:'custom',allowed_models:[A.model]}},{provider:'custom',providers:[{slug:'custom',models:[A.model]}]},{model:A.model,provider:'custom'}),e=>e.status===409)
   assert.throws(()=>resolveAgentTransport(f.agent,{provider:'custom',providers:[{slug:'custom',models:[A.model]}]},{model:A.model,provider:'tinfoil'}),e=>e.status===409)
+})
+const shapeConflict = error => error instanceof ModelSelectionConflict && error.status === 409 && error.payload.error.code === 'agent_model_route_unproven'
+for (const allowed of [undefined, null, A.model, {}, [null], [7]]) test(`malformed allowed_models is typed fail-closed with no inference: ${JSON.stringify(allowed)}`, async t => {
+  const f = await fixture(t)
+  if (allowed === undefined) delete f.agent.model.allowed_models
+  else f.agent.model.allowed_models = allowed
+  const options = { provider: native, providers: [{ slug: native, models: [A.model] }] }
+  assert.throws(() => resolveAgentTransport(f.agent, options, A), shapeConflict)
+  const read = await f.fetch(f.agent, '/api/sessions/wizard_shape')
+  assert.equal(read.status, 200)
+  const row = await read.json(); assert.equal(row.model, A.model); assert.equal(row.wizard_selection, undefined)
+  assert.equal(row.wizard_provider, undefined)
+  await assert.rejects(f.fetch(f.agent, '/v1/runs', request({ session_id: 'wizard_shape', input: 'kept original', ...A })), shapeConflict)
+  assert.equal(f.calls.filter(call => call.path.endsWith('/chat/stream') || call.path === '/v1/runs' || call.path.endsWith('/model')).length, 0)
+})
+for (const [name, options] of [
+  ['null options', null], ['missing provider', { providers: [] }], ['wrong provider type', { provider: 7, providers: [] }],
+  ['wrong providers shape', { provider: native, providers: {} }],
+  ['wrong models shape', { provider: native, providers: [{ slug: native, models: {} }] }],
+  ['invalid provider rows', { provider: native, providers: [null, {}] }],
+  ['invalid model rows', { provider: native, providers: [{ slug: native, models: [null, {}] }] }],
+]) test(`malformed catalogue shape is typed fail-closed with no inference: ${name}`, async t => {
+  const f = await fixture(t); f.setOptions(options)
+  assert.throws(() => resolveAgentTransport(f.agent, options, A), shapeConflict)
+  await assert.rejects(f.fetch(f.agent, '/v1/runs', request({ session_id: 'wizard_shape', input: 'kept original', ...A })), shapeConflict)
+  assert.equal(f.calls.filter(call => call.path.endsWith('/chat/stream') || call.path === '/v1/runs' || call.path.endsWith('/model')).length, 0)
 })
 for(const actual of [{...A,model_lock:'accepted'},{...A,provider:'other-provider',model_lock:'confirmed'},null]) {
   test(`active steer rejects unverified or different actual runtime ${JSON.stringify(actual)}`,async()=>{
