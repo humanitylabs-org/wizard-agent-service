@@ -631,6 +631,7 @@ export class DurableRunQueue {
     const value = parseJson(source.body, {})
     if (!value.input || (typeof value.input === 'string' && !value.input.trim()) || (Array.isArray(value.input) && !value.input.length)) throw requestError('saved request is empty', 409)
     if (route.model) Object.assign(value, { model: route.model, ...(route.provider ? { provider: route.provider } : {}), require_model_lock: true })
+    if (Object.hasOwn(route, 'selection_version')) value.selection_version = route.selection_version
     if (automatic) {
       const runtime = source.payload?.runtime || source.payload?.usage?.runtime || {}
       value.model ||= runtime.model || runtime.requested?.model
@@ -654,9 +655,12 @@ export class DurableRunQueue {
     return { ...admitted, record: this.get(admitted.record.publicRunId) }
   }
 
-  async retrySaved(publicRunId, sessionId, route = {}) {
+  async retrySaved(publicRunId, sessionId, route = {}, beforeDispatch = null) {
     const result = this._retrySavedRow(publicRunId, sessionId, route)
-    if (!result.replayed) await this.tick()
+    if (!result.replayed) {
+      beforeDispatch?.(result.record)
+      await this.tick()
+    }
     return { ...result, record: this.get(result.record.publicRunId) }
   }
 
