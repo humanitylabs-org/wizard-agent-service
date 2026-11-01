@@ -1,0 +1,1749 @@
+[
+  {
+    "name": "options",
+    "path": "/api/model/options",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "18789"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:01 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "f16e5db0872f941342187f848fd8b931f89eb3e3248d232eece0beb6614fc9df",
+    "response_bytes": 18789
+  },
+  {
+    "name": "capabilities",
+    "path": "/v1/capabilities",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "4128"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:01 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "mode": "server_agent",
+      "tool_execution": "server",
+      "split_runtime": false,
+      "description": "The API server creates a server-side Hermes AIAgent; tools execute on the API-server host unless a future explicit split-runtime mode is enabled."
+    },
+    "response_sha256": "34d9dd8dc9963c30e166067c0642c4dc06a39bab10ed7f9136435b472fb9793f",
+    "response_bytes": 4128
+  },
+  {
+    "name": "chat-create",
+    "path": "/api/sessions",
+    "method": "POST",
+    "request_sha256": "fd15724179a1bc1ad66754f103e013a1dfefad4993d2864ce50bbb0c9ce606c9",
+    "request_bytes": 34,
+    "synthetic_only": true,
+    "status": 201,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "581"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:01 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "e594e3613875c5373f017f58726ffac9eecfd26c128978a7f215f71a4a2691f6",
+    "response_bytes": 581
+  },
+  {
+    "name": "chat-model-lock",
+    "path": "/api/sessions/stock_contract_named_chat/model",
+    "method": "POST",
+    "request_sha256": "db500c5a5d341d54b39535d549b4ee3fd0971f9fa0ca23f366de800da00f6c7a",
+    "request_bytes": 85,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "291"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:01 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom:fixture-local",
+      "model": "fixture-alpha",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-alpha"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "e70d24f14921254f23e357b7b53715ac9445f63cfbea2e6bc63ffd414a56be58",
+    "response_bytes": 291
+  },
+  {
+    "name": "chat-turn",
+    "path": "/api/sessions/stock_contract_named_chat/chat",
+    "method": "POST",
+    "request_sha256": "d0bd3033744f60b8894c86876a7a1c5823d1d4d5ad130e911b869bed637ca6b4",
+    "request_bytes": 130,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "X-Hermes-Session-Id",
+        "stock_contract_named_chat"
+      ],
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "632"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom",
+      "model": "fixture-alpha",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-alpha"
+      },
+      "model_lock": "confirmed"
+    },
+    "response_sha256": "9eddd009de78b42dc3c38644f7a11a5c761de33bb5386666264433a658fb1d5d",
+    "response_bytes": 632
+  },
+  {
+    "name": "chat-projection",
+    "path": "/api/sessions/stock_contract_named_chat",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "620"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "086fe3d55f6511b7e7c432dd2cd5a122e9921314567ce8a2bc479d661d1187f3",
+    "response_bytes": 620
+  },
+  {
+    "name": "chat-messages",
+    "path": "/api/sessions/stock_contract_named_chat/messages",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "804"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "7d68bc8f9299d941718b302e58f2be58b0bfb14cd32e92aeb35e88c281156b4e",
+    "response_bytes": 804
+  },
+  {
+    "name": "stream-create",
+    "path": "/api/sessions",
+    "method": "POST",
+    "request_sha256": "79a280cfbcc63a5981b7f5e7286f8abcf6867e3327a964ab6afe7f9b23c9d7f2",
+    "request_bytes": 36,
+    "synthetic_only": true,
+    "status": 201,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "583"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "38063bebcb721a718a58667880ccddeea20eb3602a9496fba2b57d3c216d4a91",
+    "response_bytes": 583
+  },
+  {
+    "name": "stream-model-lock",
+    "path": "/api/sessions/stock_contract_named_stream/model",
+    "method": "POST",
+    "request_sha256": "db500c5a5d341d54b39535d549b4ee3fd0971f9fa0ca23f366de800da00f6c7a",
+    "request_bytes": 85,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "293"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom:fixture-local",
+      "model": "fixture-alpha",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-alpha"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "6a9e531d34836ee54daec872751259ec7a424b22f92c20ab4338362daf2f739e",
+    "response_bytes": 293
+  },
+  {
+    "name": "stream-turn",
+    "path": "/api/sessions/stock_contract_named_stream/chat/stream",
+    "method": "POST",
+    "request_sha256": "d0bd3033744f60b8894c86876a7a1c5823d1d4d5ad130e911b869bed637ca6b4",
+    "request_bytes": 130,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "text/event-stream"
+      ],
+      [
+        "Cache-Control",
+        "no-cache"
+      ],
+      [
+        "X-Accel-Buffering",
+        "no"
+      ],
+      [
+        "X-Hermes-Session-Id",
+        "stock_contract_named_stream"
+      ],
+      [
+        "Transfer-Encoding",
+        "chunked"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "f13fcbf9a5daccb10278d6ccbb88e13923fd31d32397dde3d2660136b52d0780",
+    "response_bytes": 2776
+  },
+  {
+    "name": "stream-projection",
+    "path": "/api/sessions/stock_contract_named_stream",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "622"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "54ec2c0af9bcd442e86fc4a1bf85297d15c090ee7dd93c540a814b88d6692bb7",
+    "response_bytes": 622
+  },
+  {
+    "name": "stream-messages",
+    "path": "/api/sessions/stock_contract_named_stream/messages",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "809"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "d42f27cd821bd9ca781b630887a0d1ecbdaee981d9d149773ed4ed1a755068f8",
+    "response_bytes": 809
+  },
+  {
+    "name": "native-create",
+    "path": "/api/sessions",
+    "method": "POST",
+    "request_sha256": "7bdb0717d8fa1e77cfaf300091d026d61d228d88393e30124d341fb40253470a",
+    "request_bytes": 36,
+    "synthetic_only": true,
+    "status": 201,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "583"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "7e17de013e6524ed9d333053849fea361d436ccef31d1ee8510edae50832929e",
+    "response_bytes": 583
+  },
+  {
+    "name": "native-model-lock",
+    "path": "/api/sessions/stock_contract_named_native/model",
+    "method": "POST",
+    "request_sha256": "db500c5a5d341d54b39535d549b4ee3fd0971f9fa0ca23f366de800da00f6c7a",
+    "request_bytes": 85,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "293"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom:fixture-local",
+      "model": "fixture-alpha",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-alpha"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "e12f3cb964742f703e16532b8eecb0622efdc61cdea994b8547b125a78014348",
+    "response_bytes": 293
+  },
+  {
+    "name": "native-admit",
+    "path": "/v1/runs",
+    "method": "POST",
+    "request_sha256": "b51cd35b1b2cc33d3f86f1fcf3011f67f676a4191499dbb21a68ab93c0da75b7",
+    "request_bytes": 171,
+    "synthetic_only": true,
+    "status": 202,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "90"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "a9817ab0a6b733b91f95fc532c6b65c909df5ee3b833ffee643e661b02359efc",
+    "response_bytes": 90
+  },
+  {
+    "name": "native-status-00",
+    "path": "/v1/runs/run_8124663af81b4c9e829c6926a958097e",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "234"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:02 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "893d857999d5d501629a3da55afb20a00461e1d467b710e1f39cc8302ab6ae0d",
+    "response_bytes": 234
+  },
+  {
+    "name": "native-status-01",
+    "path": "/v1/runs/run_8124663af81b4c9e829c6926a958097e",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "662"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom",
+      "model": "fixture-alpha",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-alpha"
+      }
+    },
+    "response_sha256": "ad3deeab5bd193ddc3f2f94fc0dd1cfe53c4e4be0f85cfcd79f85291d7afcc5d",
+    "response_bytes": 662
+  },
+  {
+    "name": "native-events",
+    "path": "/v1/runs/run_8124663af81b4c9e829c6926a958097e/events",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "text/event-stream"
+      ],
+      [
+        "Cache-Control",
+        "no-cache"
+      ],
+      [
+        "X-Accel-Buffering",
+        "no"
+      ],
+      [
+        "Transfer-Encoding",
+        "chunked"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "aeacf1242132b8a6589c920398e0c542312a2408133ec6d6688eda397c9b7b4d",
+    "response_bytes": 863
+  },
+  {
+    "name": "native-projection",
+    "path": "/api/sessions/stock_contract_named_native",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "627"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "50e2b50e5cb07dc112133a6b93a0f3649ad4c02e1ce1050733e5f9c4dc921b91",
+    "response_bytes": 627
+  },
+  {
+    "name": "native-messages",
+    "path": "/api/sessions/stock_contract_named_native/messages",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "809"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "14cf23e26f19dfc549dceb0b71822ed50b69f4e1687108a241750129070b7554",
+    "response_bytes": 809
+  },
+  {
+    "name": "legacy-create",
+    "path": "/api/sessions",
+    "method": "POST",
+    "request_sha256": "1e78fc7ee03f956529d596ed950c28a1428e1cd62c4910eb6b5c02bb4d6392b4",
+    "request_bytes": 60,
+    "synthetic_only": true,
+    "status": 201,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "592"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "be3d9975d80b23e03db1c982b0fd8f36c221db0a4a293e8ca80a41f30f053f6b",
+    "response_bytes": 592
+  },
+  {
+    "name": "legacy-projection",
+    "path": "/api/sessions/stock_contract_named_legacy",
+    "method": "GET",
+    "request_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request_bytes": 0,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "592"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "response_sha256": "be3d9975d80b23e03db1c982b0fd8f36c221db0a4a293e8ca80a41f30f053f6b",
+    "response_bytes": 592
+  },
+  {
+    "name": "alias-00-ack",
+    "path": "/api/sessions/stock_contract_named_legacy/model",
+    "method": "POST",
+    "request_sha256": "270d925c9a1933bb5d45c48f671a8ab1c88280241761700b3f8f731f41840e3e",
+    "request_bytes": 86,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "295"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom:fixture-display",
+      "model": "fixture-beta",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-display",
+        "model": "fixture-beta"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "9d7ec4b885f9524515751f5618ef06bf5af79149032b501aa2f271dc567a962d",
+    "response_bytes": 295
+  },
+  {
+    "name": "alias-01-ack",
+    "path": "/api/sessions/stock_contract_named_legacy/model",
+    "method": "POST",
+    "request_sha256": "402c2bba821b627a33acf76afed8d52e22ea46aad900e7fb0e0ba735f7eb5e57",
+    "request_bytes": 84,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "291"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "custom:fixture-local",
+      "model": "fixture-beta",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "custom:fixture-local",
+        "model": "fixture-beta"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "7db61e6c5e175321fe645894ba03f4281d0ae85f7183d332593c12aee1e35337",
+    "response_bytes": 291
+  },
+  {
+    "name": "alias-02-ack",
+    "path": "/api/sessions/stock_contract_named_legacy/model",
+    "method": "POST",
+    "request_sha256": "ec8e112e063b39f5f8d150c544872c4dfa544723f2634ae6d78c53dec5edc81a",
+    "request_bytes": 79,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "281"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "fixture display",
+      "model": "fixture-beta",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "fixture display",
+        "model": "fixture-beta"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "79fb1c82186d28878d3ba73e69280904ebf44f06fd9c3812b163da6679f907be",
+    "response_bytes": 281
+  },
+  {
+    "name": "alias-03-ack",
+    "path": "/api/sessions/stock_contract_named_legacy/model",
+    "method": "POST",
+    "request_sha256": "f191beb5e1fc6c7b2a968d5ac4fa17808519524be789ff687cf241b850173a77",
+    "request_bytes": 79,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "281"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "fixture-display",
+      "model": "fixture-beta",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "fixture-display",
+        "model": "fixture-beta"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "2772b1ba3a38e527ecc7bf10d68c42820c76973c9bf1ff22cd8b2e87a596da51",
+    "response_bytes": 281
+  },
+  {
+    "name": "alias-04-ack",
+    "path": "/api/sessions/stock_contract_named_legacy/model",
+    "method": "POST",
+    "request_sha256": "3d39dba4c09ce9913cbafb973555bfa205ec47a0ed6eb523c6bc7b592e2ee35b",
+    "request_bytes": 77,
+    "synthetic_only": true,
+    "status": 200,
+    "headers": [
+      [
+        "Content-Type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "0"
+      ],
+      [
+        "Referrer-Policy",
+        "no-referrer"
+      ],
+      [
+        "Content-Length",
+        "277"
+      ],
+      [
+        "Date",
+        "Sun, 01 Nov 2026 14:47:03 GMT"
+      ],
+      [
+        "Server",
+        "Python/3.13 aiohttp/3.14.3"
+      ],
+      [
+        "Connection",
+        "close"
+      ]
+    ],
+    "complete_body": true,
+    "observed_runtime": {
+      "provider": "fixture-local",
+      "model": "fixture-beta",
+      "route_source": "raw_request",
+      "requested": {
+        "provider": "fixture-local",
+        "model": "fixture-beta"
+      },
+      "model_lock": "accepted"
+    },
+    "response_sha256": "cd145031c07ff2b45904d41b6d74b4c637e6f3bbd00c739241e5340071a83b21",
+    "response_bytes": 277
+  }
+]

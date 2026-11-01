@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "synthetic_only": true,
+  "stock_job": "heavy_aa7fd254fdea43df944514268cbd7cd6",
+  "original_result": "failed exact-four-all-inferences predicate; never waived",
+  "core_revision": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+  "evidence_manifest_sha256": "0326f165a1326b5f95fc46e4310b24d6caa816fc9932e66d2b96c66ddbafd28a",
+  "complete_evidence_files_verified": 539,
+  "complete_native_indices_verified": true,
+  "files": {
+    "generic/native/options.response.body": {
+      "sha256": "034a350595c312c7993aa7ffee76b5f9550ec6ec58ec670f7e7c1e15e444195e",
+      "bytes": 18452,
+      "capture_path": "generic/native/options.response.body"
+    },
+    "generic/native/chat-turn.response.body": {
+      "sha256": "2e970769105810d9cfffb4982caf2c31b6f9bcb624678017a5d879cb5f521618",
+      "bytes": 606,
+      "capture_path": "generic/native/chat-turn.response.body"
+    },
+    "generic/native/stream-turn.response.body": {
+      "sha256": "001f21c19d5b309a873f589fac2a5dce22d5c85e5bfeed93794dbb94bf2fc0d2",
+      "bytes": 2739,
+      "capture_path": "generic/native/stream-turn.response.body"
+    },
+    "generic/native/native-status-01.response.body": {
+      "sha256": "de9c1d0f89ede835f3c5e09ac534f5aba1b65201d9c472a8562a7ac61ce19444",
+      "bytes": 650,
+      "capture_path": "generic/native/native-status-01.response.body"
+    },
+    "generic/native/legacy-projection.response.body": {
+      "sha256": "9cd2ba2ccf008bdebfbb75d8b1b3297a2ce3965becce42a71f2b3082f0216797",
+      "bytes": 595,
+      "capture_path": "generic/native/legacy-projection.response.body"
+    },
+    "generic/native/native-index.json": {
+      "sha256": "e6c8647c37dd418590780e3c4daa66dd6a05132c47dc129fa208f76a2915a21f",
+      "bytes": 30216,
+      "capture_path": "generic/native/native-index.json"
+    },
+    "named/native/options.response.body": {
+      "sha256": "f16e5db0872f941342187f848fd8b931f89eb3e3248d232eece0beb6614fc9df",
+      "bytes": 18789,
+      "capture_path": "named/native/options.response.body"
+    },
+    "named/native/chat-turn.response.body": {
+      "sha256": "9eddd009de78b42dc3c38644f7a11a5c761de33bb5386666264433a658fb1d5d",
+      "bytes": 632,
+      "capture_path": "named/native/chat-turn.response.body"
+    },
+    "named/native/stream-turn.response.body": {
+      "sha256": "f13fcbf9a5daccb10278d6ccbb88e13923fd31d32397dde3d2660136b52d0780",
+      "bytes": 2776,
+      "capture_path": "named/native/stream-turn.response.body"
+    },
+    "named/native/native-status-01.response.body": {
+      "sha256": "ad3deeab5bd193ddc3f2f94fc0dd1cfe53c4e4be0f85cfcd79f85291d7afcc5d",
+      "bytes": 662,
+      "capture_path": "named/native/native-status-01.response.body"
+    },
+    "named/native/legacy-projection.response.body": {
+      "sha256": "be3d9975d80b23e03db1c982b0fd8f36c221db0a4a293e8ca80a41f30f053f6b",
+      "bytes": 592,
+      "capture_path": "named/native/legacy-projection.response.body"
+    },
+    "named/native/native-index.json": {
+      "sha256": "cdde8744bec133b51bc1f50ad443ec25849aaafdd4cb90d50572b17c70fe8382",
+      "bytes": 38395,
+      "capture_path": "named/native/native-index.json"
+    },
+    "provider-final/request-012.body": {
+      "sha256": "ea113c61065cc72d54f7426cdde49c19711b825a15081c3ddd50f364bbe31be2",
+      "bytes": 1351,
+      "capture_path": "provider-final/request-012.body"
+    },
+    "provider-final/request-013.body": {
+      "sha256": "4eb935265adb878f56a392e52b01538cf041852bd83acd9ef3218387ed45c937",
+      "bytes": 24,
+      "capture_path": "provider-final/request-013.body"
+    },
+    "provider-final/request-014.body": {
+      "sha256": "bdcfaf0cfc1f99f71b766a5d799bcbc35a19aa530426410f72b1239752a425ca",
+      "bytes": 11777,
+      "capture_path": "provider-final/request-014.body"
+    },
+    "provider-final/request-015.body": {
+      "sha256": "ea113c61065cc72d54f7426cdde49c19711b825a15081c3ddd50f364bbe31be2",
+      "bytes": 1351,
+      "capture_path": "provider-final/request-015.body"
+    },
+    "provider-final/request-016.body": {
+      "sha256": "84527eaff017aab0c1f61529afb779f08a67293263c9ad9bfac6c40b66b28f4e",
+      "bytes": 23,
+      "capture_path": "provider-final/request-016.body"
+    },
+    "provider-final/request-017.body": {
+      "sha256": "31c429fcf0b29978c1c5e0c4e185c0256afa714eccce0aeacabdf2efdaf765ba",
+      "bytes": 11905,
+      "capture_path": "provider-final/request-017.body"
+    },
+    "provider-final/request-018.body": {
+      "sha256": "4eb935265adb878f56a392e52b01538cf041852bd83acd9ef3218387ed45c937",
+      "bytes": 24,
+      "capture_path": "provider-final/request-018.body"
+    },
+    "provider-final/request-019.body": {
+      "sha256": "bdcfaf0cfc1f99f71b766a5d799bcbc35a19aa530426410f72b1239752a425ca",
+      "bytes": 11777,
+      "capture_path": "provider-final/request-019.body"
+    },
+    "provider-final/request-020.body": {
+      "sha256": "ea113c61065cc72d54f7426cdde49c19711b825a15081c3ddd50f364bbe31be2",
+      "bytes": 1351,
+      "capture_path": "provider-final/request-020.body"
+    },
+    "provider-final/request-021.body": {
+      "sha256": "84527eaff017aab0c1f61529afb779f08a67293263c9ad9bfac6c40b66b28f4e",
+      "bytes": 23,
+      "capture_path": "provider-final/request-021.body"
+    },
+    "provider-final/request-022.body": {
+      "sha256": "31c429fcf0b29978c1c5e0c4e185c0256afa714eccce0aeacabdf2efdaf765ba",
+      "bytes": 11905,
+      "capture_path": "provider-final/request-022.body"
+    },
+    "provider-final/request-023.body": {
+      "sha256": "4eb935265adb878f56a392e52b01538cf041852bd83acd9ef3218387ed45c937",
+      "bytes": 24,
+      "capture_path": "provider-final/request-023.body"
+    },
+    "provider-final/requests.jsonl": {
+      "sha256": "9e83828a18ec74a65f2d66de5648fbfd68d5fd87c3782cc0da2cedb12575f7cc",
+      "bytes": 16733,
+      "capture_path": "provider-final/requests.jsonl"
+    },
+    "original-drivers-wire-before.stdout.log": {
+      "sha256": "558ead7f8b48eae28cdebc40892da6b8e9b56741b24ae6ffaa6b068850205690",
+      "bytes": 5378,
+      "capture_path": "original-drivers-wire-before.stdout.log"
+    },
+    "was-original-wire-before.stdout.log": {
+      "sha256": "558ead7f8b48eae28cdebc40892da6b8e9b56741b24ae6ffaa6b068850205690",
+      "bytes": 5378,
+      "capture_path": "was-original-wire-before.stdout.log"
+    },
+    "was-original-wire-after.stdout.log": {
+      "sha256": "2a47690136926087314c0fcde9453683773e0bca98007fc05a00d5b065598d1b",
+      "bytes": 7671,
+      "capture_path": "was-original-wire-after.stdout.log"
+    },
+    "was-main-original-wire-before.stdout.log": {
+      "sha256": "2a47690136926087314c0fcde9453683773e0bca98007fc05a00d5b065598d1b",
+      "bytes": 7671,
+      "capture_path": "was-main-original-wire-before.stdout.log"
+    },
+    "was-main-original-wire-after.stdout.log": {
+      "sha256": "5c6fd14dd43d6ebc069ed8532d6f79cb43270bfb8b3b24bacb4aa06e0ec6af49",
+      "bytes": 9964,
+      "capture_path": "was-main-original-wire-after.stdout.log"
+    },
+    "original-failed-receipt.json": {
+      "sha256": "5b938374e72b73941f0d63fbca8c38dcebe4ab7cbaafc79727d929d906d8481c",
+      "bytes": 8570,
+      "capture_path": "receipt.json"
+    }
+  },
+  "scope": "Raw bytes only. Does not authorize endpoint custody, logical-provider normalization, or private-route acceptance."
+}
