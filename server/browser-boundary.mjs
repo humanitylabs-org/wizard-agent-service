@@ -30,7 +30,10 @@ export function createBrowserBoundary({ enabled = false, token = '' } = {}) {
         return !['origin', 'sec-fetch-site', 'sec-fetch-dest'].some(name => request.headers?.[name] !== undefined)
       }
       // Even possession of a stolen token may not authorize an opaque frame.
-      if (request.headers?.origin === 'null' || request.headers?.['sec-fetch-site'] === 'cross-site') return false
+      const origin = String(request.headers?.origin ?? '').trim().toLowerCase()
+      const site = request.headers?.['sec-fetch-site']
+      if (origin === 'null' || (site !== undefined && site !== 'same-origin')) return false
+      if (['iframe', 'frame', 'embed', 'object'].includes(request.headers?.['sec-fetch-dest'])) return false
       return sameSecret(request.headers?.[SHELL_TOKEN_HEADER], token)
     },
   })
