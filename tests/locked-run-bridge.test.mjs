@@ -50,6 +50,12 @@ test('stale Opus sends retain the confirmed non-Opus route throughout launch and
   assert.equal(completed.status,'completed');assert.equal(completed.output,'OK');assert.equal(completed.runtime.model,stored.model);
  }
 });
+test('a stale Opus send is also clamped to a confirmed GPT Sol route',async()=>{
+ const stored={model:'gpt-6.1-sol',provider:'openai-codex'};let sent;const logs=[];
+ const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(_,init)=>{sent=JSON.parse(init.body);return stream(frame('run.started',{run_id:'run_sol',runtime:{...stored,model_lock:'accepted'}}))}});
+ const response=await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',model:'claude-opus-5-5[1m]',provider:'anthropic'}));
+ assert.equal((await response.json()).runtime.model,stored.model);assert.equal(sent.model,stored.model);assert.equal(sent.provider,stored.provider);assert.equal(logs.length,1)
+});
 test('a deliberate Opus pick updates the stored route before sending and is honored',async()=>{
  let stored={model:'claude-sonnet-5-5',provider:'anthropic'};const calls=[];const logs=[];
  const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(_,init)=>{
