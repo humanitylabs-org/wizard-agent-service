@@ -115,6 +115,21 @@ describe('browser data admission from real WAM install/grant state', () => {
     expect((await b.call('data.status', { operation: 'notifications.mark_read', operationKey: key })).body).toEqual({ status: 'succeeded', operationKey: key, result: mark.body })
   })
 
+  it('outcome survives a Service restart: a new process reads the durable receipt', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bt-restart-'))
+    resources.push(() => rmSync(dir, { recursive: true, force: true }))
+    const receiptsPath = join(dir, 'receipts.json')
+    const first = await box({ receiptsPath })
+    const b = await first.bind()
+    const n1 = (await b.call('notifications.list', listArgs)).body.items[0]
+    const key = randomUUID()
+    const mark = await b.call('notifications.mark_read', { id: n1.id, expectedRevision: n1.revision }, { operationKey: key })
+    const second = await box({ receiptsPath })          // fresh Service instance, same durable store
+    const again = await second.bind()
+    expect((await again.call('data.status', { operation: 'notifications.mark_read', operationKey: key })).body).toEqual({ status: 'succeeded', operationKey: key, result: mark.body })
+    expect(second.up.state.marks).toBe(0)
+  })
+
   it('lost reply: the same operationKey returns the original outcome without a second effect', async () => {
     const t = await box()
     const b = await t.bind()
