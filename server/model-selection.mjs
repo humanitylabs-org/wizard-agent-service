@@ -47,12 +47,13 @@ export class ModelSelections {
     if (this.pending.has(value.session_id) || current?.state === 'pending') throw new ModelSelectionConflict(current, 'model_selection_pending')
     const explicit = validRoute(value) ? { model: value.model, provider: value.provider } : null
     if (current && (!sameRoute(explicit || current, current)
-      || (Object.hasOwn(value, 'selection_version') && value.selection_version !== current.version))) throw new ModelSelectionConflict(current)
+      || (Object.hasOwn(value, 'selection_version') && value.selection_version !== current.version
+        && !(value.selection_version === 0 && current.version === 1 && ['existing_lock','existing_agent_lock'].includes(current.source))))) throw new ModelSelectionConflict(current)
     if (!current && Object.hasOwn(value, 'selection_version') && value.selection_version !== 0) throw new ModelSelectionConflict(null)
     const route = explicit || current
     if (!route) return null
-    const selected = current || { ...route, version: 1, state: 'confirmed', source: 'first_message' }
-    if (persist && !this.rows.has(value.session_id)) { this.rows.set(value.session_id, selected); this.save() }
+    const selected = current ? { ...current, source: current.source?.startsWith('existing_') ? 'first_message' : current.source } : { ...route, version: 1, state: 'confirmed', source: 'first_message' }
+    if (persist && (!this.rows.has(value.session_id) || selected.source !== current?.source)) { this.rows.set(value.session_id, selected); this.save() }
     return { model: route.model, provider: route.provider, selection_version: selected.version }
   }
   async change(sessionId, value, apply) {
@@ -95,7 +96,7 @@ export class ModelSelections {
     return task
   }
   project(payload) {
-    for (const row of [payload?.id ? payload : null, payload?.session, ...(Array.isArray(payload?.sessions) ? payload.sessions : []), ...(Array.isArray(payload?.data) ? payload.data : [])]) {
+    for (const row of [payload?.id ? payload : null, payload?.session, ...(Array.isArray(payload?.sessions) ? payload.sessions : []), ...(Array.isArray(payload?.data) ? payload.data : []), ...(Array.isArray(payload?.items) ? payload.items : [])]) {
       if (!row || typeof row.id !== 'string') continue
       const choice = this.current(row.id)
       if (choice) {

@@ -107,11 +107,23 @@ export class LockedRunBridge {
         }
         const ack = await response.json()
         const runtime = ack.runtime
-        if (!runtime || !runtimeMatches(runtime, value)) throw new ModelSelectionConflict(this.selections.current(sessionId), 'model_selection_ack_mismatch')
+        if (!['accepted','confirmed'].includes(runtime?.model_lock) || !runtimeMatches(runtime, value)) throw new ModelSelectionConflict(this.selections.current(sessionId), 'model_selection_ack_mismatch')
         return { model: value.model, provider: value.provider }
       })
       return new Response(JSON.stringify({ runtime: { model: selection.model, provider: selection.provider, model_lock: 'confirmed', selection_version: selection.version }, selection }),
         { headers: { 'Content-Type': 'application/json' } })
+    }
+    const steerId = target.origin === new URL(this.origin).origin && target.pathname.match(/^\/v1\/runs\/([^/]+)\/steer$/)?.[1]
+    if (steerId && init.method === 'POST') {
+      const guidance = JSON.parse(init.body.toString())
+      const entry = [...this.entries.values()].find(e => e.runId === steerId)
+      const selected = guidance.model && guidance.provider ? guidance : this.selections.current(guidance.session_id || entry?.sessionId)
+      const response = await this.fetch(this.origin + '/v1/runs/' + encodeURIComponent(steerId), { headers: init.headers })
+      const active = response.ok ? await response.json() : null
+      // Never steer on requested/accepted metadata: the route must actually be executing.
+      if (!selected || !['running', 'waiting_for_approval'].includes(active?.status)
+        || active.runtime?.model_lock !== 'confirmed' || !runtimeMatches(active.runtime, selected))
+        throw new ModelSelectionConflict(null, 'model_selection_steer_mismatch')
     }
     if (target.origin === new URL(this.origin).origin && /^\/v1\/runs\/[^/]+$/.test(target.pathname) && (!init.method || init.method === 'GET')) {
       const response = await this.rawFetch(url, init)
@@ -120,7 +132,8 @@ export class LockedRunBridge {
       const entry = [...this.entries.values()].find(e => e.runId === target.pathname.split('/').at(-1))
       const actual = value.runtime || value.usage?.runtime || entry?.runtime
       if (actual) value.runtime = actual
-      if (entry && actual && !runtimeMatches(actual, entry)) {
+      if (entry && (entry.runtimeRejected || (actual && !runtimeMatches(actual, entry))
+        || (value.status === 'completed' && (!actual || actual.model_lock !== 'confirmed')))) {
         value.status = 'failed'; value.output = null; value.error = 'Selected model/provider did not match the observed runtime'
       }
       return new Response(JSON.stringify(value), { status: response.status, headers: response.headers })
@@ -235,6 +248,9 @@ export class LockedRunBridge {
     let accept, reject
     const admitted = new Promise((yes, no) => { accept = yes; reject = no })
     let accepted = false
+    let observed = false
+    const held = []
+    let heldBytes = 0
     const consume = async () => {
       const decoder = new TextDecoder()
       let buffer = ''
@@ -262,20 +278,33 @@ export class LockedRunBridge {
               this.events.open(entry.runId)
               accepted = true; accept(entry)
             }
-            if (accepted && payload.runtime?.model_lock === 'confirmed' && !runtimeMatches(payload.runtime, route)) {
+            const actual = payload.runtime || payload.usage?.runtime
+            const terminal = event?.startsWith('run.') && ['completed','failed','cancelled','interrupted'].includes(event.slice(4))
+            if (accepted && ((actual?.model || actual?.provider) && !runtimeMatches(actual, route)
+              || (event === 'run.completed' && !observed && actual?.model_lock !== 'confirmed'))) {
+              entry.runtimeRejected = true
+            }
+            if (entry.runtimeRejected) {
               event = 'run.failed'
-              payload = { run_id: entry.runId, status: 'failed', output: null, runtime: payload.runtime,
+              payload = { run_id: entry.runId, status: 'failed', output: null, runtime: actual,
                 error: { code: 'model_lock_mismatch', message: 'Selected model could not be confirmed · no substitute accepted' } }
-              entry.state = 'runtime_mismatch'; this.save()
+              held.length = 0
+            } else if (actual?.model_lock === 'confirmed' && runtimeMatches(actual, route)) {
+              observed = true; entry.runtime = actual
+              for (const [name, value] of held) this.events.record(entry.runId, name, value)
+              held.length = 0
             }
-            if (accepted && event) this.events.record(entry.runId, event, payload)
+            if (accepted && event) {
+              if (observed || terminal || entry.runtimeRejected) this.events.record(entry.runId, event, payload)
+              else if (event !== 'run.started') {
+                heldBytes += JSON.stringify(payload).length
+                if (heldBytes > 4 * 1024 * 1024) throw fail('Unconfirmed runtime output exceeded bound')
+                held.push([event, payload])
+              }
+            }
             if (event === 'error' && !accepted) throw fail('Selected model failed before acknowledgement')
-            if (payload.runtime?.model_lock === 'confirmed') { entry.runtime = payload.runtime; this.save() }
-            if (event?.startsWith('run.') && ['completed','failed','cancelled','interrupted'].includes(event.slice(4))) {
-              entry.state = event.slice(4)
-              if (payload.runtime && !runtimeMatches(payload.runtime, route)) entry.state = 'runtime_mismatch'
-              this.save()
-            }
+            if (terminal || entry.runtimeRejected) { entry.state = entry.runtimeRejected ? 'runtime_mismatch' : event.slice(4); this.save() }
+            else if (observed) this.save()
           }
           if (buffer.length > 32 * 1024 * 1024) throw fail('Locked-run event exceeded the bound')
         }

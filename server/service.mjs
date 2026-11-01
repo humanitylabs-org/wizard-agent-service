@@ -2762,6 +2762,12 @@ function buildWizardServer(options, lifetime) {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const fetchRoutedAgent = (agent, path, init = {}) => {
+    if (routedQueues) return routedQueues.fetch(agent, path, init)
+    if (init.method === 'POST' && (/^\/v1\/runs(?:$|\/[^/]+\/steer$)/.test(path.split('?')[0]) || /\/model$/.test(path.split('?')[0])))
+      throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
+    return agents.fetchAgent(agent, path, init)
+  }
   const routedOpenAskEvidence = (agent, ids) => {
     const home = routedAgentMedia(agent)?.home
     const path = home ? join(home, 'state.db') : ''
@@ -2796,7 +2802,7 @@ function buildWizardServer(options, lifetime) {
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
     },
     acknowledgeHeavyNotices,
-    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    fetchAgent: fetchRoutedAgent,
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
       const body = JSON.stringify({ input: value.input })
@@ -3773,7 +3779,7 @@ function buildWizardServer(options, lifetime) {
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
   heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents,
-    fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    fetchAgent: fetchRoutedAgent,
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
