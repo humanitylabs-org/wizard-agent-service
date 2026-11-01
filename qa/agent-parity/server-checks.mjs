@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { post, png } from './fixture.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS } from '../../server/thread-status.mjs'
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { post, png, scene } from './fixture.mjs'
+import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
+const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '../../hermes-plugin/wizard-os')
 const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
 const history = async s => {
   const r = await s.request('/api/sessions/wizard_parity/messages?view=wizard&order=oldest')
@@ -15,9 +19,89 @@ const admit = async (s, body) => {
   assert.equal(r.status, 202)
   return r.json()
 }
-const envelope = text => JSON.parse(text.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] || '{"items":[]}').items
+// The thread leaves Working as soon as the browser reads the finished run, well inside the 30 s
+// cached Hermes listing. The listing is read while the run is live, so a stale cache would show.
+const ACTIVE = new Set(['started', 'accepted', 'queued', 'running', 'stopping', 'waiting_for_approval'])
+const finishedRunLeavesWorking = async (s, fresh = true) => {
+  const listed = async () => (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+  const until = async (ok, label) => {
+    for (let n = 0; n < 40; n++) { const item = await listed(); if (ok(item)) return item; await new Promise(r => setTimeout(r, 25)) }
+    assert.fail(label)
+  }
+  const admitted = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic request' }))
+  assert.equal(admitted.status, 202)
+  const runId = (await admitted.json()).run_id
+  // A rename makes main re-read (and cache) the Hermes listing while the run is still live.
+  assert.equal((await s.request('/api/sessions/wizard_parity', { ...post({ hidden: false, title: 'Parity · Working' }), method: 'PATCH' })).status, 200)
+  await until(item => ACTIVE.has(item?.status), 'the live run lists as Working')
+  const run = [...s.runs.values()].at(-1)
+  Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: 'Synthetic reply' })
+  s.sessions.get('wizard_parity').messages.push({ role: 'assistant', content: 'Synthetic reply', timestamp: Date.now() / 1000 + 1 })
+  const read = await s.request(`/v1/runs/${runId}`)
+  assert.equal(read.status, 200); assert.equal((await read.json()).status, 'completed')
+  const done = await until(item => item && !ACTIVE.has(item.status), 'the finished run leaves Working within 1 s, not after the 30 s listing cache')
+  assert.ok(!ACTIVE.has(done.status))
+  // The listing behind the row is the finished one too (main's direct path re-reads its Hermes cache).
+  if (fresh) assert.equal(done.messageCount, 2, 'the row is read from the finished listing, not the cached running one')
+}
+const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'owned-open-work': async s => {
+    await admit(s, { input: 'Synthetic approved backend fix' })
+    assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), false, 'persona-owned follow-up style is never imposed at any runtime HTTP boundary')
+    const status = { state: 'done', ask: 'The fix is verified.' }
+    const evidence = { agentId: s.id, ownedCount: 1, handleCount: 0, continuation: false }
+    if (s.kind === 'main') assert.equal(guardOwnedOpenWork(status, evidence).state, 'fyi')
+    else assert.equal(guardOwnedOpenWork(status, evidence), status, 'routed status remains the same object')
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const text = `Verified fix.
+
+**Still open:**
+- Archimedes: run the next checks
+[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
+    Object.assign([...s.runs.values()].at(-1), { status: 'completed', output: text })
+    row.messages.push({ role: 'assistant', timestamp: Date.now()/1000 + 1, content: text })
+    const writes = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    const before = writes().length
+    for (let i = 0; i < 2; i++) {
+      const response = await s.request('/api/sessions?view=list'); assert.equal(response.status, 200)
+      const item = (await response.json()).data.find(x => x.id === row.id)
+      assert.equal(item.attention.state, 'done', 'no main-only guard leaks into routed list projection')
+      assert.notEqual(item.wizard_waiting_on, 'owned_work')
+    }
+    assert.equal(writes().length, before, 'listing routed work never dispatches an owned-work correction')
+    assert.ok(!writes().some(r => JSON.stringify(r.body).includes('[Wizard follow-through] Your last reply lists')))
+  },
+  'provider-signin-recovery': async s => {
+    const input = 'Synthetic saved owner words: keep this exact message.'
+    const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'completed', output: "No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.", usage: { total_tokens: 0 } })
+    const read = () => s.request('/v1/runs/' + first.run_id)
+    const failed = await (await read()).json()
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.wizard_reconnect.provider, 'claude')
+    await read() // observe the unavailable state after the failure, in this exact agent's queue
+    const before = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    s.signin.ready = true
+    for (let i = 0; i < 4; i++) await read()
+    const sends = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    assert.equal(sends.length, before + 1, `${s.kind}: one automatic child after sign-in`)
+    const retried = sends.at(-1).body
+    assert.ok(JSON.stringify(retried.input ?? retried.message).includes(input))
+    assert.equal(retried.model, 'fixture-model')
+    if (s.kind !== 'main') assert.equal(retried.require_model_lock, true)
+    if (s.kind !== 'main') assert.equal(retried.provider, undefined, 'display account id never overrides routed transport')
+    for (let i = 0; i < 4; i++) await read()
+    assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length)
+    // A model picker opened before recovery cannot acknowledge the existing
+    // automatic child as a retry on the owner's newly selected route.
+    const race = await s.request('/v1/runs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_id:'wizard_parity',input:'untrusted preview',wizard_retry_run_id:first.run_id,model:'fixture-other',provider:'anthropic'}) })
+    assert.equal(race.status, 412, `${s.kind}: mismatched recovered route must fail visibly`)
+    if (s.kind === 'main') assert.equal((await race.json()).error.code, 'saved_retry_route_changed')
+    assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length, 'race never dispatches a second request')
+  },
   'supervisor-reporter': async s => {
     const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
     assert.equal(tools.length, 6)
@@ -72,11 +156,24 @@ export const serverChecks = {
     assert.equal((await s.request('/api/sessions?limit=30')).status, 200)
   },
   'finish-report-instructions': async s => {
-    await admit(s, { input: 'Synthetic task-finish prompt delivery check' })
-    const instructions = sent(s).instructions
-    assert.ok(instructions.includes(FINISH_REPORT_INSTRUCTIONS), `${s.kind}: exact finish-report rule reaches runtime`)
-    assert.ok(instructions.includes(`${FINISH_REPORT_INSTRUCTIONS}\n\n${STATUS_INSTRUCTIONS}`), `${s.kind}: finish-report rule immediately precedes status rule`)
-    assert.equal(instructions.split(FINISH_REPORT_INSTRUCTIONS).length - 1, 1, 'one shared finish-report rule per turn')
+    assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, 'own', `${s.kind}: fresh settings default to Own`)
+    await admit(s, { input: 'Synthetic fresh-install persona contract' })
+    const fresh = sent(s).instructions
+    assert.ok(fresh.includes(STATUS_PROTOCOL_INSTRUCTIONS) && fresh.includes('SOUL.md in your home'))
+    for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS]) assert.ok(!fresh.includes(rule), `${s.kind}: fresh install has no imposed style`)
+    // One style source: whatever an older shell saved, every runtime gets Wizard OS facts + status protocol only.
+    for (const style of ['summary', 'concise', 'own']) {
+      const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
+      assert.equal(put.status, 200)
+      assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, 'own')
+      const session_id = `wizard_parity_${style}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
+      const own = sent(s).instructions
+      assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
+      for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
+      assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
+    }
   },
   'chats-spaces': async s => {
     const foreign = { id: 'foreign-space', name: 'FOREIGN_SPACE_CANARY', agent: s.id === 'hermes' ? 'other-agent' : 'hermes', threads: [], createdAt: '2026-10-24T00:00:00.000Z' }
@@ -110,6 +207,14 @@ export const serverChecks = {
       await tool(name, { space_id: 'missing-space', ...args }, 'not_found')
     }
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_add', { space_id: created.id, thread_ids: ['wizard_parity', 'wizard_parity'] })).space.count, 1)
+    // One Space per chat: adding moved it out of parity-space.
+    assert.equal((await tool('spaces_list')).spaces.find(x => x.id === space.id).count, 0, 'spaces_add moves, never a second Space')
+    // A full PUT (older shell) naming it in two of this agent's Spaces keeps one: the newly joined one.
+    const full = (await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces
+    assert.equal((await put(full.map(x => x.id === space.id ? { ...x, threads: ['wizard_parity'] } : x))).status, 200)
+    const counts = Object.fromEntries((await tool('spaces_list')).spaces.map(x => [x.id, x.count]))
+    assert.deepEqual([counts[space.id], counts[created.id]], [1, 0], 'PUT cannot leave a chat in two Spaces')
+    await tool('spaces_remove', { space_id: space.id, thread_ids: ['wizard_parity'] })
     for (let i = 0; i < 2; i++) assert.equal((await tool('spaces_remove', { space_id: created.id, thread_ids: ['wizard_parity'] })).space.count, 0)
     const run = await admit(s, { input: 'Synthetic Space fill' })
     assert.ok(sent(s).instructions.includes(`"id":"${created.id}"`), 'run note includes own Space catalogue')
@@ -120,7 +225,7 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await tool('spaces_list')).spaces.find(x => x.id === created.id).count, 1, 'durable agent-scoped membership')
     await tool('spaces_delete', { space_id: created.id })
-    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [space, foreign])
+    assert.deepEqual((await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces, [{ ...space, threads: [] }, foreign])
     assert.equal((await put([])).status, 200)
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
@@ -140,16 +245,62 @@ export const serverChecks = {
     assert.ok(JSON.stringify(await history(s)).includes('WIZARD_FILE_CHIPS_V1'))
   },
   'assistant-media': async s => {
-    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nMEDIA:${s.media.text}` })
+    s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nImage explanation continues here.\nMEDIA:${s.media.text}` })
     const row = (await history(s)).find(m => m.id === 'media-reply')
     const items = envelope(row.content)
     assert.equal(items.length, 2, 'both image and document must be usable')
+    assert.equal(new Set(items.map(item => item.id)).size, 2, 'attachments are not duplicated')
+    const positioned = [...row.content.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)]
+    assert.equal(JSON.parse(positioned[0][1]).inline, true)
+    assert.ok(positioned[0].index < row.content.indexOf('Image explanation continues here.'), 'image keeps MEDIA line position on every runtime')
     assert.ok(!row.content.includes('unavailable')); assert.ok(!row.content.includes(s.agentHome)); assert.ok(!row.content.includes('/opt/data'))
     for (const [i, expected] of [png, Buffer.from('PARITY_SYNTHETIC_DOCUMENT\n')].entries()) {
       const r = await s.raw(`/wizard/attachments/${items[i].id}`)
       assert.equal(r.status, 200); assert.deepEqual(Buffer.from(await r.arrayBuffer()), expected)
     }
     s.mediaItems = items
+  },
+  'working-context': async s => {
+    // The wizard-work-progress pre_llm_call hook, run for this runtime's own Wizard session, injects the Working
+    // contract into the user turn. History on every kind shows only the human words (text and multimodal).
+    const plugin = new URL('../../hermes-plugin/wizard-work-progress/__init__.py', import.meta.url).pathname
+    const hook = (sid, parent = '') => execFileSync('python3', ['-c', "import json,runpy,sys; r=runpy.run_path(sys.argv[1])['turn_context'](session_id=sys.argv[2], platform='api_server', parent_session_id=sys.argv[3]); print(json.dumps(r))", plugin, sid, parent], { encoding: 'utf8' })
+    const injected = JSON.parse(hook('wizard_parity'))
+    assert.ok(injected?.context?.includes('Working progress contract'), 'the Wizard session receives the Working contract')
+    assert.equal(JSON.parse(hook('wizard_parity_child', 'wizard_parity')), null, 'delegated children do not')
+    const human = 'Synthetic: build the preview and verify playback.'
+    const image = { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }
+    const now = Date.now() / 1000, row = s.sessions.get('wizard_parity')
+    row.messages.push({ id: 'working-text', role: 'user', timestamp: now, content: `${human}\n\n${injected.context}` })
+    row.messages.push({ id: 'working-image', role: 'user', timestamp: now + 1, content: [{ type: 'text', text: human }, image, { type: 'text', text: injected.context }] })
+    const rows = await history(s)
+    const text = rows.find(m => m.id === 'working-text'), multi = rows.find(m => m.id === 'working-image')
+    assert.equal(text.content, human, 'text history shows the human words only')
+    assert.ok(!JSON.stringify(multi.content).includes('Working progress contract'), 'multimodal history hides the contract')
+    assert.ok(JSON.stringify(multi.content).includes(human))
+  },
+  'sent-media-snapshot': async s => {
+    // Run the real wizard-os media hook with this runtime's own home, then serve what it wrote through the Service.
+    const scratch = join(s.agentHome, 'cache/scratch/run'); mkdirSync(scratch, { recursive: true })
+    mkdirSync(join(s.agentHome, 'cache/images'), { recursive: true })
+    writeFileSync(join(scratch, 'screenshot.png'), png)
+    const visible = p => ['container', 'restricted'].includes(s.kind) ? p.replace(s.agentHome, '/opt/data') : p
+    const hook = `import importlib.util,sys\nspec=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nprint(m.transform_llm_output(response_text=sys.argv[2],platform='api_server'))`
+    const out = execFileSync('python3', ['-c', hook, join(pluginRoot, 'media.py'), `Synthetic screenshot\nMEDIA:${join(scratch, 'screenshot.png')}`],
+      { encoding: 'utf8', env: { ...process.env, HERMES_HOME: s.agentHome, WIZARD_FILES_ROOT: join(s.root, 'no-files') } }).trimEnd()
+    const line = out.split('\n').find(l => l.startsWith('MEDIA:'))
+    assert.ok(line && line.includes('/cache/images/wizard-sent/'), 'hook copies the scratch file into a shown folder')
+    s.sessions.get('wizard_parity').messages.push({ id: 'snapshot-reply', role: 'assistant', timestamp: Date.now() / 1000, content: visible(out) })
+    // History re-projects the stored reply on every open, so serve what a fresh open shows.
+    const served = async () => {
+      const [item] = envelope((await history(s)).find(m => m.id === 'snapshot-reply').content)
+      assert.ok(item, 'sent snapshot is attached on every runtime')
+      const r = await s.raw(`/wizard/attachments/${item.id}`); assert.equal(r.status, 200)
+      return Buffer.from(await r.arrayBuffer())
+    }
+    assert.deepEqual(await served(), png)
+    writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
+    assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
   },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)
@@ -159,6 +310,16 @@ export const serverChecks = {
     assert.equal(image.status, 200); assert.equal(image.headers.get('content-type'), 'image/png')
     assert.ok(image.headers.get('content-disposition').includes('download.png'))
     assert.deepEqual(Buffer.from(await image.arrayBuffer()), png)
+    // Browser cache (every runtime): attachments are immutable; owner files revalidate and an edit shows at once.
+    assert.equal(image.headers.get('cache-control'), 'private, no-cache')
+    const etag = image.headers.get('etag'); assert.ok(etag, 'owner file carries a validator')
+    assert.equal((await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })).status, 304)
+    const index = JSON.parse(readFileSync(join(s.root, 'media.json')))
+    const onDisk = join(s.root, 'files', index.files.find(f => f.id === file.id).rel), { mtime } = statSync(onDisk)
+    const edited = Buffer.from(png); edited[edited.length - 1] ^= 1; writeFileSync(onDisk, edited); utimesSync(onDisk, mtime, mtime)
+    const fresh = await s.raw(`/wizard/files/${file.id}/content`, { headers: { 'If-None-Match': etag } })
+    assert.equal(fresh.status, 200, 'same-size edit with preserved mtime is not served as 304'); assert.deepEqual(Buffer.from(await fresh.arrayBuffer()), edited)
+    for (const item of s.mediaItems) assert.equal((await s.raw(`/wizard/attachments/${item.id}`)).headers.get('cache-control'), 'private, max-age=31536000, immutable')
     const document = await s.raw(`/wizard/attachments/${s.mediaItems[1].id}`)
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))
@@ -196,6 +357,22 @@ export const serverChecks = {
     const tail=await (await s.request('/api/sessions?view=list&window=archive-50&fields=slim&limit=500&cursor='+page.archive_cursor)).json();
     assert.equal(tail.data.length,115); assert.equal(tail.archive_cursor,null); assert.equal(tail.build,page.build);
     if(s.kind!=='main') { const main=await (await s.raw('/wizard/hermes/api/sessions?view=list&window=archive-50&fields=slim')).json(); assert(!main.data.some(row=>row.id.startsWith('wizard_slim_')),'main index never unions a routed runtime'); }
+  },
+  'archive-age': async s => {
+    const now=Date.now()/1000;
+    for(let i=0;i<12;i++) s.sessions.set(`wizard_age_${i}`,{id:`wizard_age_${i}`,source:'wizard-mobile',title:`Aged ${i}`,created_at:now-20*86400-i,archived:i<4,hidden:false,messages:[{role:'user',content:'Aged preview',timestamp:now-20*86400-i}]});
+    if(s.kind==='main') await s.restart();
+    const list=async days=>{
+      const put=await s.raw('/wizard/v1/ui-preferences',{...post({archiveAfterDays:days}),method:'PUT'}); assert.equal(put.status,200);
+      const r=await s.request('/api/sessions?view=list&window=archive-50&limit=100'); assert.equal(r.status,200); const page=await r.json();
+      return {total:page.archive_total, listed:new Set(page.data.map(row=>row.id))};
+    };
+    const week=await list(7); assert.equal(week.total,12,'one week archives explicit and aged threads');
+    for(const days of [30,0]) {
+      const r=await list(days); assert.equal(r.total,4,`archiveAfterDays ${days} archives only explicit Done threads`);
+      for(let i=4;i<12;i++) assert(r.listed.has(`wizard_age_${i}`),`aged thread ${i} stays listed with archiveAfterDays ${days}`);
+    }
+    await list(7);
   },
   'session-body-search': async s => {
     const row=s.sessions.get('wizard_parity'),now=Date.now()/1000; row.hidden=false;
@@ -284,6 +461,83 @@ export const serverChecks = {
     assert.ok(!JSON.stringify(body).includes(s.root));assert.ok(!JSON.stringify(body).includes('parity-runtime-secret'))
     const target=s.seen.filter(x=>x.method==='POST'&&x.path.endsWith('/v1/runs')).at(-1)
     assert.equal(target.path,s.kind==='host-profile'?'/p/parity-profile/v1/runs':'/v1/runs')
+  },
+  'app-job-routing': async s => {
+    // A synthetic app with a job and a shipped skill, installed the App Manager way (apps.json + skill under the OS home).
+    const osHome = join(s.root, 'os'), skills = join(osHome, 'skills')
+    mkdirSync(join(skills, 'parity-video'), { recursive: true })
+    writeFileSync(join(skills, 'parity-video', 'SKILL.md'), '---\nname: parity-video\ndescription: Synthetic app workflow.\n---\nCall make_short.\n')
+    const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], skill: 'skills/parity-video/SKILL.md', mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const install = apps => writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    const kernel = async () => {
+      const r = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
+      assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+      return (await r.json()).result.instructions
+    }
+    const pointer = join(skills, 'wizard-job-short-form-video', 'SKILL.md')
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    if (s.kind !== 'main') {
+      // The install picker ticks this standard agent for the new app (#58): its own list, nothing else.
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = [...new Set([...(agent.permissions.wizard_apps || []), 'parity-video'])]
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    install([parityQa, app]); await s.restart()
+    const text = await kernel()
+    if (s.kind === 'main') {
+      assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
+      assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
+      assert.match(text, /wizard-job-<job> skill in your skills/u)
+    } else {
+      // No pointer skills outside the main agent's index: the gateway tells this agent its own jobs instead.
+      assert.doesNotMatch(text, /wizard-job-<job>/u)
+      assert.match(text, /- short-form video -> Synthetic Video \(`mcp__wizard__parity_video__\*`\)/u)
+    }
+    install([parityQa]); await s.restart()
+    const after = await kernel()
+    assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
+    assert.doesNotMatch(after, /Synthetic Video/u)
+  },
+  'agent-app-access': async s => {
+    // Connections → Agents (Miguel, 29 Oct 2026): the owner turns one app off for this agent. Its tools leave this
+    // agent's list and a call is refused in plain words at once, without a restart; on again, it is no longer refused.
+    const osHome = join(s.root, 'os')
+    const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps: [parityQa, app] }))
+    const setApps = apps => {
+      if (s.kind === 'main') return writeFileSync(join(osHome, 'agents', '.main-agent.json'), JSON.stringify({ schema: 1, wizard_apps: apps, agent_apps: [] }))
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = apps; agent.permissions.agent_apps = []
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    const call = async () => {
+      const r = await s.agentMcp('tools/call', { name: 'parity_video__make_short', arguments: {} })
+      assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+      return (await r.json()).result
+    }
+    setApps(['parity-qa', 'parity-video']); await s.restart()
+    assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'an app that is on is never refused')
+    setApps(['parity-qa'])
+    const refused = await call()
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0].text, /^.+ is not allowed to use Synthetic Video\. The owner can turn it on in Connections\.$/u)
+    const listed = await s.agentMcp('tools/list')
+    assert.ok(!(await listed.json()).result.tools.some(t => t.name.startsWith('parity_video__')), 'turned-off app leaves the tool list')
+    setApps(['parity-qa', 'parity-video'])
+    assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
+  },
+  'finished-run-leaves-working': async s => {
+    await finishedRunLeavesWorking(s)
+    if (s.kind !== 'main') return
+    // Main admits through the durable run queue too (this scene runs it direct): both leave at once.
+    // Fresh-mode box: no state.db and no Wizard Inbox, so only the queue revision can tell the cached
+    // listing that the queued run finished; the row must come from the finished listing.
+    const queued = await scene('main', { canonicalSessionListing: true, fixtureSessionStatus: true, hermesStatePath: '' })
+    try {
+      assert.equal((await queued.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile' }))).status, 201)
+      await finishedRunLeavesWorking(queued)
+    } finally { await queued.close() }
   },
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false

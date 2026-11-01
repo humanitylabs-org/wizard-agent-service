@@ -1,7 +1,8 @@
 # Headless Wizard Agent Service: the /wizard/... API, runs, approvals, voice and the one app gateway.
 # No shell assets: the Wizard shell (wizard-ux) is its own container and app.
+# git keeps the history of the owner's Pages (server/pages.mjs).
 FROM node:22-alpine
-RUN apk add --no-cache python3 tini && mkdir -p /app /state && chown 1000:1000 /state
+RUN apk add --no-cache python3 tini git && mkdir -p /app /state && chown 1000:1000 /state
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force

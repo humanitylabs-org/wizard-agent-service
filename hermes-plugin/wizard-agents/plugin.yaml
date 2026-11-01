@@ -1,0 +1,10 @@
+name: wizard-agents
+version: 0.1.0
+description: Read other standard Wizard agents' memory, skills and notes, read-only and on demand, via the Wizard Agent Service.
+provides_tools:
+  - wizard_agents_list
+  - wizard_agents_memory_read
+  - wizard_agents_skills_list
+  - wizard_agents_skill_read
+  - wizard_agents_notes_list
+  - wizard_agents_notes_read

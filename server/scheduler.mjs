@@ -203,7 +203,7 @@ function scheduleBaseInput(job) {
 }
 
 export class Scheduler {
-  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -220,6 +220,8 @@ export class Scheduler {
     for (const column of ['started_at', 'finished_at', 'outcome', 'report_lint', 'report_correction', 'report_correction_receipt', 'report_final_lint']) {
       if (!columns.has(column)) this.db.exec(`ALTER TABLE schedule_occurrences ADD COLUMN ${column} TEXT`)
     }
+    // Epoch ms, like `instant`: when the occurrence was admitted (notification rows age from here).
+    if (!columns.has('admitted_at')) this.db.exec('ALTER TABLE schedule_occurrences ADD COLUMN admitted_at INTEGER')
     this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
     this.lookup = lookup
     this.deliver = deliver
@@ -227,6 +229,7 @@ export class Scheduler {
     // { available(): boolean, send({ title, message, key, priority }) }: the notifications slot. Absent or
     // unavailable at claim time means a notification job falls back to its thread for that occurrence.
     this.notifier = notifier
+    this.agentId = agentId
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -267,9 +270,10 @@ export class Scheduler {
     this.refreshing = (async () => {
       // Only the last occurrence can be shown. Never use unrelated chat activity.
       // Every unfinished admitted occurrence (bounded to 6 h) so the trickle's in-flight count is true.
-      // A notification occurrence keeps being observed for 7 days, so a long run or a slot outage still sends it.
+      // A notification occurrence keeps being observed for 7 days from admission (not from its scheduled instant,
+      // so an overdue one-shot admitted late is still sent), covering a long run or a slot outage.
       const rows = this.db.prepare(`SELECT * FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL
-        AND (json_extract(data,'$.kind')='watch' OR instant > ? OR (json_extract(data,'$.deliver')='notification' AND instant > ?))`).all(this.now() - 6 * 3600_000, this.now() - 7 * 86400_000)
+        AND (json_extract(data,'$.kind')='watch' OR instant > ? OR (json_extract(data,'$.deliver')='notification' AND coalesce(admitted_at, instant) > ?))`).all(this.now() - 6 * 3600_000, this.now() - 7 * 86400_000)
       await Promise.all(rows.map(async row => {
         const receipt = JSON.parse(row.receipt || '{}')
         if (!receipt.run_id) return
@@ -294,7 +298,7 @@ export class Scheduler {
             if (note) {
               try {
                 if (!this.notifier) throw new Error('no notifier')
-                await this.notifier.send({ ...note, key: row.key })
+                await this.notifier.send({ ...note, key: row.key, agent: this.agentId(occurrence.agent) })
                 outcome = 'notified'
               } catch {
                 // Stay unfinished so the next refresh retries (notification rows are observed for 7 days).
@@ -492,7 +496,7 @@ export class Scheduler {
     // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
     let deliver = 'thread'
     if (job.deliver === 'notification' && job.kind !== 'return') {
-      try { if (this.notifier?.available()) deliver = 'notification' } catch { /* fall back to the thread */ }
+      try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
@@ -575,7 +579,7 @@ export class Scheduler {
           // A return has no run to watch: delivery is the whole outcome.
           const at = iso(this.now())
           this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='returned', started_at=?, finished_at=? WHERE key=?").run(JSON.stringify(receipt ?? {}), at, at, row.key)
-        } else this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='running', finished_at=NULL WHERE key=?").run(JSON.stringify(receipt ?? {}), row.key)
+        } else this.db.prepare("UPDATE schedule_occurrences SET admitted=1, receipt=?, error=NULL, outcome='running', finished_at=NULL, admitted_at=coalesce(admitted_at, ?) WHERE key=?").run(JSON.stringify(receipt ?? {}), this.now(), row.key)
       } catch (error) {
         // No arbitrary exception/body strings in state/API responses (they may contain credentials).
         this.db.prepare("UPDATE schedule_occurrences SET error=?, outcome='failed' WHERE key=?").run('Admission failed; will retry', row.key)
@@ -664,28 +668,31 @@ function hermesImportConfig(home) {
 
 const shellQuote = value => `'${value.replace(/'/g, `'"'"'`)}'`
 const expandHome = value => value.startsWith('~/') ? join(homedir(), value.slice(2)) : value
-function hermesScriptPrelude(row, home, config) {
-  if (!row.script) return ''
-  const script = row.script
+// Shared by agent prelude migration and host-only job migration. Resolve missing
+// execution-host files through existing parents without losing the symlink boundary.
+function canonicalImportPath(path) {
+  const absolute = resolve(path)
+  if (existsSync(absolute)) return realpathSync(absolute)
+  const parent = dirname(absolute)
+  return parent === absolute ? absolute : join(canonicalImportPath(parent), basename(absolute))
+}
+export function resolveHermesScript(script, home) {
   if (typeof script !== 'string' || !script.trim() || script.length > 4096 || script.includes('\0')) throw fail('invalid script')
-  // Match Hermes' scripts-directory boundary, including existing symlink targets.
-  // Missing files may be on the execution host: importing never executes them.
-  const canonical = path => {
-    const absolute = resolve(path)
-    if (existsSync(absolute)) return realpathSync(absolute)
-    const parent = dirname(absolute)
-    return parent === absolute ? absolute : join(canonical(parent), basename(absolute))
-  }
-  const scripts = canonical(join(home, 'scripts'))
-  const path = canonical(resolve(scripts, expandHome(script)))
+  const scripts = canonicalImportPath(join(home, 'scripts'))
+  const path = canonicalImportPath(resolve(scripts, expandHome(script)))
   const within = relative(scripts, path)
   if (!within || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) throw fail('invalid script')
+  return path
+}
+function hermesScriptPrelude(row, home, config) {
+  if (!row.script) return ''
+  const path = resolveHermesScript(row.script, home)
   const shell = ['.sh', '.bash'].includes(extname(path).toLowerCase())
   let interpreter = shell ? 'bash' : 'python3'
   if (!shell && row.interpreter) {
     const python = expandHome(text(row.interpreter, 4096, 'interpreter'))
     const pythonName = /^python(?:[0-9]+(?:\.[0-9]+)*)?(?:\.exe)?$/i
-    if (!isAbsolute(python) || !pythonName.test(basename(python)) || !pythonName.test(basename(canonical(python)))) throw fail('invalid interpreter')
+    if (!isAbsolute(python) || !pythonName.test(basename(python)) || !pythonName.test(basename(canonicalImportPath(python)))) throw fail('invalid interpreter')
     interpreter = shellQuote(python)
   }
   const workdir = typeof row.workdir === 'string' && isAbsolute(row.workdir) && existsSync(row.workdir) && statSync(row.workdir).isDirectory() ? row.workdir : dirname(path)

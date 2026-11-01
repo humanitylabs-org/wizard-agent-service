@@ -17,7 +17,27 @@ const validSpace = s => !!s && typeof s === 'object' && !Array.isArray(s)
   && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(s.name)
   && Array.isArray(s.threads) && s.threads.length <= 500 && s.threads.every(id => typeof id === 'string' && THREAD_ID.test(id)) && new Set(s.threads).size === s.threads.length
   && typeof s.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(s.createdAt) && realDate(s.createdAt)
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}(?![\s\S])/u
+const MARKER = /^[a-z0-9][a-z0-9._-]{0,79}(?![\s\S])/u
+const text = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\u0000-\u001f\u007f]/u.test(v)
+const ids = v => Array.isArray(v) && v.length <= 100 && v.every(id => typeof id === 'string' && APP_ID.test(id)) && new Set(v).size === v.length
+const iso = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z(?![\s\S])/u.test(v) && realDate(v)
+const nativeLink = a => isPlainObject(a) && Object.keys(a).every(k => ['id', 'name', 'icon', 'colors', 'href', 'phoneOnly', 'desc'].includes(k))
+  && typeof a.id === 'string' && APP_ID.test(a.id) && text(a.name, 80) && text(a.icon, 160) && text(a.href, 2048)
+  && /^(?:https?:\/\/[^\s]+|tel:[+0-9*#;,]*|sms:[+0-9;,]*|intent:(?:\/\/)?#Intent;[^\s]*;end)$/.test(a.href)
+  && (!Object.hasOwn(a, 'desc') || text(a.desc, 240))
+  && (!Object.hasOwn(a, 'phoneOnly') || typeof a.phoneOnly === 'boolean')
+  && (!Object.hasOwn(a, 'colors') || (Array.isArray(a.colors) && a.colors.length >= 1 && a.colors.length <= 2 && a.colors.every(c => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?(?![\s\S])/iu.test(c))))
+const launcherValidators = {
+  nativeLinks: v => Array.isArray(v) && v.length <= 50 && v.every(nativeLink) && new Set(v.map(a => a.id)).size === v.length,
+  recents: ids, desktopQuick: ids, autoOpen: ids, hostedThreadApps: ids,
+  displayNames: v => isPlainObject(v) && Object.keys(v).length <= 100 && Object.entries(v).every(([k, name]) => APP_ID.test(k) && text(name, 80)),
+}
+const validLauncher = v => isPlainObject(v) && Object.entries(v).every(([k, value]) => Object.hasOwn(launcherValidators, k) && launcherValidators[k](value))
+const validMigrations = v => isPlainObject(v) && Object.keys(v).length <= 100 && Object.entries(v).every(([k, value]) => MARKER.test(k) && iso(value))
 const validators = {
+  launcher: validLauncher,
+  migrations: validMigrations,
   spaces: v => Array.isArray(v) && v.length <= 50 && v.every(validSpace) && new Set(v.map(s => s.id)).size === v.length,
   archiveAfterDays: v => Number.isInteger(v) && [0, 1, 3, 7, 14, 30].includes(v),
   compact: v => typeof v === 'boolean',
@@ -66,9 +86,123 @@ export function readUiPreferences(path) {
 export function updateUiPreferences(path, patch) {
   validateUiPreferences(patch)
   const stored = readStored(path) || {}
-  let next = { ...stored, ...patch }
+  // Full writes (an older shell's PUT snapshot) are held to the one-Space rule too.
+  if (Object.hasOwn(patch, 'spaces')) patch = { ...patch, spaces: oneSpaceEach(patch.spaces, sanitizeUiPreferences(stored).spaces) }
+  return writePreferences(path, stored, { ...stored, ...patch }, patch)
+}
+
+// Item operations on shared lists. PUT replaces a whole list, so a device that had not pulled yet erased
+// another device's (or an agent's) change; an operation names only the item it changes and is applied to
+// the stored list inside the same synchronous read/merge/atomic rename as PUT. Every operation is idempotent.
+//   {op:'add'|'remove', key:'pinnedChats'|'subjectOrder', item:<string>}  add appends when absent
+//   {op:'front', key:'subjectOrder', items:[...]}  these first in this order, every other stored one after
+//   {op:'add', key:'spaces', item:{id,name,threads,createdAt,agent?}}  no-op when that id exists
+//   {op:'remove', key:'spaces', item:<space id>}
+//   {op:'add'|'remove', key:'spaces/<id>/threads', item:<thread id>}  no-op when the Space is gone
+// A thread belongs to at most one Space of its agent (James, 29 Oct 2026: "A message should only be in one space").
+// Adding it to a Space (or creating a Space with it) moves it there: the same write drops it from that agent's
+// other Spaces, so no device, agent tool or old client can leave it in two.
+//   {op:'set', key:'spaces/<id>/name', item:<name>}
+const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
+// Operands are checked even when they change nothing (removing an absent item), so malformed ops are always a 400.
+const SUBJECT = v => typeof v === 'string' && v.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(v)
+const listItem = { pinnedChats: v => typeof v === 'string' && THREAD_ID.test(v), subjectOrder: SUBJECT }
+const badOps = () => { throw Object.assign(new Error('invalid_preferences'), { status: 400 }) }
+const ownerOf = s => s.agent || 'hermes'
+// The one-Space rule, shared by every writer: `target` keeps (or gains) these threads, the agent's other Spaces lose them.
+export function fileInOneSpace(spaces, target, threads) {
+  const agent = ownerOf(target), moving = new Set(threads)
+  return spaces.map(s => s.id === target.id ? { ...s, threads: [...new Set([...s.threads, ...threads])] }
+    : ownerOf(s) === agent && s.threads.some(t => moving.has(t)) ? { ...s, threads: s.threads.filter(t => !moving.has(t)) } : s)
+}
+// Full snapshots may carry unresolved legacy duplicates. Preserve those memberships (including
+// explicit removals), rather than choosing a keeper by array order. One newly joined Space is an
+// old add-only client's move; several new targets are ambiguous and reject the whole write.
+export function oneSpaceEach(spaces, before = []) {
+  const memberships = list => {
+    const groups = new Map()
+    for (const s of list) for (const t of s.threads) {
+      const key = `${ownerOf(s)}\n${t}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push({ space: s, thread: t })
+    }
+    return groups
+  }
+  const had = memberships(before), moves = []
+  for (const [key, group] of memberships(spaces)) {
+    if (group.length < 2) continue
+    const old = new Set((had.get(key) || []).map(m => m.space.id))
+    const fresh = group.filter(m => !old.has(m.space.id))
+    if (fresh.length > 1) badOps()
+    if (fresh.length === 1) moves.push(fresh[0])
+  }
+  return moves.reduce((next, { space, thread }) => fileInOneSpace(next, space, [thread]), spaces)
+}
+export function applyUiPreferenceOps(prefs, ops) {
+  if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()
+  const next = { ...prefs }
+  for (const o of ops) {
+    if (!isPlainObject(o) || Object.keys(o).some(k => !['op', 'key', 'item', 'items'].includes(k)) || typeof o.key !== 'string') badOps()
+    const { op, key, item } = o
+    const sub = SPACE_KEY.exec(key)
+    if (key === 'pinnedChats' || key === 'subjectOrder') {
+      const list = next[key].slice(), str = listItem[key](item)
+      if (op === 'front' && key === 'subjectOrder' && Array.isArray(o.items) && o.items.length <= 60 && o.items.every(SUBJECT)) {
+        const first = [...new Set(o.items)]
+        next[key] = first.concat(list.filter(s => !first.includes(s))).slice(0, 60)
+      } else if ((op === 'add' || op === 'remove') && str) next[key] = op === 'add' ? (list.includes(item) ? list : list.concat(item)) : list.filter(s => s !== item)
+      else badOps()
+    } else if (key === 'spaces') {
+      if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = fileInOneSpace(next.spaces.concat(item), item, item.threads) }
+      else if (op === 'remove' && typeof item === 'string' && SPACE_ID.test(item)) next.spaces = next.spaces.filter(s => s.id !== item)
+      else badOps()
+    } else if (sub) {
+      const [, id, field] = sub
+      // Checked here too: a Space deleted meanwhile makes the operation a no-op, never a way past validation.
+      if (field === 'threads' ? !((op === 'add' || op === 'remove') && typeof item === 'string' && THREAD_ID.test(item)) : !(op === 'set' && text(item, 60))) badOps()
+      const target = next.spaces.find(s => s.id === id)
+      if (!target) continue
+      next.spaces = field === 'threads' && op === 'add' ? fileInOneSpace(next.spaces, target, [item])
+        : next.spaces.map(s => s.id !== id ? s : field === 'name' ? { ...s, name: item } : { ...s, threads: s.threads.filter(t => t !== item) })
+    } else badOps()
+  }
+  return next
+}
+
+// PATCH {ops:[…]}: no await between read, apply and atomic rename, so it shares PUT's critical section.
+// Only the keys the operations touch are written; the result is validated exactly like a PUT of them.
+export function patchUiPreferences(path, body) {
+  if (!isPlainObject(body) || Object.keys(body).some(k => k !== 'ops')) badOps()
+  const stored = readStored(path) || {}
+  const current = sanitizeUiPreferences(stored), next = applyUiPreferenceOps(current, body.ops)
+  const patch = Object.fromEntries([...new Set(body.ops.map(o => SPACE_KEY.test(o.key) ? 'spaces' : o.key))].map(k => [k, next[k]]))
+  validateUiPreferences(patch)
+  return writePreferences(path, stored, { ...stored, ...patch }, patch)
+}
+
+// No await between read/check/write: shares PUT's process-local synchronous critical section.
+// A marker and every missing launcher key are committed by the very same atomic rename.
+export function seedUiPreferences(path, body) {
+  if (!isPlainObject(body) || Object.keys(body).some(k => !['marker', 'launcher'].includes(k))
+    || typeof body.marker !== 'string' || !MARKER.test(body.marker) || !validLauncher(body.launcher))
+    throw Object.assign(new Error('invalid_preferences'), { status: 400 })
+  const stored = readStored(path)
+  // Never turn a corrupt owner's file into migration defaults.
+  if (!stored && existsSync(path)) throw new Error('preferences_unavailable')
+  const raw = stored || {}
+  if (isPlainObject(raw.migrations) && Object.hasOwn(raw.migrations, body.marker))
+    return { seeded: false, preferences: sanitizeUiPreferences(raw) }
+  if ((Object.hasOwn(raw, 'launcher') && !validLauncher(raw.launcher))
+    || (Object.hasOwn(raw, 'migrations') && !validMigrations(raw.migrations))) throw new Error('preferences_unavailable')
+  const next = { ...raw, launcher: { ...body.launcher, ...raw.launcher },
+    migrations: { ...raw.migrations, [body.marker]: new Date().toISOString() } }
+  validateUiPreferences({ launcher: next.launcher, migrations: next.migrations })
+  return { seeded: true, preferences: writePreferences(path, raw, next) }
+}
+
+function writePreferences(path, stored, next, patch = null) {
   let text = JSON.stringify(next) + '\n'
-  if (Buffer.byteLength(text) > UI_PREFERENCES_MAX_BYTES) { next = { ...sanitizeUiPreferences(stored), ...patch }; text = JSON.stringify(next) + '\n' }
+  if (patch && Buffer.byteLength(text) > UI_PREFERENCES_MAX_BYTES) { next = { ...sanitizeUiPreferences(stored), ...patch }; text = JSON.stringify(next) + '\n' }
   if (Buffer.byteLength(text) > UI_PREFERENCES_MAX_BYTES) throw Object.assign(new Error('invalid_preferences'), { status: 400 })
   mkdirSync(dirname(path), { recursive: true })
   const temp = `${path}.${randomUUID()}.tmp`

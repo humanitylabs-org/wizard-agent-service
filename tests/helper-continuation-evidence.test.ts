@@ -1,14 +1,41 @@
 import { test } from 'vitest'
 import assert from 'node:assert/strict'
 import { fixture, withServer, sid } from './fixtures/helper-backend.mjs'
-import { captureContinuation, continuationCurrent } from '../server/helper-continuation.mjs'
+import { captureContinuation, continuationCurrent, requestWatermark, helperAnswerAfter } from '../server/helper-continuation.mjs'
 import { findPendingFollowThroughs, startDelegationFollowThrough } from '../server/delegation-follow-through.mjs'
-import { RECEIPT_PREFIX, receiptConsumed, findIdleUndeliveredHelperReceipts } from '../server/delegation-receipts.mjs'
+import { RECEIPT_PREFIX, receiptConsumed, findIdleUndeliveredHelperReceipts, currentOwnerResult, ownerMovedOn } from '../server/delegation-receipts.mjs'
 import { readHelperStatuses } from '../server/helper-status.mjs'
 const final = state => `Verified outcome\n[WIZARD_STATUS_V1]{"state":"${state}","ask":"Verified result"}[/WIZARD_STATUS_V1]`
 const status = path => readHelperStatuses(path,[sid]).get(sid)
 const complete = ({message,sec}) => message('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_review]\nSaved sanitized findings',sec-250)
 const capture = path => captureContinuation(path,findPendingFollowThroughs(path)[0])
+
+test('rewound helper answer never consumes the pending completion',()=>fixture(({db,sec,message}: any)=>{
+ const id = 'deleg_review'
+ db.exec('ALTER TABLE messages ADD COLUMN compacted INT DEFAULT 0')
+ message('user',`[ASYNC DELEGATION BATCH COMPLETE — ${id}] builder result`,sec-40,'async_delegation_complete')
+ const answer=message('assistant',final('done'),sec-30)
+ db.prepare('UPDATE messages SET active=0 WHERE id=?').run(answer.lastInsertRowid)
+ assert.equal(helperAnswerAfter(db,sid,sec-50,id),false)
+ db.prepare('UPDATE messages SET compacted=1 WHERE id=?').run(answer.lastInsertRowid)
+ assert.equal(helperAnswerAfter(db,sid,sec-50,id),true)
+}))
+
+test('rewound request and outcome never replace retained owner authority',()=>fixture(({db,sec,message}: any)=>{
+ db.exec('ALTER TABLE messages ADD COLUMN compacted INT DEFAULT 0')
+ const current = requestWatermark(db,sid)
+ const answer=message('assistant',final('needs_you'),sec-100)
+ const deleted=message('user','Deleted newer request',sec-50)
+ db.prepare('UPDATE messages SET active=0 WHERE id=?').run(deleted.lastInsertRowid)
+ assert.deepEqual(requestWatermark(db,sid),current)
+ assert.equal(currentOwnerResult(db,sid),'needs_you')
+ assert.equal(ownerMovedOn(db,sid,sec-100),false)
+ db.prepare('UPDATE messages SET active=0 WHERE id=?').run(answer.lastInsertRowid)
+ assert.equal(currentOwnerResult(db,sid),null)
+ db.prepare('UPDATE messages SET compacted=1 WHERE id=?').run(deleted.lastInsertRowid)
+ assert.equal(requestWatermark(db,sid)!.id,Number(deleted.lastInsertRowid))
+ assert.equal(ownerMovedOn(db,sid,sec-100),true)
+}))
 
 // Only a service witness captured before cleanup retains the original boundary.
 for(const removeBeforeCapture of [true,false]) test(`receipt cleanup preserves captured authority only (before=${removeBeforeCapture})`,()=>fixture(async(ctx)=>{
@@ -67,6 +94,22 @@ for(const mutation of ['content','timestamp','active-original','missing-lineage'
  if(mutation==='different-uid')db.exec("UPDATE messages SET message_uid='new-request' WHERE id=2")
  assert.equal(continuationCurrent(path,token),false)
 }))
+test('typed completion plus matching tool dispatch admits a machine follow-through after ledger cleanup',()=>fixture(async(ctx: any)=>{
+ const {db,path,message,sec}=ctx
+ message('tool',JSON.stringify({status:'dispatched',mode:'background',delegation_id:'deleg_review',count:1}),sec-1800)
+ const row=complete(ctx)
+ db.prepare("UPDATE messages SET display_kind='async_delegation_complete' WHERE id=?").run(row.lastInsertRowid)
+ db.exec('DELETE FROM async_delegations')
+ const token=capture(path)
+ assert.equal(continuationCurrent(path,token),true)
+ await withServer(path,async(server: any)=>{
+  await new Promise(resolve=>setTimeout(resolve,5200)) // normal five-second watcher tick, not manual Continue
+  assert.equal(server.launches,1)
+  assert.equal(server.bodies[0].headers['idempotency-key'],'wizard-helper-receipt-deleg_review')
+  assert.match(server.bodies[0].body.input,/^\[Wizard follow-through\] Recovered helper receipt deleg_review/u)
+ },{followThrough:true,joinedDelegation:'off'})
+}),10000)
+
 // System-alerts shape: recovered result -> reviewed done -> unrelated automated FYI.
 test('integrated recovered findings stay resolved after a later FYI',()=>fixture(({path,sec,message})=>{
  message('user',RECEIPT_PREFIX+'deleg_review\nSaved review findings',sec-250)

@@ -3,9 +3,9 @@ import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
-import { readSettings, wizardOsHome } from './wizard-os-settings.mjs'
-import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
+import { existsSync, readFileSync } from 'node:fs'
 
 const secretFile = (path) => {
   if (!path) return ''
@@ -66,6 +66,13 @@ const router = process.env.WIZARD_ROUTER_URL && process.env.WIZARD_ROUTER_MODEL 
   url: process.env.WIZARD_ROUTER_URL, model: process.env.WIZARD_ROUTER_MODEL, key: process.env.WIZARD_ROUTER_KEY || '',
 } : null
 const settingsPath = process.env.WIZARD_SETTINGS_PATH || resolve(osHome, 'settings.json')
+// Detect previous Wizard use before createWizardServer creates any stores. A stock Hermes
+// may already exist on a genuinely new Wizard install; its private history is never read.
+initializeResponseStyle(settingsPath, { existingInstall: [
+  settingsPath,
+  process.env.WIZARD_RUN_QUEUE_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/run-queue.sqlite3'),
+  process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state/wizard-mobile/thread-seen.json'),
+].some(path => existsSync(path)) })
 // The Serve listener: Tailscale Serve (https://<box>.<tailnet>.ts.net/) forwards here, and only here. Every
 // request on it is verified as the owner's tailnet identity, whatever WIZARD_AUTH_MODE says about the
 // box-local listener above. Unset: no tailnet listener (computer-only use).
@@ -124,7 +131,14 @@ server = createWizardServer({
   supervisorStatePath: process.env.WIZARD_SUPERVISOR_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'supervisor.sqlite3'),
   schedulerHermesHome: process.env.HERMES_HOME || '',
   schedulerEnabled: process.env.WIZARD_SCHEDULER === '1',
+  // Host-only, opt-in: never infer host authority from an agent's Hermes home.
+  systemJobsStatePath: process.env.WIZARD_SYSTEM_JOBS_STATE_PATH || '',
+  systemJobsHermesHome: process.env.WIZARD_SYSTEM_JOBS_IMPORT_HOME || '',
+  systemJobsSocketPath: process.env.WIZARD_SYSTEM_JOBS_SOCKET || '',
+  systemJobsUnitDir: process.env.WIZARD_SYSTEM_JOBS_UNIT_DIR || '',
+  systemJobsEnabled: process.env.WIZARD_SYSTEM_JOBS === '1',
   schedulerTimezone: process.env.WIZARD_SCHEDULER_TIMEZONE || undefined,
+  providerAccessRecovery: process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
   runQueueMaxActive: Number(process.env.WIZARD_MAX_ACTIVE_THREADS || 8),
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
@@ -140,12 +154,14 @@ server = createWizardServer({
   accessVerifier,
   ...(tailnetVerifier ? { tailnetVerifier } : {}),
   tailnetShellOrigin: process.env.WIZARD_TAILNET_SHELL_ORIGIN || '',
+  diagnosticsOrigin: process.env.WIZARD_DIAGNOSTICS_ORIGIN || '',
   privateAccessSocket: process.env.WIZARD_PRIVATE_ACCESS_SOCKET || '',
   tailnetAccessPinned: Boolean(tailnetVerifier?.pinned),
   operatorWorkerModel: 'glm-5-3',
   joinedDelegation,
   settingsPath,
   appsJsonPath: process.env.WIZARD_APPS_JSON_PATH || resolve(osHome, 'apps.json'),
+  phoneFeedDir: process.env.WIZARD_PHONE_FEED_DIR || resolve(process.env.WIZARD_APPS_JSON_PATH ? dirname(process.env.WIZARD_APPS_JSON_PATH) : osHome, 'phone'),
   launcherPath: process.env.WIZARD_LAUNCHER_PATH || resolve(osHome, 'launcher.json'),
   subjectsPath: process.env.WIZARD_SUBJECTS_PATH || resolve(osHome, 'subjects.json'),
   uxDir: process.env.WIZARD_UX_DIR || '',
@@ -180,6 +196,7 @@ server = createWizardServer({
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
+  devicesStatePath: process.env.WIZARD_DEVICES_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'devices.json'),
   // My skin: <Files root>/Skins/My skin/skin.css (legacy My skin.css still works), using the user-files
   // root, else media root. WIZARD_MY_SKIN_PATH names another file; WIZARD_MY_SKIN=off turns the layer off.
   skinsStateDir: process.env.WIZARD_SKINS_STATE_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'skins'),
@@ -190,6 +207,11 @@ server = createWizardServer({
   },
   mySkinPath: process.env.WIZARD_MY_SKIN_PATH || '',
   ...(process.env.WIZARD_MY_SKIN === 'off' ? { mySkin: false } : {}),
+  // Pages (spec/PAGES.md): <Files root>/Pages/ served at /pages/, history in <state>/pages-history.git.
+  // WIZARD_PAGES_ROOT / WIZARD_PAGES_GIT_DIR override the two paths; WIZARD_PAGES=off turns Pages off.
+  ...(process.env.WIZARD_PAGES_ROOT ? { pagesRoot: process.env.WIZARD_PAGES_ROOT } : {}),
+  ...(process.env.WIZARD_PAGES_GIT_DIR ? { pagesGitDir: process.env.WIZARD_PAGES_GIT_DIR } : {}),
+  ...(process.env.WIZARD_PAGES === 'off' ? { pages: false } : {}),
   appsMcpAddress: process.env.WIZARD_APPS_MCP_ADDRESS || 'url',
   // How /wizard/ai-usage reaches AI connection apps: 'local' (loopback; alongside boxes run the
   // service with host networking) or 'internal' (app hostnames on the container network).
@@ -206,6 +228,10 @@ server = createWizardServer({
   // A second Agent Service on the same Hermes (a staging copy beside the daily driver) sets this to 'off',
   // so only one service ever starts automatic follow-through turns on the shared threads.
   followThrough: process.env.WIZARD_FOLLOW_THROUGH !== 'off',
+  // Automatic owned-open-work nudges started extra replies in threads whose work was already running
+  // elsewhere (owner, 27 Oct 2026: "multiple replies in many threads instead of just one good reply").
+  // Off unless explicitly enabled; the prompt rule alone carries the contract.
+  ownedOpenWork: process.env.WIZARD_OWNED_OPEN_WORK === 'on',
   // Agents (spec/AGENTS.md): folders under <WIZARD_OS_HOME>/agents; containers via the host agent-runtime helper.
   ...(process.env.WIZARD_AGENTS === 'off' ? { agents: false } : {}),
   ...(process.env.WIZARD_AGENTS_DIR ? { agentsDir: process.env.WIZARD_AGENTS_DIR } : {}),

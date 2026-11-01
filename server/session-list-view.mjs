@@ -36,7 +36,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
   function reconnectRow(v) {
     const app = v && typeof v === 'object' && v.kind === 'provider_signed_out' ? RECONNECT[v.provider] : null;
     if (!app || v.app_id !== app[0]) return null;
-    return { provider: v.provider, appId: app[0], name: app[1], installed: v.installed !== false,
+    return { provider: v.provider, appId: app[0], name: app[1], runId: String(v.run_id || ''), installed: v.installed !== false,
       appStatus: ['connected', 'signed_out', 'expired'].includes(v.app_status) ? v.app_status : 'unknown' };
   }
   const ATTN = new Set(['needs_you', 'check', 'done', 'fyi']);
@@ -62,7 +62,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     const working = WORKING.has(status) || status === 'waiting_for_approval';
     const latestText = clean(text(latest?.content ?? latest?.text));
     const userText = clean(text(lastUser?.content ?? lastUser?.text) || text(item.wizard_request_preview));
-    const preview = working ? (userText || latestText) : (latestText || userText || clean(text(item.preview)));
+    const preview = working ? (item.wizard_helper_status ? (latestText || clean(text(item.preview)) || userText) : (userText || latestText)) : (latestText || userText || clean(text(item.preview)));
     const latestAt = optIso(latest?.timestamp ?? latest?.created_at);
     const userAt = optIso(lastUser?.timestamp ?? lastUser?.created_at);
     return {
@@ -70,6 +70,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       title: String(item.title || item.name || 'Untitled chat'),
       source: item.source || '',
       status,
+      queueReason: item.queue_reason === 'provider_access' ? 'provider_access' : '',
       safeError: typeof item.wizard_safe_error === 'string' ? item.wizard_safe_error : '',
       // Provider sign-in expired: the connection app that fixes it (provider-reconnect.mjs).
       reconnect: reconnectRow(item.wizard_reconnect),
@@ -89,6 +90,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       critical: (item.wizard_attention_level || item.attention_level) === 'critical',
       waitingOn: item.wizard_waiting_on === 'helper' ? 'helper' : '',
       helperStatus: item.wizard_helper_status && typeof item.wizard_helper_status === 'object' ? item.wizard_helper_status : null,
+      background: ['helper', 'heavy'].includes(item.wizard_background) ? item.wizard_background : '',
       // What the finished thread asks of James (the agent's hidden status line): needs_you / check / done / fyi.
       attention: attentionOf(item.wizard_attention),
       // A durable quiet one-shot checker bound to this thread. The prompt never reaches the list.
@@ -110,7 +112,7 @@ export function listRow(item, q = '') {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','attention','followUp']) if (!row[key]) delete row[key];
+  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','background','attention','followUp']) if (!row[key]) delete row[key];
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;

@@ -44,7 +44,7 @@ def call(action, args, session_id=None, **kwargs):
             data=json.dumps(value).encode(), method='POST', headers={
                 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
         # A slow/offline remote worker never extends this request: submission is local.
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(request, timeout=15) as response:
             return response.read(131072).decode()
     except urllib.error.HTTPError as error:
         return json.dumps({'error': 'heavy admission refused', 'status': error.code})

@@ -14,22 +14,23 @@ const req = { headers: { authorization: `Bearer ${token}` } }
 const spec = { cwd: heavyRoot, argv: ['uname', '-a'], timeout_seconds: 10, lane: 'light' }
 const path = '/wizard/internal/heavy/submit'
 
-async function fixture() {
+async function fixture(providerAccessRecovery = false) {
   const root = mkdtempSync(join(tmpdir(), 'heavy-followup-'))
   let integration: any
   const statuses = new Map<string, string>()
+  const workerStates = new Map<string, string>()
   const history = [{ id: 1, role: 'user', content: 'Check the authorized build' }]
   let duringHistory = async () => {}, duringRuntime = async () => {}
   let runs: any
   const open = () => {
-    runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0,
+    runs = new DurableRunQueue({ statePath: join(root, 'runs.db'), pollIntervalMs: 0, providerAccessRecovery,
       launch: async (r: any) => {
         if (r.continuation?.kind === 'external-heavy') await integration.validate(r)
         statuses.set(r.publicRunId, 'running')
         return { upstreamRunId: r.publicRunId, payload: { status: 'running' } }
       }, lookup: async (r: any) => ({ payload: { status: statuses.get(r.publicRunId) || 'running' } }) })
     integration = createHeavyIntegration({ options: { heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
-      heavyTransport: async (p: any) => ({ job_id: p.job_id, state: 'completed', receipt: { exit_code: 0 } }) },
+      heavyTransport: async (p: any) => ({ job_id: p.job_id, state: workerStates.get(p.job_id) || 'completed', receipt: { exit_code: workerStates.get(p.job_id) === 'failed' ? 1 : 0 } }) },
       queue: runs, request: async (p: string) => {
         if (p.startsWith('/v1/runs/')) { await duringRuntime(); return { runtime: { model: 'original', provider: 'original-provider' } } }
         await duringHistory(); return { data: history }
@@ -54,10 +55,86 @@ async function fixture() {
   const finish = async (id: string) => { statuses.set(id, 'completed'); await runs.tick(true) }
   const origin = await admit('human')
   return { get runs() { return runs }, get integration() { return integration }, submit, finish, admit, origin, history,
+    workerStates,
     restart: async () => { await integration.close(); runs.close(); open() },
     setHistoryHook: (fn: () => Promise<void>) => { duringHistory = fn },
     setRuntimeHook: (fn: () => Promise<void>) => { duringRuntime = fn } }
 }
+
+it('A heavy build-completion delivery resumes after a sign-in outage without losing its original authority', async () => {
+  const f = await fixture(true)
+  const job = await f.submit('build-completion')
+  await f.finish(f.origin.publicRunId); await f.integration.queue.tick()
+  const source = f.runs.get(f.integration.queue.get(job.job_id).resume)
+  const failed = f.runs._update(source.publicRunId, { status: 'failed', payload: { status: 'failed', error: { type: 'provider_preflight_failed' } } })
+  f.runs._waitForProvider(failed)
+  const health = await f.admit('health-confirmation', null, 'health-thread')
+  await f.finish(health.publicRunId); await f.runs.tick(true)
+  const retry = f.runs.byIdempotencyKey('direct', `wizard-saved-retry-${source.publicRunId}`)
+  expect(retry.status).toBe('running')
+  expect(retry.body).toBe(source.body)
+  expect(retry.continuation).toEqual(source.continuation)
+  await f.integration.validate(retry)
+  await expect(f.integration.validate({ ...retry, body: JSON.stringify({ session_id: 's', input: 'tampered' }) })).rejects.toMatchObject({ status: 410 })
+  f.integration.stopSession('s')
+  await expect(f.integration.validate(retry)).rejects.toMatchObject({ status: 410 })
+})
+
+it.each([false, true])('two heavy jobs from one turn both report back; restart=%s', async restart => {
+  const f = await fixture()
+  const first = await f.submit('first'), second = await f.submit('second')
+  f.workerStates.set(first.job_id, 'failed'); f.workerStates.set(second.job_id, 'running')
+  await f.finish(f.origin.publicRunId); await f.integration.queue.tick()
+  const one = f.integration.queue.get(first.job_id)
+  expect(f.runs.get(one.resume).status).toBe('running')
+  f.history.push({ id: 2, role: 'user', content: JSON.parse(f.runs.get(one.resume).body).input })
+  if (restart) await f.restart()
+  f.workerStates.set(second.job_id, 'failed')
+  await f.integration.queue.tick()
+  const two = f.integration.queue.get(second.job_id)
+  expect(two.resume).toMatch(/^wizardq_/)
+  expect(f.runs.get(two.resume).status).toBe('queued')
+  await f.finish(one.resume)
+  expect(f.runs.get(two.resume).status).toBe('running')
+  expect(JSON.parse(f.runs.get(two.resume).body).input).toContain('"exit_code":1')
+  await f.integration.queue.tick()
+  expect(f.integration.queue.get(second.job_id).resume).toBe(two.resume)
+})
+
+it('two heavy jobs from one turn both report back after an automatic provider recovery', async () => {
+  const f = await fixture()
+  const first = await f.submit('first'), second = await f.submit('second')
+  f.workerStates.set(second.job_id, 'running')
+  await f.finish(f.origin.publicRunId); await f.integration.queue.tick()
+  const one = f.integration.queue.get(first.job_id)
+  await f.finish(one.resume)
+  f.runs._update(one.resume, { status: 'failed', waitingReason: 'provider_access' })
+  const retried = f.runs._retrySavedRow(one.resume, 's', {}, true).record
+  expect(retried.providerRecoveryAttempted).toBe(true)
+  f.workerStates.set(second.job_id, 'failed')
+  await f.integration.queue.tick()
+  expect(f.integration.queue.get(second.job_id).resume).toMatch(/^wizardq_/)
+  await expect(f.integration.validate(f.runs.get(retried.publicRunId))).resolves.toBeUndefined()
+  await f.runs.tick()
+  expect(f.runs.get(retried.publicRunId).status).toBe('running')
+})
+
+it('superseded terminal results leave a durable short notice for the next turn', async () => {
+  const f = await fixture(), first = await f.submit('first')
+  await f.admit('new-owner-request')
+  await f.integration.queue.tick()
+  expect(f.integration.queue.get(first.job_id).resume).toBe('superseded')
+  await f.restart()
+  const note = f.integration.queue.noticeContext('hermes', 's')
+  expect(note).toContain(first.job_id)
+  expect(note).toContain('completed')
+  expect(f.integration.queue.noticeContext('other-agent', 's')).toBe('')
+  expect(f.integration.queue.noticeContext('hermes', 'other-session')).toBe('')
+  f.integration.queue.acknowledgeNotices('hermes', 's', { instructions: 'not sent' })
+  expect(f.integration.queue.noticeContext('hermes', 's')).toBe(note)
+  f.integration.queue.acknowledgeNotices('hermes', 's', { instructions: note })
+  expect(f.integration.queue.noticeContext('hermes', 's')).toBe('')
+})
 
 it.each([false, true])('admits a follow-up from the running continuation behind a newer sibling; restart=%s', async restart => {
   const f = await fixture()

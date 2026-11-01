@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { createWizardServer, listen, WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
+import { createWizardServer, listen, OWN_STYLE_RUN_INSTRUCTIONS as WIZARD_RUN_INSTRUCTIONS } from '../server/service.mjs'
 import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 
 const instructions = `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}`

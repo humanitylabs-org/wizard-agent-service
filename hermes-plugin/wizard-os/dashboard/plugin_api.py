@@ -40,8 +40,14 @@ router = APIRouter()
 # Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
 # auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a
 # path that provably keeps that login; until then set WIZARD_ACCOUNT_CHANGES=1 only on a box that has been checked.
-def _changes_on() -> bool:
-    return os.environ.get('WIZARD_ACCOUNT_CHANGES', '0') == '1'
+# A comma list of providers (e.g. `chatgpt`) turns changes on for those only: a fresh Wizard OS box adds ChatGPT
+# sign-ins here while its Claude sign-in stays with the Claude app's own Claude Code page (the login the agent's
+# Claude subscription provider uses).
+def _changes_on(provider: str) -> bool:
+    value = os.environ.get('WIZARD_ACCOUNT_CHANGES', '0').strip().lower()
+    if value == '1':
+        return True
+    return provider in {p.strip() for p in value.split(',') if p.strip()}
 _CHANGES_OFF = 'Adding and removing subscriptions here is switched off for now; manage them with stock Hermes.'
 
 
@@ -59,7 +65,7 @@ async def account_operation(provider: str, request: Request, response: Response)
     # Stock dashboard auth protects all plugin routes. Require a non-simple
     # request too: cross-origin forms cannot initiate provider operations.
     response.headers['Cache-Control'] = 'no-store'
-    if not _changes_on():
+    if not _changes_on(provider):
         raise HTTPException(403, _CHANGES_OFF)
     if request.headers.get('X-Wizard-Account-Action') != '1' or request.headers.get('content-type', '').split(';')[0] != 'application/json':
         raise HTTPException(403, 'Account action header required')
@@ -144,6 +150,19 @@ def get_chatgpt_usage():
     return value
 
 
+@router.get('/provider-accounts/claude/model-cooldowns')
+def get_claude_model_cooldowns():
+    # Cheap fresh store read; the account listing fetches live usage and can take
+    # tens of seconds when cold. No provider requests or credentials cross this API.
+    try:
+        result = _accounts.claude_model_cooldowns()
+    except Exception:
+        result = None
+    if result is None:
+        raise HTTPException(503, 'Cooldown inventory unavailable')
+    return result
+
+
 @router.get('/provider-accounts/{provider}')
 def get_provider_accounts(provider: str):
     if provider not in _accounts.PROVIDERS:
@@ -151,7 +170,7 @@ def get_provider_accounts(provider: str):
     try:
         result = _accounts.provider_accounts(provider)
         # Changes off (the default): the listing needs no Hermes config at all.
-        if not _changes_on():
+        if not _changes_on(provider):
             reason = _CHANGES_OFF
             result['management'] = {**result['management'], 'status': 'off', 'message': reason}
             result['actions'] = {k: False for k in result.get('actions', {})}

@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { abortKeeperStream, keeperFetch, keeperUnavailable } from './run-stream-keeper.mjs'
 import { migrateJson, atomicStoreWrite } from './thread-reference.mjs'
+import { RunEventLog } from './run-event-log.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
 // Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
@@ -61,11 +62,18 @@ export class LockedRunBridge {
     this.entries = new Map()
     this.pending = new Map()
     this.streams = new Set()
+    // Live progress of each locked turn, served as GET /v1/runs/<id>/events (Hermes 404s that for chat/stream runs).
+    this.events = new RunEventLog()
     if (statePath) {
       migrateJson(statePath, rows => rows.map(([key, row]) => [key, { ...row, agent_id: row.agent_id ?? 'hermes', session_id: row.session_id ?? row.sessionId }]))
       try { this.entries = new Map(JSON.parse(readFileSync(statePath, 'utf8'))) }
       catch (error) { if (error.code !== 'ENOENT') throw fail('Model-route journal is unreadable', 503) }
     }
+  }
+  isLockedRun(runId) {
+    if (!runId) return false
+    for (const entry of this.entries.values()) if (entry.runId === runId) return true
+    return false
   }
   save() {
     if (!this.statePath) return
@@ -217,8 +225,10 @@ export class LockedRunBridge {
               if (!idPattern.test(payload.run_id || '') || meta?.model_lock !== 'accepted' || !ackMatches)
                 throw fail('Hermes did not acknowledge the selected model lock')
               entry.runId = payload.run_id; entry.state = 'running'; this.save()
+              this.events.open(entry.runId)
               accepted = true; accept(entry)
             }
+            if (accepted && event) this.events.record(entry.runId, event, payload)
             if (event === 'error' && !accepted) throw fail('Selected model failed before acknowledgement')
             if (payload.runtime?.model_lock === 'confirmed') { entry.runtime = payload.runtime; this.save() }
             if (event?.startsWith('run.') && ['completed','failed','cancelled','interrupted'].includes(event.slice(4))) {
@@ -230,7 +240,9 @@ export class LockedRunBridge {
           if (buffer.length > 32 * 1024 * 1024) throw fail('Locked-run event exceeded the bound')
         }
         if (!accepted) throw fail('Selected model stream ended without an admission receipt')
+        this.events.detach(entry.runId)
       } catch (error) {
+        if (accepted) this.events.detach(entry.runId)
         entry.state = accepted ? 'stream_disconnected' : 'uncertain'; this.save()
         if (!accepted) reject(error)
         // A deliberate stop must still reach Hermes when the keeper holds the stream.

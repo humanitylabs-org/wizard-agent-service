@@ -30,7 +30,11 @@ beforeAll(async () => {
       response.end(JSON.stringify({ data: [
         { id: 'assistant', role: 'assistant', content: `Made it.\n\nMEDIA:${source}`, timestamp: 1 },
         { id: 'unsafe', role: 'assistant', content: 'MEDIA:/etc/passwd', timestamp: 2 },
+        { id: 'positioned', role: 'assistant', content: `First layout.\nMEDIA:${source}\nSecond layout.\nMEDIA:${secondSource}\nChoose either.\nMEDIA:${source}\nMEDIA:${apkSource}`, timestamp: 10 },
+        { id: 'file-first', role: 'assistant', content: `Download first.\nMEDIA:${apkSource}\nThen screenshot.\nMEDIA:${source}`, timestamp: 12 },
+        { id: 'literal', role: 'assistant', content: `Example only:\n\`\`\`text\nMEDIA:/example/screenshot.png\n\`\`\``, timestamp: 11 },
         { id: 'assistant-apk', role: 'assistant', content: `Latest build.\n\nMEDIA:${apkSource}\n\nInstall it over the old copy.`, timestamp: 8 },
+        { id: 'assistant-spaced', role: 'assistant', content: `Spaced tag.\n\nMEDIA: ${source}  \n\nEnd.`, timestamp: 13 },
         { id: 'assistant-missing', role: 'assistant', content: `Here it is.\n\nMEDIA:${join(sourceRoot, 'gone.pdf')}`, timestamp: 9 },
         ...['user', 'assistant'].map(role => ({ id: `${role}-inline-file`, role, content: [
           { type: 'text', text: `Review screenshot\n\n[WIZARD_FILES_V1]\n${JSON.stringify([
@@ -70,6 +74,30 @@ afterAll(async () => {
 })
 
 describe('agent image delivery', () => {
+  it('agent screenshots appear inline where the reply mentions them', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json()
+    const content = payload.data.find((message: { id: string }) => message.id === 'positioned').content as string
+    const blocks = [...content.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)]
+    expect(blocks).toHaveLength(3)
+    expect(blocks.slice(0, 2).map(block => JSON.parse(block[1]))).toEqual([
+      expect.objectContaining({ inline: true, items: [expect.objectContaining({ name: 'poster.png', kind: 'image' })] }),
+      expect.objectContaining({ inline: true, items: [expect.objectContaining({ name: 'second.png', kind: 'image' })] }),
+    ])
+    expect(content.indexOf('First layout.')).toBeLessThan(blocks[0].index!)
+    expect(blocks[0].index!).toBeLessThan(content.indexOf('Second layout.'))
+    expect(content.indexOf('Second layout.')).toBeLessThan(blocks[1].index!)
+    expect(blocks[1].index!).toBeLessThan(content.indexOf('Choose either.'))
+    expect(JSON.parse(blocks[2][1])).toMatchObject({ items: [{ kind: 'file' }] })
+    const legacyItems = blocks.flatMap(block => JSON.parse(block[1]).items)
+    expect(new Set(legacyItems.map(item => item.id)).size).toBe(3)
+    const fileFirst = payload.data.find((message: { id: string }) => message.id === 'file-first').content as string
+    const ordered = [...fileFirst.matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].map(block => JSON.parse(block[1]))
+    expect(ordered.map(envelope => [envelope.items[0].kind, envelope.inline])).toEqual([['file', false], ['image', true]])
+    expect(content).not.toContain(sourceRoot)
+    const literal = payload.data.find((message: { id: string }) => message.id === 'literal').content
+    expect(literal).not.toContain('<helm_attachments>')
+  })
+
   it('renders the durable screenshot once while keeping distinct photos and audio', async () => {
     const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json()
     const parts = payload.data.find((message: { id: string }) => message.id === 'user-inline-file').content
@@ -131,6 +159,14 @@ describe('agent image delivery', () => {
     expect(content).toContain('[file: gone.pdf unavailable]')
     expect(content).not.toContain(sourceRoot)
     expect(payload.data.find((message) => message.id === 'unsafe')?.content).toBe('[file: passwd unavailable]')
+  })
+
+  it('shows a MEDIA line written with a space after the colon', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'assistant-spaced')?.content ?? ''
+    expect(content).toContain('<helm_attachments>')
+    expect(content).not.toContain('unavailable')
+    expect(content).not.toContain(sourceRoot)
   })
 
   it('projects completed run output before the client renders it', async () => {

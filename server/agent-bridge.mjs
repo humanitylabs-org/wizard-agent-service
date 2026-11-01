@@ -11,6 +11,7 @@
 import { constants, opendirSync, openSync, closeSync, fstatSync, lstatSync, realpathSync, readSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { dirname, join, resolve, sep } from 'node:path'
+import { isPrivateApp } from './agents.mjs'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
@@ -64,6 +65,9 @@ export function bridgeApps(registry, { mcpAddress = 'url' } = {}) {
       status: clean(app.status, 24) || 'unknown', jobs: provides.filter((p) => !SKIP_PROVIDES.has(p)),
       url, address: url.replace(/^(https?:\/\/[^/]+).*$/u, '$1'), transport: clean(mcp?.transport, 40) || 'streamable-http',
       skill: typeof app.skill === 'string' && app.skill && !app.skill.includes('..') ? app.skill : '',
+      // private apps (tagged, or recognised by their private-data slots, as the registry decides) stay unnamed to an
+      // agent that may not use them (#58/#59 seal)
+      ...(isPrivateApp(app) ? { private: true } : {}),
     })
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -98,8 +102,11 @@ function jobsOf(apps) {
  * `jobMap` adds the fallback job -> app map (max 12 lines); the generic harness, which has no skills index,
  * always gets it.
  */
-export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false } = {}) {
+export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false, skillsIndex } = {}) {
   const hermes = harness === 'hermes'
+  // Only the main agent's skills index holds wizard-job-* pointers (#58). Any other agent on the gateway is told the
+  // jobs directly, limited to the apps on its own list.
+  const pointers = hermes && skillsIndex !== false
   const meta = hermes ? `mcp__${MCP_SERVER_NAME}__${META_TOOL}` : META_TOOL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
@@ -108,17 +115,17 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
       'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
-    hermes
+    pointers
       ? 'When a request matches a wizard-job-<job> skill in your skills:'
       : 'When a request matches a job below:',
-    ...(hermes ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
+    ...(pointers ? ['1. Load it with skill_view for tool names and purposes.'] : ['1. Use the app named for that job.']),
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
     `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Save routing-only app-job skills.',
   ]
-  if (jobMap || !hermes) {
+  if (jobMap || !pointers) {
     const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
       `- ${jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
     text.push('', 'Jobs on this box:', ...(rows.length ? rows : ['- (no apps installed yet)']))
@@ -164,13 +171,15 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
     const lines = owners.flatMap((a) => {
       const known = (tools[a.id] || []).slice(0, 8).map(toolEntry)
       const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
-      const head = `- ${a.name}: pick the tool whose purpose matches the request and call it.${down}`
+      const how = a.skill
+        ? `load its skill \`${a.id}\` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.`
+        : 'pick the tool whose purpose matches the request and call it.'
+      const head = `- ${a.name}: ${how}${down}`
       const rows = known.length
         ? known.map((t) => `  - \`${agentToolName(a.prefix, t.name, harness)}\`${t.purpose ? `: ${t.purpose}` : ''}`)
         : [`  - \`${agentToolName(a.prefix, '*', harness)}\``]
       const address = [`  Its address (for files it serves): ${a.address}`]
-      const skill = a.skill ? [`  Its skill \`${a.id}\` (skill_view) has details for long or unusual jobs; the tools above come first.`] : []
-      return [head, ...rows, ...address, ...skill]
+      return [head, ...rows, ...address]
     })
     out[jobSkillName(job)] = [
       '---',
@@ -241,22 +250,29 @@ function decodeMcpBody(contentType, text, wantId) {
 }
 
 class AppClient {
-  constructor(app, { fetchImpl, timeoutMs }) {
+  constructor(app, { fetchImpl, timeoutMs, appKey = () => '' }) {
     this.app = app
     this.fetch = fetchImpl
     this.timeoutMs = timeoutMs
+    this.appKey = appKey
     this.session = ''
     this.ready = false
     this.nextId = 1
   }
 
-  async post(message, wantId) {
+  async post(message, wantId, extra = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
       const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL_VERSIONS[0] }
       if (this.session) headers['Mcp-Session-Id'] = this.session
-      const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal })
+      // The gateway's per-app grant key (wizard-os spec/PERMISSIONS.md layer 2): the app checks it against the
+      // `host:agent-service` row of its own grants file, so it can tell the gateway from any other local caller and trust
+      // the agent named in X-Wizard-Agent. `Authorization` is left alone. Agent headers go only with the key.
+      const key = this.appKey()
+      if (key) Object.assign(headers, { 'X-Wizard-Grant': key }, extra)
+      // No redirects: a redirect would carry the grant key and agent headers to another origin.
+      const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal, redirect: 'error' })
       const sid = response.headers.get('mcp-session-id')
       if (sid) this.session = sid
       const text = await response.text()
@@ -277,12 +293,12 @@ class AppClient {
     this.ready = true
   }
 
-  async request(method, params) {
+  async request(method, params, extra = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await this.open()
         const id = this.nextId++
-        return await this.post({ jsonrpc: '2.0', id, method, params }, id)
+        return await this.post({ jsonrpc: '2.0', id, method, params }, id, extra)
       } catch (error) {
         if (!error?.retry || attempt) throw error
       }
@@ -297,6 +313,61 @@ function safeEqual(a, b) {
   const x = Buffer.from(String(a))
   const y = Buffer.from(String(b))
   return x.length === y.length && timingSafeEqual(x, y)
+}
+
+export const GATEWAY_GRANTS_FILE = join('grants', 'agent-service.json')
+const GRANT_KEY = /^[A-Za-z0-9_-]{32,256}$/u
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u
+
+/**
+ * The gateway's side of the app grant keys (wizard-os spec/PERMISSIONS.md layer 2, "The gateway is a consumer too"):
+ * `key(appId)` is the key to send as X-Wizard-Grant to that app, or '' when it holds none. The file is re-read when it
+ * changes (an App Manager rewrite or a revoke takes effect on the next call); a symlink, an oversized or malformed file
+ * and malformed keys give no keys, never an error.
+ */
+export function createGatewayGrants({ osHome, file = osHome ? join(osHome, GATEWAY_GRANTS_FILE) : '', log = () => {} }) {
+  const MAX = 64 * 1024
+  let stamp = null
+  let keys = new Map()
+  // One bounded read through a no-follow handle; the stamp comes from that same handle. A stamp younger than 2 s is
+  // not trusted (an in-place rewrite within one mtime tick keeps inode and size), so the file is read again next time.
+  let told = ''
+  const drop = (why) => { if (told !== `${stamp}:${why}`) { told = `${stamp}:${why}`; log(JSON.stringify({ event: 'gateway-grants', ok: false, why })) } }
+  const load = () => {
+    let fd
+    try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) } catch { stamp = null; keys = new Map(); return }
+    try {
+      const st = fstatSync(fd)
+      // ctime too: a chmod/chown fix is seen, and utime cannot fake it.
+      const next = `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`
+      if (next === stamp) return
+      stamp = Date.now() - Math.max(st.mtimeMs, st.ctimeMs) > 2000 ? next : null
+      keys = new Map()
+      // Owner-only, as the spec says (0600, the gateway's user): a file others can read or write holds no key.
+      if (!st.isFile() || st.size > MAX) return drop('not a regular file under 64 KiB')
+      if ((st.mode & 0o077) || (process.getuid && st.uid !== process.getuid())) return drop('not mode 0600 owned by the Agent Service user')
+      const buf = Buffer.alloc(MAX + 1)
+      let n = 0
+      for (let r; n <= MAX && (r = readSync(fd, buf, n, MAX + 1 - n, null)) > 0;) n += r
+      if (n > MAX) return drop('over 64 KiB')
+      let doc
+      try { doc = JSON.parse(buf.toString('utf8', 0, n)) } catch { return drop('not JSON') }
+      const out = doc && typeof doc === 'object' && doc.outgoing && typeof doc.outgoing === 'object' && !Array.isArray(doc.outgoing) ? doc.outgoing : {}
+      const bad = []
+      for (const [id, key] of Object.entries(out)) {
+        if (APP_ID.test(id) && typeof key === 'string' && GRANT_KEY.test(key)) keys.set(id, key)
+        else bad.push(APP_ID.test(id) ? id : '?')
+      }
+      if (bad.length) drop(`malformed key for ${bad.slice(0, 5).join(', ')}`)
+    } catch { stamp = null; keys = new Map() } finally { closeSync(fd) }
+  }
+  return {
+    key(appId) {
+      if (!file || !APP_ID.test(String(appId || ''))) return ''
+      load()
+      return keys.get(appId) || ''
+    },
+  }
 }
 
 /** The gateway token: $WIZARD_MCP_TOKEN, else <osHome>/mcp-token (created 0600 on first start). */
@@ -328,7 +399,7 @@ export const GATEWAY_MAIN_AGENT = 'hermes'
  * describes and calls only those apps for that agent.
  */
 export function createAgentBridge({
-  appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
+  appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', grantsHome = osHome, mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
   agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null,
@@ -372,9 +443,13 @@ export function createAgentBridge({
   const onChange = () => { if (refresh()) notifyChanged() }
   if (appsJsonPath && watchIntervalMs > 0) watchFile(appsJsonPath, { interval: watchIntervalMs, persistent: false }, onChange)
 
+  // The gateway's grant keys (wizard-os spec/PERMISSIONS.md layer 2): <wizard-os home>/grants/agent-service.json,
+  // `{"outgoing": {"<app id>": "<key>"}}`, written 0600 by the App Manager (the same key system as app-to-app grants).
+  // An app without a key is called exactly as before.
+  const gatewayGrants = createGatewayGrants({ osHome: grantsHome, log })
   const client = (app) => {
     let c = clients.get(app.id)
-    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs }); clients.set(app.id, c) }
+    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs, appKey: () => gatewayGrants.key(app.id) }); clients.set(app.id, c) }
     return c
   }
 
@@ -399,6 +474,13 @@ export function createAgentBridge({
     let allowed = null
     try { allowed = appsFor(agentId) } catch { allowed = new Set() }
     return allowed ? apps.filter((app) => allowed.has(app.id)) : apps
+  }
+
+  /** The agent's own name for a refusal ("Oscar is not allowed to use Money"); the registry's label, else a plain word. */
+  const agentLabel = (agentId) => {
+    let label = ''
+    try { label = agents()?.read?.(agentId)?.label || '' } catch { label = '' }
+    return clean(label, 60) || 'This agent'
   }
 
   async function collectNames(list = apps) {
@@ -465,9 +547,16 @@ export function createAgentBridge({
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
       return r
     }
-    // An app this agent may not use is answered exactly like an app that is not installed (#58).
     const app = visible(agentId).find((a) => typeof name === 'string' && name.startsWith(`${a.prefix}__`))
     const tool = app ? name.slice(app.prefix.length + 2) : ''
+    // An installed app the owner turned off for this agent (Connections → Agents, Miguel 29 Oct 2026): say so plainly,
+    // so the agent can tell the owner where to turn it on. A private app stays answered exactly like an app that is
+    // not installed (#58/#59: nothing tells a standard agent that a private app is there).
+    const off = app ? null : apps.find((a) => !a.private && typeof name === 'string' && name.startsWith(`${a.prefix}__`))
+    if (off) {
+      log(JSON.stringify({ event: 'call', app: off.id, tool: clean(String(name).slice(off.prefix.length + 2), 80), agent: agentId, ms: 0, ok: false, denied: true }))
+      return failure(`${agentLabel(agentId)} is not allowed to use ${off.name}. The owner can turn it on in Connections.`)
+    }
     if (!app || !tool) {
       log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
       return failure(`No installed app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
@@ -480,7 +569,8 @@ export function createAgentBridge({
       const saved = c.timeoutMs
       c.timeoutMs = callTimeoutMs
       try {
-        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} })
+        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} },
+          { 'X-Wizard-Agent': agentId, 'X-Wizard-Agent-Label': encodeURIComponent(agentLabel(agentId)) })
         ok = !result?.isError
       } catch (error) {
         const reason = error?.rpc ? clean(error.message, 200) : error?.name === 'AbortError' ? 'it did not answer in time' : 'it is not reachable'
@@ -529,7 +619,7 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap }),
+          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap, skillsIndex: agentId === GATEWAY_MAIN_AGENT && writeSkills && Boolean(osHome) }),
         })
       }
       if (method === 'ping') return reply({})
@@ -619,7 +709,8 @@ export function createAgentBridge({
     // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
     appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
     kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap }) },
-    apps: () => { refresh(); return apps },
+    // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
+    apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
     close: () => { if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
   }
@@ -685,7 +776,7 @@ function statePath(home, relative) {
 }
 
 /** Bounded descriptor reads; special files and hardlinks cannot masquerade as notes. */
-function stateText(home, relative) {
+export function stateText(home, relative) {
   const file = statePath(home, relative)
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -703,7 +794,7 @@ function stateText(home, relative) {
   } finally { closeSync(fd) }
 }
 
-function stateList(home, folder, skills = false) {
+export function stateList(home, folder, skills = false) {
   const entries = []
   let visited = 0, truncated = false
   function walk(relative, depth) {

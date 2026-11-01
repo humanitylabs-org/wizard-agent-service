@@ -297,6 +297,42 @@ describe('agents registry and API', () => {
     expect(payload.data[0].run_context.original).toContain('[private attachment]')
   })
 
+  it('shows a routed agent\'s notes paths as its notebook while other home paths stay private', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const host = join(dir, 'agents/private/home')
+    const priv = await fakeHermes('private', ['wizard_private_notes'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'The handoff is at /opt/data/wiki/for-review/2026-01-02-synthetic.md' },
+      { id: 2, role: 'assistant', timestamp: 2, content: `Also ${host}/wiki/index.md, /opt/data/inbox/2026-01-02/brief.pdf and /opt/data/config.yaml` },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const file = join(dir, 'agents', 'private', 'agent.json')
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), notes_dir: 'wiki' }))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_notes/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(200)
+    const text = JSON.stringify(await response.json())
+    expect(text).toContain('The handoff is at Private notes › for-review/2026-01-02-synthetic.md')
+    expect(text).toContain('Also Private notes › index.md, [private attachment: brief.pdf] and [private attachment]')
+    expect(text).not.toContain('/opt/data')
+    expect(text).not.toContain(host)
+  })
+
+  it('still refuses a routed history that exposes a credential next to a notes path', async () => {
+    const dir = box()
+    const main = await fakeHermes('main')
+    const priv = await fakeHermes('private', ['wizard_private_leak'], [
+      { id: 1, role: 'assistant', timestamp: 1, content: 'Notes at /opt/data/wiki/a.md and fixture-key' },
+    ])
+    const { base } = await start(dir, main)
+    await withPrivate(dir, base, priv.port)
+    const file = join(dir, 'agents', 'private', 'agent.json')
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), notes_dir: 'wiki' }))
+    const response = await fetch(`${base}/wizard/hermes/api/sessions/wizard_private_leak/messages?agent=private&view=wizard`)
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: 'unsafe_upstream_response' })
+  })
+
   it('turns a routed agent\'s own MEDIA files into openable attachments kept in that agent\'s folder', async () => {
     const dir = box()
     const main = await fakeHermes('main')
@@ -320,18 +356,21 @@ describe('agents registry and API', () => {
     expect(text).not.toContain('/opt/data')
     expect(text).not.toContain(dir)
     const rows = JSON.parse(text).data
-    const envelope = JSON.parse(rows[0].content.match(/<helm_attachments>(.*)<\/helm_attachments>/s)[1])
-    expect(envelope.items.map((i: any) => [i.name, i.kind])).toEqual([['notes.md', 'file'], ['chart.png', 'image']])
+    const envelopes = [...rows[0].content.matchAll(/<helm_attachments>(.*?)<\/helm_attachments>/gs)].map(match => JSON.parse(match[1]))
+    const items = envelopes.flatMap(envelope => envelope.items)
+    expect(items).toHaveLength(2)
+    expect(items.map((i: any) => [i.name, i.kind])).toEqual(expect.arrayContaining([['notes.md', 'file'], ['chart.png', 'image']]))
+    expect(envelopes.find(envelope => envelope.inline)?.items[0].name).toBe('chart.png')
     expect(rows[1].content).toContain('[file: escape.md unavailable]')
     expect(rows[1].content).toContain('[file: outside.md unavailable]')
     expect(rows[1].content).not.toContain('<helm_attachments>')
     // Bytes live in the agent's own folder, not the main agent's shared artifact store.
     expect(readdirSync(join(dir, 'agents', 'private', 'wizard-artifacts')).filter(n => n.endsWith('.bin')).length).toBe(2)
-    const md = await fetch(`${base}/wizard/attachments/${envelope.items[0].id}`)
+    const md = await fetch(`${base}/wizard/attachments/${items.find(item => item.kind === 'file').id}`)
     expect(md.status).toBe(200)
     expect(md.headers.get('content-disposition')).toContain('notes.md')
     expect(await md.text()).toContain('OUTBOUND_MD_CANARY')
-    const image = await fetch(`${base}/wizard/attachments/${envelope.items[1].id}`)
+    const image = await fetch(`${base}/wizard/attachments/${items.find(item => item.kind === 'image').id}`)
     expect(image.status).toBe(200)
     expect(image.headers.get('content-type')).toBe('image/png')
     expect(Buffer.from(await image.arrayBuffer())).toEqual(png)
@@ -390,6 +429,7 @@ describe('agents registry and API', () => {
     expect(run.status).toBe(202)
     const sent = priv.seen.find(r => r.path === '/v1/runs')
     expect(sent?.body.instructions).toContain('MEDIA:/absolute/path')
+    expect(sent?.body.instructions).toContain('Put each MEDIA line right after the sentence that talks about it; it shows there as a tappable picture.')
     const status = await fetch(`${base}/wizard/hermes/v1/runs/private-run-1?agent=private`)
     expect(status.status).toBe(200)
   })

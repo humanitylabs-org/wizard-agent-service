@@ -135,7 +135,7 @@ Service's state plane. Roll back the Service environment as well as importer
 
 ## Verification
 
-`npm test` includes ten hermetic recovery-preparation regressions via
+`npm test` includes eleven hermetic recovery-preparation regressions via
 `scripts/test-hermes-import.mjs`, with isolated HOME/HERMES_HOME/WIZARD_OS_HOME/
 TMPDIR. They exercise provider/secret selection, minimal files/skills, host
 terminal, environment scrubbing, no service installation, move survival,

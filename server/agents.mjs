@@ -95,7 +95,7 @@ export const PRESETS = [
   },
   {
     id: 'standard', label: 'Standard',
-    summary: 'Hermes defaults: outside tools on, shared files, apps you pick.',
+    summary: 'Hermes defaults: outside tools on, shared files, every installed app on (turn any off per agent).',
     privacy: 'standard',
     permissions: { outside_tools: OUTSIDE_TOOLS.map((tool) => tool.id), files: 'shared-write', wizard_apps: [], agent_apps: [], other_agents: 'read', shared_with_agents: true },
   },
@@ -172,9 +172,13 @@ function normalizeAppearance(value, privacy) {
   return { glyph, hue }
 }
 
-function idList(value, check) {
+// An agent's app lists hold every installed app it may use (a new standard agent starts with all of them), so they
+// allow far more entries than the outside-tools list; a stored list must always read back (Codex review on PR 265).
+export const APP_LIST_MAX = 512
+
+function idList(value, check, max = 64) {
   if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.length > 64 || !value.every((item) => typeof item === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(item))) {
+  if (!Array.isArray(value) || value.length > max || !value.every((item) => typeof item === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(item))) {
     fail(400, 'invalid_permissions', check)
   }
   return [...new Set(value)]
@@ -209,9 +213,9 @@ export function normalizePermissions(base, patch = {}) {
     if (!FILES_LEVELS.includes(patch.files)) fail(400, 'invalid_permissions', 'agent.permissions.files')
     out.files = patch.files
   }
-  const wizardApps = idList(patch.wizard_apps, 'agent.permissions.wizard_apps')
+  const wizardApps = idList(patch.wizard_apps, 'agent.permissions.wizard_apps', APP_LIST_MAX)
   if (wizardApps) out.wizard_apps = wizardApps
-  const agentApps = idList(patch.agent_apps, 'agent.permissions.agent_apps')
+  const agentApps = idList(patch.agent_apps, 'agent.permissions.agent_apps', APP_LIST_MAX)
   if (agentApps) out.agent_apps = agentApps
   if (patch.other_agents !== undefined) {
     if (!OTHER_AGENTS_LEVELS.includes(patch.other_agents)) fail(400, 'invalid_permissions', 'agent.permissions.other_agents')
@@ -412,9 +416,13 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     }
   } else if (!agentAppIds(agent).size) lines.push('mcp_servers: {}')
-  lines.push('memory:', '  memory_enabled: true', '  user_profile_enabled: true')
+  lines.push('memory:', '  provider: holographic', '  memory_enabled: true', '  user_profile_enabled: true')
   if (agent.memory?.user_chars) lines.push(`  user_char_limit: ${agent.memory.user_chars}`)
   if (agent.memory?.notes_chars) lines.push(`  memory_char_limit: ${agent.memory.notes_chars}`)
+  // Stock Hermes ships this provider in the pinned runtime image. Keep state in
+  // this agent's persisted home, never the image layer or the Service's home.
+  lines.push('plugins:', '  enabled: [holographic, wizard-supervisor-tools]', '  hermes-memory-store:',
+    '    db_path: "$HERMES_HOME/memory_store.db"', '    auto_extract: false')
   return `${lines.join('\n')}\n`
 }
 
@@ -490,13 +498,20 @@ export function createAgentRegistry(options = {}) {
   // Resolved for every thread in a Chats list: rebuild only when .main-agent.json or apps.json changes.
   let mainMemo = { key: null, value: null }
   const fileStamp = (path) => { try { const st = statSync(path); return `${st.ino}:${st.size}:${st.mtimeMs}` } catch { return '-' } }
+  // What the owner calls his agent (settings.json agent.name, "Oscar"), else the deployment's label (default Hermes).
+  // "Wizard" is the settings default ("until the owner names it"), not a name he chose.
+  const ownerName = () => {
+    const name = options.settingsPath ? readJson(options.settingsPath)?.agent?.name : ''
+    const text = typeof name === 'string' ? cleanLabel(name, '') : ''
+    return text === 'Wizard' ? '' : text
+  }
   const mainAgent = () => {
-    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${mainLabel}`
+    const key = `${fileStamp(mainPath)}|${appsJsonPath ? fileStamp(appsJsonPath) : ''}|${options.settingsPath ? fileStamp(options.settingsPath) : ''}|${mainLabel}`
     if (mainMemo.key !== key) mainMemo = { key, value: buildMainAgent() }
     return structuredClone(mainMemo.value)
   }
   const buildMainAgent = () => ({
-    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${mainLabel} (system)` : mainLabel, harness: 'hermes', privacy: 'standard',
+    schema: AGENT_SCHEMA, id: MAIN_AGENT_ID, hidden: readJson(mainPath)?.hidden === true, label: readJson(mainPath)?.role === 'recovery' ? `${ownerName() || mainLabel} (system)` : ownerName() || mainLabel, harness: 'hermes', privacy: 'standard',
     ...(readJson(mainPath)?.role === 'recovery' ? { role: 'recovery' } : {}),
     appearance: normalizeAppearance(options.mainAppearance, 'standard'),
     model: { provider: 'host', model: '', allowed_models: [], fallback: true },
@@ -983,6 +998,15 @@ export function createAgentRegistry(options = {}) {
     if (!preset) fail(400, 'unknown_preset', 'agent.permissions.preset')
     const { preset: _ignored, ...overrides } = body.permissions ?? {}
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
+    if (preset.privacy !== 'private' && overrides.wizard_apps === undefined && overrides.agent_apps === undefined) {
+      // Miguel, 29 Oct 2026: a new standard agent starts with everything on: every installed app the main agent would
+      // get (private apps still need a tick). The owner turns items off per agent in Connections → Agents. A client
+      // that sends either app list picks the apps itself.
+      const hidden = privateApps()
+      const { wizardApps, agentApps } = installedApps()
+      permissions.wizard_apps = wizardApps.filter((app) => !hidden.has(app.id)).map((app) => app.id).slice(0, APP_LIST_MAX)
+      permissions.agent_apps = agentApps.filter((app) => !hidden.has(app.id)).map((app) => app.id).slice(0, APP_LIST_MAX)
+    }
     if (preset.privacy === 'private') {
       const kinds = appKinds()
       for (const app of privateApps()) {

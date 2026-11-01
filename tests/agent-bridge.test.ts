@@ -1,10 +1,10 @@
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync, statSync, symlinkSync, writeFileSync, chmodSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bridgeApps, createAgentBridge, renderKernel, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
+import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const PLUGIN = resolve(__dirname, '../hermes-plugin/wizard-os')
@@ -17,7 +17,7 @@ function fakeApp(tools = [{ name: 'wizard_time', description: 'Current UTC time.
     let body = ''
     for await (const c of req) body += c
     const msg = JSON.parse(body || '{}')
-    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '' })
+    calls.push({ method: msg.method, session: req.headers['mcp-session-id'] || '', auth: req.headers.authorization || '', grant: req.headers['x-wizard-grant'] || '', agent: req.headers['x-wizard-agent'] || '', label: req.headers['x-wizard-agent-label'] || '' })
     const send = (result) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'app-s1' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })) }
     if (msg.id === undefined) { res.writeHead(202); res.end(); return }
     if (msg.method === 'initialize') return send({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake' } })
@@ -116,11 +116,84 @@ describe('agent bridge: kernel', () => {
     const diag = readFileSync(join(dir, 'skills', 'wizard-job-diagnostics', 'SKILL.md'), 'utf8')
     expect(diag).toContain('name: wizard-job-diagnostics')
     expect(diag).toContain('description: Use when the owner asks for diagnostics.')
-    expect(diag).toContain('- Hello Wizard: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n  Its skill `hello-wizard` (skill_view)')
+    expect(diag).toContain("- Hello Wizard: load its skill `hello-wizard` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.\n  - `mcp__wizard__hello_wizard__wizard_time`: Current UTC time on the Wizard\n  - `mcp__wizard__hello_wizard__wizard_echo`\n  Its address (for files it serves): http://127.0.0.1:1\n")
+    expect(diag).not.toContain('come first')
     expect(readFileSync(join(dir, 'skills', 'wizard-job-transcription', 'SKILL.md'), 'utf8')).toContain('- Transcriber: pick the tool whose purpose matches the request and call it.\n  - `mcp__wizard__transcriber__*`')
     expect(existsSync(join(dir, 'skills', '_jobs'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'wizard-job-gone'))).toBe(false)
     expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true) // app skills untouched
+  })
+
+  it('acceptance: three apps (two share a job, one has none), removal and idempotent re-runs', () => {
+    const dir = box([])
+    const video = app('defleur-video', 3, { name: 'DeFleur Video', provides: ['short-form-video', 'video-editing'] })
+    const clipper = app('clipper', 4, { provides: ['short-form-video'], skill: '' })
+    const notes = app('notes', 5, { provides: [] })
+    const listing = () => readdirSync(join(dir, 'skills')).filter((n) => n.startsWith('wizard-job-')).sort()
+    const read = (name) => readFileSync(join(dir, 'skills', name, 'SKILL.md'), 'utf8')
+    const write = (apps) => { writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps })); return writePointerSkills(dir, bridgeApps({ apps })) }
+
+    // Install all three: one pointer per job; the shared job names both apps; the app with no job gets none.
+    expect(write([video, clipper, notes])).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).toBe([
+      '---',
+      'name: wizard-job-short-form-video',
+      'description: Use when the owner asks for short-form video. The installed Clipper or DeFleur Video app does it; call its tools, never search files.',
+      '---',
+      '',
+      '# short-form video',
+      '',
+      '- Clipper: pick the tool whose purpose matches the request and call it.',
+      '  - `mcp__wizard__clipper__*`',
+      '  Its address (for files it serves): http://127.0.0.1:4',
+      "- DeFleur Video: load its skill `defleur-video` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.",
+      '  - `mcp__wizard__defleur_video__*`',
+      '  Its address (for files it serves): http://127.0.0.1:3',
+      '',
+      'Tools are on the `wizard` MCP server. If one is not in your tool list, run it with tool_call and that exact name. Paths are relative to the owner\'s Files root.',
+      '',
+      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
+      '',
+    ].join('\n'))
+    expect(read('wizard-job-video-editing')).toContain('The installed DeFleur Video app does it')
+    expect(read('wizard-job-video-editing')).not.toContain('Clipper')
+    for (const name of listing()) expect(read(name)).not.toMatch(/notes/iu)
+
+    // Re-running on the same apps.json changes nothing on disk (same bytes, same mtimes).
+    const stat = (name) => statSync(join(dir, 'skills', name, 'SKILL.md')).mtimeMs
+    const before = Object.fromEntries(listing().map((n) => [n, [read(n), stat(n)]]))
+    const later = new Date(Date.now() + 5000)
+    for (const name of listing()) utimesSync(join(dir, 'skills', name, 'SKILL.md'), later, later)
+    const pinned = Object.fromEntries(listing().map((n) => [n, stat(n)]))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    expect(write([video, clipper, notes])).toEqual(Object.keys(before))
+    for (const name of listing()) { expect(read(name)).toBe(before[name][0]); expect(stat(name)).toBe(pinned[name]) }
+
+    // Uninstall Clipper: the shared pointer now names only DeFleur Video.
+    write([video, notes])
+    expect(listing()).toEqual(['wizard-job-short-form-video', 'wizard-job-video-editing'])
+    expect(read('wizard-job-short-form-video')).not.toContain('Clipper')
+    expect(read('wizard-job-short-form-video')).toContain('The installed DeFleur Video app does it')
+
+    // Uninstall DeFleur Video: both of its pointers disappear; app skills (not ours) stay.
+    expect(write([notes])).toEqual([])
+    expect(listing()).toEqual([])
+    expect(existsSync(join(dir, 'skills', 'hello-wizard', 'SKILL.md'))).toBe(true)
+
+    // The Hermes plugin does the same removal when it is the writer (service down).
+    write([video, clipper, notes])
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [clipper] }))
+    const future = new Date(Date.now() + 10000)
+    utimesSync(join(dir, 'apps.json'), future, future)
+    const py = (code) => execFileSync('python3', ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import kernel; from pathlib import Path; ${code}`, dir]).toString().trim()
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe("['wizard-job-short-form-video']")
+    expect(listing()).toEqual(['wizard-job-short-form-video'])
+    expect(read('wizard-job-short-form-video')).toBe(pointerSkills(bridgeApps({ apps: [clipper] }))['wizard-job-short-form-video'])
+    // and is a no-op once its stamp is newer than apps.json
+    const past = new Date(Date.now() - 10000)
+    utimesSync(join(dir, 'apps.json'), past, past)
+    expect(py('print(kernel.refresh_pointer_skills(Path(sys.argv[1])))')).toBe('None')
   })
 
   it('the Python plugin renders the same bytes as the service', () => {
@@ -135,6 +208,11 @@ describe('agent bridge: kernel', () => {
       expect(py("print(kernel.render_kernel(apps), end='')", reg)).toBe(renderKernel(bridgeApps(reg)))
       expect(py("print(kernel.render_kernel(apps, job_map=True), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { jobMap: true }))
       expect(py("print(kernel.render_kernel(apps, 'generic'), end='')", reg)).toBe(renderKernel(bridgeApps(reg), { harness: 'generic' }))
+      // An agent without the main skills index (any non-main agent): no pointer wording, its own jobs inline.
+      const noIndex = renderKernel(bridgeApps(reg), { skillsIndex: false })
+      expect(py("print(kernel.render_kernel(apps, skills_index=False), end='')", reg)).toBe(noIndex)
+      expect(noIndex).not.toContain('wizard-job-<job>')
+      expect(noIndex).toContain('Jobs on this box:')
       expect(JSON.parse(py('print(json.dumps(kernel.pointer_skills(apps)))', reg))).toEqual(pointerSkills(bridgeApps(reg)))
       const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare']]))
       expect(JSON.parse(py(`print(json.dumps(kernel.pointer_skills(apps, tools=${JSON.stringify(JSON.stringify(tools))} and json.loads(${JSON.stringify(JSON.stringify(tools))}))))`, reg))).toEqual(pointerSkills(bridgeApps(reg), { tools }))
@@ -184,7 +262,7 @@ describe('agent bridge: MCP gateway', () => {
     expect(init.json.result.instructions).toContain('wizard-job-<job>')
     const list = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, init.session)
     const names = list.json.result.tools.map((t) => t.name)
-    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
+    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_devices', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
     expect(names).toContain('spaces_list')
     expect(list.json.result.tools.find(t => t.name === 'hello_wizard__wizard_time').description).toBe('[Hello Wizard · diagnostics] Current UTC time.')
     const call = await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_echo', arguments: { text: 'secret-arg' } } }, init.session)
@@ -195,6 +273,84 @@ describe('agent bridge: MCP gateway', () => {
     expect(callLogs[0]).toMatchObject({ app: 'hello-wizard', tool: 'wizard_echo', ok: true })
     expect(typeof callLogs[0].ms).toBe('number')
     expect(logs.join('\n')).not.toContain('secret-arg')
+  })
+
+  it('sends the gateway grant key from grants/agent-service.json and names the calling agent only to that app', async () => {
+    const keyed = fakeApp(); const plain = fakeApp(); const bad = fakeApp()
+    servers.push(keyed.server, plain.server, bad.server)
+    const dir = box([app('messenger', (await listen(keyed.server)).port), app('hello-wizard', (await listen(plain.server)).port), app('odd-app', (await listen(bad.server)).port)])
+    mkdirSync(join(dir, 'grants'))
+    const KEY = 'a1'.repeat(32) // what the App Manager mints: 32 random bytes, hex
+    const file = join(dir, 'grants', 'agent-service.json')
+    writeFileSync(file, JSON.stringify({ outgoing: { messenger: KEY, 'odd-app': 'short' } }), { mode: 0o600 }) // malformed keys are never sent
+    const base = await start(dir)
+    const init = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
+    await rpc(base, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hello_wizard__wizard_time', arguments: {} } }, init.session)
+    await rpc(base, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'odd_app__wizard_time', arguments: {} } }, init.session)
+    expect(keyed.calls.length).toBeGreaterThan(0)
+    expect(keyed.calls.every((c) => c.grant === KEY && c.auth === '')).toBe(true) // Authorization is left alone
+    const call = keyed.calls.find((c) => c.method === 'tools/call')
+    expect(call.agent).toBe('hermes')
+    expect(decodeURIComponent(call.label).length).toBeGreaterThan(0)
+    expect(keyed.calls.filter((c) => c.method !== 'tools/call').every((c) => c.agent === '')).toBe(true)
+    for (const other of [plain, bad]) {
+      expect(other.calls.length).toBeGreaterThan(0)
+      expect(other.calls.every((c) => c.grant === '' && c.auth === '' && c.agent === '' && c.label === '')).toBe(true)
+    }
+    // A revoke (the App Manager drops the key) applies to the next call, without a restart.
+    writeFileSync(file, JSON.stringify({ outgoing: {} }), { mode: 0o600 })
+    const t = new Date(Date.now() + 5000); utimesSync(file, t, t)
+    const before = keyed.calls.length
+    await rpc(base, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
+    expect(keyed.calls.slice(before).every((c) => c.grant === '' && c.agent === '')).toBe(true)
+  })
+
+  it('reads no grant keys from a symlinked, oversized or malformed gateway grants file, and never from the old app-mcp-keys files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wz-grants-'))
+    mkdirSync(join(dir, 'grants'))
+    const KEY = 'b2'.repeat(32)
+    const real = join(dir, 'elsewhere.json')
+    writeFileSync(real, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o600 })
+    symlinkSync(real, join(dir, 'grants', 'agent-service.json'))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    rmSync(join(dir, 'grants', 'agent-service.json'))
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), '{not json')
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY }, pad: 'x'.repeat(70 * 1024) }))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    mkdirSync(join(dir, 'app-mcp-keys'))
+    writeFileSync(join(dir, 'app-mcp-keys', 'messenger'), KEY + '\n', { mode: 0o600 })
+    rmSync(join(dir, 'grants', 'agent-service.json'))
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    // An in-place rewrite of the same size within one mtime tick (a rotation) is still seen: no utime here.
+    const f = join(dir, 'grants', 'agent-service.json')
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o600 })
+    const fresh = createGatewayGrants({ osHome: dir })
+    expect(fresh.key('messenger')).toBe(KEY)
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: 'c3'.repeat(32) } }))
+    expect(fresh.key('messenger')).toBe('c3'.repeat(32))
+    rmSync(f)
+    execFileSync('mkfifo', [f]) // a FIFO never blocks the gateway
+    expect(createGatewayGrants({ osHome: dir }).key('messenger')).toBe('')
+    rmSync(f)
+    // A file others may read or write holds no key (the spec says 0600).
+    writeFileSync(f, JSON.stringify({ outgoing: { messenger: KEY } }), { mode: 0o644 })
+    chmodSync(f, 0o644)
+    const said: string[] = []
+    const loose = createGatewayGrants({ osHome: dir, log: (line: string) => said.push(line) })
+    expect(loose.key('messenger')).toBe('')
+    expect(loose.key('messenger')).toBe('')
+    expect(said).toHaveLength(1) // said once, with the reason, not per call
+    expect(said[0]).toContain('0600')
+    chmodSync(f, 0o600) // the operator's fix is seen without a restart (ctime is in the stamp)
+    expect(loose.key('messenger')).toBe(KEY)
+    rmSync(f)
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: KEY, '../x': KEY } }), { mode: 0o600 })
+    const g = createGatewayGrants({ osHome: dir })
+    expect(g.key('messenger')).toBe(KEY)
+    expect(g.key('../x')).toBe('')
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('a down app returns a clear tool error and the gateway keeps serving', async () => {

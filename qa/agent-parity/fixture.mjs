@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../../server/service.mjs'
@@ -9,6 +9,10 @@ import { agentSocketPath } from '../../server/agent-sockets.mjs'
 import { PRESETS } from '../../server/agents.mjs'
 
 export const kinds = ['main', 'host-profile', 'container', 'restricted']
+// Where scenes live. Agent ingress sockets sit under the scene (<root>/os/agents/<id>/gateway/ingress.sock) and the
+// Service refuses socket paths over 103 bytes (agent-sockets.mjs). macOS's per-user $TMPDIR (/var/folders/…/T/) is
+// long enough to push them past that, so scenes use /tmp there (resolved, so path comparisons stay exact).
+export const sceneTmp = () => process.platform === 'darwin' ? realpathSync('/tmp') : tmpdir()
 export const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh6wAAAABJRU5ErkJggg==', 'base64')
 export const image = `data:image/png;base64,${png.toString('base64')}`
 export const owner = { 'X-Wizard-Owner-Proof': 'parity-synthetic-owner-proof-0123456789abcdef' }
@@ -26,7 +30,7 @@ export async function scene(kind, serverOptions = {}) {
   const optionOverrides = { ...serverOptions }
   delete optionOverrides.followUpParity
   delete optionOverrides.supervisorParity
-  const root = mkdtempSync(join(tmpdir(), 'parity-'))
+  const root = mkdtempSync(join(sceneTmp(), 'parity-'))
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
   mkdirSync(folder, { recursive: true })
@@ -39,6 +43,7 @@ export async function scene(kind, serverOptions = {}) {
   writeFileSync(join(agentHome, 'synthetic.png'), png)
   writeFileSync(join(agentHome, 'synthetic.txt'), 'PARITY_SYNTHETIC_DOCUMENT\n')
   const stt = { text: 'Synthetic voice words.' }
+  const signin = { ready: false }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
   titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL,
     source TEXT, model TEXT, ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0,
@@ -114,7 +119,9 @@ export async function scene(kind, serverOptions = {}) {
     }
     if (path === '/api/sessions') {
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100)
-      const rows = [...sessions.values()].filter(row => !(searchDb && row.archived)).map(row => ({ ...row, message_count: row.messages.length, latest_message: row.messages.at(-1), last_active: row.messages.at(-1)?.timestamp || row.created_at }))
+      const rows = [...sessions.values()].filter(row => !(searchDb && row.archived)).map(row => ({ ...row, message_count: row.messages.length, latest_message: row.messages.at(-1), last_active: row.messages.at(-1)?.timestamp || row.created_at,
+        // Stock Hermes marks a session with a live turn as running; opt-in so older contracts keep their rows.
+        ...(serverOptions.fixtureSessionStatus && [...runs.values()].some(r => r.session_id === row.id && ['queued', 'running'].includes(r.status)) ? { status: 'running' } : {}) }))
       return json(200, { data: rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
     }
     const sm = path.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|model))?$/)
@@ -173,9 +180,13 @@ export async function scene(kind, serverOptions = {}) {
   if (supervisorParity) installSupervisorAssets(agentHome)
   const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
+    providerSignInReady: async () => signin.ready,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
+  // A feature fixture may seed its own app/agent choices and state paths once,
+  // after the common runtime exists but before the real Service starts.
+  if (typeof serverOptions === 'function') serverOptions = serverOptions({ root, id, folder, osHome })
   let wizard, base
   const start = async () => {
     const priorScheduler = process.env.WIZARD_SCHEDULER
@@ -188,7 +199,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, origin: () => base, ownerHeaders: owner,
+  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {

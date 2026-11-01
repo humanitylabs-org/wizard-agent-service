@@ -43,6 +43,17 @@ describe('title format', () => {
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur - Captions' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur · Captions' })
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped' }))).toEqual({ state: 'done', ask: 'Shipped' })
   })
+
+  // James: an old, finished feature must not keep naming a thread that now works on other features
+  // of the same app ("Messenger · Composer paste" while the thread built zoom, file sending, Select…).
+  it('renames a thread whose title names a finished feature while new features of the same app are built', () => {
+    expect(STATUS_INSTRUCTIONS).toContain('even inside the same app')
+    expect(STATUS_INSTRUCTIONS).toContain('a title naming a feature that is finished while the thread now works on others is outdated')
+    expect(STATUS_INSTRUCTIONS).not.toContain('Give a new title only when')
+    expect(titleToApply({ currentTitle: 'Messenger · Composer paste', proposed: 'Messenger · Chats features', record: { locked: false, appliedFor: null }, assistantAt: 1 })).toBe('Messenger · Chats features')
+    // The owner's own rename still wins.
+    expect(titleToApply({ currentTitle: 'Messenger · Composer paste', proposed: 'Messenger · Chats features', record: { locked: true, appliedFor: null }, assistantAt: 1 })).toBe('')
+  })
 })
 
 describe('when a title changes', () => {

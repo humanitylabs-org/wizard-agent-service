@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createWizardServer, listen, readActiveHumanSessionIds, WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
+import { createWizardServer, listen, readActiveHumanSessionIds, OWN_STYLE_RUN_INSTRUCTIONS as WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
 import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 
 const servers: ReturnType<typeof createServer>[] = []

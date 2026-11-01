@@ -664,7 +664,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     const receipt = await (await api(f.origin, `/${created.id}/run`, 'POST')).json()
     await f.server.scheduler.tick(false); await f.server.scheduler.refreshRuns()
     expect(f.bodies[0].input).toContain("the owner's Notifications, not this chat")
-    expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key }])
+    expect(sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%.', key: receipt.key, agent: 'hermes' }])
     expect(f.server.scheduler.project(f.server.scheduler.get(created.id)).lastRun.outcome).toBe('notified')
     expect(f.sessions.get(receipt.thread)).toMatchObject({ hidden: true })
     const row = f.server.scheduler.db.prepare('SELECT receipt FROM schedule_occurrences WHERE key=?').get(receipt.key)
@@ -1055,7 +1055,7 @@ describe('deliver: notification (alerts go to the notifications slot, not Chats)
     expect(bodies[0].body.input).toContain("the owner's Notifications, not this chat")
     expect(isSilentResult('**Disk almost full**\nThales is at 93%.\n[SILENT]')).toBe(true)
     await s.refreshRuns(); await s.refreshRuns()
-    expect(n.sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%. Free space or approve cleanup.', key: expect.stringMatching(/^schedule:/) }])
+    expect(n.sent).toEqual([{ title: 'Disk almost full', message: 'Thales is at 93%. Free space or approve cleanup.', key: expect.stringMatching(/^schedule:/), agent: 'main' }])
     expect(s.project(s.get(j.id)).lastRun).toMatchObject({ outcome: 'notified', error: null })
   })
   it('sends nothing for a [SILENT]-only answer', async () => {
@@ -1086,6 +1086,29 @@ describe('deliver: notification (alerts go to the notifications slot, not Chats)
     clock += 8 * 3600_000; state = { status: 'completed', output: 'Render done\nAll 3 clips exported.\n[SILENT]' }
     await s.refreshRuns()
     expect(n.sent).toHaveLength(1); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('notified')
+  })
+  it('observes an overdue one-shot admitted more than 7 days after its instant', async () => {
+    let state: any = { status: 'running' }; const n = notifier()
+    const s = scheduler(undefined, { notifier: n, lookup: async () => state })
+    const j = s.create(job({ deliver: 'notification', when: { once: new Date(clock - 9 * 86400_000).toISOString() } }))
+    await s.tick()
+    state = { status: 'completed', output: 'Late check\nThe overdue check ran.\n[SILENT]' }
+    await s.refreshRuns()
+    expect(n.sent).toHaveLength(1); expect(s.project(s.get(j.id)).lastRun.outcome).toBe('notified')
+  })
+  it('checks availability and sends with the job agent, so an agent without the app falls back to its thread', async () => {
+    const seen: string[] = []; const sent: any[] = []; let bodies: any[] = []
+    const scoped = { available: (agent: string) => { seen.push(agent); return agent !== 'private' }, send: async (x: any) => { sent.push(x) } }
+    const s = scheduler(async (o: any) => { bodies.push(o); return { run_id: 'r' } }, { notifier: scoped, agentId: (a: string) => (a === 'main' ? 'hermes' : a),
+      lookup: async () => ({ status: 'completed', output: 'Done\nAll good.\n[SILENT]' }) })
+    s.create(job({ deliver: 'notification', agent: 'private' })); s.create(job({ name: 'Main watcher', deliver: 'notification' }))
+    clock += 5 * 60_000; await s.tick(); await s.refreshRuns(); clock += 5 * 60_000; await s.tick(); await s.refreshRuns()
+    expect(new Set(bodies.map(b => b.agent)).size).toBe(2)
+    expect([...new Set(seen)].sort()).toEqual(['hermes', 'private'])
+    const priv = bodies.find(b => b.agent === 'private'), main = bodies.find(b => b.agent !== 'private')
+    expect(priv).toMatchObject({ fallback: true }); expect(priv.deliver).toBeUndefined()
+    expect(main.deliver).toBe('notification')
+    expect(sent).toEqual([expect.objectContaining({ agent: 'hermes' })])
   })
   it('validates deliver and keeps returns as threads', () => {
     const s = scheduler()

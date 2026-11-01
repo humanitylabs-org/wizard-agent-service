@@ -1,5 +1,7 @@
 # Wizard scheduler — backend slice 1 (#47)
 
+Deterministic host commands (backups, watchdogs and disk maintenance) have a separate [host system jobs](system-jobs.md) owner registry and systemd user timers. Agent prompts stay here; script-only migration is disabled by default and never writes the Hermes source.
+
 The Agent Service owns schedules. It does not scan cron output, append finished
 reports to Chats, or run another agent's cron process. A scheduled occurrence is
 an ordinary run in the destination thread; Hermes writes the answer there.
