@@ -200,6 +200,16 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
 
+// Optional installed/owner-link metadata, not a new launcher or executable app markup.
+export function readyCard(c, view) {
+  if (!c || typeof c !== 'object' || !/^\/(?:[a-zA-Z0-9_-]+\/)+$/.test(view || '')) return null
+  const endpoint = p => typeof p === 'string' && p.length <= 160 && /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(p)
+  if (!endpoint(c.status) || (c.dismiss !== undefined && !endpoint(c.dismiss))) return null
+  const title = cleanText(c.title, 60), subtitle = cleanText(c.subtitle, 160)
+  if (!title) return null
+  return { title, subtitle, status: c.status, ...(c.dismiss ? { dismiss: c.dismiss } : {}) }
+}
+
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
  * links from launcher.json. Only what a front end needs to draw and open a tile leaves the box.
@@ -222,6 +232,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
       receives_voice_input: !!view && app.receives_voice_input === true,
+      ...(readyCard(app.ready_card, view) ? { ready_card: readyCard(app.ready_card, view) } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
@@ -237,6 +248,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
       receives_voice_input: link.receives_voice_input === true,
+      ...(readyCard(link.ready_card, url) ? { ready_card: readyCard(link.ready_card, url) } : {}),
     })
   }
   const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
