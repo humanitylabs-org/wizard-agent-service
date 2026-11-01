@@ -225,6 +225,16 @@ const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
 const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
 const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
+// Optional installed/owner-link metadata, not a new launcher or executable app markup.
+export function readyCard(c, view) {
+  if (!c || typeof c !== 'object' || !/^\/(?:[a-zA-Z0-9_-]+\/)+$/.test(view || '')) return null
+  const endpoint = p => typeof p === 'string' && p.length <= 160 && /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(p)
+  if (!endpoint(c.status) || (c.dismiss !== undefined && !endpoint(c.dismiss))) return null
+  const title = cleanText(c.title, 60), subtitle = cleanText(c.subtitle, 160)
+  if (!title) return null
+  return { title, subtitle, status: c.status, ...(c.dismiss ? { dismiss: c.dismiss } : {}) }
+}
+
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
  * links from launcher.json. Only what a front end needs to draw and open a tile leaves the box.
@@ -251,6 +261,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       // malformed value (string, null) normalizes to [] so it is never mistaken for an old registration.
       ...(Object.hasOwn(app, 'voice_names') ? { voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
         typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [] } : {}),
+      ...(readyCard(app.ready_card, view) ? { ready_card: readyCard(app.ready_card, view) } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
       // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
@@ -270,6 +281,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
       receives_voice_input: link.receives_voice_input === true,
+      ...(readyCard(link.ready_card, url) ? { ready_card: readyCard(link.ready_card, url) } : {}),
     })
   }
   const candidates = [CHATS_DEFAULT, ...out.filter(a => a.chats_view).map(a => a.id)]
