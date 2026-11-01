@@ -14,6 +14,9 @@ const req = (headers = {}) => ({ headers })
 const owner = { kind: 'owner', via: 'access_verifier' }
 
 describe('browser owner boundary', () => {
+  it('private notebook opt-in cannot bypass a disabled shell boundary', () => {
+    expect(() => createWizardServer({ ownerPrivateNotes: true, browserBoundary: { enabled: false } })).toThrow('Private notebooks require the browser boundary')
+  })
   it('off is inert, including an unused/invalid secret path', () => {
     expect(browserBoundaryFromEnv({ WIZARD_BROWSER_BOUNDARY: '0', WIZARD_SHELL_TOKEN_FILE: '/missing' })).toEqual({ enabled: false })
     expect(createBrowserBoundary().allows(req({ origin: 'null' }), owner)).toBe(true)
@@ -36,7 +39,8 @@ describe('browser owner boundary', () => {
     expect(gate.allows(req({ 'x-wizard-shell-token': TOKEN, 'sec-fetch-site': 'cross-site' }), owner)).toBe(false)
     for (const kind of ['agent', 'service']) {
       expect(gate.allows(req(), { kind })).toBe(true)
-      for (const headers of [{ origin: 'null' }, { 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-mode': 'cors' }, { 'sec-fetch-dest': 'empty' }]) expect(gate.allows(req(headers), { kind })).toBe(false)
+      expect(gate.allows(req({ 'sec-fetch-mode': 'cors' }), { kind })).toBe(true)
+      for (const headers of [{ origin: 'null' }, { 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'empty' }]) expect(gate.allows(req(headers), { kind })).toBe(false)
     }
   })
 
@@ -75,7 +79,8 @@ describe('browser owner boundary', () => {
     const headers = { 'X-Wizard-Shell-Token': TOKEN, 'X-Wizard-Owner-Proof': PROOF }
     expect((await fetch(base + '/wizard/v1/settings', { headers })).status).toBe(200)
     expect((await fetch(base + '/wizard/v1/setup', { headers: { 'X-Wizard-Shell-Token': TOKEN } })).status).toBe(403)
-    expect((await fetch(base + '/wizard/v1/settings', { headers: { ...headers, Origin: 'null' } })).status).toBe(401)
+    // Main's earlier Origin gate also rejects opaque requests, before the boundary.
+    expect((await fetch(base + '/wizard/v1/settings', { headers: { ...headers, Origin: 'null' } })).status).toBe(403)
     expect((await fetch(base + '/wizard-os-home/api/voice')).status).toBe(401)
   })
   it('tailnet static proxy preserves browser metadata and opener isolation, never owner credentials', async () => {

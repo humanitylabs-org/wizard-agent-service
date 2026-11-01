@@ -20,12 +20,14 @@ export function createBrowserBoundary({ enabled = false, token = '' } = {}) {
     enabled: enabled === true,
     // This is an additional gate, NEVER a replacement for the principal/access
     // verifier. Internal and socket-bound agent calls retain their existing scope.
-    allows(request, principal, { staticRequest = false, healthRequest = false } = {}) {
+    allows(request, principal, { staticRequest = false, healthRequest = false, machineRequest = false } = {}) {
       if (!enabled || staticRequest || healthRequest) return true
       // Machine credentials cannot be used to turn an ordinary browser request
       // into an internal call. Browser Fetch Metadata is not script-settable.
-      if (principal?.kind === 'service' || principal?.kind === 'agent') {
-        return !['origin', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest'].some(name => request.headers?.[name] !== undefined)
+      // Node's fetch adds Sec-Fetch-Mode:cors but no Site/Dest; preserve those
+      // existing machine clients. A real browser cannot suppress Sec-Fetch-Site.
+      if (principal?.kind === 'service' || principal?.kind === 'agent' || machineRequest) {
+        return !['origin', 'sec-fetch-site', 'sec-fetch-dest'].some(name => request.headers?.[name] !== undefined)
       }
       // Even possession of a stolen token may not authorize an opaque frame.
       if (request.headers?.origin === 'null' || request.headers?.['sec-fetch-site'] === 'cross-site') return false

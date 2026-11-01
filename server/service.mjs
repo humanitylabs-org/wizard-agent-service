@@ -85,7 +85,7 @@ import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { createBrowserBoundary } from './browser-boundary.mjs'
-import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
+import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -2538,6 +2538,7 @@ function buildWizardServer(options, lifetime) {
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const browserBoundary = createBrowserBoundary(options.browserBoundary)
+  if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true
   const baseAccessVerifier = options.accessVerifier
   if (baseRequireAccess && typeof baseAccessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
@@ -5012,7 +5013,14 @@ function buildWizardServer(options, lifetime) {
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
       const staticRequest = ['GET', 'HEAD'].includes(request.method) && shellStaticPath(url.pathname, uxPrefix)
-      if (!browserBoundary.allows(request, principal, { staticRequest })) {
+      // Dedicated machine routes retain their own credentials and downstream route gates.
+      // This exemption never grants an owner principal and is never available on Serve.
+      const machineRequest = browserBoundary.enabled && !tailnetIngress && (
+        (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|heavy|schedules|supervisor)\//u.test(url.pathname)
+          && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
+        || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
+      )
+      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest })) {
         sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
         return
       }
