@@ -150,6 +150,10 @@ server = createWizardServer({
 
   requireAccess,
   browserBoundary: browserBoundaryFromEnv(),
+  // Default-off. Real WAM install/grant admission for browser data/state needs BOTH the boundary and this opt-in.
+  ...(process.env.WIZARD_BROWSER_BOUNDARY === '1' && process.env.WIZARD_BROWSER_ADAPTERS === 'wam' ? { browserAdapterWam: {
+    receiptsPath: process.env.WIZARD_BROWSER_RECEIPTS_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'browser-operation-receipts.json'),
+  } } : {}),
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
