@@ -250,22 +250,29 @@ function decodeMcpBody(contentType, text, wantId) {
 }
 
 class AppClient {
-  constructor(app, { fetchImpl, timeoutMs }) {
+  constructor(app, { fetchImpl, timeoutMs, appKey = () => '' }) {
     this.app = app
     this.fetch = fetchImpl
     this.timeoutMs = timeoutMs
+    this.appKey = appKey
     this.session = ''
     this.ready = false
     this.nextId = 1
   }
 
-  async post(message, wantId) {
+  async post(message, wantId, extra = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
       const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': PROTOCOL_VERSIONS[0] }
       if (this.session) headers['Mcp-Session-Id'] = this.session
-      const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal })
+      // The gateway's per-app grant key (wizard-os spec/PERMISSIONS.md layer 2): the app checks it against the
+      // `host:agent-service` row of its own grants file, so it can tell the gateway from any other local caller and trust
+      // the agent named in X-Wizard-Agent. `Authorization` is left alone. Agent headers go only with the key.
+      const key = this.appKey()
+      if (key) Object.assign(headers, { 'X-Wizard-Grant': key }, extra)
+      // No redirects: a redirect would carry the grant key and agent headers to another origin.
+      const response = await this.fetch(this.app.url, { method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal, redirect: 'error' })
       const sid = response.headers.get('mcp-session-id')
       if (sid) this.session = sid
       const text = await response.text()
@@ -286,12 +293,12 @@ class AppClient {
     this.ready = true
   }
 
-  async request(method, params) {
+  async request(method, params, extra = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await this.open()
         const id = this.nextId++
-        return await this.post({ jsonrpc: '2.0', id, method, params }, id)
+        return await this.post({ jsonrpc: '2.0', id, method, params }, id, extra)
       } catch (error) {
         if (!error?.retry || attempt) throw error
       }
@@ -306,6 +313,61 @@ function safeEqual(a, b) {
   const x = Buffer.from(String(a))
   const y = Buffer.from(String(b))
   return x.length === y.length && timingSafeEqual(x, y)
+}
+
+export const GATEWAY_GRANTS_FILE = join('grants', 'agent-service.json')
+const GRANT_KEY = /^[A-Za-z0-9_-]{32,256}$/u
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u
+
+/**
+ * The gateway's side of the app grant keys (wizard-os spec/PERMISSIONS.md layer 2, "The gateway is a consumer too"):
+ * `key(appId)` is the key to send as X-Wizard-Grant to that app, or '' when it holds none. The file is re-read when it
+ * changes (an App Manager rewrite or a revoke takes effect on the next call); a symlink, an oversized or malformed file
+ * and malformed keys give no keys, never an error.
+ */
+export function createGatewayGrants({ osHome, file = osHome ? join(osHome, GATEWAY_GRANTS_FILE) : '', log = () => {} }) {
+  const MAX = 64 * 1024
+  let stamp = null
+  let keys = new Map()
+  // One bounded read through a no-follow handle; the stamp comes from that same handle. A stamp younger than 2 s is
+  // not trusted (an in-place rewrite within one mtime tick keeps inode and size), so the file is read again next time.
+  let told = ''
+  const drop = (why) => { if (told !== `${stamp}:${why}`) { told = `${stamp}:${why}`; log(JSON.stringify({ event: 'gateway-grants', ok: false, why })) } }
+  const load = () => {
+    let fd
+    try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) } catch { stamp = null; keys = new Map(); return }
+    try {
+      const st = fstatSync(fd)
+      // ctime too: a chmod/chown fix is seen, and utime cannot fake it.
+      const next = `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`
+      if (next === stamp) return
+      stamp = Date.now() - Math.max(st.mtimeMs, st.ctimeMs) > 2000 ? next : null
+      keys = new Map()
+      // Owner-only, as the spec says (0600, the gateway's user): a file others can read or write holds no key.
+      if (!st.isFile() || st.size > MAX) return drop('not a regular file under 64 KiB')
+      if ((st.mode & 0o077) || (process.getuid && st.uid !== process.getuid())) return drop('not mode 0600 owned by the Agent Service user')
+      const buf = Buffer.alloc(MAX + 1)
+      let n = 0
+      for (let r; n <= MAX && (r = readSync(fd, buf, n, MAX + 1 - n, null)) > 0;) n += r
+      if (n > MAX) return drop('over 64 KiB')
+      let doc
+      try { doc = JSON.parse(buf.toString('utf8', 0, n)) } catch { return drop('not JSON') }
+      const out = doc && typeof doc === 'object' && doc.outgoing && typeof doc.outgoing === 'object' && !Array.isArray(doc.outgoing) ? doc.outgoing : {}
+      const bad = []
+      for (const [id, key] of Object.entries(out)) {
+        if (APP_ID.test(id) && typeof key === 'string' && GRANT_KEY.test(key)) keys.set(id, key)
+        else bad.push(APP_ID.test(id) ? id : '?')
+      }
+      if (bad.length) drop(`malformed key for ${bad.slice(0, 5).join(', ')}`)
+    } catch { stamp = null; keys = new Map() } finally { closeSync(fd) }
+  }
+  return {
+    key(appId) {
+      if (!file || !APP_ID.test(String(appId || ''))) return ''
+      load()
+      return keys.get(appId) || ''
+    },
+  }
 }
 
 /** The gateway token: $WIZARD_MCP_TOKEN, else <osHome>/mcp-token (created 0600 on first start). */
@@ -337,7 +399,7 @@ export const GATEWAY_MAIN_AGENT = 'hermes'
  * describes and calls only those apps for that agent.
  */
 export function createAgentBridge({
-  appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', mcpAddress = 'url', token = '',
+  appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', grantsHome = osHome, mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
   agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null,
@@ -381,9 +443,13 @@ export function createAgentBridge({
   const onChange = () => { if (refresh()) notifyChanged() }
   if (appsJsonPath && watchIntervalMs > 0) watchFile(appsJsonPath, { interval: watchIntervalMs, persistent: false }, onChange)
 
+  // The gateway's grant keys (wizard-os spec/PERMISSIONS.md layer 2): <wizard-os home>/grants/agent-service.json,
+  // `{"outgoing": {"<app id>": "<key>"}}`, written 0600 by the App Manager (the same key system as app-to-app grants).
+  // An app without a key is called exactly as before.
+  const gatewayGrants = createGatewayGrants({ osHome: grantsHome, log })
   const client = (app) => {
     let c = clients.get(app.id)
-    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs }); clients.set(app.id, c) }
+    if (!c || c.app.url !== app.url) { c = new AppClient(app, { fetchImpl, timeoutMs, appKey: () => gatewayGrants.key(app.id) }); clients.set(app.id, c) }
     return c
   }
 
@@ -503,7 +569,8 @@ export function createAgentBridge({
       const saved = c.timeoutMs
       c.timeoutMs = callTimeoutMs
       try {
-        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} })
+        result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} },
+          { 'X-Wizard-Agent': agentId, 'X-Wizard-Agent-Label': encodeURIComponent(agentLabel(agentId)) })
         ok = !result?.isError
       } catch (error) {
         const reason = error?.rpc ? clean(error.message, 200) : error?.name === 'AbortError' ? 'it did not answer in time' : 'it is not reachable'
