@@ -54,6 +54,7 @@ import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
+import { ModelSelectionConflict, sameRoute } from './model-selection.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
@@ -3618,7 +3619,7 @@ function buildWizardServer(options, lifetime) {
       // Persist the actual decorated wire payload, not just the UI input: capability and
       // instruction changes across a restart must not change an attempted idempotency key.
       queuedBody = Buffer.from(runQueue.freezeDispatchBody(record.publicRunId, queuedBody.toString('utf8')))
-      const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
+      const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual', wizardAdmittedRoute: record.runtime === 'direct' })
       const raw = Buffer.from(await result.arrayBuffer())
       if (!result.ok) throw upstreamError(result.status, raw, result.headers.get('retry-after'))
       let payload
@@ -6308,6 +6309,9 @@ function buildWizardServer(options, lifetime) {
           catch (error) { sendJson(response, error.status, { error: { code: error.code, message: error.message } }); return }
         }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
+          const guidanceRoute = parseJsonBody(body)
+          const captured = parseJsonBody(queuedProxyRecord.body)
+          if (!sameRoute(guidanceRoute, captured)) throw new ModelSelectionConflict(lockedBridge.selections.current(queuedProxyRecord.sessionId), 'model_selection_steer_mismatch')
           const prepared = await prepareRunBody(body, resolveFiles, true)
           const guidance = parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
@@ -6326,6 +6330,7 @@ function buildWizardServer(options, lifetime) {
             if (operator || !runQueue) throw Object.assign(new Error('saved retry unavailable'), { status: 400 })
             const { wizard_retry_run_id: sourceId, ...validation } = requested
             directBody('POST', '/v1/runs', Buffer.from(JSON.stringify(validation)), admissionContract)
+            if (!runQueue.byIdempotencyKey('direct', `wizard-saved-retry-${sourceId}`)) lockedBridge.selections.capture(requested)
             let retried
             try { retried = await runQueue.retrySaved(sourceId, requested.session_id, requested) }
             catch (error) {
@@ -6356,6 +6361,7 @@ function buildWizardServer(options, lifetime) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
               return
             }
+            if (!operator && (requested.require_model_lock || lockedBridge.selections.current(sessionId))) lockedBridge.selections.capture(requested, false)
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
               ...(quietWatcherAdmission ? { continuation: { kind: 'watch', preserve_archived: request.headers['x-wizard-watcher-preserve'] === '1' } } : {}) }
           }
@@ -6383,6 +6389,13 @@ function buildWizardServer(options, lifetime) {
             return
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
+          if (queuedAdmission.runtime === 'direct') {
+            const requested = parseJsonBody(body)
+            if (requested.require_model_lock || lockedBridge.selections.current(queuedAdmission.sessionId)) {
+              const captured = lockedBridge.selections.capture(requested)
+              body = Buffer.from(JSON.stringify({ ...requested, ...captured, require_model_lock: true }))
+            }
+          }
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
@@ -6458,11 +6471,8 @@ function buildWizardServer(options, lifetime) {
         }
         let result = Buffer.from(await upstream.arrayBuffer())
         if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
-        if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
-          const ack = JSON.parse(result.toString('utf8'))
-          const selected = lockedBridge.sessionRoute(decodeURIComponent(upstreamPath.split('/')[3]))
-          if (ack.runtime && selected?.version) { ack.runtime.selection_version = selected.version; result = Buffer.from(JSON.stringify(ack)) }
-        }
+        if (upstream.ok && request.method === 'GET' && /^\/api\/sessions(?:\/[^/]+)?$/.test(upstreamPath) && contentType.includes('application/json'))
+          result = Buffer.from(JSON.stringify(lockedBridge.selections.project(JSON.parse(result.toString('utf8')))))
         if (queuedProxyRecord && contentType.includes('application/json')) {
           const operatorRecord = queuedProxyRecord.runtime === 'operator'
             ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
@@ -6731,6 +6741,10 @@ function buildWizardServer(options, lifetime) {
       sendJson(response, 404, { error: 'not_found' })
     } catch (error) {
       if (error instanceof OwnerThreadWriteError && !response.headersSent) {
+        sendJson(response, error.status, error.payload)
+        return
+      }
+      if (error?.payload?.error?.code?.startsWith('model_selection_') && !response.headersSent) {
         sendJson(response, error.status, error.payload)
         return
       }

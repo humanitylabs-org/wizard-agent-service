@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { abortKeeperStream, keeperFetch, keeperUnavailable } from './run-stream-keeper.mjs'
 import { migrateJson, atomicStoreWrite } from './thread-reference.mjs'
 import { RunEventLog } from './run-event-log.mjs'
+import { ModelSelections, ModelSelectionConflict, sameRoute } from './model-selection.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
 // Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
@@ -13,6 +14,15 @@ export function neverSent(error) {
   return false
 }
 const fail = (message, status = 422) => Object.assign(new Error(message), { status })
+
+// Compatibility export: route mismatches are conflicts, never substitutions.
+export function selectLockedRoute(value, stored, log) {
+  const explicit = value.model && value.provider ? { model: value.model, provider: value.provider } : null
+  const confirmed = stored?.model && stored?.provider ? { model: stored.model, provider: stored.provider } : null
+  if (explicit && confirmed && !sameRoute(explicit, confirmed)) throw new ModelSelectionConflict(stored)
+  if (confirmed && Object.hasOwn(value, 'selection_version') && value.selection_version !== stored.version) throw new ModelSelectionConflict(stored)
+  return explicit || confirmed
+}
 
 export function runtimeMatches(runtime, route) {
   if (runtime?.model !== route.model) return false
@@ -59,6 +69,7 @@ export class LockedRunBridge {
     this.origin = origin.replace(/\/$/, '')
     this.statePath = statePath
     this.sessionRoute = sessionRoute
+    this.selections = new ModelSelections({ statePath: statePath ? statePath + '.selections' : '', sessionRoute })
     this.entries = new Map()
     this.pending = new Map()
     this.streams = new Set()
@@ -82,6 +93,26 @@ export class LockedRunBridge {
   }
   async fetch(url, init = {}) {
     const target = new URL(url)
+    const modelSession = target.origin === new URL(this.origin).origin && target.pathname.match(/^\/api\/sessions\/([^/]+)\/model$/)?.[1]
+    if (modelSession && init.method === 'POST') {
+      const value = JSON.parse(init.body.toString())
+      const sessionId = decodeURIComponent(modelSession)
+      value.selection_request_id ||= 'legacy-' + createHash('sha256').update(JSON.stringify(value)).digest('hex')
+      const selection = await this.selections.change(sessionId, value, async () => {
+        const response = await this.rawFetch(url, init)
+        if (!response.ok) {
+          const error = fail('Selected model was not confirmed', response.status)
+          error.selectionNotApplied = response.status >= 400 && response.status < 500
+          throw error
+        }
+        const ack = await response.json()
+        const runtime = ack.runtime
+        if (!runtime || !runtimeMatches(runtime, value)) throw new ModelSelectionConflict(this.selections.current(sessionId), 'model_selection_ack_mismatch')
+        return { model: value.model, provider: value.provider }
+      })
+      return new Response(JSON.stringify({ runtime: { model: selection.model, provider: selection.provider, model_lock: 'confirmed', selection_version: selection.version }, selection }),
+        { headers: { 'Content-Type': 'application/json' } })
+    }
     if (target.origin === new URL(this.origin).origin && /^\/v1\/runs\/[^/]+$/.test(target.pathname) && (!init.method || init.method === 'GET')) {
       const response = await this.rawFetch(url, init)
       if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return response
@@ -99,11 +130,11 @@ export class LockedRunBridge {
     let value
     try { value = JSON.parse(init.body.toString()) }
     catch { throw fail('Invalid model-route request', 400) }
-    // Explicit body route is the immutable send-time selection. Older clients inherit a confirmed stored selection.
-    const stored = this.sessionRoute(value.session_id)
+    const stored = this.selections.current(value.session_id)
     if (!value.require_model_lock && !stored) return this.rawFetch(url, init)
-    const route = value.model && value.provider ? { model: value.model, provider: value.provider }
-      : stored ? { model: stored.model, provider: stored.provider } : null
+    // Trusted queue custody is an init capability, never a field accepted from JSON.
+    const route = init.wizardAdmittedRoute === true ? { model: value.model, provider: value.provider, selection_version: value.selection_version }
+      : (value.model && value.provider ? { model: value.model, provider: value.provider } : stored)
     if (!route && !value.require_model_lock) return this.rawFetch(url, init)
     if (!route?.model || !route?.provider || !idPattern.test(value.session_id || ''))
       throw fail('No confirmed model/provider for this message', 400)
@@ -114,14 +145,17 @@ export class LockedRunBridge {
     const idem = headers.get('Idempotency-Key')
     if (!idem) throw fail('Model-locked sends need an idempotency key', 400)
     const key = createHash('sha256').update(value.session_id + '\0' + idem).digest('hex')
-    const requestHash = createHash('sha256').update(JSON.stringify({ ...value, ...route })).digest('hex')
+    const requestHash = createHash('sha256').update(JSON.stringify(value)).digest('hex')
     const existing = this.entries.get(key)
-    if (existing && existing.requestHash !== requestHash) throw fail('Idempotency key belongs to a different selected model or message')
+    const comparedHash = existing && !existing.requestHashVersion
+      ? createHash('sha256').update(JSON.stringify({ ...value, model: existing.model, provider: existing.provider })).digest('hex') : requestHash
+    if (existing && (existing.requestHash !== comparedHash || (value.model && value.model !== existing.model) || (value.provider && value.provider !== existing.provider))) throw fail('Idempotency key belongs to a different selected model or message')
     if (this.pending.has(key)) return this.response(await this.pending.get(key), true)
     if (existing?.runId) return this.response(existing, true)
     if (existing && !(await this.provablyUndelivered(key, existing, value.session_id, probeText(value.input))))
       throw fail('Model-locked delivery is uncertain; automatic replay is blocked to avoid a duplicate')
-    const entry = { sessionId: value.session_id, session_id: value.session_id, agent_id: 'hermes', ...route, requestHash, state: 'starting', createdAt: Date.now() }
+    if (init.wizardAdmittedRoute !== true) route = this.selections.capture(value)
+    const entry = { sessionId: value.session_id, session_id: value.session_id, agent_id: 'hermes', ...route, requestHash, requestHashVersion: 2, state: 'starting', createdAt: Date.now() }
     this.entries.set(key, entry); this.save()
     const task = this.launch(value, route, headers, entry)
     this.pending.set(key, task)
@@ -212,7 +246,7 @@ export class LockedRunBridge {
           let pos
           while ((pos = buffer.indexOf('\n\n')) !== -1) {
             const frame = buffer.slice(0, pos); buffer = buffer.slice(pos + 2)
-            const event = frame.match(/^event:\s*(.+)$/m)?.[1]
+            let event = frame.match(/^event:\s*(.+)$/m)?.[1]
             const data = frame.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n')
             if (!data) continue
             let payload
@@ -227,6 +261,12 @@ export class LockedRunBridge {
               entry.runId = payload.run_id; entry.state = 'running'; this.save()
               this.events.open(entry.runId)
               accepted = true; accept(entry)
+            }
+            if (accepted && payload.runtime?.model_lock === 'confirmed' && !runtimeMatches(payload.runtime, route)) {
+              event = 'run.failed'
+              payload = { run_id: entry.runId, status: 'failed', output: null, runtime: payload.runtime,
+                error: { code: 'model_lock_mismatch', message: 'Selected model could not be confirmed · no substitute accepted' } }
+              entry.state = 'runtime_mismatch'; this.save()
             }
             if (accepted && event) this.events.record(entry.runId, event, payload)
             if (event === 'error' && !accepted) throw fail('Selected model failed before acknowledgement')
