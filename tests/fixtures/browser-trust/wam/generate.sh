@@ -25,5 +25,16 @@ tool install notifications --repo oscarhenrycollins/notifications --port 18810; 
 tool install profiles --repo oscarhenrycollins/profiles --provides profiles --port 18811
 tool grant profiles state.local; snap profiles-oscar
 tool update profiles --repo humanitylabs-org/profiles --provides profiles --port 18811; snap profiles-org
+# Card 2: the real Notifications screens' contract (inbox + mark). NOTIFICATIONS_WIZARD_MD = the app checkout's
+# own wizard.md; without it, a copy of its browser_contract on a minimal manifest.
+MD=${NOTIFICATIONS_WIZARD_MD:-}
+if [ -z "$MD" ]; then
+  MD="$T/wizard.md"
+  printf -- '---\nid: notifications\nname: Notifications\ntype: service\nversion: 1.0.0\nprovides: [notifications]\nview: {path: /notifications/, port: 8080}\nbrowser_contract:\n  version: 1\n  isolation: opaque\n  operations: [notifications.inbox, notifications.mark]\n---\n' > "$MD"
+fi
+tool install notifications --repo oscarhenrycollins/notifications --port 18810 --wizard-md "$MD"; snap card2-declared
+tool grant notifications notifications.inbox; snap card2-inbox-only
+tool grant notifications notifications.mark; snap card2-granted
+tool revoke notifications notifications.mark; snap card2-revoked-mark
 git -C "$WAM" rev-parse HEAD > "$OUT/WAM_COMMIT"
 echo "wrote $(ls "$OUT"/*.json | wc -l) scenarios from WAM $(cat "$OUT/WAM_COMMIT")"

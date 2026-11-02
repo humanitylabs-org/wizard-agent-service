@@ -1,7 +1,7 @@
 // Fixed browser data/state admission, not an HTTP/MCP relay. Identity and grants come only from the
 // injected resolver: the synthetic prototype rig, or the production WAM resolver (browser-installations.mjs).
 import { randomUUID } from 'node:crypto'
-import { OPERATIONS, OPERATION_KEY, createNotificationsOperations } from './browser-operations.mjs'
+import { OPERATIONS, OPERATION_KEY, WRITE_OPERATIONS, createNotificationsOperations } from './browser-operations.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const exact = (x, keys) => x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).sort().join(',') === [...keys].sort().join(',')
 export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null } = {}) {
@@ -32,9 +32,9 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
   }
   // Re-resolve the installation before an effect and before releasing any result.
   const recheck = (b, operation) => { const p = current(b); admit(p, operation); return p }
-  const real = new Set(['notifications.list', 'notifications.mark_read', 'data.status'])
+  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'data.status'])
   async function call(request) {
-    const write = request?.operation === 'notifications.mark_read'
+    const write = WRITE_OPERATIONS.includes(request?.operation)
     const { b, p } = admitRequest(request, ['handle', 'generation', 'requestId', 'operation', 'args', ...(write ? ['operationKey'] : [])])
     if (!operations) fail('unsupported_capability')
     if (request.operation === 'data.status') {
@@ -46,9 +46,11 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     }
     admit(p, request.operation)
     if (write && (typeof request.operationKey !== 'string' || !OPERATION_KEY.test(request.operationKey))) fail('bad_request')
-    const value = request.operation === 'notifications.list'
-      ? await operations.list(p, request.args)
-      : await operations.markRead(p, request.args, request.operationKey, async () => recheck(b, request.operation))
+    const effect = async () => recheck(b, request.operation)
+    const value = request.operation === 'notifications.list' ? await operations.list(p, request.args)
+      : request.operation === 'notifications.inbox' ? await operations.inbox(p, request.args)
+        : request.operation === 'notifications.mark' ? await operations.mark(p, request.args, request.operationKey, effect)
+          : await operations.markRead(p, request.args, request.operationKey, effect)
     recheck(b, request.operation)
     return value
   }
