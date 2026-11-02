@@ -643,7 +643,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (value && (isModelChange || upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions' || method === 'PATCH')) {
     if (isModelChange && !value.model) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
     if (!modelAllowed(agent, value)) throw new AgentError(409, 'model_not_allowed', 'agent.allowed_models')
-    if (value.model || value.provider) {
+    if (agent.privacy === 'standard' && (value.model || value.provider)) {
+      value = {...value, provider: value.provider || agent.model.provider, ...(typeof value.model === 'string' && value.model.includes('/') ? {model: value.model.split('/')[1]} : {})}
+    } else if (value.model || value.provider) {
       // The agent's Hermes knows the model under its own provider; never forward a provider switch.
       const { provider: _provider, ...rest } = value
       value = typeof rest.model === 'string' && rest.model.includes('/') ? { ...rest, model: rest.model.split('/')[1] } : rest

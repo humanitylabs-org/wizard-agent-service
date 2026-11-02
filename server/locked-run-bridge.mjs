@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { abortKeeperStream, keeperFetch, keeperUnavailable } from './run-stream-keeper.mjs'
 import { migrateJson, atomicStoreWrite } from './thread-reference.mjs'
 import { RunEventLog } from './run-event-log.mjs'
+import { ModelSelections, ModelSelectionConflict } from './model-selection.mjs'
 
 const idPattern = /^[A-Za-z0-9._:-]{1,180}$/
 // Connect-phase failures: the request never reached Hermes, so a replay cannot duplicate it.
@@ -57,7 +58,7 @@ export function probeText(input) {
 }
 
 export class LockedRunBridge {
-  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000, keeperSocket = '', log = (line) => console.warn(line) }) {
+  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, isPublicSession = () => false, deliveryProbe = null, uncertainSettleMs = 15_000, keeperSocket = '', log = (line) => console.warn(line) }) {
     // Hermes interrupts a locked turn when its stream closes. The run stream keeper holds that
     // stream in a separate process so an Agent Service restart no longer cuts replies.
     this.keeperSocket = keeperSocket
@@ -72,6 +73,8 @@ export class LockedRunBridge {
     this.origin = origin.replace(/\/$/, '')
     this.statePath = statePath
     this.sessionRoute = sessionRoute
+    this.isPublicSession = isPublicSession
+    this.publicSelections = null
     this.entries = new Map()
     this.pending = new Map()
     this.streams = new Set()
@@ -82,6 +85,9 @@ export class LockedRunBridge {
       try { this.entries = new Map(JSON.parse(readFileSync(statePath, 'utf8'))) }
       catch (error) { if (error.code !== 'ENOENT') throw fail('Model-route journal is unreadable', 503) }
     }
+  }
+  get selections() {
+    return this.publicSelections ||= new ModelSelections({statePath: this.statePath ? this.statePath + '.public-selections' : '', sessionRoute: this.sessionRoute})
   }
   isLockedRun(runId) {
     if (!runId) return false
@@ -95,6 +101,26 @@ export class LockedRunBridge {
   }
   async fetch(url, init = {}) {
     const target = new URL(url)
+    const modelSession = target.origin === new URL(this.origin).origin && target.pathname.match(/^\/api\/sessions\/([^/]+)\/model$/)?.[1]
+    if (modelSession && init.method === 'POST' && this.isPublicSession(decodeURIComponent(modelSession))) {
+      const value = JSON.parse(init.body.toString())
+      const sessionId = decodeURIComponent(modelSession)
+      value.selection_request_id ||= 'legacy-' + createHash('sha256').update(JSON.stringify(value)).digest('hex')
+      const selection = await this.selections.change(sessionId, value, async () => {
+        const response = await this.rawFetch(url, init)
+        if (!response.ok) {
+          const error = fail('Selected model was not confirmed', response.status)
+          error.selectionNotApplied = response.status >= 400 && response.status < 500
+          throw error
+        }
+        const ack = await response.json()
+        const runtime = ack.runtime
+        if (!['accepted','confirmed'].includes(runtime?.model_lock) || !runtimeMatches(runtime, value)) throw new ModelSelectionConflict(this.selections.current(sessionId), 'model_selection_ack_mismatch')
+        return { model: value.model, provider: value.provider }
+      })
+      return new Response(JSON.stringify({ runtime: { model: selection.model, provider: selection.provider, model_lock: 'accepted', selection_version: selection.version }, selection }),
+        { headers: { 'Content-Type': 'application/json' } })
+    }
     if (target.origin === new URL(this.origin).origin && /^\/v1\/runs\/[^/]+$/.test(target.pathname) && (!init.method || init.method === 'GET')) {
       const response = await this.rawFetch(url, init)
       if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return response
@@ -113,6 +139,23 @@ export class LockedRunBridge {
     try { value = JSON.parse(init.body.toString()) }
     catch { throw fail('Invalid model-route request', 400) }
     // Resolve once: the effective route must drive launch, the journal and runtime checks alike.
+    if (this.isPublicSession(value.session_id)) {
+      // Queue custody, not today's picker, owns an admitted send. This capability
+      // is an internal init field, never accepted from the request JSON.
+      const replayKey = value.session_id + ':' + new Headers(init.headers).get('Idempotency-Key')
+      const replay = this.entries.get(replayKey)
+      if (replay && ((value.model && value.model !== replay.model) || (value.provider && value.provider !== replay.provider))) throw fail('This send was already used for a different selected model')
+      if (replay) return this.start(value, {model: replay.model, provider: replay.provider}, init)
+      const route = init.wizardAdmittedRoute === true
+        ? { model: value.model, provider: value.provider }
+        : this.selections.capture(value)
+      if (route) {
+        if (!route.model || !route.provider || !idPattern.test(value.session_id || '')) throw fail('No confirmed model/provider for this message', 400)
+        return this.start(value, route, init)
+      }
+      if (value.require_model_lock) throw fail('No confirmed model/provider for this message', 400)
+      return this.rawFetch(url, init)
+    }
     const stored = this.sessionRoute(value.session_id)
     if (!value.require_model_lock && !stored) return this.rawFetch(url, init)
     const route = selectLockedRoute(value, stored, this.log)
