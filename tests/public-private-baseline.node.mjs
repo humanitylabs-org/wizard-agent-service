@@ -28,8 +28,11 @@ for(const requested of [{},route,{model:'claude-opus-5-5',provider:'anthropic'},
   const selected=await(await b.fetch('http://fixture/api/sessions/wizard_private/model',post(route))).json()
   const response=await b.fetch('http://fixture/v1/runs',post({session_id:'wizard_private',input:'synthetic',...requested}))
   const payload=await response.json();await Promise.all([...b.streams])
-  assert.equal(payload.created_at,now/1000,'native admission timestamp derives from the same frozen clock')
-  assert.equal([...b.entries.values()][0].createdAt,now)
+  if(requested.provider==='custom:fixture') assert.equal(b.entries.size,0,'unlocked pass-through creates no synthetic admission timestamp')
+  else {
+   assert.equal(payload.created_at,now/1000,'native admission timestamp derives from the same frozen clock')
+   assert.equal([...b.entries.values()][0].createdAt,now)
+  }
   return {selected,status:response.status,payload,calls,logs}
  }
  assert.deepEqual(await run(Candidate),await run(Baseline))
