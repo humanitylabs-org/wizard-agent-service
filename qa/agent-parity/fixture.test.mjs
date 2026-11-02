@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +13,7 @@ const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'
 let report
 try {
   report = JSON.parse(readFileSync(join(reportDir, 'matrix.json'), 'utf8'))
+  if (process.env.RR_PARITY_MATRIX) copyFileSync(join(reportDir, 'matrix.json'), process.env.RR_PARITY_MATRIX)
   assert.equal(report.completed, true)
 } catch (error) {
   throw new Error(`Parity runner did not complete: ${error.message}\n${result.stderr}\n${result.stdout}`)

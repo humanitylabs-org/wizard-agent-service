@@ -613,7 +613,7 @@ export class DurableRunQueue {
     return record && (['failed', 'interrupted'].includes(record.status) || record.waitingReason === 'provider_access') && !this._ownerStopped(record) ? record : null
   }
 
-  _retrySavedRow(publicRunId, sessionId, route = {}, automatic = false) {
+  _retrySavedRow(publicRunId, sessionId, route = {}, automatic = false, prepare = null) {
     const source = this.get(publicRunId)
     if (!source || source.sessionId !== sessionId || source.runtime !== 'direct') throw requestError('saved retry not found', 404)
     const key = `wizard-saved-retry-${publicRunId}`
@@ -641,6 +641,13 @@ export class DurableRunQueue {
       value.provider ||= runtime.provider || runtime.requested?.provider
       value.require_model_lock = true // never permit provider fallback on a recovered owner request
     }
+    // Internal synchronous preparation sees only a source-owned clone, after ALL
+    // retry eligibility checks. Replays return above without invoking it. No await
+    // may separate final custody from insertion/dispatch. Omitted: legacy behavior.
+    if (prepare) {
+      const result = prepare(value, source.runtime)
+      if (result && typeof result.then === 'function') throw requestError('saved retry preparation must be synchronous', 500)
+    }
     const body = JSON.stringify(value)
     // One synchronous transaction: a process crash cannot insert a child without its inherited bounds.
     this.database.exec('BEGIN IMMEDIATE')
@@ -658,8 +665,10 @@ export class DurableRunQueue {
     return { ...admitted, record: this.get(admitted.record.publicRunId) }
   }
 
-  async retrySaved(publicRunId, sessionId, route = {}) {
-    const result = this._retrySavedRow(publicRunId, sessionId, route)
+  async retrySaved(publicRunId, sessionId, route = {}, prepare = null) {
+    const result = prepare
+      ? this._retrySavedRow(publicRunId, sessionId, route, false, prepare)
+      : this._retrySavedRow(publicRunId, sessionId, route)
     if (!result.replayed) await this.tick()
     return { ...result, record: this.get(result.record.publicRunId) }
   }

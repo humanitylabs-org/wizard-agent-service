@@ -722,7 +722,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
   })
 
   it('keeps an archived watcher quiet when capacity delays its durable queue dispatch', async () => {
-    const f = await fixture({ fixtureStatus: 'running', runQueueMaxActive: 1 })
+    const f = await fixture({ fixtureStatus: 'running', runQueueMaxActive: 1, runQueuePollIntervalMs: 25 })
     f.sessions.set('blocker', { id: 'blocker', title: 'Blocker', archived: false })
     f.sessions.set('wizard_origin', { id: 'wizard_origin', title: 'Origin', archived: true })
     const headers = { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'Content-Type': 'application/json' }
@@ -739,10 +739,7 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect(JSON.parse(queueDb.prepare('SELECT continuation_json FROM wizard_run_queue WHERE public_run_id=?').get(watcherRunId).continuation_json)).toMatchObject({ kind: 'watch', preserve_archived: true })
     queueDb.close()
     f.admitted.get('blocker-key').status = 'completed'
-    for (let i = 0; i < 20 && f.bodies.length < 2; i++) {
-      await fetch(`${f.origin}/wizard/hermes/v1/runs/${watcherRunId}`, { headers })
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
+    await expect.poll(() => f.bodies.length, { timeout: 3000, interval: 20 }).toBe(2)
     expect(f.bodies.map((body: any) => body.session_id)).toEqual(['blocker', 'wizard_origin'])
     expect(f.sessions.get('wizard_origin').archived).toBe(true)
   })

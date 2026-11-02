@@ -4,12 +4,16 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { post, png, scene } from './fixture.mjs'
+import { post, png, scene, runWrites, runInput } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '../../hermes-plugin/wizard-os')
-const sent = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
+const sent = s => {
+  const row = runWrites(s).at(-1)
+  assert.ok(row, 'a real native or legacy inference admission was observed')
+  return { ...row.body, input: runInput(row) }
+}
 const history = async s => {
   const r = await s.request('/api/sessions/wizard_parity/messages?view=wizard&order=oldest')
   assert.equal(r.status, 200)
@@ -127,15 +131,20 @@ export const serverChecks = {
     assert.equal(failed.wizard_reconnect.provider, 'claude')
     await read() // observe the unavailable state after the failure, in this exact agent's queue
     const before = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    for (let i = 0; i < 100 && !s.signin.unavailableProbes; i++) { await read(); await new Promise(r => setTimeout(r, 10)) }
+    assert.ok(s.signin.unavailableProbes > 0, 'observe unavailable before permitting the sign-in transition')
     s.signin.ready = true
-    for (let i = 0; i < 4; i++) await read()
+    for (let i = 0; i < 100 && runWrites(s).length === before; i++) { await read(); await new Promise(r => setTimeout(r, 10)) }
     const sends = s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
     assert.equal(sends.length, before + 1, `${s.kind}: one automatic child after sign-in`)
     const retried = sends.at(-1).body
     assert.ok(JSON.stringify(retried.input ?? retried.message).includes(input))
     assert.equal(retried.model, 'fixture-model')
     if (s.kind !== 'main') assert.equal(retried.require_model_lock, true)
-    if (s.kind !== 'main') assert.equal(retried.provider, undefined, 'display account id never overrides routed transport')
+    const native = sends.at(-1).path.endsWith('/chat/stream')
+    if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1') assert.ok(native,'selected public recovery must use native SSE')
+    assert.equal(retried.provider, native || s.kind === 'main' ? 'anthropic' : undefined, 'native uses exact configured transport; legacy strips display account overrides')
+    assert.equal(sends.at(-1).path, (s.kind === 'host-profile' ? '/p/parity-profile' : '') + (native ? '/api/sessions/wizard_parity/chat/stream' : '/v1/runs'))
     for (let i = 0; i < 4; i++) await read()
     assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length)
     // A model picker opened before recovery cannot acknowledge the existing
@@ -458,6 +467,9 @@ export const serverChecks = {
     const file = (await upload.json()).file
     await admit(s, { input: 'Synthetic supplied transcript', model: 'fixture-other', provider: 'anthropic', wizard_file_ids: [file.id] })
     const body = sent(s)
+    if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1') {
+      assert.ok(runWrites(s).at(-1).path.endsWith('/chat/stream'));assert.equal(body.provider,'anthropic');assert.equal(body.require_model_lock,true)
+    }
     assert.equal(body.model, 'fixture-other'); assert.ok(JSON.stringify(body.input).includes('Synthetic supplied transcript'))
     assert.ok(JSON.stringify(body.input).includes('audio/wav'))
     if (['container', 'restricted'].includes(s.kind)) assert.deepEqual(Buffer.from(s.placed.at(-1).payload.data_base64, 'base64'), audio)

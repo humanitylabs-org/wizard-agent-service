@@ -18,6 +18,33 @@ export const image = `data:image/png;base64,${png.toString('base64')}`
 export const owner = { 'X-Wizard-Owner-Proof': 'parity-synthetic-owner-proof-0123456789abcdef' }
 export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) })
 
+export const runWrites = s => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+export const runInput = row => row.body.input ?? row.body.message
+export async function pick(s, model, revision) {
+  const response = await s.request('/api/sessions/wizard_parity/model', post({ model, provider: 'anthropic', selection_version: revision, selection_request_id: crypto.randomUUID() }))
+  if (response.status !== 200) throw Error('Picker refused: ' + await response.text())
+  const ack = await response.json()
+  if (ack.runtime?.model !== model || ack.runtime?.provider !== 'anthropic' || ack.runtime?.model_lock !== 'accepted') throw Error('Picker did not acknowledge exact configured route')
+  if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1') {
+    if (!Number.isSafeInteger(ack.selection?.version ?? ack.runtime.selection_version)) throw Error('Picker did not acknowledge public selection revision')
+    return ack.selection?.version ?? ack.runtime.selection_version
+  }
+  // Archived main directBody forwards model POST intact; agents-http strips its
+  // display provider. Neither guarantees new public CAS fields. Prove the actual
+  // native ACK, stored lock timestamp and readback without inventing a revision.
+  const wire = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/wizard_parity/model')).at(-1)
+  if (wire?.body.model !== model || (s.kind === 'main'
+      ? wire.body.provider !== 'anthropic' : Object.hasOwn(wire.body, 'provider'))
+    || ack.session?.wizard_model !== model || ack.session?.wizard_provider !== 'anthropic'
+    || !(ack.session?.wizard_model_lock_updated_at > 0)) throw Error('Legacy picker did not prove native route and stored lock timestamp')
+  const read = await s.request('/api/sessions/wizard_parity')
+  if (read.status !== 200) throw Error('Legacy selected session unreadable')
+  const payload = await read.json(), stored = payload.session || payload
+  if (stored.wizard_model !== model || stored.wizard_provider !== 'anthropic'
+    || stored.wizard_model_lock_updated_at !== ack.session.wizard_model_lock_updated_at) throw Error('Legacy selected route not retained')
+  return undefined
+}
+
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
 export async function scene(kind, serverOptions = {}) {
@@ -43,7 +70,7 @@ export async function scene(kind, serverOptions = {}) {
   writeFileSync(join(agentHome, 'synthetic.png'), png)
   writeFileSync(join(agentHome, 'synthetic.txt'), 'PARITY_SYNTHETIC_DOCUMENT\n')
   const stt = { text: 'Synthetic voice words.' }
-  const signin = { ready: false }
+  const signin = { ready: false, unavailableProbes: 0 }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
   titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL,
     source TEXT, model TEXT, ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0,
@@ -91,8 +118,8 @@ export async function scene(kind, serverOptions = {}) {
     const json = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)) }
     const streamRun = run => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
-        if (!serverOptions.fixtureHoldEvents) return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n')
         res.write(`event: run.started\ndata: ${JSON.stringify(run)}\n\n`)
+        if (!serverOptions.fixtureHoldEvents) return res.end(`event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: ${JSON.stringify({output:'Fixture reply',...(run.runtime?{runtime:{...run.runtime,model_lock:'confirmed'}}:{})})}\n\n`)
         const timer=setInterval(()=>{if(['completed','failed','cancelled','interrupted'].includes(run.status))res.end(`event: run.${run.status}\ndata: ${JSON.stringify(run)}\n\n`);else res.write(': synthetic heartbeat\n\n')},250)
         res.on('close',()=>clearInterval(timer));return
       }
@@ -134,7 +161,8 @@ export async function scene(kind, serverOptions = {}) {
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
       if (req.method === 'PATCH' || sm[2] === 'model') { Object.assign(row, body); if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id) }
-      return json(200, { session: row })
+      if (sm[2] === 'model') Object.assign(row, {wizard_model:body.model,wizard_provider:body.provider || 'anthropic',wizard_model_lock_updated_at:(row.wizard_model_lock_updated_at || 1000) + 1})
+      return json(200, { session: row, ...(sm[2] === 'model' ? {runtime:{model:row.wizard_model,provider:row.wizard_provider,model_lock:'accepted'}} : {}) })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
       const key = req.headers['idempotency-key']
@@ -180,7 +208,7 @@ export async function scene(kind, serverOptions = {}) {
   if (supervisorParity) installSupervisorAssets(agentHome)
   const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
-    providerSignInReady: async () => signin.ready,
+    providerSignInReady: async () => { if (!signin.ready) signin.unavailableProbes++; return signin.ready },
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }

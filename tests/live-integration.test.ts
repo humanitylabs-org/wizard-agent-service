@@ -73,7 +73,7 @@ async function upstreamFixture(reject = false, runStatus = 'completed') {
       return res.end(`event: run.started\ndata: ${JSON.stringify({ run_id: `fixture_${admissions.length}`, runtime })}\n\nevent: run.completed\ndata: ${JSON.stringify({ runtime: { ...runtime, model_lock: 'confirmed' } })}\n\n`)
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    if (req.method === 'POST' && path.endsWith('/model')) return res.end(JSON.stringify({ runtime: route }))
+    if (req.method === 'POST' && path.endsWith('/model')) return res.end(JSON.stringify({ runtime: { ...route, model_lock: 'accepted' } }))
     return res.end(JSON.stringify({ object: 'list', data: [], status: 'completed', runtime: { ...route, model_lock: 'confirmed' } }))
   }))
   return { origin, admissions, completion, get statusReads() { return statusReads } }
@@ -117,7 +117,9 @@ it('inherits live selector locks, keeps OS/view instructions, and recovers a dro
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(route),
   })
   expect(ack.status).toBe(200)
-  expect((await ack.json()).runtime.selection_version).toBe(1234)
+  const acknowledged = await ack.json()
+  expect(acknowledged.runtime).toMatchObject({ ...route, model_lock: 'accepted', selection_version: 1235 })
+  expect(acknowledged.selection).toMatchObject({ ...route, state: 'confirmed', version: 1235, source: 'picker' })
 }, 12000)
 
 it('a no-state locked send keeps the same provider on its detached HTTP follow-through', async () => {
