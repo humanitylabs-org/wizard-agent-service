@@ -60,7 +60,7 @@ export class ModelSelections {
       || guidance.selection_version !== captured.selection_version
       || (Object.hasOwn(guidance, 'selection_version') !== Object.hasOwn(captured, 'selection_version'))
       || (Object.hasOwn(captured, 'selection_version') && (!Number.isSafeInteger(captured.selection_version) || captured.selection_version < 0)))
-      throw new ModelSelectionConflict(current, 'model_selection_steer_mismatch')
+      throw new ModelSelectionConflict(validRoute(captured) ? { model:captured.model, provider:captured.provider, version:captured.selection_version } : null, 'model_selection_steer_mismatch')
   }
   // Capture happens before durable queue admission, without an intervening await.
   // A server-owned queue replay/dispatch does NOT call this again: its route is immutable.

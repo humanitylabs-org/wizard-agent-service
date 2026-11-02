@@ -250,20 +250,37 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           body.provider ||= agent.model?.provider
           // Resolve before mutation; recheck CAS synchronously after the awaited catalogue read.
           transport=await resolve(body)
-          Object.assign(body,selections.capture(body),{require_model_lock:true})
+          // Retry capture belongs to the queue's post-eligibility seam below.
+          if (!Object.hasOwn(body, 'wizard_retry_run_id')) Object.assign(body,selections.capture(body),{require_model_lock:true})
         }
         }
         if (Object.hasOwn(body, 'wizard_retry_run_id')) {
           try {
-            // retrySaved dispatches before returning. Persist custody under its exact
-            // source-owned envelope hash first, never the caller's preview input.
-            const source = queue.get(body.wizard_retry_run_id)
-            if (selections && source?.sessionId === body.session_id) {
-              const value = JSON.parse(source.body)
-              if (body.model) Object.assign(value, {model:body.model, ...(body.provider ? {provider:body.provider} : {}), require_model_lock:true})
-              transports.rows.set(queueRequestHash(source.runtime, JSON.stringify(value)), transport);transports.save()
-            }
-            const {record,replayed} = await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body)
+            const prepare = selections ? (value, runtime) => {
+              // The queue alone decides eligibility and supplies source bytes. The
+              // request's CAS is checked only for NEW admission; never replay.
+              let admitted = transport
+              if (transport?.legacyUnselected === true) {
+                if (selections.current(body.session_id) || selections.pending.has(body.session_id)) throw new ModelSelectionConflict(selections.current(body.session_id))
+              } else {
+                const captured = selections.capture(body, false)
+                Object.assign(value, captured, {require_model_lock:true})
+                admitted = {...transport, selection_version:captured.selection_version}
+              }
+              const hash = queueRequestHash(runtime, JSON.stringify(value))
+              if (transports.rows.has(hash)) {
+                if (JSON.stringify(transports.rows.get(hash)) !== JSON.stringify(admitted)) throw new ModelSelectionConflict(null, 'admitted_agent_route_unproven')
+              } else {
+                // Persist before dispatch. Separate stores are not atomic: a crash
+                // can leave unused custody, but never dispatch without route proof.
+                transports.rows.set(hash, admitted)
+                try { transports.save() } catch (error) { transports.rows.delete(hash); throw error }
+              }
+            } : null
+            // Preserve the exact private call shape when the seam is omitted.
+            const {record,replayed} = selections
+              ? await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body, prepare)
+              : await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body)
             const response = json(202,queue.publicPayload(record))
             if (replayed) response.headers.set('Idempotency-Replayed','true')
             return response

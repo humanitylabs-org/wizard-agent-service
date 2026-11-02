@@ -25,7 +25,22 @@ export async function pick(s, model, revision) {
   if (response.status !== 200) throw Error('Picker refused: ' + await response.text())
   const ack = await response.json()
   if (ack.runtime?.model !== model || ack.runtime?.provider !== 'anthropic' || ack.runtime?.model_lock !== 'accepted') throw Error('Picker did not acknowledge exact configured route')
-  return ack.selection?.version ?? ack.runtime.selection_version
+  if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1' || s.kind === 'main') {
+    if (!Number.isSafeInteger(ack.selection?.version ?? ack.runtime.selection_version)) throw Error('Picker did not acknowledge public selection revision')
+    return ack.selection?.version ?? ack.runtime.selection_version
+  }
+  // Original agents-http strips the display provider on model POST. Native ACK
+  // still proves its configured provider and stored lock timestamp, not new CAS.
+  const wire = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/wizard_parity/model')).at(-1)
+  if (wire?.body.model !== model || Object.hasOwn(wire.body, 'provider')
+    || ack.session?.wizard_model !== model || ack.session?.wizard_provider !== 'anthropic'
+    || !(ack.session?.wizard_model_lock_updated_at > 0)) throw Error('Legacy picker did not prove native route and stored lock timestamp')
+  const read = await s.request('/api/sessions/wizard_parity')
+  if (read.status !== 200) throw Error('Legacy selected session unreadable')
+  const payload = await read.json(), stored = payload.session || payload
+  if (stored.wizard_model !== model || stored.wizard_provider !== 'anthropic'
+    || stored.wizard_model_lock_updated_at !== ack.session.wizard_model_lock_updated_at) throw Error('Legacy selected route not retained')
+  return undefined
 }
 
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
@@ -144,7 +159,8 @@ export async function scene(kind, serverOptions = {}) {
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
       if (req.method === 'PATCH' || sm[2] === 'model') { Object.assign(row, body); if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id) }
-      return json(200, { session: row, ...(sm[2] === 'model' ? {runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}} : {}) })
+      if (sm[2] === 'model') Object.assign(row, {wizard_model:body.model,wizard_provider:body.provider || 'anthropic',wizard_model_lock_updated_at:(row.wizard_model_lock_updated_at || 1000) + 1})
+      return json(200, { session: row, ...(sm[2] === 'model' ? {runtime:{model:row.wizard_model,provider:row.wizard_provider,model_lock:'accepted'}} : {}) })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
       const key = req.headers['idempotency-key']

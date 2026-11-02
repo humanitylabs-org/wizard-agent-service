@@ -188,7 +188,11 @@ test('guidance retains immutable admitted revision across a pending and complete
   const pending=s.change(sid,choice(),()=>new Promise(resolve=>{release=resolve}))
   s.assertQueuedGuidance(sid,guidance,captured)
   assert.throws(()=>s.capture(message()),conflict,'pending still fences NEW admissions')
-  assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,...B},captured),conflict)
+  assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,...B},captured),error=>{
+    assert.ok(conflict(error));assert.equal(error.payload.error.code,'model_selection_steer_mismatch')
+    assert.deepEqual(error.payload.selection,{model:captured.model,provider:captured.provider,version:captured.selection_version})
+    return true
+  })
   assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,selection_version:8},captured),conflict)
   release(B);await pending
   s.assertQueuedGuidance(sid,guidance,captured)
