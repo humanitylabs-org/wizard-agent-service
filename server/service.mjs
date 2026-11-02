@@ -52,7 +52,7 @@ import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, re
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
-import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
+import { ThreadAppSnapshots, appsDelta, bridgeApps, createAgentBridge, createGatewayGrants, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs } from './heavy-wait.mjs'
@@ -2647,6 +2647,26 @@ function buildWizardServer(options, lifetime) {
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
+  // Speech-to-text sends the gateway's key for the app that answers at the STT origin (wizard-os issue 386, card 5).
+  // The Transcriber front serves its engine API to that key, the same per-installation key the agent gateway sends
+  // to the app's MCP (grants/agent-service.json `outgoing[<app id>]`, written 0600 by the App Manager). The key goes
+  // only to an installed app whose registry MCP address IS the STT origin, never to another listener. Without a key
+  // nothing changes: the request is sent exactly as before (the front's own `enforce` flag decides).
+  const sttGrants = createGatewayGrants({ osHome: bridgeOsHome })
+  let sttApp = { stamp: '', id: '' }
+  const sttGrantHeaders = () => {
+    if (!appsJsonPath || !bridgeOsHome) return {}
+    try {
+      const st = statSync(appsJsonPath)
+      const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`
+      if (stamp !== sttApp.stamp) {
+        const apps = bridgeApps(JSON.parse(readFileSync(appsJsonPath, 'utf8')))
+        sttApp = { stamp, id: apps.find((a) => a.address === sttOrigin)?.id ?? '' }
+      }
+    } catch { sttApp = { stamp: '', id: '' } }
+    const key = sttApp.id ? sttGrants.key(sttApp.id) : ''
+    return key ? { 'X-Wizard-Grant': key } : {}
+  }
   let workspaceStore = null
   // The agent registry (below) decides which apps each agent may use on the gateway (#58).
   let gatewayAgents = null
@@ -2953,7 +2973,7 @@ function buildWizardServer(options, lifetime) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const r = await fetchImpl(`${sttOrigin}${path}`, { signal: controller.signal, redirect: 'error' })
+      const r = await fetchImpl(`${sttOrigin}${path}`, { signal: controller.signal, redirect: 'error', headers: sttGrantHeaders() })
       const raw = Buffer.from(await r.arrayBuffer())
       if (!r.ok || raw.length > 64 * 1024) return { reachable: true, ok: false, value: null }
       try { return { reachable: true, ok: true, value: JSON.parse(raw.toString('utf8')) } } catch { return { reachable: true, ok: true, value: null } }
@@ -3031,7 +3051,7 @@ function buildWizardServer(options, lifetime) {
     let segments = false
     let timedOut = false
     try {
-      const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
+      const r = await fetchImpl(`${sttOrigin}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(1500), headers: sttGrantHeaders() })
       if (r.ok) {
         const listing = await r.json()
         const first = speechModelOf(listing)
@@ -5809,7 +5829,7 @@ function buildWizardServer(options, lifetime) {
             if (form && !form.has('model')) { form.append('model', model); body = form; headers = {} }
           }
           const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, {
-            method: 'POST', body, redirect: 'error', signal: controller.signal, headers,
+            method: 'POST', body, redirect: 'error', signal: controller.signal, headers: { ...headers, ...sttGrantHeaders() },
           })
           const raw = Buffer.from(await upstream.arrayBuffer())
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, ms: Date.now() - started, model: '' }); return }
@@ -5851,7 +5871,7 @@ function buildWizardServer(options, lifetime) {
         const timer = setTimeout(() => controller.abort(), 180_000)
         request.once('aborted', () => controller.abort())
         try {
-          const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal })
+          const upstream = await fetchImpl(`${sttOrigin}/v1/audio/transcriptions`, { method: 'POST', body: form, redirect: 'error', signal: controller.signal, headers: sttGrantHeaders() })
           const raw = Buffer.from(await upstream.arrayBuffer())
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           // verbose_json carries per-segment tokens, several times the plain reply; long takes need room.
