@@ -2553,20 +2553,22 @@ function buildWizardServer(options, lifetime) {
   // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
   let browserShellOperations = null
   const browserAdapters = !browserBoundary.enabled ? null
-    : options.browserAdapterWam ? ((wam, tickets, receipts) => (browserShellOperations = createShellOperations({
-      // The shell document's own reads (model picker): same WAM facts and listener credential, not the app-frame path.
+    : options.browserAdapterWam ? ((wam, tickets, receipts, notifications = createNotificationsOperations({
+      fetchImpl: options.browserAdapterWam.fetchImpl,
+      listenerCredential: p => wam.resolveListenerCredential(p.installationId),
+      receipts,
+      tickets,
+    })) => (browserShellOperations = createShellOperations({
+      // The shell document's own reads (model picker, Chats bell): same WAM facts and listener credential, not the
+      // app-frame path. The bell shares the frame's notifications operations (one receipts store, one projection).
       resolveInstallation: wam.resolveInstallation,
       listenerCredential: p => wam.resolveListenerCredential(p.installationId),
       fetchImpl: options.browserAdapterWam.fetchImpl,
+      notifications,
     }), createBrowserAdapters({
       ...wam,
       tickets,
-      operations: createNotificationsOperations({
-        fetchImpl: options.browserAdapterWam.fetchImpl,
-        listenerCredential: p => wam.resolveListenerCredential(p.installationId),
-        receipts,
-        tickets,
-      }),
+      operations: notifications,
       // ChatGPT/Claude connection pages (shell intents): one receipts store and the same listener credential path.
       ai: createAiAccountsOperations({
         fetchImpl: options.browserAdapterWam.fetchImpl,

@@ -33,7 +33,11 @@ export function projectPickerAccounts(raw) {
   }
 }
 
-export function createShellOperations({ resolveInstallation, listenerCredential = () => null, fetchImpl = globalThis.fetch, timeoutMs = 4000 } = {}) {
+// The Notifications slot's installation; the shell's Chats bell and the skin-host inbox read and mark through it.
+const NOTIFICATIONS_APP = 'notifications', NOTIFICATIONS_SLOT = 'notifications'
+const MARK_KEYS = ['read', 'flag', 'archived']
+
+export function createShellOperations({ resolveInstallation, listenerCredential = () => null, fetchImpl = globalThis.fetch, timeoutMs = 4000, notifications = null } = {}) {
   async function claudeAccounts() {
     const p = resolveInstallation?.(CLAUDE_APP)
     // No Claude app (or not the slot's current provider, or not running): the picker shows no Claude note, as today.
@@ -55,13 +59,60 @@ export function createShellOperations({ resolveInstallation, listenerCredential 
     if (!q || q.installationId !== p.installationId || q.sourceId !== p.sourceId || q.providers?.[CLAUDE_SLOT] !== true) return { state: 'absent' }
     return { state: 'ok', ...projectPickerAccounts(parsed) }
   }
-  const OPS = Object.freeze({ 'models.claude_accounts': { validate: args => { if (!exact(args, [])) fail('bad_request') }, run: claudeAccounts } })
+  // Shell bell (web/core/notif-bell.js): the count, the inbox items and the owner's marks, through the SAME typed
+  // notifications operations the opaque frame uses (projection, compare-and-set marks, durable receipts), on the
+  // Notifications slot's current installation and its listener credential. Before this the bell fetched
+  // /notifications/api/* straight from the shell document, which the listener gate refuses (rehearsal, wizard-os 389).
+  const notificationsInstallation = () => {
+    const p = resolveInstallation?.(NOTIFICATIONS_APP)
+    return p && p.status === 'running' && p.providers?.[NOTIFICATIONS_SLOT] === true && p.upstream ? p : null
+  }
+  const sameInstallation = p => async () => {
+    const q = resolveInstallation?.(NOTIFICATIONS_APP)
+    if (!q || q.installationId !== p.installationId || q.sourceId !== p.sourceId || q.providers?.[NOTIFICATIONS_SLOT] !== true) fail('conflict')
+  }
+  async function notificationsRead(view, limit) {
+    const p = notificationsInstallation()
+    if (!p || !notifications) return { state: 'absent' }
+    try { return { state: 'ok', ...(await notifications.inbox(p, { view, limit })) } } catch { return { state: 'unavailable' } }
+  }
+  async function notificationsCount() {
+    const r = await notificationsRead('inbox', 1)
+    return r.state === 'ok' ? { state: 'ok', counts: r.counts } : r
+  }
+  async function notificationsItems() {
+    const r = await notificationsRead('all', 200)
+    return r.state === 'ok' ? { state: 'ok', counts: r.counts, items: r.items } : r
+  }
+  async function notificationsMark(args) {
+    const p = notificationsInstallation()
+    if (!p || !notifications) return { state: 'absent' }
+    try {
+      return { state: 'ok', ...(await notifications.mark(p, { items: args.items, marks: args.marks }, args.operationKey, sameInstallation(p))) }
+    } catch (e) {
+      if (e?.code === 'bad_request') throw e
+      return { state: 'failed', error: ['conflict', 'not_found', 'busy', 'outcome_unknown', 'unsupported_capability'].includes(e?.code) ? e.code : 'backend_failed' }
+    }
+  }
+  const markArgs = args => {
+    if (!exact(args, ['items', 'marks', 'operationKey']) || !Array.isArray(args.items) || args.items.length < 1 || args.items.length > 200) fail('bad_request')
+    const m = args.marks
+    if (!m || typeof m !== 'object' || Array.isArray(m) || !Object.keys(m).length || Object.keys(m).some(k => !MARK_KEYS.includes(k) || typeof m[k] !== 'boolean')) fail('bad_request')
+    if (typeof args.operationKey !== 'string') fail('bad_request')   // item ids, revisions and key format: the typed operation
+  }
+  const none = args => { if (!exact(args, [])) fail('bad_request') }
+  const OPS = Object.freeze({
+    'models.claude_accounts': { validate: none, run: claudeAccounts },
+    'notifications.count': { validate: none, run: notificationsCount },
+    'notifications.items': { validate: none, run: notificationsItems },
+    'notifications.mark': { validate: markArgs, run: notificationsMark },
+  })
   return Object.freeze({
     has: op => Object.hasOwn(OPS, op),
     async call(request) {
       if (!exact(request, ['operation', 'args']) || typeof request.operation !== 'string' || !Object.hasOwn(OPS, request.operation)) fail('bad_request')
       OPS[request.operation].validate(request.args)
-      return OPS[request.operation].run()
+      return OPS[request.operation].run(request.args)
     },
   })
 }
