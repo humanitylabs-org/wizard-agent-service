@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "updated_at": 1793548336,
+  "updated_at": 1793595791,
   "store": "wizardapps",
   "apps": [
     {
@@ -76,7 +76,7 @@
     "schema": 1,
     "enabled": true,
     "mode": "declared",
-    "checked_at": 1793548336,
+    "checked_at": 1793595792,
     "live": true,
     "gateway": {
       "core": [],

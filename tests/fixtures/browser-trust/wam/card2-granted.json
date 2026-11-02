@@ -1,14 +1,14 @@
 {
   "schema": 2,
-  "updated_at": 1793586237,
+  "updated_at": 1793595800,
   "store": "wizardapps",
   "apps": [
     {
       "id": "notifications",
       "name": "Notifications",
       "type": "service",
-      "category": "system",
-      "version": "2.29.0-wizard16",
+      "category": null,
+      "version": "1.0.0",
       "status": "running",
       "urn": "notifications:wizardapps",
       "repo": "oscarhenrycollins/notifications",
@@ -19,19 +19,15 @@
       ],
       "uses": [],
       "needs": [],
-      "summary": "Your Wizard's own notification server. The agent tells you when something is done or needs you.",
+      "summary": "",
       "shares": [],
       "mounts": [],
-      "mcp": {
-        "url": "http://127.0.0.1:18810/mcp",
-        "internal": "http://notifications:8080/mcp",
-        "transport": "streamable-http"
-      },
+      "mcp": null,
       "skill": null,
       "view": {
         "url": "http://127.0.0.1:18810/notifications/"
       },
-      "health": "http://127.0.0.1:18810/v1/health",
+      "health": null,
       "browser": {
         "schema": 1,
         "installation_id": "inst-0b448216590cff3257e40d514ce94ffa",
@@ -53,12 +49,12 @@
           "notifications.inbox",
           "notifications.mark"
         ],
-        "grant_revision": 6,
+        "grant_revision": 7,
         "admissible": true,
         "upstream": "http://127.0.0.1:18810",
         "reason": null,
         "contract_digest": "163afdec663a5fb89e5f287c722cfb0cd3a5873ca03830b76d74af390e52c643",
-        "permission_revision": "p-2510630a829b88a5c294d991"
+        "permission_revision": "p-a3856a4baeea7dc45c437411"
       },
       "system": true
     },
@@ -141,7 +137,7 @@
     "schema": 1,
     "enabled": true,
     "mode": "declared",
-    "checked_at": 1793586237,
+    "checked_at": 1793595800,
     "live": true,
     "gateway": {
       "core": [],

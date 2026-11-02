@@ -153,6 +153,8 @@ server = createWizardServer({
   // Default-off. Real WAM install/grant admission for browser data/state needs BOTH the boundary and this opt-in.
   ...(process.env.WIZARD_BROWSER_BOUNDARY === '1' && process.env.WIZARD_BROWSER_ADAPTERS === 'wam' ? { browserAdapterWam: {
     receiptsPath: process.env.WIZARD_BROWSER_RECEIPTS_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'browser-operation-receipts.json'),
+    // Scoped content tickets (default-off): the public origin of the dedicated content listener. Unset = no tickets.
+    ...(process.env.WIZARD_BROWSER_CONTENT_BASE ? { content: { publicBase: process.env.WIZARD_BROWSER_CONTENT_BASE } } : {}),
   } } : {}),
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
@@ -256,6 +258,15 @@ server = createWizardServer({
 })
 await server.agentSocketsReady
 server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+// The content-ticket listener: loopback by default, its own port, no owner routes (publish it as its own origin).
+if (server.browserContent) {
+  const contentPort = Number(process.env.WIZARD_BROWSER_CONTENT_PORT || 0)
+  if (!Number.isInteger(contentPort) || contentPort < 1 || contentPort > 65535 || contentPort === port) {
+    process.stderr.write('WIZARD_BROWSER_CONTENT_BASE needs WIZARD_BROWSER_CONTENT_PORT (a free port other than WIZARD_PORT); the content listener was not started.\n')
+  } else {
+    server.browserContent.createServer().listen(contentPort, process.env.WIZARD_BROWSER_CONTENT_HOST || '127.0.0.1', () => process.stdout.write(`Wizard content tickets on ${contentPort}\n`))
+  }
+}
 if (tailnetPort) {
   createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
 }

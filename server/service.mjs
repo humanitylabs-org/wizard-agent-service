@@ -87,6 +87,7 @@ import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { createBrowserBoundary } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
 import { createBrowserAdapters, browserAdaptersHttp } from './browser-adapters.mjs'
+import { createContentTickets } from './browser-content.mjs'
 import { createWamInstallationResolver } from './browser-installations.mjs'
 import { createNotificationsOperations } from './browser-operations.mjs'
 import { createOperationReceipts } from './browser-operation-receipts.mjs'
@@ -2542,18 +2543,24 @@ function buildWizardServer(options, lifetime) {
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const browserBoundary = createBrowserBoundary(options.browserBoundary)
+  let browserContentTickets = null
   // Prototype-only trusted resolver injection. No env/default, manifest self-grant,
   // owner-fetch handler or production WAM registry integration is installed here.
   // Production path (still default-off): the WAM-written apps.json `browser` facts plus durable outcome
   // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
   const browserAdapters = !browserBoundary.enabled ? null
-    : options.browserAdapterWam ? createBrowserAdapters({
-      ...createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
+    : options.browserAdapterWam ? ((wam, tickets) => createBrowserAdapters({
+      ...wam,
+      tickets,
       operations: createNotificationsOperations({
         fetchImpl: options.browserAdapterWam.fetchImpl,
+        listenerCredential: p => wam.resolveListenerCredential(p.installationId),
         receipts: createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }),
+        tickets,
       }),
-    })
+    }))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
+      // Scoped content tickets need their own non-owner origin; without one, notifications.media is unsupported.
+      browserContentTickets = options.browserAdapterWam.content?.publicBase ? createContentTickets({ ...options.browserAdapterWam.content }) : null)
     : options.browserAdapterPrototype ? createBrowserAdapters(options.browserAdapterPrototype) : null
   if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true
@@ -6872,6 +6879,8 @@ function buildWizardServer(options, lifetime) {
     listCacheTimer.unref?.()
     server.on('close', () => clearInterval(listCacheTimer))
   }
+  // The dedicated content listener for scoped tickets (default-off; the caller listens on its own port).
+  if (browserContentTickets) server.browserContent = browserContentTickets
   return server
 }
 
