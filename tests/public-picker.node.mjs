@@ -184,8 +184,10 @@ test('a caller cannot forge admitted custody in the JSON body; stale send does z
 })
 test('guidance retains immutable admitted revision across a pending and completed picker', async () => {
   const s=seeded(),captured=message(),guidance={input:'Additional synthetic guidance',...A,selection_version:7}
-  let release
-  const pending=s.change(sid,choice(),()=>new Promise(resolve=>{release=resolve}))
+  let release, entered
+  const started=new Promise(resolve=>{entered=resolve})
+  const pending=s.change(sid,choice(),()=>new Promise(resolve=>{release=resolve;entered()}))
+  await started
   s.assertQueuedGuidance(sid,guidance,captured)
   assert.throws(()=>s.capture(message()),conflict,'pending still fences NEW admissions')
   assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,...B},captured),error=>{

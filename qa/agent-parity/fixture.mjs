@@ -25,14 +25,16 @@ export async function pick(s, model, revision) {
   if (response.status !== 200) throw Error('Picker refused: ' + await response.text())
   const ack = await response.json()
   if (ack.runtime?.model !== model || ack.runtime?.provider !== 'anthropic' || ack.runtime?.model_lock !== 'accepted') throw Error('Picker did not acknowledge exact configured route')
-  if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1' || s.kind === 'main') {
+  if (process.env.RR_EXPECT_PUBLIC_SELECTED === '1') {
     if (!Number.isSafeInteger(ack.selection?.version ?? ack.runtime.selection_version)) throw Error('Picker did not acknowledge public selection revision')
     return ack.selection?.version ?? ack.runtime.selection_version
   }
-  // Original agents-http strips the display provider on model POST. Native ACK
-  // still proves its configured provider and stored lock timestamp, not new CAS.
+  // Archived main directBody forwards model POST intact; agents-http strips its
+  // display provider. Neither guarantees new public CAS fields. Prove the actual
+  // native ACK, stored lock timestamp and readback without inventing a revision.
   const wire = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/wizard_parity/model')).at(-1)
-  if (wire?.body.model !== model || Object.hasOwn(wire.body, 'provider')
+  if (wire?.body.model !== model || (s.kind === 'main'
+      ? wire.body.provider !== 'anthropic' : Object.hasOwn(wire.body, 'provider'))
     || ack.session?.wizard_model !== model || ack.session?.wizard_provider !== 'anthropic'
     || !(ack.session?.wizard_model_lock_updated_at > 0)) throw Error('Legacy picker did not prove native route and stored lock timestamp')
   const read = await s.request('/api/sessions/wizard_parity')
