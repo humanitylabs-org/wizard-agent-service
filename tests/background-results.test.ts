@@ -69,14 +69,14 @@ async function fixture({ count = 205, access = false, history = false, loseAck =
   })
   const origin = `http://127.0.0.1:${(await listen(upstream)).port}`
   let server: ReturnType<typeof createWizardServer>, base: string
-  const open = async () => {
+  const open = async (automaticDispatch = false) => {
     server = createWizardServer({ upstreamOrigin: origin, hermesKey: 'fixture-only', joinedDelegation: 'prefer',
       followThrough: false, hermesStatePath: history ? historyPath : '', sessionDbPath: join(dir, 'absent-state.db'), archivedSessionReader: () => [],
-      runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: loseAck ? 0 : 25, dispatchHealthReader: () => canDispatch,
+      runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: loseAck && !automaticDispatch ? 0 : 25, dispatchHealthReader: () => canDispatch,
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
       requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30,
-      backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: loseAck ? 60_000 : 25 })
+      backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: loseAck ? 50 : 25 })
     base = `http://127.0.0.1:${(await listen(server)).port}`
   }
   await open()
@@ -88,7 +88,7 @@ async function fixture({ count = 205, access = false, history = false, loseAck =
     failHistory: (v: boolean) => { failHistory = v },
     deleted: () => { failHistory = true; historyStatus = 404 }, denyHistory: () => { failHistory = true; historyStatus = 403 }, failLease: (v: boolean) => { failLease = v }, slowHistory: (v: boolean) => { slowHistory = v },
     pause: () => { canDispatch = false }, resume: () => { canDispatch = true },
-    restart: async () => { await close(); await open() },
+    restart: async (automaticDispatch = false) => { await close(); await open(automaticDispatch) },
     list: async () => {
       for (let n = 0; n < 250; n++) {
         const r = await fetch(`${base}/wizard/background-results`), body = await r.json()
@@ -118,9 +118,10 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     expect(frozen.dispatch_body).toBe(f.wireAttempts[0].text)
     before.close()
     f.rows.get('wizard_manual_0')!.push({ id: 200001, role: 'user', content: 'A newer human request', timestamp: f.at + 100 })
-    await f.restart()
-    const retry = new DatabaseSync(f.queuePath)
-    retry.exec('UPDATE wizard_run_queue SET retry_after=0'); retry.close()
+    // Status GET deliberately stopped ticking the whole queue in 4de50f55.
+    // Resume the ordinary dispatcher, not a forged retry_after row.
+    await f.restart(true)
+    await expect.poll(() => f.wireAttempts.length, { timeout: 3000, interval: 20 }).toBe(2)
     const result = await (await fetch(`${f.base()}/wizard/hermes/v1/runs/${queued.run_id}`)).json()
     expect(result.status).toBe('completed')
     expect(f.calls).toHaveLength(1)

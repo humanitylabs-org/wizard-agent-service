@@ -1,4 +1,4 @@
-import { test, vi } from 'vitest'
+import { test, vi, expect } from 'vitest'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -71,17 +71,19 @@ test('manual and automatic watcher share token/key; watcher rechecks after async
  try{const tick=watcher.tick();await ready;message('user','The owner moved on',Date.now()/1000);release();await tick;await watcher.tick();assert.equal(launch,0)}finally{watcher.stop()}
 }))
 for(const restart of [false,true])test(`queued helper with newer owner request never launches (restart=${restart})`,()=>fixture(async({path,dir,message})=>{
- let dispatch=false;const queue=join(dir,'queue.db')
+ let dispatch=false,unavailableProbes=0;const queue=join(dir,'queue.db')
  await withServer(path,async(ctx)=>{
   assert.equal((await ctx.post()).status,202);assert.equal(ctx.launches,0)
   const q=new DatabaseSync(queue),row=q.prepare('SELECT * FROM wizard_run_queue').get();q.close()
   assert.equal(JSON.parse(row.continuation_json).request.id,1);assert.equal((await ctx.post()).status,409)
+  await expect.poll(()=>unavailableProbes,{timeout:3000,interval:20}).toBeGreaterThan(0)
   message('user','Moved on after admission; no stale receipt may launch',Date.now()/1000);dispatch=true
   if(restart)await ctx.restart()
+  await expect.poll(async()=>{const r=await fetch(`http://127.0.0.1:${ctx.server.address().port}/wizard/hermes/v1/runs/${row.public_run_id}`);return (await r.json()).status},{timeout:3000,interval:20}).toBe('cancelled')
   const r=await fetch(`http://127.0.0.1:${ctx.server.address().port}/wizard/hermes/v1/runs/${row.public_run_id}`)
   assert.equal(r.status,200);assert.equal((await r.json()).status,'cancelled');assert.equal(ctx.launches,0)
   const after=new DatabaseSync(queue);assert.equal(after.prepare('SELECT COUNT(*) AS n FROM wizard_run_queue').get().n,1);after.close()
- },{runQueueStatePath:queue,runQueuePollIntervalMs:0,activeSessionReader:async()=>[],dispatchHealthReader:()=>dispatch})
+ },{runQueueStatePath:queue,runQueuePollIntervalMs:25,activeSessionReader:async()=>[],dispatchHealthReader:()=>{if(!dispatch)unavailableProbes++;return dispatch}})
 }))
 test('restart launch revalidates generation after its capability await, not only queue admission',()=>fixture(async({path,dir,message})=>{
  let dispatch=false,checks=0,entered,release
@@ -154,20 +156,24 @@ test('explicit trusted public origin enables no-Access proxy hosting, but not fo
  assert.equal(ctx.launches,1)
 },{helperContinueOrigins:['https://approved.example']})))
 test('an owner lease acquired after queue admission waits instead of permanently cancelling its receipt',()=>fixture(async({path,dir,db,sec})=>{
- let dispatch=false;const queue=join(dir,'queue.db')
+ let dispatch=false,unavailableProbes=0;const queue=join(dir,'queue.db')
  await withServer(path,async(ctx)=>{
   assert.equal((await ctx.post()).status,202)
   const q=new DatabaseSync(queue),row=q.prepare('SELECT * FROM wizard_run_queue').get();q.close()
+  await expect.poll(()=>unavailableProbes,{timeout:3000,interval:20}).toBeGreaterThan(0)
   db.prepare('INSERT INTO session_turn_leases VALUES(?,?)').run(sid,sec+120);dispatch=true
+  // requireCurrentContinuation reports the held owner lease as retryable 503.
+  await expect.poll(()=>{const q=new DatabaseSync(queue);try{return q.prepare('SELECT waiting_reason FROM wizard_run_queue WHERE public_run_id=?').get(row.public_run_id)?.waiting_reason}finally{q.close()}},{timeout:3000,interval:20}).toBe('admission_retry')
   let r=await fetch(`http://127.0.0.1:${ctx.server.address().port}/wizard/hermes/v1/runs/${row.public_run_id}`)
   assert.equal((await r.json()).status,'queued');assert.equal(ctx.launches,0)
   db.exec('DELETE FROM session_turn_leases')
   const clock=vi.spyOn(Date,'now').mockReturnValue(Date.now()+3000)
   try {
+   await expect.poll(()=>ctx.launches,{timeout:3000,interval:20}).toBe(1)
    r=await fetch(`http://127.0.0.1:${ctx.server.address().port}/wizard/hermes/v1/runs/${row.public_run_id}`)
    assert.equal(r.status,200);assert.equal(ctx.launches,1)
   } finally { clock.mockRestore() }
- },{runQueueStatePath:queue,runQueuePollIntervalMs:0,runQueueRetryDelayMs:0,activeSessionReader:async()=>[],dispatchHealthReader:()=>dispatch})
+ },{runQueueStatePath:queue,runQueuePollIntervalMs:25,runQueueRetryDelayMs:0,activeSessionReader:async()=>[],dispatchHealthReader:()=>{if(!dispatch)unavailableProbes++;return dispatch}})
 }))
 for(const text of ['Example [WIZARD_STATUS_V1]{"state":"done","ask":"Example only"}[/WIZARD_STATUS_V1] followed by more progress','[WIZARD_STATUS_V1]{"state":"done","ask":"Genuine result"}[/WIZARD_STATUS_V1]']) test(`completion requires a terminal parsed final, not an inline example: ${text}`,()=>fixture(({path,sec,message})=>{
  message('user','[ASYNC DELEGATION BATCH COMPLETE — deleg_review] findings',sec-250);message('assistant',text,sec-200)
