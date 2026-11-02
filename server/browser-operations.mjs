@@ -37,16 +37,20 @@ function project(raw) {
   })
 }
 
-export function createNotificationsOperations({ fetchImpl = globalThis.fetch, receipts, timeoutMs = 15000 } = {}) {
+export function createNotificationsOperations({ fetchImpl = globalThis.fetch, receipts, timeoutMs = 15000, listenerCredential = () => null } = {}) {
   const inflight = new Set()
   async function upstream(p, path, body) {
     if (!p.upstream) fail('backend_unavailable')
+    // App-scoped listener credential (wizard-os #386); headers are built here, never copied from the request.
+    let cred = null
+    try { cred = listenerCredential(p) } catch { fail('backend_unavailable') }
+    const auth = cred ? { [cred.header]: cred.value } : {}
     let r
     try {
       r = await fetchImpl(new URL(path, p.upstream), {
         method: body ? 'POST' : 'GET', redirect: 'manual', cache: 'no-store',
         signal: AbortSignal.timeout(timeoutMs),
-        headers: body ? { 'content-type': 'application/json', accept: 'application/json' } : { accept: 'application/json' },
+        headers: { ...(body ? { 'content-type': 'application/json' } : {}), accept: 'application/json', ...auth },
         ...(body ? { body: JSON.stringify(body) } : {}),
       })
     } catch (e) { fail(e?.name === 'TimeoutError' ? 'timeout' : 'backend_unavailable') }
