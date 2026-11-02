@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto'
 import { OPERATIONS, OPERATION_KEY, WRITE_OPERATIONS, createNotificationsOperations } from './browser-operations.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const exact = (x, keys) => x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).sort().join(',') === [...keys].sort().join(',')
-export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null } = {}) {
+export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null, tickets = null, now = () => Date.now() } = {}) {
   const bindings = new Map()
+  const MEDIA_PER_MINUTE = 10, MEDIA_SESSION_MS = 8 * 3600 * 1000   // ADAPTER-SKETCH §6 renewal bounds
   const snapshot = appId => {
     const p = resolveInstallation?.(appId)
     if (!p || p.status !== 'running' || !p.installationId || !p.sourceId || !p.installedCommit || !p.permissionRevision) fail('not_allowed')
@@ -32,7 +33,7 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
   }
   // Re-resolve the installation before an effect and before releasing any result.
   const recheck = (b, operation) => { const p = current(b); admit(p, operation); return p }
-  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'data.status'])
+  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'notifications.media', 'data.status'])
   async function call(request) {
     const write = WRITE_OPERATIONS.includes(request?.operation)
     const { b, p } = admitRequest(request, ['handle', 'generation', 'requestId', 'operation', 'args', ...(write ? ['operationKey'] : [])])
@@ -47,6 +48,20 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     admit(p, request.operation)
     if (write && (typeof request.operationKey !== 'string' || !OPERATION_KEY.test(request.operationKey))) fail('bad_request')
     const effect = async () => recheck(b, request.operation)
+    if (request.operation === 'notifications.media') {
+      // Renewal is just another open through this live binding: at most ten a minute, never past eight hours.
+      const t = now()
+      b.media = (b.media || []).filter(x => x > t - 60_000)
+      if (b.media.length >= MEDIA_PER_MINUTE) fail('quota_exceeded')
+      if (t - b.created > MEDIA_SESSION_MS) fail('stale_binding')
+      b.media.push(t)
+      const value = await operations.media(p, request.args, Object.freeze({
+        handle: request.handle, generation: b.generation, appId: b.appId, identity: identity(p),
+        recheck: effect, current: () => recheck(b, 'notifications.media'),
+      }))
+      recheck(b, request.operation)
+      return value
+    }
     const value = request.operation === 'notifications.list' ? await operations.list(p, request.args)
       : request.operation === 'notifications.inbox' ? await operations.inbox(p, request.args)
         : request.operation === 'notifications.mark' ? await operations.mark(p, request.args, request.operationKey, effect)
@@ -60,6 +75,18 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     if (identity(p) !== identity(b.principal)) fail('revoked')
     return p
   }
+  // A content ticket is good only while its binding is live and the installation/grant it was minted under is
+  // still current (same installation, source, commit, permission revision; operation still granted).
+  tickets?.setAdmission(e => {
+    try {
+      const b = bindings.get(e.handle)
+      if (!b || b.generation !== e.generation || b.appId !== e.appId) return false
+      const p = current(b)
+      if (identity(p) !== e.identity) return false
+      admit(p, e.operation)
+      return true
+    } catch { return false }
+  })
   const api = Object.freeze({
     create(request) {
       if (!exact(request, ['appId', 'generation']) || typeof request.appId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(request.appId) || !/^[a-f0-9-]{36}$/.test(request.generation)) fail('bad_request')
@@ -67,7 +94,7 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
       for (const [id,b] of bindings) if (b.expires < Date.now()) bindings.delete(id)
       if (bindings.size >= 512) fail('busy')
       const handle = randomUUID()
-      bindings.set(handle, { appId: request.appId, principal: p, generation: request.generation, expires: Date.now()+3600000, seen: new Set() })
+      bindings.set(handle, { appId: request.appId, principal: p, generation: request.generation, created: now(), expires: Date.now()+3600000, seen: new Set() })
       return { handle, principal: { installationId: p.installationId, sourceId: p.sourceId, installedCommit: p.installedCommit, permissionRevision: p.permissionRevision } }
     },
     check(request) {
@@ -89,7 +116,7 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     call,
     /** HTTP entry: fixed real operations are async; state.local and the synthetic fixture stay synchronous. */
     async dispatch(request) { return real.has(request?.operation) ? call(request) : api.check(request) },
-    revoke(handle) { bindings.delete(handle) },
+    revoke(handle) { bindings.delete(handle); tickets?.revokeBinding(handle) },
   })
   return api
 }
