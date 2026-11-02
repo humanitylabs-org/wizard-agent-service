@@ -25,6 +25,9 @@ tool install notifications --repo oscarhenrycollins/notifications --port 18810; 
 tool install profiles --repo oscarhenrycollins/profiles --provides profiles --port 18811
 tool grant profiles state.local; snap profiles-oscar
 tool update profiles --repo humanitylabs-org/profiles --provides profiles --port 18811; snap profiles-org
+# Listener credential (wizard-os #386): the installed compose takes WIZARD_APP_CREDENTIAL, so WAM mints one.
+tool update notifications --repo oscarhenrycollins/notifications --commit "$(printf 'd%.0s' {1..40})" --port 18810 --listener-auth
+tool grant notifications notifications.list notifications.mark_read; snap listener-auth
 # Card 2: the real Notifications screens' contract (inbox + mark). NOTIFICATIONS_WIZARD_MD = the app checkout's
 # own wizard.md; without it, a copy of its browser_contract on a minimal manifest.
 MD=${NOTIFICATIONS_WIZARD_MD:-}
@@ -32,9 +35,17 @@ if [ -z "$MD" ]; then
   MD="$T/wizard.md"
   printf -- '---\nid: notifications\nname: Notifications\ntype: service\nversion: 1.0.0\nprovides: [notifications]\nview: {path: /notifications/, port: 8080}\nbrowser_contract:\n  version: 1\n  isolation: opaque\n  operations: [notifications.inbox, notifications.mark]\n---\n' > "$MD"
 fi
+tool uninstall notifications   # start clean: no listener-auth compose left from the scenario above
 tool install notifications --repo oscarhenrycollins/notifications --port 18810 --wizard-md "$MD"; snap card2-declared
 tool grant notifications notifications.inbox; snap card2-inbox-only
 tool grant notifications notifications.mark; snap card2-granted
 tool revoke notifications notifications.mark; snap card2-revoked-mark
+# Card 3 media (ADAPTER-SKETCH §6): the app's contract plus notifications.media, with a listener credential.
+MEDIA_MD="$T/wizard-media.md"
+sed 's/operations: \[notifications.inbox, notifications.mark\]/operations: [notifications.inbox, notifications.mark, notifications.media]/' "$MD" > "$MEDIA_MD"
+grep -q 'notifications.media' "$MEDIA_MD"
+tool install notifications --repo oscarhenrycollins/notifications --port 18810 --wizard-md "$MEDIA_MD" --listener-auth
+tool grant notifications notifications.inbox notifications.mark notifications.media; snap media-granted
+tool revoke notifications notifications.media; snap media-revoked
 git -C "$WAM" rev-parse HEAD > "$OUT/WAM_COMMIT"
 echo "wrote $(ls "$OUT"/*.json | wc -l) scenarios from WAM $(cat "$OUT/WAM_COMMIT")"

@@ -2547,13 +2547,14 @@ function buildWizardServer(options, lifetime) {
   // Production path (still default-off): the WAM-written apps.json `browser` facts plus durable outcome
   // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
   const browserAdapters = !browserBoundary.enabled ? null
-    : options.browserAdapterWam ? createBrowserAdapters({
-      ...createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
+    : options.browserAdapterWam ? ((wam) => createBrowserAdapters({
+      ...wam,
       operations: createNotificationsOperations({
         fetchImpl: options.browserAdapterWam.fetchImpl,
+        listenerCredential: p => wam.resolveListenerCredential(p.installationId),
         receipts: createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }),
       }),
-    })
+    }))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }))
     : options.browserAdapterPrototype ? createBrowserAdapters(options.browserAdapterPrototype) : null
   if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true

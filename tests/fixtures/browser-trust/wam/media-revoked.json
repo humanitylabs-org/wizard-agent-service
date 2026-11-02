@@ -1,0 +1,340 @@
+{
+  "schema": 2,
+  "updated_at": 1793595803,
+  "store": "wizardapps",
+  "apps": [
+    {
+      "id": "notifications",
+      "name": "Notifications",
+      "type": "service",
+      "category": null,
+      "version": "1.0.0",
+      "status": "running",
+      "urn": "notifications:wizardapps",
+      "repo": "oscarhenrycollins/notifications",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "notifications"
+      ],
+      "uses": [],
+      "needs": [],
+      "summary": "",
+      "shares": [],
+      "mounts": [],
+      "mcp": null,
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18810/notifications/"
+      },
+      "health": null,
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-5ba19b88fc47acb3237e2a6584f6d894",
+        "source_id": "standard:oscarhenrycollins/notifications",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "notifications.inbox",
+            "notifications.mark",
+            "notifications.media"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 0
+          }
+        },
+        "granted": [
+          "notifications.inbox",
+          "notifications.mark"
+        ],
+        "grant_revision": 10,
+        "admissible": true,
+        "upstream": "http://127.0.0.1:18810",
+        "reason": null,
+        "contract_digest": "6fe274d11bac69bd45fd33a2808203bd8d18eb7b5d823cae8fee7ff74e042ca9",
+        "permission_revision": "p-609156fdf56851a71b9091e6",
+        "listener_credential": {
+          "header": "X-Wizard-App-Credential",
+          "ref": "browser-app-credentials/inst-5ba19b88fc47acb3237e2a6584f6d894.key",
+          "env": "WIZARD_APP_CREDENTIAL",
+          "state": "written"
+        }
+      },
+      "system": true
+    },
+    {
+      "id": "profiles",
+      "name": "profiles",
+      "type": "service",
+      "category": null,
+      "version": "1.0.0",
+      "status": "running",
+      "urn": "profiles:wizardapps",
+      "repo": "humanitylabs-org/profiles",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "profiles"
+      ],
+      "uses": [],
+      "needs": [],
+      "summary": "",
+      "shares": [],
+      "mounts": [],
+      "mcp": null,
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18811/profiles/"
+      },
+      "health": null,
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-f60d024f5857bd7b6d3483feea50919a",
+        "source_id": "standard:humanitylabs-org/profiles",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "notifications.list",
+            "notifications.mark_read",
+            "state.local"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 65536
+          }
+        },
+        "granted": [],
+        "grant_revision": 0,
+        "admissible": false,
+        "upstream": "http://127.0.0.1:18811",
+        "reason": "no_grant",
+        "contract_digest": "89414bfaa882e446f38f8cc82192459a317eddd85ba198bec66fffef98386838",
+        "permission_revision": "p-74f3cb2724cbecb7001f36b8"
+      },
+      "system": false
+    }
+  ],
+  "slots": {
+    "notifications": {
+      "default": "notifications",
+      "candidates": [
+        "notifications"
+      ]
+    },
+    "profiles": {
+      "default": "profiles",
+      "candidates": [
+        "profiles"
+      ]
+    },
+    "chats": {
+      "default": "wizard-chats",
+      "candidates": [
+        "wizard-chats"
+      ]
+    }
+  },
+  "grants": [],
+  "connections": {
+    "schema": 1,
+    "enabled": true,
+    "mode": "declared",
+    "checked_at": 1793595804,
+    "live": true,
+    "gateway": {
+      "core": [],
+      "path": "loopback",
+      "detail": "the gateway runs on the server's network and calls apps on their published 127.0.0.1 port"
+    },
+    "apps": [
+      {
+        "id": "notifications",
+        "name": "Notifications",
+        "state": "no-network",
+        "why": "none of its services take part in app networking",
+        "kind": "app",
+        "provides": [
+          "notifications"
+        ],
+        "running": true,
+        "internet": true,
+        "gateway": "on its published 127.0.0.1 port",
+        "host_access": [],
+        "can_reach": [],
+        "reached_by": [],
+        "drift": [
+          "notifications is on wizard-app-notifications, which nothing declares",
+          "notifications is on wizard-link-wizard-cloudflare--notifications, which nothing declares"
+        ],
+        "sensitive": false
+      }
+    ],
+    "agents": [],
+    "main_agent_apps": null,
+    "networks": [],
+    "shared_network": {
+      "name": "runtipi_tipi_main_network",
+      "containers": [
+        "files_wizardapps-files-1",
+        "runtipi",
+        "runtipi-reverse-proxy"
+      ]
+    },
+    "ok": false,
+    "owner_state": false,
+    "controls": [],
+    "sensitive": [],
+    "notices": []
+  },
+  "parking": [
+    {
+      "slot": "chats",
+      "name": "Chats",
+      "required": false,
+      "default_app": null,
+      "active": "wizard-chats",
+      "state": "filled"
+    },
+    {
+      "slot": "shell",
+      "name": "Shell (Wizard UX)",
+      "required": true,
+      "default_app": "wizard-ux",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent-service",
+      "name": "Agent Service",
+      "required": true,
+      "default_app": "wizard-agent-service",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent",
+      "name": "Agent",
+      "required": true,
+      "default_app": "hermes-agent",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "ai-connection",
+      "name": "AI connections",
+      "required": false,
+      "default_app": "wizard-chatgpt",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "claude-subscription",
+      "name": "Claude connection",
+      "required": false,
+      "default_app": "wizard-claude",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "troubleshooter",
+      "name": "Wizard Troubleshooter",
+      "required": false,
+      "default_app": "wizard-troubleshooter",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "connection-router",
+      "name": "Connection Router",
+      "required": false,
+      "default_app": "wizard-connection-router",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent-history",
+      "name": "Agent History",
+      "required": false,
+      "default_app": null,
+      "active": null,
+      "state": "no default yet"
+    },
+    {
+      "slot": "files",
+      "name": "Files",
+      "required": true,
+      "default_app": "files",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "transcription",
+      "name": "Transcription",
+      "required": false,
+      "default_app": "transcriber",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "voice",
+      "name": "Voice",
+      "required": false,
+      "default_app": "wizard-voice-service",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "browser",
+      "name": "Browser",
+      "required": false,
+      "default_app": "browser",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "secrets",
+      "name": "Secrets",
+      "required": false,
+      "default_app": "secret-drop",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "web-search",
+      "name": "Web search",
+      "required": false,
+      "default_app": "wizard-search",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "cloudflare-connection",
+      "name": "Cloudflare",
+      "required": false,
+      "default_app": "wizard-cloudflare",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "connected-accounts",
+      "name": "Connected accounts",
+      "required": false,
+      "default_app": "connected-accounts",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "notifications",
+      "name": "Notifications",
+      "required": false,
+      "default_app": "notifications",
+      "active": "notifications",
+      "state": "filled"
+    }
+  ]
+}

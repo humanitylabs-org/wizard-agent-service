@@ -71,16 +71,23 @@ function projectInbox(raw) {
 }
 const publicItem = ({ cas, ...it }) => it
 
-export function createNotificationsOperations({ fetchImpl = globalThis.fetch, receipts, timeoutMs = 15000 } = {}) {
+export function createNotificationsOperations({ fetchImpl = globalThis.fetch, receipts, timeoutMs = 15000, listenerCredential = () => null } = {}) {
   const inflight = new Set()
+  // App-scoped listener credential (wizard-os #386); headers are built here, never copied from the request.
+  function authHeaders(p) {
+    let cred = null
+    try { cred = listenerCredential(p) } catch { fail('backend_unavailable') }
+    return cred ? { [cred.header]: cred.value } : {}
+  }
   async function upstream(p, path, body) {
     if (!p.upstream) fail('backend_unavailable')
+    const auth = authHeaders(p)
     let r
     try {
       r = await fetchImpl(new URL(path, p.upstream), {
         method: body ? 'POST' : 'GET', redirect: 'manual', cache: 'no-store',
         signal: AbortSignal.timeout(timeoutMs),
-        headers: body ? { 'content-type': 'application/json', accept: 'application/json' } : { accept: 'application/json' },
+        headers: { ...(body ? { 'content-type': 'application/json' } : {}), accept: 'application/json', ...auth },
         ...(body ? { body: JSON.stringify(body) } : {}),
       })
     } catch (e) { fail(e?.name === 'TimeoutError' ? 'timeout' : 'backend_unavailable') }
@@ -92,10 +99,11 @@ export function createNotificationsOperations({ fetchImpl = globalThis.fetch, re
   // A write's upstream reply: 'ok', 'conflict' (compare-and-set refused, nothing written) or 'unknown'.
   async function upstreamWrite(p, path, body) {
     if (!p.upstream) fail('backend_unavailable')
+    const auth = authHeaders(p)   // before the effect: a missing credential is backend_unavailable, nothing sent
     try {
       const r = await fetchImpl(new URL(path, p.upstream), {
         method: 'POST', redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(timeoutMs),
-        headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body),
+        headers: { 'content-type': 'application/json', accept: 'application/json', ...auth }, body: JSON.stringify(body),
       })
       await r.text().catch(() => '')
       return r.status === 200 ? 'ok' : r.status === 409 ? 'conflict' : 'unknown'
