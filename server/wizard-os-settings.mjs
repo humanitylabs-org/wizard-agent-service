@@ -257,6 +257,9 @@ export function readApps({ appsJsonPath, launcherPath }) {
       ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
       ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
+      // Browser boundary (default-off; WAM projects `browser` only when it is on): a reviewed separate-origin exception
+      // (wizard-os #385, File Browser) on its own https origin. The shell opens it only as its own tab, never a frame.
+      ...(app.browser?.isolation === 'own-tab' && /^https:\/\/[^\s/]+\//u.test(view) ? { own_tab: true } : {}),
     })
   }
   const launcher = readJsonFile(launcherPath, 256 * 1024)
