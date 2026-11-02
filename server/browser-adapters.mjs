@@ -2,10 +2,16 @@
 // injected resolver: the synthetic prototype rig, or the production WAM resolver (browser-installations.mjs).
 import { randomUUID } from 'node:crypto'
 import { OPERATIONS, OPERATION_KEY, WRITE_OPERATIONS, createNotificationsOperations } from './browser-operations.mjs'
-const fail = code => { throw Object.assign(new Error(code), { code }) }
+const fail = (code, extra = {}) => { throw Object.assign(new Error(code), { code, ...extra }) }
 const exact = (x, keys) => x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).sort().join(',') === [...keys].sort().join(',')
-export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null, tickets = null, now = () => Date.now() } = {}) {
+export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null, tickets = null, ai = null, now = () => Date.now() } = {}) {
   const bindings = new Map()
+  // Shell intents (wizard-os spec/browser-trust-shell-intents). An owner-consent operation runs only through an intent
+  // the SHELL queued and confirmed: bound to the binding + document generation, installation/source/commit/permission
+  // revision, the operation and its exact normalized arguments + operationKey; consumed once; 2 min to confirm.
+  // Review requests: at most 3 a minute per installation (confirm + navigate together), one open per binding.
+  const intents = new Map()
+  const INTENT_TTL_MS = 120_000, INTENTS_PER_MINUTE = 3, intentLog = new Map()
   const MEDIA_PER_MINUTE = 10, MEDIA_SESSION_MS = 8 * 3600 * 1000   // ADAPTER-SKETCH §6 renewal bounds
   const snapshot = appId => {
     const p = resolveInstallation?.(appId)
@@ -33,10 +39,31 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
   }
   // Re-resolve the installation before an effect and before releasing any result.
   const recheck = (b, operation) => { const p = current(b); admit(p, operation); return p }
-  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'notifications.media', 'data.status'])
+  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'notifications.media', 'data.status', ...Object.keys(ai || {})])
+  // Provider sign-in pages the Service itself read from this binding's upstream and matched to the installed contract.
+  // The frame only ever sees the target id; the URL leaves only to the shell, through a confirmed navigation intent.
+  const remember = b => (ref, target, url) => {
+    b.signin ||= new Map()
+    b.signin.delete(ref); b.signin.set(ref, { target, url, at: now() })
+    while (b.signin.size > 16) b.signin.delete(b.signin.keys().next().value)
+  }
+  async function runAi(b, p, operation, args, operationKey) {
+    const handler = ai[operation]
+    const value = await handler.run(p, args, operationKey, { recheck: async () => recheck(b, operation), signin: remember(b) })
+    recheck(b, operation)
+    return value
+  }
   async function call(request) {
     const write = WRITE_OPERATIONS.includes(request?.operation)
     const { b, p } = admitRequest(request, ['handle', 'generation', 'requestId', 'operation', 'args', ...(write ? ['operationKey'] : [])])
+    if (ai && Object.hasOwn(ai, request.operation)) {
+      admit(p, request.operation)
+      // Never on the app's word: no `confirmed` argument exists, and consent operations need a consumed intent.
+      if (OPERATIONS[request.operation].consent === 'owner') fail('confirmation_required')
+      const args = ai[request.operation].validate(request.args)
+      if (write && (typeof request.operationKey !== 'string' || !OPERATION_KEY.test(request.operationKey))) fail('bad_request')
+      return runAi(b, p, request.operation, args, request.operationKey)
+    }
     if (!operations) fail('unsupported_capability')
     if (request.operation === 'data.status') {
       if (!request.args || typeof request.args !== 'object' || typeof request.args.operation !== 'string') fail('bad_request')
@@ -87,7 +114,77 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
       return true
     } catch { return false }
   })
+  function intentBudget(p) {
+    const t = now(), log = (intentLog.get(p.installationId) || []).filter(x => x > t - 60_000)
+    if (log.length >= INTENTS_PER_MINUTE) fail('rate_limited', { retryAfterMs: Math.max(1, log[0] + 60_000 - t) })
+    log.push(t); intentLog.set(p.installationId, log)
+  }
+  const host = url => { const u = new URL(url); return { host: u.hostname, path: u.pathname } }
+  /** Shell-only: queue a review. confirm = {operation, args, operationKey}; navigate = {target, ref}. */
+  async function intentCreate(request) {
+    const kind = request?.kind
+    const keys = kind === 'confirm' ? ['handle', 'generation', 'requestId', 'kind', 'operation', 'args', 'operationKey'] : ['handle', 'generation', 'requestId', 'kind', 'target', 'ref']
+    if (kind !== 'confirm' && kind !== 'navigate') fail('bad_request')
+    const { b, p } = admitRequest(request, keys)
+    for (const [id, it] of intents) if (it.expires < now() || it.consumed) intents.delete(id)
+    if ([...intents.values()].some(it => it.handle === request.handle)) fail('busy', { retryable: true })
+    let entry
+    if (kind === 'confirm') {
+      if (!ai || !Object.hasOwn(ai, request.operation) || OPERATIONS[request.operation]?.consent !== 'owner') fail('not_allowed')
+      admit(p, request.operation)
+      const args = ai[request.operation].validate(request.args)
+      if (typeof request.operationKey !== 'string' || !OPERATION_KEY.test(request.operationKey)) fail('bad_request')
+      intentBudget(p)
+      const summary = await ai[request.operation].describe(p, args)
+      recheck(b, request.operation)
+      entry = { kind, operation: request.operation, args, digest: JSON.stringify([request.operation, args, request.operationKey]), operationKey: request.operationKey, summary }
+    } else {
+      if (typeof request.target !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(request.target) || typeof request.ref !== 'string' || !/^(ai|cc):[A-Za-z0-9_-]{8,64}$/.test(request.ref)) fail('bad_request')
+      const seen = b.signin?.get(request.ref)
+      // Only a page this binding's own upstream produced, for an operation still granted, still in the contract.
+      const producer = request.ref.startsWith('ai:') ? 'ai_accounts.progress' : 'claude_code.connect'
+      admit(p, producer)
+      if (!seen || seen.target !== request.target || now() - seen.at > 15 * 60_000) fail('not_found')
+      const { navigationTarget } = await import('./browser-ai-accounts.mjs')
+      if (navigationTarget(p.browser_contract, seen.url) !== request.target) fail('not_allowed')
+      intentBudget(p)
+      const where = host(seen.url)
+      entry = { kind, target: request.target, ref: request.ref, url: seen.url, summary: { title: 'Open the sign-in page?', detail: `Opens ${where.host} in a new tab. Sign in there, then come back.`, danger: false, action: 'Open', ...where } }
+    }
+    const id = randomUUID()
+    intents.set(id, { ...entry, id, handle: request.handle, generation: b.generation, identity: identity(p), appId: b.appId, expires: now() + INTENT_TTL_MS, consumed: false })
+    return { intent: id, kind, expiresAt: new Date(now() + INTENT_TTL_MS).toISOString(), summary: entry.summary }
+  }
+  /** Shell-only, after a trusted owner activation in the shell's own dialog. Consumes the intent before any effect. */
+  async function intentConfirm(request) {
+    // No requestId here: the intent id itself is the single-use handle (the frame never learns it).
+    if (!exact(request, ['handle', 'generation', 'intent'])) fail('bad_request')
+    const b = bindings.get(request.handle), p = current(b)
+    if (request.generation !== b.generation) fail('stale_binding')
+    const it = typeof request.intent === 'string' ? intents.get(request.intent) : null
+    if (!it || it.handle !== request.handle || it.generation !== b.generation) fail('not_found')
+    if (it.consumed) fail('replay')
+    it.consumed = true; intents.delete(it.id)
+    if (it.expires < now()) fail('expired')
+    if (identity(p) !== it.identity) fail('revoked')   // update, source switch, grant change since the review opened
+    if (it.kind === 'navigate') {
+      const producer = it.ref.startsWith('ai:') ? 'ai_accounts.progress' : 'claude_code.connect'
+      admit(p, producer)
+      const { navigationTarget } = await import('./browser-ai-accounts.mjs')
+      if (navigationTarget(p.browser_contract, it.url) !== it.target) fail('not_allowed')
+      return { kind: 'navigate', url: it.url }
+    }
+    admit(p, it.operation)
+    return { kind: 'confirm', value: await runAi(b, p, it.operation, it.args, it.operationKey) }
+  }
+  function intentCancel(request) {
+    if (!exact(request, ['handle', 'intent'])) fail('bad_request')
+    const it = intents.get(request.intent)
+    if (it && it.handle === request.handle) intents.delete(it.id)
+    return { cancelled: true }
+  }
   const api = Object.freeze({
+    intentCreate, intentConfirm, intentCancel,
     create(request) {
       if (!exact(request, ['appId', 'generation']) || typeof request.appId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(request.appId) || !/^[a-f0-9-]{36}$/.test(request.generation)) fail('bad_request')
       const p = snapshot(request.appId)
@@ -116,13 +213,14 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     call,
     /** HTTP entry: fixed real operations are async; state.local and the synthetic fixture stay synchronous. */
     async dispatch(request) { return real.has(request?.operation) ? call(request) : api.check(request) },
-    revoke(handle) { bindings.delete(handle); tickets?.revokeBinding(handle) },
+    revoke(handle) { bindings.delete(handle); tickets?.revokeBinding(handle); for (const [id, it] of intents) if (it.handle === handle) intents.delete(id) },
   })
   return api
 }
 
 const HTTP_ERRORS = Object.freeze({
-  bad_request: 400, not_allowed: 403, stale_binding: 403, revoked: 403, replay: 403, not_found: 404,
+  bad_request: 400, not_allowed: 403, stale_binding: 403, revoked: 403, replay: 403, confirmation_required: 403, not_found: 404,
+  expired: 410, rate_limited: 429,
   conflict: 409, outcome_unknown: 409, busy: 429, quota_exceeded: 507, unsupported_capability: 501,
   backend_failed: 502, backend_unavailable: 503, storage_unavailable: 503, timeout: 504,
 })
@@ -140,12 +238,15 @@ export async function browserAdaptersHttp(request, response, url, { enabled, pri
     if (url.pathname === '/wizard/v1/browser-adapters/bindings') value = adapters.create(body)
     else if (url.pathname === '/wizard/v1/browser-adapters/call') value = await (adapters.dispatch ? adapters.dispatch(body) : adapters.check(body))
     else if (url.pathname === '/wizard/v1/browser-adapters/revoke' && exact(body,['handle'])) { adapters.revoke(body.handle); value = {revoked:true} }
+    else if (url.pathname === '/wizard/v1/browser-adapters/intents' && adapters.intentCreate) value = await adapters.intentCreate(body)
+    else if (url.pathname === '/wizard/v1/browser-adapters/intents/confirm' && adapters.intentConfirm) value = await adapters.intentConfirm(body)
+    else if (url.pathname === '/wizard/v1/browser-adapters/intents/cancel' && adapters.intentCancel) value = adapters.intentCancel(body)
     else fail('bad_request')
     reply(200,value)
   } catch (e) {
     const code = Object.hasOwn(HTTP_ERRORS, e.code) ? e.code : 'bad_request'
     // Sanitized: code plus the documented outcome fields only; never an upstream body or credential.
-    reply(HTTP_ERRORS[code], { error: code, ...(e.outcome ? { outcome: e.outcome } : {}), ...(e.operationKey ? { operationKey: e.operationKey } : {}), retryable: ['busy', 'timeout', 'backend_unavailable', 'storage_unavailable'].includes(code) })
+    reply(HTTP_ERRORS[code], { error: code, ...(e.outcome ? { outcome: e.outcome } : {}), ...(e.operationKey ? { operationKey: e.operationKey } : {}), ...(Number.isSafeInteger(e.retryAfterMs) ? { retryAfterMs: e.retryAfterMs } : {}), retryable: ['busy', 'timeout', 'backend_unavailable', 'storage_unavailable', 'rate_limited'].includes(code) })
   }
   return true
 }

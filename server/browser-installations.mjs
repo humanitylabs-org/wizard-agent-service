@@ -47,7 +47,11 @@ export function createWamInstallationResolver({ appsJsonPath }) {
         sourceId: b.source_id,
         installedCommit: b.commit,
         permissionRevision: b.permission_revision,
-        browser_contract: { operations: [...(b.contract.operations || [])], state: { persistent_bytes: b.contract.state?.persistent_bytes || 0 } },
+        browser_contract: { operations: [...(b.contract.operations || [])], state: { persistent_bytes: b.contract.state?.persistent_bytes || 0 },
+          // Reviewed provider sign-in pages (WAM normalize_navigation); anything off-shape is dropped, never widened.
+          navigation: (Array.isArray(b.contract.navigation) ? b.contract.navigation : []).slice(0, 4).filter(n => n && typeof n.id === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(n.id)
+            && typeof n.url === 'string' && /^https:\/\/[a-z0-9.-]+\/[A-Za-z0-9._~/-]*$/.test(n.url) && (n.query === undefined || (Array.isArray(n.query) && n.query.every(q => typeof q === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(q)))))
+            .map(n => ({ id: n.id, url: n.url, query: [...(n.query || [])] })) },
         providers,
         upstream: typeof b.upstream === 'string' && /^http:\/\/[a-z0-9.-]+:[0-9]{1,5}$/i.test(b.upstream) ? b.upstream : null,
       }
