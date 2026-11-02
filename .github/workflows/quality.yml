@@ -42,6 +42,7 @@ jobs:
           .fixture-venv/bin/pip install fastapi==0.133.1 httpx==0.28.1
           .fixture-venv/bin/python tests/test_account_lifecycle.py
           .fixture-venv/bin/python tests/test_provider_accounts.py
+          .fixture-venv/bin/python tests/test_account_add_safety.py
           node --test tests/provider-accounts.node.mjs
       - name: Fixture boots
         run: |

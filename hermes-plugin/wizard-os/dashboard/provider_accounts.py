@@ -246,6 +246,27 @@ def claude_model_cooldowns(read=None, inventory=None):
     return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
 
 
+def _hash_email(raw):
+    exact = str(raw or '').strip().lower()
+    if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
+        return hashlib.sha256(exact.encode()).hexdigest()[:16]
+    return None
+
+
+def email_hash_of(row):
+    """Cached provider email hint only, not account/organization/grant identity.
+
+    Never fetches a profile or renews a grant. Missing projection cache is unknown.
+    """
+    token = (row or {}).get('access_token') or ''
+    if not token:
+        return None
+    key = ('email', hashlib.sha256(token.encode()).hexdigest())
+    with _LOCK:
+        raw = _CACHE.get(key)
+    return _hash_email(raw)
+
+
 def _rank(row):
     value = row.get('priority')
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
@@ -308,9 +329,9 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
         # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
         # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
-        exact = str(raw or '').strip().lower()
-        if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
-            extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
+        email_hash = _hash_email(raw)
+        if email_hash:
+            extra['emailHash'] = email_hash
         state = str(row.get('last_status') or 'ready')
         # Hermes calls a healthy OAuth grant "ok"; the connection apps use "ready".
         if state == 'ok':

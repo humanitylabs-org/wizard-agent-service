@@ -4,6 +4,9 @@ Reconnect is a fresh login, not refresh: old grants are retained for explicit
 removal. A successful login is reconciled against the read-only pool inventory.
 Prefer moves one existing sign-in to priority 0 with stock `hermes auth priority`
 (tried first under fill_first); it never signs in, out or removes anything.
+
+Duplicate email matches are advisory only: they do not establish organization or
+grant identity. Add never refreshes or removes any grant after login.
 """
 import atexit
 import fcntl
@@ -33,8 +36,10 @@ class BrokerError(ValueError):
 
 
 class Broker:
-    def __init__(self, read=read_pool, command=None, ttl=600, lock_path=None):
+    def __init__(self, read=read_pool, command=None, ttl=600, lock_path=None, identify=None):
         self.lock_path = lock_path
+        # Pure cache-only lookup; never perform provider I/O in reconciliation.
+        self.identify = identify
         self.stock_cli = command is None
         self.read = read
         self.command = command or ['hermes']
@@ -126,6 +131,7 @@ class Broker:
             job = dict(id=secrets.token_urlsafe(24), provider=provider, action=action,
                        target=target, status='running', expiresAt=time.time()+self.ttl,
                        url=None, userCode=None, inputRequired=False, credentialIds=[],
+                       duplicateOf=None, duplicateRemoved=False, duplicateEmailHintOf=None,
                        proc=proc, lease=lease, before=before, stop=None, submitted=False)
             self.jobs[job['id']] = job
             # Bound retained completed job metadata.
@@ -137,7 +143,8 @@ class Broker:
 
     def view(self, job):
         return {k: job[k] for k in ('id', 'provider', 'action', 'target', 'status', 'expiresAt',
-                                   'url', 'userCode', 'inputRequired', 'credentialIds')}
+                                   'url', 'userCode', 'inputRequired', 'credentialIds',
+                                   'duplicateOf', 'duplicateRemoved', 'duplicateEmailHintOf')}
 
     def get(self, provider, jid):
         job = self.jobs.get(jid)
@@ -236,6 +243,9 @@ class Broker:
                 job['status'] = ('needs_review' if unexpected_loss else
                                  'succeeded' if ok and proc.returncode == 0 else
                                  'needs_review' if ok or added else job['stop'] or 'failed')
+                if job['action'] == 'add' and job['status'] == 'succeeded' and len(added) == 1 \
+                        and job['provider'] == 'claude':
+                    self._duplicate_advisory(job, rows, added[0])
         except Exception:
             self._kill(proc)
             proc.wait()
@@ -246,6 +256,37 @@ class Broker:
             os.close(job['lease'])
             with self.lock:
                 job.update(url=None, userCode=None, inputRequired=False)
+
+    def _duplicate_advisory(self, job, rows, new_id):
+        """Best-effort cached email match, never permission to combine or remove grants.
+
+        Called under the job lock; the production identify callback is cache-only.
+        A cache miss is unknown, not a reason to fetch, refresh or run another CLI.
+        """
+        def active():
+            return not job['stop'] and time.time() < job['expiresAt']
+        if self.identify is None or not active():
+            return
+        try:
+            new = next((r for r in rows if r.get('id') == new_id), None)
+            mine = self.identify(new) if new else None
+            if not mine or not active():
+                return
+            for row in rows:
+                if not active():
+                    return
+                if row.get('id') not in job['before'] or not str(row.get('source', '')).startswith('manual:'):
+                    continue
+                match = self.identify(row) == mine
+                if not active():
+                    return
+                if match:
+                    # Legacy connection pages interpret duplicateOf as a discarded
+                    # login. Never put an advisory email match in that field.
+                    job['duplicateEmailHintOf'] = row['id']
+                    return
+        except Exception:
+            pass  # An unavailable advisory never changes the login outcome.
 
     def close(self):
         with self.lock:
