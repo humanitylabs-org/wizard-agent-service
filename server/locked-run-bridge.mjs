@@ -142,12 +142,13 @@ export class LockedRunBridge {
     if (this.isPublicSession(value.session_id)) {
       // Queue custody, not today's picker, owns an admitted send. This capability
       // is an internal init field, never accepted from the request JSON.
-      const replayKey = value.session_id + ':' + new Headers(init.headers).get('Idempotency-Key')
+      const replayIdem = new Headers(init.headers).get('Idempotency-Key')
+      const replayKey = replayIdem ? createHash('sha256').update(value.session_id + '\0' + replayIdem).digest('hex') : null
       const replay = this.entries.get(replayKey)
       if (replay && ((value.model && value.model !== replay.model) || (value.provider && value.provider !== replay.provider))) throw fail('This send was already used for a different selected model')
       if (replay) return this.start(value, {model: replay.model, provider: replay.provider}, init)
       const route = init.wizardAdmittedRoute === true
-        ? { model: value.model, provider: value.provider }
+        ? (value.model || value.provider ? { model: value.model, provider: value.provider } : null)
         : this.selections.capture(value)
       if (route) {
         if (!route.model || !route.provider || !idPattern.test(value.session_id || '')) throw fail('No confirmed model/provider for this message', 400)

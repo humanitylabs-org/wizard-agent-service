@@ -145,7 +145,8 @@ describe('Wizard proxy capacity queue', () => {
       canonicalSessionReader: () => sessions,
       runQueueStatePath: join(directory, 'queue.sqlite3'),
       runQueueMaxActive: 2,
-      runQueuePollIntervalMs: 0,
+      // Automatic drain requires the real dispatcher; GET refreshes only its own run.
+      runQueuePollIntervalMs: 25,
       activeSessionReader: async () => [],
       dispatchHealthReader: () => true,
     })
@@ -216,9 +217,9 @@ describe('Wizard proxy capacity queue', () => {
 
     upstreamRuns.get('actual_1')!.status = 'completed'
     let thirdStatus = third.json
-    for (let attempt = 0; attempt < 8 && thirdStatus.status === 'queued'; attempt += 1) {
+    for (let attempt = 0; attempt < 100 && ['queued', 'launching'].includes(thirdStatus.status); attempt += 1) {
       thirdStatus = (await request(origin, `/wizard/hermes/v1/runs/${encodeURIComponent(third.json.run_id)}`)).json
-      if (thirdStatus.status === 'queued') await new Promise((resolve) => setTimeout(resolve, 25))
+      if (['queued', 'launching'].includes(thirdStatus.status)) await new Promise((resolve) => setTimeout(resolve, 25))
     }
     expect(thirdStatus.status).toBe('running')
     expect(admissions).toBe(3)
@@ -461,7 +462,8 @@ describe('Wizard proxy capacity queue', () => {
       operatorWorkerStatePath: join(directory, 'workers.json'),
       runQueueStatePath: join(directory, 'queue.sqlite3'),
       runQueueMaxActive: 2,
-      runQueuePollIntervalMs: 0,
+      // Retries are dispatched by ticks, not by a queued run's status read.
+      runQueuePollIntervalMs: 25,
       runQueueRetryDelayMs: 50,
       activeSessionReader: async () => [],
       dispatchHealthReader: () => true,
@@ -475,8 +477,11 @@ describe('Wizard proxy capacity queue', () => {
       body: JSON.stringify({ session_id: 'wizardop_user_one', input: 'Research this fully.' }),
     })
     expect(admitted.json.status).toBe('queued')
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    const retried = await request(origin, `/wizard/operator/v1/runs/${encodeURIComponent(admitted.json.run_id)}`)
+    let retried = admitted
+    for (let attempt = 0; attempt < 100 && ['queued', 'launching'].includes(retried.json.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      retried = await request(origin, `/wizard/operator/v1/runs/${encodeURIComponent(admitted.json.run_id)}`)
+    }
     expect(retried.json.status).toBe('running')
     expect(workerAdmissions).toBe(1)
     expect(sessions.size).toBe(1)

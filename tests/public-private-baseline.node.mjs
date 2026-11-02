@@ -15,7 +15,9 @@ const route={model:'claude-sonnet-5-5',provider:'anthropic'}
 const frame=(event,payload)=>`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
 const json=value=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}})
 const post=value=>({method:'POST',headers:{'Idempotency-Key':'synthetic'},body:JSON.stringify(value)})
-for(const requested of [{},route,{model:'claude-opus-5-5',provider:'anthropic'},{model:'fixture-other',provider:'custom:fixture'}]) test('private/unknown bridge baseline differential '+JSON.stringify(requested),async()=>{
+for(const requested of [{},route,{model:'claude-opus-5-5',provider:'anthropic'},{model:'fixture-other',provider:'custom:fixture'}]) test('private/unknown bridge baseline differential '+JSON.stringify(requested),async t=>{
+ const now=Date.UTC(2026,0,2,3,4,5)
+ t.mock.timers.enable({apis:['Date'],now})
  async function run(Bridge){
   const calls=[],logs=[]
   const b=new Bridge({origin:'http://fixture',isPublicSession:()=>false,sessionRoute:()=>route,log:l=>logs.push(l),fetchImpl:async(url,init)=>{
@@ -26,6 +28,8 @@ for(const requested of [{},route,{model:'claude-opus-5-5',provider:'anthropic'},
   const selected=await(await b.fetch('http://fixture/api/sessions/wizard_private/model',post(route))).json()
   const response=await b.fetch('http://fixture/v1/runs',post({session_id:'wizard_private',input:'synthetic',...requested}))
   const payload=await response.json();await Promise.all([...b.streams])
+  assert.equal(payload.created_at,now/1000,'native admission timestamp derives from the same frozen clock')
+  assert.equal([...b.entries.values()][0].createdAt,now)
   return {selected,status:response.status,payload,calls,logs}
  }
  assert.deepEqual(await run(Candidate),await run(Baseline))
