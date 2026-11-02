@@ -6,6 +6,7 @@ import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
 
 const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true),
+  'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
   // Main's cached Hermes listing with the stock running status; main admits direct here (the
   // check runs main's durable-queue path in a second scene) and without state.db, whose live
   // truth would otherwise hide a stale cached listing.
@@ -14,6 +15,13 @@ const featureScenes = { 'scheduler-notifications': kind => notificationScene(kin
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  'private-incognito-policy': async s => {
+    const init = post({})
+    const response = await fetch(`${s.origin()}/wizard/v1/agents/${s.id || 'main'}/incognito`, { ...init, headers: { ...init.headers, ...s.ownerHeaders } })
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error, 'incognito_private_only')
+    assert.ok(!s.seen.some(r => r.path.includes('/incognito')), 'private-only refusal must happen before any upstream request')
+  },
   'scheduler-notifications': checkBoundNotification,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))

@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isSilentResult, isScheduleInput } from './scheduler.mjs'
-import { heavyResultOwed } from './heavy-wait.mjs'
+import { heavyJobsForSession, heavyResultOwed } from './heavy-wait.mjs'
 export { SUPERVISOR_SPELL } from './supervisor.mjs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
 import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
@@ -81,11 +81,24 @@ export function parseStatus(text) {
 // Apply after parsing/backfill, including cached rows: heavy work can change
 // independently of the assistant's final reply. An owner decision still wins.
 export function guardHeavyStatus(status, { jobs = [], agentId = 'hermes', sessionId = '', isDelivered = () => false, nonHoldingIds = new Set() } = {}) {
-  if (!['done', 'check'].includes(status?.state)) return status
+  if (status?.state !== 'check') return status
   const pending = jobs?.some(job => (job.agent_id ?? 'hermes') === agentId
     && (job.sessionId ?? job.session_id) === sessionId && heavyResultOwed(job, isDelivered)
     && !(agentId === 'hermes' && status.state === 'done' && nonHoldingIds.has(job.job_id ?? job.id)))
   return pending ? { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' } : status
+}
+
+/** heavyStatus(agentId, sessionId, status, jobs?) for list projections. Only `check` can change,
+ * so other states return before any ledger read. `jobs` is one ledger snapshot shared by every
+ * row of a list; without it the queue's (cached) snapshot is read. Either way the guard sees only
+ * this thread's jobs through a per-snapshot index, never a scan of the whole ledger per row. */
+export function createHeavyStatusGuard({ rows = () => [], isDelivered = () => false } = {}) {
+  return (agentId, sessionId, status, jobs) => {
+    if (status?.state !== 'check') return status
+    return guardHeavyStatus(status, { agentId, sessionId,
+      jobs: heavyJobsForSession(jobs ?? rows(), agentId, sessionId),
+      isDelivered: job => isDelivered(agentId, sessionId, job) })
+  }
 }
 
 // Provenance is independent of attention: publishers may send an app-only marker.
