@@ -90,6 +90,7 @@ import { createBrowserAdapters, browserAdaptersHttp } from './browser-adapters.m
 import { createContentTickets } from './browser-content.mjs'
 import { createWamInstallationResolver } from './browser-installations.mjs'
 import { createNotificationsOperations } from './browser-operations.mjs'
+import { createFilesOperations } from './browser-files.mjs'
 import { createAiAccountsOperations } from './browser-ai-accounts.mjs'
 import { createOperationReceipts } from './browser-operation-receipts.mjs'
 import { browserShellHttp, createShellOperations } from './browser-shell-operations.mjs'
@@ -2571,6 +2572,16 @@ function buildWizardServer(options, lifetime) {
         fetchImpl: options.browserAdapterWam.fetchImpl,
         listenerCredential: p => wam.resolveListenerCredential(p.installationId),
         receipts,
+      }),
+      // First-party Files view (browser-files.mjs): its own upstream + credential, the content tickets for Range reads,
+      // and THIS service's resumable upload store and owner-files root for the upload port (resolved at call time).
+      files: createFilesOperations({
+        fetchImpl: options.browserAdapterWam.fetchImpl,
+        listenerCredential: p => wam.resolveListenerCredential(p.installationId),
+        tickets,
+        uploads: () => uploads,
+        userFiles: () => userFiles,
+        timeZone: () => ownerTimeZone(),
       }),
     })))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
       // Scoped content tickets need their own non-owner origin; without one, notifications.media is unsupported.

@@ -61,6 +61,7 @@ export function createContentTickets({ publicBase = '', ttlMs = 60_000, maxTicke
     const e = tickets.get(ticket)
     if (!e || e.expiresAt <= now()) { if (e) tickets.delete(ticket); log({ ref, status: 410, why: 'expired_or_unknown' }); return plain(res, 410, 'ticket expired') }
     if (!admit(e)) { tickets.delete(ticket); log({ ref, status: 403, why: 'revoked' }); return plain(res, 403, 'ticket revoked') }
+    if (e.stream) return streamed(req, res, e, ticket, ref)
     let body
     try { body = await e.fetchBytes() } catch { log({ ref, status: 502, why: 'app' }); return plain(res, 502, 'content unavailable') }
     if (createHash('sha256').update(body).digest('hex') !== e.sha256) { tickets.delete(ticket); log({ ref, status: 410, why: 'changed' }); return plain(res, 410, 'content changed') }
@@ -87,6 +88,48 @@ export function createContentTickets({ publicBase = '', ttlMs = 60_000, maxTicke
       if (res.destroyed) return
       if (!ok) await new Promise(r => { res.once('drain', r); res.once('close', r) })
     }
+    res.end()
+  }
+  // Large files (Files view: video seek, downloads): never held whole. The entry's stream({start, end, method}) asks the
+  // app for exactly the requested range with the installation's CURRENT upstream and credential; a changed file ends
+  // the ticket. The listener still re-checks admission before the head and between every forwarded chunk.
+  async function streamed(req, res, e, ticket, ref) {
+    const range = parseRange(req.headers.range, e.bytes)
+    if (range === 'bad') return plain(res, 416, 'bad range', { 'Content-Range': `bytes */${e.bytes}` })
+    const { start, end } = range || { start: 0, end: e.bytes - 1 }
+    let up = { body: null }
+    if (e.bytes > 0) {
+      try { up = await e.stream({ start, end, method: req.method }) } catch { log({ ref, status: 502, why: 'app' }); return plain(res, 502, 'content unavailable') }
+      if (up.changed) { tickets.delete(ticket); log({ ref, status: 410, why: 'changed' }); return plain(res, 410, 'content changed') }
+    }
+    if (!admit(e)) { tickets.delete(ticket); up.body?.cancel?.().catch?.(() => {}); return plain(res, 403, 'ticket revoked') }
+    const length = e.bytes > 0 ? end - start + 1 : 0
+    const name = String(e.filename || 'file').replace(/[\u0000-\u001f\u007f"\\]/g, '_').slice(0, 200)
+    res.writeHead(range ? 206 : 200, {
+      'Content-Type': e.mime, 'Content-Length': String(length), 'Accept-Ranges': 'bytes',
+      ...(range ? { 'Content-Range': `bytes ${start}-${end}/${e.bytes}` } : {}),
+      'Content-Disposition': `${e.disposition === 'attachment' ? 'attachment' : 'inline'}; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin',
+    })
+    log({ ref, status: range ? 206 : 200, method: req.method, bytes: length })
+    if (req.method === 'HEAD' || !up.body) { up.body?.cancel?.().catch?.(() => {}); return res.end() }
+    const set = active.get(e.handle) || new Set(); set.add(res); active.set(e.handle, set)
+    const deadline = setTimeout(() => res.destroy(), connectionMs); deadline.unref?.()
+    res.on('close', () => { clearTimeout(deadline); set.delete(res); up.body?.cancel?.().catch?.(() => {}) })
+    let sent = 0
+    try {
+      for await (const part of up.body) {
+        if (!admit(e)) { log({ ref, status: 'aborted', why: 'revoked' }); return res.destroy() }
+        const chunk = Buffer.from(part).subarray(0, Math.max(0, length - sent))
+        sent += chunk.length
+        const ok = res.write(chunk)
+        if (res.destroyed) return
+        if (!ok) await new Promise(r => { res.once('drain', r); res.once('close', r) })
+        if (sent >= length) break
+      }
+    } catch { return res.destroy() }
+    if (sent !== length) return res.destroy()   // short app reply: never a silently truncated file
     res.end()
   }
   return Object.freeze({

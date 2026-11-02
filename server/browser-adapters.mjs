@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto'
 import { OPERATIONS, OPERATION_KEY, WRITE_OPERATIONS, createNotificationsOperations } from './browser-operations.mjs'
 const fail = (code, extra = {}) => { throw Object.assign(new Error(code), { code, ...extra }) }
 const exact = (x, keys) => x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).sort().join(',') === [...keys].sort().join(',')
-export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null, tickets = null, ai = null, now = () => Date.now() } = {}) {
+// Files view sub-operations: one grant (files.upload) covers the whole upload port.
+const FILES_UPLOAD = Object.freeze({ 'files.upload.create': 'uploadCreate', 'files.upload.status': 'uploadStatus', 'files.upload.commit': 'uploadCommit', 'files.upload.abort': 'uploadAbort' })
+const FILES_READ = Object.freeze({ 'files.list': 'list', 'files.index': 'index', 'files.thumbnail': 'thumbnail' })
+const THUMBNAILS_PER_MINUTE = 240
+export function createBrowserAdapters({ resolveInstallation, resolveGrants, operations = null, tickets = null, ai = null, files = null, now = () => Date.now() } = {}) {
   const bindings = new Map()
   // Shell intents (wizard-os spec/browser-trust-shell-intents). An owner-consent operation runs only through an intent
   // the SHELL queued and confirmed: bound to the binding + document generation, installation/source/commit/permission
@@ -39,7 +43,20 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
   }
   // Re-resolve the installation before an effect and before releasing any result.
   const recheck = (b, operation) => { const p = current(b); admit(p, operation); return p }
-  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'notifications.media', 'data.status', ...Object.keys(ai || {})])
+  const real = new Set(['notifications.list', 'notifications.mark_read', 'notifications.inbox', 'notifications.mark', 'notifications.media', 'data.status', ...Object.keys(ai || {}),
+    ...(files ? [...Object.keys(FILES_READ), 'files.content', ...Object.keys(FILES_UPLOAD)] : [])])
+  const filesBinding = (request, b, operation) => Object.freeze({
+    handle: request.handle, generation: b.generation, appId: b.appId, identity: identity(b.principal), installationId: b.principal.installationId,
+    recheck: async () => recheck(b, operation), current: () => recheck(b, operation),
+  })
+  // Media renewal bounds (ADAPTER-SKETCH §6), shared by every media operation of one binding.
+  const mediaBudget = b => {
+    const t = now()
+    b.media = (b.media || []).filter(x => x > t - 60_000)
+    if (b.media.length >= MEDIA_PER_MINUTE) fail('quota_exceeded')
+    if (t - b.created > MEDIA_SESSION_MS) fail('stale_binding')
+    b.media.push(t)
+  }
   // Provider sign-in pages the Service itself read from this binding's upstream and matched to the installed contract.
   // The frame only ever sees the target id; the URL leaves only to the shell, through a confirmed navigation intent.
   const remember = b => (ref, target, url) => {
@@ -53,7 +70,27 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     recheck(b, operation)
     return value
   }
+  async function callFiles(request) {
+    const { b, p } = admitRequest(request, ['handle', 'generation', 'requestId', 'operation', 'args'])
+    const op = request.operation, grant = Object.hasOwn(FILES_UPLOAD, op) ? 'files.upload' : op
+    admit(p, grant)
+    const ctx = filesBinding(request, b, grant)
+    let value
+    if (op === 'files.content') { mediaBudget(b); value = await files.content(p, request.args, ctx) }
+    else if (Object.hasOwn(FILES_UPLOAD, op)) value = await files[FILES_UPLOAD[op]](p, request.args, ctx)
+    else {
+      if (op === 'files.thumbnail') {
+        const t = now(); b.thumbs = (b.thumbs || []).filter(x => x > t - 60_000)
+        if (b.thumbs.length >= THUMBNAILS_PER_MINUTE) fail('busy', { retryable: true })
+        b.thumbs.push(t)
+      }
+      value = await files[FILES_READ[op]](p, request.args, ctx)
+    }
+    recheck(b, grant)   // grant/install still current before the result leaves
+    return value
+  }
   async function call(request) {
+    if (files && (Object.hasOwn(FILES_READ, request?.operation) || Object.hasOwn(FILES_UPLOAD, request?.operation) || request?.operation === 'files.content')) return callFiles(request)
     const write = WRITE_OPERATIONS.includes(request?.operation)
     const { b, p } = admitRequest(request, ['handle', 'generation', 'requestId', 'operation', 'args', ...(write ? ['operationKey'] : [])])
     if (ai && Object.hasOwn(ai, request.operation)) {
@@ -77,11 +114,7 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     const effect = async () => recheck(b, request.operation)
     if (request.operation === 'notifications.media') {
       // Renewal is just another open through this live binding: at most ten a minute, never past eight hours.
-      const t = now()
-      b.media = (b.media || []).filter(x => x > t - 60_000)
-      if (b.media.length >= MEDIA_PER_MINUTE) fail('quota_exceeded')
-      if (t - b.created > MEDIA_SESSION_MS) fail('stale_binding')
-      b.media.push(t)
+      mediaBudget(b)
       const value = await operations.media(p, request.args, Object.freeze({
         handle: request.handle, generation: b.generation, appId: b.appId, identity: identity(p),
         recheck: effect, current: () => recheck(b, 'notifications.media'),
@@ -183,8 +216,25 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     if (it && it.handle === request.handle) intents.delete(it.id)
     return { cancelled: true }
   }
+  /**
+   * One upload chunk from the shell's upload port (Files view). Per chunk: the upload ticket, the SAME live binding and
+   * document generation, the installation unchanged and files.upload still granted; then exact offset + chunk hash.
+   */
+  async function uploadChunk({ ticket, offset, sha256, body }) {
+    if (!files) fail('unsupported_capability')
+    const t = files.chunkTicket(ticket)
+    const b = bindings.get(t.handle)
+    if (!b) fail('revoked')
+    if (b.generation !== t.generation) fail('stale_binding')
+    const p = current(b)
+    if (p.installationId !== t.installationId) fail('revoked')
+    admit(p, 'files.upload')
+    const value = await files.uploadChunk(p, t, { offset, sha256, body })
+    recheck(b, 'files.upload')
+    return value
+  }
   const api = Object.freeze({
-    intentCreate, intentConfirm, intentCancel,
+    intentCreate, intentConfirm, intentCancel, uploadChunk,
     create(request) {
       if (!exact(request, ['appId', 'generation']) || typeof request.appId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(request.appId) || !/^[a-f0-9-]{36}$/.test(request.generation)) fail('bad_request')
       const p = snapshot(request.appId)
@@ -213,14 +263,14 @@ export function createBrowserAdapters({ resolveInstallation, resolveGrants, oper
     call,
     /** HTTP entry: fixed real operations are async; state.local and the synthetic fixture stay synchronous. */
     async dispatch(request) { return real.has(request?.operation) ? call(request) : api.check(request) },
-    revoke(handle) { bindings.delete(handle); tickets?.revokeBinding(handle); for (const [id, it] of intents) if (it.handle === handle) intents.delete(id) },
+    revoke(handle) { bindings.delete(handle); tickets?.revokeBinding(handle); files?.forget(handle); for (const [id, it] of intents) if (it.handle === handle) intents.delete(id) },
   })
   return api
 }
 
 const HTTP_ERRORS = Object.freeze({
   bad_request: 400, not_allowed: 403, stale_binding: 403, revoked: 403, replay: 403, confirmation_required: 403, not_found: 404,
-  expired: 410, rate_limited: 429,
+  expired: 410, rate_limited: 429, offset_mismatch: 409, integrity: 422, too_large: 413,
   conflict: 409, outcome_unknown: 409, busy: 429, quota_exceeded: 507, unsupported_capability: 501,
   backend_failed: 502, backend_unavailable: 503, storage_unavailable: 503, timeout: 504,
 })
@@ -231,6 +281,19 @@ export async function browserAdaptersHttp(request, response, url, { enabled, pri
   if (!enabled || !adapters) { reply(404,{error:'not_found'}); return true }
   if (principal.kind !== 'owner' || !access) { reply(403,{error:'owner_required'}); return true }
   if (request.method !== 'POST') { reply(405,{error:'method_not_allowed'}); return true }
+  if (url.pathname === '/wizard/v1/browser-adapters/upload-chunk' && adapters.uploadChunk) {
+    // Binary chunk (<= 1 MiB) of the Files view's upload port; the shell sends it, never the frame.
+    try {
+      const sha256 = String(request.headers['x-wizard-chunk-sha256'] || ''), offsetHeader = String(request.headers['upload-offset'] || '')
+      if (!/^\d{1,16}$/.test(offsetHeader) || !String(request.headers['content-type'] || '').startsWith('application/offset+octet-stream')) fail('bad_request')
+      const body = await readBody(request, 1024 * 1024)
+      reply(200, await adapters.uploadChunk({ ticket: String(request.headers['x-wizard-upload-ticket'] || ''), offset: Number(offsetHeader), sha256, body }))
+    } catch (e) {
+      const code = Object.hasOwn(HTTP_ERRORS, e.code) ? e.code : e.status === 413 || e.code === 'body_too_large' ? 'too_large' : 'bad_request'
+      reply(HTTP_ERRORS[code], { error: code, ...(Number.isSafeInteger(e.offset) ? { offset: e.offset } : {}), retryable: ['busy', 'timeout', 'backend_unavailable', 'backend_failed'].includes(code) && e.retryable !== false })
+    }
+    return true
+  }
   try {
     const bytes = await readBody(request, 65536)
     const body = JSON.parse(bytes.toString('utf8'))
