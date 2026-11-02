@@ -34,6 +34,8 @@ _lspec = spec_from_file_location('wizard_account_lifecycle', Path(__file__).with
 assert _lspec is not None and _lspec.loader is not None
 _lifecycle = module_from_spec(_lspec)
 _lspec.loader.exec_module(_lifecycle)
+# Cache-only advisory: matching email is never authority to refresh, fold or delete a grant.
+_lifecycle.broker.identify = _accounts.email_hash_of
 
 router = APIRouter()
 
