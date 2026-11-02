@@ -180,7 +180,7 @@ it.each(kinds)('heavy delivery immediately restores the unchanged check reply: %
 
 it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %s', async kind => {
   const root = mkdtempSync(join(tmpdir(), 'heavy-status-')), heavyStatePath = join(root, 'heavy.db')
-  const s = await scene(kind, { heavyStatePath, heavyToken: 'synthetic-heavy-status-token-000000000', heavyPollIntervalMs: 3_600_000,
+  const s = await scene(kind, { heavyStatePath, heavyToken: 'synthetic-heavy-status-token-000000000', heavyPollIntervalMs: 3_600_000, runQueuePollIntervalMs: kind === 'main' ? 25 : 0,
     heavyTransport: async () => { throw Error('fixture must not contact a worker') } })
   const db = new DatabaseSync(heavyStatePath)
   const id = 'wizard_parity'
@@ -227,6 +227,8 @@ it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %
     expect(queued.status).toBe('queued')
     expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeUndefined()
     for (const run of s.runs.values()) { run.status = 'completed'; run.output = 'Finished' }
+    // Main uses the periodic durable queue; a status GET must not drive dispatch.
+    await expect.poll(() => JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at ?? 0, {timeout:5000,interval:20}).toBeGreaterThan(0)
     await s.request('/v1/runs/' + queued.run_id)
     expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeGreaterThan(0)
   } finally { db.close(); await s.close(); rmSync(root, { recursive: true, force: true }) }
