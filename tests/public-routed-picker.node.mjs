@@ -17,7 +17,7 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
   const provider=privateRoute?'tinfoil':A.provider, transport=privateRoute?'custom:tinfoil-operator':native
   const agents=new Map(['first','second'].map(id=>[id,{id,privacy:'standard',kind,model:{provider,model:A.model,allowed_models:[A.model,B.model]}}]))
   for(const id of agents.keys())mkdirSync(join(root,id))
-  const calls=[],runs=new Map(),disposers=[]; let unsafe=false, count=0, optionsOverride, hasOptionsOverride=false
+  const calls=[],runs=new Map(),disposers=[]; let unsafe=false, count=0, optionsOverride, hasOptionsOverride=false, unselected=false
   // createAgentRegistry.list() is synchronous and returns full agent records.
   const registry={agentsDir:root,list:()=>[...agents.values()],apiKey:()=> 'synthetic-no-authority',async fetchAgent(agent,path,init={}) {
     const body=init.body?JSON.parse(init.body):null;calls.push({agent:agent.id,path,body})
@@ -28,7 +28,11 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
       runs.set(run_id,{run_id,session_id:'wizard_shared',status:'running',runtime})
       return new Response(frame('run.started',{run_id,runtime:{model:'',provider:'',requested:{model:body.model,provider:body.provider},model_lock:'accepted'}})+frame('run.completed',{run_id,runtime,output:'fixture'}),{headers:{'Content-Type':'text/event-stream'}})
     }
-    if(path.startsWith('/api/sessions/'))return json({id:'wizard_shared',model:A.model,provider:transport})
+    if(path.startsWith('/api/sessions/'))return json({id:'wizard_shared',...(unselected?{}:{model:A.model,provider:transport})})
+    if(path==='/v1/runs') {
+      const run_id='legacy_'+(++count); runs.set(run_id,{run_id,session_id:body.session_id,status:'running'})
+      return json(runs.get(run_id),202)
+    }
     if(path.startsWith('/v1/runs/')&&path.endsWith('/steer'))return json({status:'accepted'})
     if(path.startsWith('/v1/runs/'))return json(runs.get(path.split('/')[3])||{},runs.has(path.split('/')[3])?200:404)
     throw Error('unhandled synthetic endpoint '+path)
@@ -43,6 +47,7 @@ async function fixture(t,kind='host-profile',privateRoute=false) {
   start(); t.after(async()=>{for(const dispose of disposers.splice(0))await dispose()})
   return {agent:agents.get('first'),second:agents.get('second'),calls,registry,transport,provider,fetch:(a,path,init)=>queues.fetch(a,path,init),setUnsafe:()=>unsafe=true,
     setOptions(value){hasOptionsOverride=true;optionsOverride=value},
+    setUnselected(){unselected=true},
     async restart(){for(const dispose of disposers.splice(0))await dispose();start()}}
 }
 for(const [kind,privateRoute] of [['host-profile',false],['container',false],['restricted',false]]) {
@@ -68,6 +73,24 @@ for(const provider of ['openai','openai-codex','google','nvidia','openrouter']) 
     assert.throws(()=>resolveAgentTransport(agent,{...options,provider:'different-provider'},{model:A.model,provider}),error=>error.status===409)
   })
 }
+test('unselected public legacy keeps native configured routing and exact replay across restart', async t => {
+  const f=await fixture(t); f.setUnselected(); f.setOptions(null)
+  const body={session_id:'wizard_shared',input:'Synthetic scheduled or first owner message'}
+  const response=await f.fetch(f.agent,'/v1/runs',request(body)); assert.equal(response.status,202)
+  const admitted=await response.json(); await until(()=>f.calls.some(c=>c.path==='/v1/runs'))
+  const wires=f.calls.filter(c=>c.path==='/v1/runs'); assert.equal(wires.length,1)
+  assert.deepEqual(wires[0].body,{...body,model:A.model})
+  assert.equal(f.calls.filter(c=>c.path==='/api/model/options'||c.path.endsWith('/chat/stream')).length,0)
+  await f.restart()
+  const replay=await f.fetch(f.agent,'/v1/runs',request(body));assert.equal(replay.headers.get('Idempotency-Replayed'),'true')
+  assert.equal((await replay.json()).run_id,admitted.run_id); assert.equal(f.calls.filter(c=>c.path==='/v1/runs').length,1)
+})
+for (const claim of [{model:A.model},{provider:A.provider},{require_model_lock:false},{selection_version:0},{wizard_retry_run_id:'unknown'},{wizard_selection:{model:A.model}},{route:{}},{runtime:{}}])
+test(`legacy exception refuses explicit selection metadata without a catalogue: ${JSON.stringify(claim)}`,async t=>{
+  const f=await fixture(t);f.setUnselected();f.setOptions(null)
+  await assert.rejects(f.fetch(f.agent,'/v1/runs',request({session_id:'wizard_shared',input:'Kept synthetic message',...claim})),e=>e.status===409)
+  assert.equal(f.calls.filter(c=>c.path==='/v1/runs'||c.path.endsWith('/chat/stream')||c.path.endsWith('/model')).length,0)
+})
 const shapeConflict = error => error instanceof ModelSelectionConflict && error.status === 409 && error.payload.error.code === 'agent_model_route_unproven'
 for (const allowed of [undefined, null, A.model, {}, [null], [7]]) test(`malformed allowed_models is typed fail-closed with no inference: ${JSON.stringify(allowed)}`, async t => {
   const f = await fixture(t)

@@ -32,6 +32,10 @@ export function resolveAgentTransport(agent, options, route) {
     throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
   return { model: route.model, provider: canonical }
 }
+// Only a fresh envelope with no selection/lock/retry claims can retain native
+// legacy routing. Configuration prefill is not a deliberate picker selection.
+const unselectedEnvelope = body => body && typeof body === 'object' && !Array.isArray(body)
+  && !Object.keys(body).some(key => /model|provider|lock|selection|version|route|runtime|transport|retry/i.test(key))
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
 export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null }) {
@@ -67,7 +71,10 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         resolve = async route => {
           const response = await raw('/api/model/options')
           if (!response.ok) throw new ModelSelectionConflict(null, 'agent_model_route_unproven')
-          return resolveAgentTransport(agent, await response.json(), route)
+          let options
+          try { options = await response.json() }
+          catch { throw new ModelSelectionConflict(null, 'agent_model_route_unproven') }
+          return resolveAgentTransport(agent, options, route)
         }
       }
       const call = async (path,init={}) => {
@@ -91,9 +98,20 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
               if (transport) { transports.rows.set(record.requestHash, transport); transports.save() }
             }
             if (!transport) throw new ModelSelectionConflict(null, 'admitted_agent_route_unproven')
+            if (transport.legacyUnselected === true) {
+              // This marker is server-owned admission custody, never request JSON.
+              // Unknown old queue rows remain held; today's picker cannot recast them.
+              const { provider: _displayProvider, ...legacy } = body
+              input = JSON.parse(record.dispatchBody || queue.freezeDispatchBody(record.publicRunId,
+                JSON.stringify(decorateDispatch?.(agent.id, record.sessionId, legacy) || legacy)))
+              const response = await raw('/v1/runs', {method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey}, body:JSON.stringify(input)})
+              payload = await response.json()
+              if (!response.ok) throw Object.assign(new Error('routed admission unavailable'), {status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
+            } else {
             input = JSON.parse(record.dispatchBody || queue.freezeDispatchBody(record.publicRunId,
               JSON.stringify(decorateDispatch?.(agent.id, record.sessionId, {...body, ...transport, require_model_lock: true}) || {...body, ...transport, require_model_lock: true})))
             payload = await call('/v1/runs', {method:'POST', wizardAdmittedRoute:true, headers:{'Content-Type':'application/json','Idempotency-Key':record.idempotencyKey}, body:JSON.stringify(input)})
+            }
           } else {
           // Agent registry providers are owner-facing account ids (e.g. anthropic),
           // not Hermes' configured transport (e.g. Claude subscription or custom).
@@ -196,11 +214,18 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           const response=await raw(`/api/sessions/${encodeURIComponent(body.session_id)}`)
           if(response.ok) project(await response.json()); else await response.body?.cancel()
         }
-        body.model ||= selections.current(body.session_id)?.model || agent.model?.model
-        body.provider ||= agent.model?.provider
-        // Resolve before mutation; recheck CAS synchronously after the awaited catalogue read.
-        transport=await resolve(body)
-        Object.assign(body,selections.capture(body),{require_model_lock:true})
+        const previous = queue.latestForSession(body.session_id)
+        const previousLegacy = !previous || transports.rows.get(previous.requestHash)?.legacyUnselected === true
+        if (previousLegacy && !selections.current(body.session_id) && !selections.pending.has(body.session_id)
+          && !/(?:^|[:/])incog_/u.test(body.session_id) && unselectedEnvelope(body)) {
+          transport = {legacyUnselected:true}
+        } else {
+          body.model ||= selections.current(body.session_id)?.model || agent.model?.model
+          body.provider ||= agent.model?.provider
+          // Resolve before mutation; recheck CAS synchronously after the awaited catalogue read.
+          transport=await resolve(body)
+          Object.assign(body,selections.capture(body),{require_model_lock:true})
+        }
         }
         if (Object.hasOwn(body, 'wizard_retry_run_id')) {
           try {
@@ -219,6 +244,8 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
 
         const continuation=headers.get('X-Wizard-Schedule-Kind')==='watch'
           ? {kind:'watch',preserve_archived:headers.get('X-Wizard-Watcher-Preserve')==='1',agent_id:agent.id} : null
+        if (transport?.legacyUnselected && (selections.current(body.session_id) || selections.pending.has(body.session_id)))
+          throw new ModelSelectionConflict(selections.current(body.session_id))
         try {
           const replay = queue.replay('direct', body.session_id, key, requestHash)
           const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id,continuation})

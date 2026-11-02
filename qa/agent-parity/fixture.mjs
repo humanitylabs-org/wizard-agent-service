@@ -91,8 +91,8 @@ export async function scene(kind, serverOptions = {}) {
     const json = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)) }
     const streamRun = run => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
-        if (!serverOptions.fixtureHoldEvents) return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n')
         res.write(`event: run.started\ndata: ${JSON.stringify(run)}\n\n`)
+        if (!serverOptions.fixtureHoldEvents) return res.end(`event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: ${JSON.stringify({output:'Fixture reply',...(run.runtime?{runtime:{...run.runtime,model_lock:'confirmed'}}:{})})}\n\n`)
         const timer=setInterval(()=>{if(['completed','failed','cancelled','interrupted'].includes(run.status))res.end(`event: run.${run.status}\ndata: ${JSON.stringify(run)}\n\n`);else res.write(': synthetic heartbeat\n\n')},250)
         res.on('close',()=>clearInterval(timer));return
       }
@@ -134,7 +134,7 @@ export async function scene(kind, serverOptions = {}) {
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
       if (req.method === 'PATCH' || sm[2] === 'model') { Object.assign(row, body); if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id) }
-      return json(200, { session: row })
+      return json(200, { session: row, ...(sm[2] === 'model' ? {runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}} : {}) })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
       const key = req.headers['idempotency-key']
