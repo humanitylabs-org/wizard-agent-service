@@ -3,6 +3,7 @@
 // recorded source, installed commit, permission revision, installed browser_contract and the owner's
 // browser grants for THIS installation+source. Nothing comes from a frame, URL or request body.
 import { readFileSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const MAX_REGISTRY_BYTES = 2 * 1024 * 1024
 
@@ -59,6 +60,26 @@ export function createWamInstallationResolver({ appsJsonPath }) {
       const b = hits[0].browser
       if (sourceId !== undefined && b.source_id !== sourceId) return { operations: [] }
       return { operations: b.admissible === true && Array.isArray(b.granted) ? [...b.granted] : [] }
+    },
+    /**
+     * The installation's listener credential for the adapter's OWN upstream call (wizard-os #386), or null
+     * when WAM recorded none (the app's listener has no gate). Read server-side from the WAM-minted file on
+     * every call: rotation on reinstall and removal on uninstall apply at once. Never sent to a browser,
+     * never the shell token. A recorded but missing/malformed key fails closed.
+     */
+    resolveListenerCredential(installationId) {
+      const doc = readRegistry(appsJsonPath)
+      if (!doc || !/^inst-[a-f0-9]{32}$/.test(String(installationId))) return null
+      const hits = doc.apps.filter(a => a?.browser?.installation_id === installationId)
+      if (hits.length !== 1) return null
+      const c = hits[0].browser.listener_credential
+      if (!c) return null
+      const ref = `browser-app-credentials/${installationId}.key`
+      if (c.ref !== ref || c.header !== 'X-Wizard-App-Credential') throw Object.assign(new Error('backend_unavailable'), { code: 'backend_unavailable' })
+      let value = ''
+      try { value = readFileSync(join(dirname(appsJsonPath), ref), 'utf8').trim() } catch { /* missing: fail closed below */ }
+      if (!/^[a-f0-9]{64}$/.test(value)) throw Object.assign(new Error('backend_unavailable'), { code: 'backend_unavailable' })
+      return { header: 'x-wizard-app-credential', value }
     },
   })
 }

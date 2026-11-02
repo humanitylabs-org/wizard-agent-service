@@ -25,5 +25,8 @@ tool install notifications --repo oscarhenrycollins/notifications --port 18810; 
 tool install profiles --repo oscarhenrycollins/profiles --provides profiles --port 18811
 tool grant profiles state.local; snap profiles-oscar
 tool update profiles --repo humanitylabs-org/profiles --provides profiles --port 18811; snap profiles-org
+# Listener credential (wizard-os #386): the installed compose takes WIZARD_APP_CREDENTIAL, so WAM mints one.
+tool update notifications --repo oscarhenrycollins/notifications --commit "$(printf 'd%.0s' {1..40})" --port 18810 --listener-auth
+tool grant notifications notifications.list notifications.mark_read; snap listener-auth
 git -C "$WAM" rev-parse HEAD > "$OUT/WAM_COMMIT"
 echo "wrote $(ls "$OUT"/*.json | wc -l) scenarios from WAM $(cat "$OUT/WAM_COMMIT")"
