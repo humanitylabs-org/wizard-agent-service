@@ -209,6 +209,10 @@ test('saved Retry HTTP custody persistence failure refuses before child admissio
   ModelSelections.prototype.save=function(){if(this.statePath.endsWith('.transports'))throw Error('synthetic custody persistence failure');return save.call(this)}
   try {assert.equal((await f.retry()).status,500)}finally{ModelSelections.prototype.save=save}
   assert.equal(f.custody(),bytes);assert.equal(f.row(f.source.run_id).body,source);assert.equal(f.wires().length,1)
+  const admit=DurableRunQueue.prototype._admitRow
+  DurableRunQueue.prototype._admitRow=function(request,inTransaction){if(inTransaction)throw Error('synthetic insert failure');return admit.call(this,request,inTransaction)}
+  try {assert.equal((await f.retry()).status,500)}finally{DurableRunQueue.prototype._admitRow=admit}
+  assert.equal(f.custody(),bytes);assert.equal(f.row(f.source.run_id).body,source);assert.equal(f.wires().length,1)
   const r=await f.retry();assert.equal(r.status,202);await until(()=>f.wires().length===2)
 })
 test('saved Retry preparation runs after real queue eligibility only, never replay, failure admits nothing',async t=>{

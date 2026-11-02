@@ -255,6 +255,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         }
         }
         if (Object.hasOwn(body, 'wizard_retry_run_id')) {
+          let createdCustody = null
           try {
             const prepare = selections ? (value, runtime) => {
               // The queue alone decides eligibility and supplies source bytes. The
@@ -274,7 +275,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
                 // Persist before dispatch. Separate stores are not atomic: a crash
                 // can leave unused custody, but never dispatch without route proof.
                 transports.rows.set(hash, admitted)
-                try { transports.save() } catch (error) { transports.rows.delete(hash); throw error }
+                try { transports.save(); createdCustody = hash } catch (error) { transports.rows.delete(hash); throw error }
               }
             } : null
             // Preserve the exact private call shape when the seam is omitted.
@@ -284,7 +285,14 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
             const response = json(202,queue.publicPayload(record))
             if (replayed) response.headers.set('Idempotency-Replayed','true')
             return response
-          } catch(error) { if(Number.isInteger(error.status))return json(error.status,{error:error.code||'saved_retry_unavailable'});throw error }
+          } catch(error) {
+            // Rejected/failed insertion must leave no orphan custody. A tick can
+            // fail AFTER insertion: never remove an already-admitted child's proof.
+            if (createdCustody && queue.byIdempotencyKey('direct', `wizard-saved-retry-${body.wizard_retry_run_id}`)?.requestHash !== createdCustody) {
+              transports.rows.delete(createdCustody);transports.save()
+            }
+            if(Number.isInteger(error.status))return json(error.status,{error:error.code||'saved_retry_unavailable'});throw error
+          }
         }
         if (!body.model) {
           let session = null
