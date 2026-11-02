@@ -1,3 +1,4 @@
+import {begin, setRoot, event, snapshot, awaited, wire, arm, finish} from './operator-timeout-trace.mjs'
 import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,11 +10,11 @@ import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 const servers: any[] = [], dirs: string[] = []
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise(r => s.close(r)) }; await Promise.all(dirs.splice(0).map(d => rm(d,{recursive:true,force:true}))) })
 async function fixture(handler: (req: any, res: any, text: string) => any, options: any = {}, capabilities: any = null) {
-  const root=await mkdtemp(join(tmpdir(),'compat-proxy-'));dirs.push(root)
-  const upstream=createServer(async(req,res)=>{let text='';for await(const c of req)text+=c;res.setHeader('Content-Type','application/json');if(req.url==='/v1/capabilities'){if(capabilities){await capabilities(req,res);return}res.end(JSON.stringify({features:{run_unknown_resolution:true}}));return}await handler(req,res,text)});servers.push(upstream)
-  const up=await listen(upstream)
-  const start=async(overrides: any = {})=>{const s=createWizardServer({upstreamOrigin:`http://127.0.0.1:${up.port}`,hermesKey:'isolated',requireAccess:false,agentBridge:false,followThrough:false,joinedDelegation:'off',wizardOsHome:root,runQueueStatePath:join(root,'q.db'),operatorWorkerStatePath:join(root,'workers.json'),runQueuePollIntervalMs:0,dispatchHealthReader:()=>true,activeSessionReader:()=>[],canonicalSessionReader:()=>[],appsJsonPath:join(root,'apps.json'),settingsPath:join(root,'settings.json'),threadTitleStatePath:join(root,'titles.json'),...options,...overrides});servers.push(s);const a=await listen(s);return {s,base:`http://127.0.0.1:${a.port}/wizard/hermes`}}
-  return {root,start,...await start()}
+  const root=await awaited('fixture.mkdtemp',()=>mkdtemp(join(tmpdir(),'compat-proxy-')));dirs.push(root);setRoot(root)
+  const upstream=createServer(async(req,res)=>{let text='';for await(const c of req)text+=c;wire(req,res,text);res.setHeader('Content-Type','application/json');if(req.url==='/v1/capabilities'){if(capabilities){await awaited('fixture.capabilities',()=>capabilities(req,res));return}res.end(JSON.stringify({features:{run_unknown_resolution:true}}));return}await awaited('fixture.handler',()=>handler(req,res,text))});servers.push(upstream)
+  const up=await awaited('fixture.upstream.listen',()=>listen(upstream))
+  const start=async(overrides: any = {})=>{const s=createWizardServer({upstreamOrigin:`http://127.0.0.1:${up.port}`,hermesKey:'isolated',requireAccess:false,agentBridge:false,followThrough:false,joinedDelegation:'off',wizardOsHome:root,runQueueStatePath:join(root,'q.db'),operatorWorkerStatePath:join(root,'workers.json'),runQueuePollIntervalMs:0,dispatchHealthReader:()=>true,activeSessionReader:()=>[],canonicalSessionReader:()=>[],appsJsonPath:join(root,'apps.json'),settingsPath:join(root,'settings.json'),threadTitleStatePath:join(root,'titles.json'),...options,...overrides});servers.push(s);const a=await awaited('fixture.service.listen',()=>listen(s));return {s,base:`http://127.0.0.1:${a.port}/wizard/hermes`}}
+  return {root,start,...await awaited('fixture.service.start',()=>start())}
 }
 const post=(body:any,key?:string)=>({method:'POST',headers:{'Content-Type':'application/json',...(key?{'Idempotency-Key':key}:{})},body:JSON.stringify(body)})
 it.each(['permission_denied','idempotency_key_conflict','admission_conflict'])('HTTP admission %s becomes a durable failed receipt, not capacity',async code=>{
@@ -58,10 +59,11 @@ it('capability preflight failure before a run POST remains editable and cancella
   expect(runPosts).toEqual([])
 })
 it.each(['worker-ack-lost', 'parent-rejected'])('Operator %s retry preserves one worker across model changes and restart', async failure => {
+  begin('Operator '+failure+' retry preserves one worker across model changes and restart');const traceTimer=arm();try {
   const workers = new Map<string,string>()
   const workerAttempts: any[] = [], parentAttempts: any[] = []
   const workerBoundaryMarkers: any[] = []
-  const f = await fixture((req: any, res: any, text: string) => {
+  const f = await awaited('fixture',()=>fixture((req: any, res: any, text: string) => {
     const body = JSON.parse(text || '{}')
     if (req.url === '/v1/runs' || req.url.endsWith('/chat/stream')) {
       const attempt = {text,key:req.headers['idempotency-key']}
@@ -88,9 +90,9 @@ it.each(['worker-ack-lost', 'parent-rejected'])('Operator %s retry preserves one
     res.end(JSON.stringify({status:'running'}))
   // Bound the real persisted retry eligibility before admission; restart inherits it.
   // This contract checks frozen bytes/identity and one worker, not wall-clock backoff.
-  }, {operatorWorkerModel:'original-worker-model',runQueueRetryDelayMs:50})
+  }, {operatorWorkerModel:'original-worker-model',runQueueRetryDelayMs:50}))
   const base = f.base.replace('/wizard/hermes','/wizard/operator')
-  const item = await (await fetch(base+'/v1/runs',post({session_id:'wizardop_user_compat',input:'Research this fully.'},'operator-stable'))).json()
+  const item = await awaited('initial.json',async()=> (await awaited('initial.POST',()=>fetch(base+'/v1/runs',post({session_id:'wizardop_user_compat',input:'Research this fully.'},'operator-stable')))).json())
   expect(item.status).toBe('queued')
   expect(workerAttempts).toHaveLength(1)
   expect(workerBoundaryMarkers).toEqual([1])
@@ -100,12 +102,12 @@ it.each(['worker-ack-lost', 'parent-rejected'])('Operator %s retry preserves one
   expect(JSON.parse(String(frozen.worker_dispatch_body)).model).toBe('original-worker-model')
   if (failure==='worker-ack-lost') expect(frozen.dispatch_body).toBeNull()
   db.close()
-  expect((await fetch(base+'/v1/runs/'+item.run_id+'/steer',post({input:'cannot mutate a started worker'}))).status).toBe(409)
-  expect((await fetch(base+'/v1/runs/'+item.run_id+'/stop',post({}))).status).toBe(409)
-  f.s.closeAllConnections();await new Promise(r=>f.s.close(r));servers.splice(servers.indexOf(f.s),1)
-  const again = await f.start({operatorWorkerModel:'changed-worker-model',runQueuePollIntervalMs:25})
-  await expect.poll(async()=>{const r=await fetch(again.base.replace('/wizard/hermes','/wizard/operator')+'/v1/runs/'+item.run_id);return (await r.json()).status},{timeout:5000,interval:20}).toBe(failure==='parent-rejected'?'running':'failed')
-  const result = await (await fetch(again.base.replace('/wizard/hermes','/wizard/operator')+'/v1/runs/'+item.run_id)).json()
+  expect((await awaited('steer.POST',()=>fetch(base+'/v1/runs/'+item.run_id+'/steer',post({input:'cannot mutate a started worker'})))).status).toBe(409)
+  expect((await awaited('stop.POST',()=>fetch(base+'/v1/runs/'+item.run_id+'/stop',post({})))).status).toBe(409)
+  snapshot('before.close');f.s.closeAllConnections();await awaited('service.close',()=>new Promise(r=>f.s.close(r)));snapshot('after.close');servers.splice(servers.indexOf(f.s),1)
+  snapshot('before.reopen');const again = await awaited('service.reopen',()=>f.start({operatorWorkerModel:'changed-worker-model',runQueuePollIntervalMs:25}));snapshot('after.reopen')
+  await awaited('poll.until.status',()=>expect.poll(async()=>{const r=await awaited('poll.GET',()=>fetch(again.base.replace('/wizard/hermes','/wizard/operator')+'/v1/runs/'+item.run_id));const status=(await awaited('poll.json',()=>r.json())).status;event('poll.status',{status});return status},{timeout:5000,interval:20}).toBe(failure==='parent-rejected'?'running':'failed'))
+  const result = await awaited('final.json',async()=>(await awaited('final.GET',()=>fetch(again.base.replace('/wizard/hermes','/wizard/operator')+'/v1/runs/'+item.run_id))).json())
   const finalDb = new DatabaseSync(join(f.root,'q.db'))
   expect(finalDb.prepare('SELECT worker_dispatch_body FROM wizard_run_queue').get()?.worker_dispatch_body).toBe(frozen.worker_dispatch_body)
   finalDb.close()
@@ -120,6 +122,7 @@ it.each(['worker-ack-lost', 'parent-rejected'])('Operator %s retry preserves one
     // Preserve the existing native bridge's uncertain-send refusal (422); never replay it.
     expect(result.status).toBe('failed');expect(parentAttempts).toHaveLength(0)
   }
+  } finally { finish(traceTimer) }
 })
 
 it.each(['helper','heavy','manual'].flatMap(kind => [false,true].map(attempted => ({kind,attempted}))))(
