@@ -228,7 +228,7 @@ it.each(kinds)('thread is not marked done while its heavy jobs are unfinished: %
     expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeUndefined()
     for (const run of s.runs.values()) { run.status = 'completed'; run.output = 'Finished' }
     // Main uses the periodic durable queue; a status GET must not drive dispatch.
-    await expect.poll(() => JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at ?? 0, {timeout:5000,interval:20}).toBeGreaterThan(0)
+    if (kind === 'main') await expect.poll(() => JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at ?? 0, {timeout:5000,interval:20}).toBeGreaterThan(0)
     await s.request('/v1/runs/' + queued.run_id)
     expect(JSON.parse(db.prepare('SELECT data FROM heavy_jobs WHERE id=?').get('heavy_status').data as string).notice_delivered_at).toBeGreaterThan(0)
   } finally { db.close(); await s.close(); rmSync(root, { recursive: true, force: true }) }

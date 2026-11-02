@@ -86,7 +86,9 @@ it.each(['worker-ack-lost', 'parent-rejected'])('Operator %s retry preserves one
     }
     if (req.url.startsWith('/api/sessions')) { res.end('{}'); return }
     res.end(JSON.stringify({status:'running'}))
-  }, {operatorWorkerModel:'original-worker-model'})
+  // Bound the real persisted retry eligibility before admission; restart inherits it.
+  // This contract checks frozen bytes/identity and one worker, not wall-clock backoff.
+  }, {operatorWorkerModel:'original-worker-model',runQueueRetryDelayMs:50})
   const base = f.base.replace('/wizard/hermes','/wizard/operator')
   const item = await (await fetch(base+'/v1/runs',post({session_id:'wizardop_user_compat',input:'Research this fully.'},'operator-stable'))).json()
   expect(item.status).toBe('queued')
