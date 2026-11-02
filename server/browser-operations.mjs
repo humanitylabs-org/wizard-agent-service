@@ -48,6 +48,19 @@ export const OPERATIONS = Object.freeze({
   'notifications.mark': Object.freeze({ kind: 'write', slot: 'notifications' }),
   // Card 3 media (ADAPTER-SKETCH §6): one picture of one notification, as a 60 s read ticket. Own grant.
   'notifications.media': Object.freeze({ kind: 'media', slot: 'notifications' }),
+  // Shell intents (wizard-os spec/browser-trust-shell-intents): the ChatGPT/Claude connection pages, each the
+  // installation's own upstream. `consent: 'owner'` = only through a consumed trusted-shell confirmation, never a plain
+  // data.call. `signin` = may hand the shell a provider sign-in page (navigation intent, installed contract only).
+  'ai_accounts.inventory': Object.freeze({ kind: 'read' }),
+  'ai_accounts.change': Object.freeze({ kind: 'write', consent: 'owner' }),
+  'ai_accounts.progress': Object.freeze({ kind: 'read', signin: true }),
+  'ai_accounts.step': Object.freeze({ kind: 'write' }),
+  'claude_code.status': Object.freeze({ kind: 'read' }),
+  'claude_code.connect': Object.freeze({ kind: 'write', consent: 'owner', signin: true }),
+  'claude_code.code': Object.freeze({ kind: 'write' }),
+  'claude_code.cancel': Object.freeze({ kind: 'write' }),
+  'claude_code.logout': Object.freeze({ kind: 'write', consent: 'owner' }),
+  'claude_code.test': Object.freeze({ kind: 'write' }),
 })
 export const WRITE_OPERATIONS = Object.freeze(Object.keys(OPERATIONS).filter(k => OPERATIONS[k].kind === 'write'))
 

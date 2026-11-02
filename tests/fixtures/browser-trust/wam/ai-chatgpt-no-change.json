@@ -1,0 +1,611 @@
+{
+  "schema": 2,
+  "updated_at": 1793598679,
+  "store": "wizardapps",
+  "apps": [
+    {
+      "id": "notifications",
+      "name": "Notifications",
+      "type": "service",
+      "category": null,
+      "version": "1.0.0",
+      "status": "running",
+      "urn": "notifications:wizardapps",
+      "repo": "oscarhenrycollins/notifications",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "notifications"
+      ],
+      "uses": [],
+      "needs": [],
+      "summary": "",
+      "shares": [],
+      "mounts": [],
+      "mcp": null,
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18810/notifications/"
+      },
+      "health": null,
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-5ba19b88fc47acb3237e2a6584f6d894",
+        "source_id": "standard:oscarhenrycollins/notifications",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "notifications.inbox",
+            "notifications.mark",
+            "notifications.media"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 0
+          }
+        },
+        "granted": [
+          "notifications.inbox",
+          "notifications.mark"
+        ],
+        "grant_revision": 10,
+        "admissible": true,
+        "upstream": "http://127.0.0.1:18810",
+        "reason": null,
+        "contract_digest": "6fe274d11bac69bd45fd33a2808203bd8d18eb7b5d823cae8fee7ff74e042ca9",
+        "permission_revision": "p-609156fdf56851a71b9091e6",
+        "listener_credential": {
+          "header": "X-Wizard-App-Credential",
+          "ref": "browser-app-credentials/inst-5ba19b88fc47acb3237e2a6584f6d894.key",
+          "env": "WIZARD_APP_CREDENTIAL",
+          "state": "written"
+        }
+      },
+      "system": true
+    },
+    {
+      "id": "profiles",
+      "name": "profiles",
+      "type": "service",
+      "category": null,
+      "version": "1.0.0",
+      "status": "running",
+      "urn": "profiles:wizardapps",
+      "repo": "humanitylabs-org/profiles",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "profiles"
+      ],
+      "uses": [],
+      "needs": [],
+      "summary": "",
+      "shares": [],
+      "mounts": [],
+      "mcp": null,
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18811/profiles/"
+      },
+      "health": null,
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-f60d024f5857bd7b6d3483feea50919a",
+        "source_id": "standard:humanitylabs-org/profiles",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "notifications.list",
+            "notifications.mark_read",
+            "state.local"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 65536
+          }
+        },
+        "granted": [],
+        "grant_revision": 0,
+        "admissible": false,
+        "upstream": "http://127.0.0.1:18811",
+        "reason": "no_grant",
+        "contract_digest": "89414bfaa882e446f38f8cc82192459a317eddd85ba198bec66fffef98386838",
+        "permission_revision": "p-74f3cb2724cbecb7001f36b8"
+      },
+      "system": false
+    },
+    {
+      "id": "wizard-chatgpt",
+      "name": "ChatGPT",
+      "type": "external",
+      "category": "system",
+      "version": "0.2.16",
+      "status": "running",
+      "urn": "wizard-chatgpt:wizardapps",
+      "repo": "oscarhenrycollins/chatgpt-connection",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "ai-connection",
+        "chatgpt-subscription"
+      ],
+      "uses": [
+        "hermes-agent"
+      ],
+      "needs": [],
+      "summary": "Connect one or more ChatGPT subscriptions; your agent uses them, and you see how much each has left.",
+      "shares": [],
+      "mounts": [],
+      "mcp": {
+        "url": "http://127.0.0.1:18820/mcp",
+        "internal": "http://wizard-chatgpt:8801/mcp",
+        "transport": "streamable-http"
+      },
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18820/"
+      },
+      "health": "http://127.0.0.1:18820/health",
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-bc6bb059a27680a5868fbd78bc6e39b9",
+        "source_id": "standard:oscarhenrycollins/chatgpt-connection",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "ai_accounts.change",
+            "ai_accounts.inventory",
+            "ai_accounts.progress",
+            "ai_accounts.step"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 0
+          },
+          "navigation": [
+            {
+              "id": "signin",
+              "url": "https://auth.openai.com/codex/device",
+              "query": []
+            }
+          ]
+        },
+        "granted": [
+          "ai_accounts.inventory",
+          "ai_accounts.progress",
+          "ai_accounts.step"
+        ],
+        "grant_revision": 13,
+        "admissible": true,
+        "upstream": "http://127.0.0.1:18820",
+        "reason": null,
+        "contract_digest": "baa90676a36a74c8ea4bc124dee9e606da8a899c0ec5efd1a624d231f25e7e06",
+        "permission_revision": "p-32849b718c94864f4e7a125f",
+        "listener_credential": {
+          "header": "X-Wizard-App-Credential",
+          "ref": "browser-app-credentials/inst-bc6bb059a27680a5868fbd78bc6e39b9.key",
+          "env": "WIZARD_APP_CREDENTIAL",
+          "state": "written"
+        }
+      },
+      "system": true
+    },
+    {
+      "id": "wizard-claude",
+      "name": "Claude",
+      "type": "external",
+      "category": "system",
+      "version": "0.2.20",
+      "status": "running",
+      "urn": "wizard-claude:wizardapps",
+      "repo": "oscarhenrycollins/claude-connection",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "source": "standard",
+      "provides": [
+        "ai-connection",
+        "claude-subscription"
+      ],
+      "uses": [],
+      "needs": [],
+      "summary": "Connect one or more Claude subscriptions; every agent on the box uses them, and you see how much each has left.",
+      "shares": [],
+      "mounts": [],
+      "mcp": {
+        "url": "http://127.0.0.1:18821/mcp",
+        "internal": "http://wizard-claude:8799/mcp",
+        "transport": "streamable-http"
+      },
+      "skill": null,
+      "view": {
+        "url": "http://127.0.0.1:18821/"
+      },
+      "health": "http://127.0.0.1:18821/health",
+      "browser": {
+        "schema": 1,
+        "installation_id": "inst-8c38de91d6cc71891dcf968c0d4823e1",
+        "source_id": "standard:oscarhenrycollins/claude-connection",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "contract": {
+          "version": 1,
+          "isolation": "opaque",
+          "operations": [
+            "ai_accounts.change",
+            "ai_accounts.inventory",
+            "ai_accounts.progress",
+            "ai_accounts.step",
+            "claude_code.cancel",
+            "claude_code.code",
+            "claude_code.connect",
+            "claude_code.logout",
+            "claude_code.status",
+            "claude_code.test"
+          ],
+          "state": {
+            "schema_version": 1,
+            "persistent_bytes": 0
+          },
+          "navigation": [
+            {
+              "id": "signin",
+              "url": "https://claude.ai/oauth/authorize",
+              "query": [
+                "client_id",
+                "code",
+                "code_challenge",
+                "code_challenge_method",
+                "redirect_uri",
+                "response_type",
+                "scope",
+                "state"
+              ]
+            },
+            {
+              "id": "signin-claude-com",
+              "url": "https://claude.com/cai/oauth/authorize",
+              "query": [
+                "client_id",
+                "code",
+                "code_challenge",
+                "code_challenge_method",
+                "redirect_uri",
+                "response_type",
+                "scope",
+                "state"
+              ]
+            }
+          ]
+        },
+        "granted": [
+          "ai_accounts.change",
+          "ai_accounts.inventory",
+          "ai_accounts.progress",
+          "ai_accounts.step",
+          "claude_code.cancel",
+          "claude_code.code",
+          "claude_code.connect",
+          "claude_code.logout",
+          "claude_code.status",
+          "claude_code.test"
+        ],
+        "grant_revision": 12,
+        "admissible": true,
+        "upstream": "http://127.0.0.1:18821",
+        "reason": null,
+        "contract_digest": "9162ef0daf590edb0d21a72480d3df149be3f6c9d32428f72b59a893d1310989",
+        "permission_revision": "p-b73c17e079cbe15f10ef8287",
+        "listener_credential": {
+          "header": "X-Wizard-App-Credential",
+          "ref": "browser-app-credentials/inst-8c38de91d6cc71891dcf968c0d4823e1.key",
+          "env": "WIZARD_APP_CREDENTIAL",
+          "state": "written"
+        }
+      },
+      "system": true
+    }
+  ],
+  "slots": {
+    "ai-connection": {
+      "default": "wizard-chatgpt",
+      "candidates": [
+        "wizard-chatgpt",
+        "wizard-claude"
+      ]
+    },
+    "chatgpt-subscription": {
+      "default": "wizard-chatgpt",
+      "candidates": [
+        "wizard-chatgpt"
+      ]
+    },
+    "claude-subscription": {
+      "default": "wizard-claude",
+      "candidates": [
+        "wizard-claude"
+      ]
+    },
+    "notifications": {
+      "default": "notifications",
+      "candidates": [
+        "notifications"
+      ]
+    },
+    "profiles": {
+      "default": "profiles",
+      "candidates": [
+        "profiles"
+      ]
+    },
+    "chats": {
+      "default": "wizard-chats",
+      "candidates": [
+        "wizard-chats"
+      ]
+    }
+  },
+  "grants": [],
+  "connections": {
+    "schema": 1,
+    "enabled": true,
+    "mode": "declared",
+    "checked_at": 1793598679,
+    "live": true,
+    "gateway": {
+      "core": [],
+      "path": "loopback",
+      "detail": "the gateway runs on the server's network and calls apps on their published 127.0.0.1 port"
+    },
+    "apps": [
+      {
+        "id": "notifications",
+        "name": "Notifications",
+        "state": "no-network",
+        "why": "none of its services take part in app networking",
+        "kind": "app",
+        "provides": [
+          "notifications"
+        ],
+        "running": true,
+        "internet": true,
+        "gateway": "on its published 127.0.0.1 port",
+        "host_access": [],
+        "can_reach": [],
+        "reached_by": [],
+        "drift": [
+          "notifications is on wizard-app-notifications, which nothing declares",
+          "notifications is on wizard-link-wizard-cloudflare--notifications, which nothing declares"
+        ],
+        "sensitive": false
+      },
+      {
+        "id": "wizard-chatgpt",
+        "name": "ChatGPT",
+        "state": "no-network",
+        "why": "none of its services take part in app networking",
+        "kind": "connector",
+        "provides": [
+          "ai-connection",
+          "chatgpt-subscription"
+        ],
+        "running": true,
+        "internet": true,
+        "gateway": "on its published 127.0.0.1 port",
+        "host_access": [],
+        "can_reach": [
+          {
+            "to": "hermes-agent",
+            "declared": "hermes-agent",
+            "reason": "uses",
+            "state": "not-approved",
+            "network": null
+          }
+        ],
+        "reached_by": [],
+        "drift": [
+          "wizard-chatgpt is on wizard-app-wizard-chatgpt, which nothing declares",
+          "wizard-chatgpt-engine is on wizard-app-wizard-chatgpt, which nothing declares"
+        ],
+        "sensitive": false
+      },
+      {
+        "id": "wizard-claude",
+        "name": "Claude",
+        "state": "no-network",
+        "why": "none of its services take part in app networking",
+        "kind": "connector",
+        "provides": [
+          "ai-connection",
+          "claude-subscription"
+        ],
+        "running": true,
+        "internet": true,
+        "gateway": "on its published 127.0.0.1 port",
+        "host_access": [],
+        "can_reach": [],
+        "reached_by": [],
+        "drift": [
+          "wizard-claude is on wizard-app-wizard-claude, which nothing declares",
+          "wizard-claude-engine is on wizard-app-wizard-claude, which nothing declares"
+        ],
+        "sensitive": false
+      }
+    ],
+    "agents": [],
+    "main_agent_apps": null,
+    "networks": [],
+    "shared_network": {
+      "name": "runtipi_tipi_main_network",
+      "containers": [
+        "files_wizardapps-files-1",
+        "runtipi",
+        "runtipi-reverse-proxy"
+      ]
+    },
+    "ok": false,
+    "owner_state": false,
+    "controls": [
+      {
+        "from": "wizard-chatgpt",
+        "to": "slot:hermes-agent",
+        "origin": "declared",
+        "providers": [],
+        "status": "not-approved",
+        "at": null,
+        "label": "ChatGPT \u2192 hermes-agent"
+      }
+    ],
+    "sensitive": [],
+    "notices": []
+  },
+  "parking": [
+    {
+      "slot": "chats",
+      "name": "Chats",
+      "required": false,
+      "default_app": null,
+      "active": "wizard-chats",
+      "state": "filled"
+    },
+    {
+      "slot": "shell",
+      "name": "Shell (Wizard UX)",
+      "required": true,
+      "default_app": "wizard-ux",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent-service",
+      "name": "Agent Service",
+      "required": true,
+      "default_app": "wizard-agent-service",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent",
+      "name": "Agent",
+      "required": true,
+      "default_app": "hermes-agent",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "ai-connection",
+      "name": "AI connections",
+      "required": false,
+      "default_app": "wizard-chatgpt",
+      "active": "wizard-chatgpt",
+      "state": "filled"
+    },
+    {
+      "slot": "claude-subscription",
+      "name": "Claude connection",
+      "required": false,
+      "default_app": "wizard-claude",
+      "active": "wizard-claude",
+      "state": "filled"
+    },
+    {
+      "slot": "troubleshooter",
+      "name": "Wizard Troubleshooter",
+      "required": false,
+      "default_app": "wizard-troubleshooter",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "connection-router",
+      "name": "Connection Router",
+      "required": false,
+      "default_app": "wizard-connection-router",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "agent-history",
+      "name": "Agent History",
+      "required": false,
+      "default_app": null,
+      "active": null,
+      "state": "no default yet"
+    },
+    {
+      "slot": "files",
+      "name": "Files",
+      "required": true,
+      "default_app": "files",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "transcription",
+      "name": "Transcription",
+      "required": false,
+      "default_app": "transcriber",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "voice",
+      "name": "Voice",
+      "required": false,
+      "default_app": "wizard-voice-service",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "browser",
+      "name": "Browser",
+      "required": false,
+      "default_app": "browser",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "secrets",
+      "name": "Secrets",
+      "required": false,
+      "default_app": "secret-drop",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "web-search",
+      "name": "Web search",
+      "required": false,
+      "default_app": "wizard-search",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "cloudflare-connection",
+      "name": "Cloudflare",
+      "required": false,
+      "default_app": "wizard-cloudflare",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "connected-accounts",
+      "name": "Connected accounts",
+      "required": false,
+      "default_app": "connected-accounts",
+      "active": null,
+      "state": "empty"
+    },
+    {
+      "slot": "notifications",
+      "name": "Notifications",
+      "required": false,
+      "default_app": "notifications",
+      "active": "notifications",
+      "state": "filled"
+    }
+  ]
+}

@@ -90,6 +90,7 @@ import { createBrowserAdapters, browserAdaptersHttp } from './browser-adapters.m
 import { createContentTickets } from './browser-content.mjs'
 import { createWamInstallationResolver } from './browser-installations.mjs'
 import { createNotificationsOperations } from './browser-operations.mjs'
+import { createAiAccountsOperations } from './browser-ai-accounts.mjs'
 import { createOperationReceipts } from './browser-operation-receipts.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -2549,18 +2550,25 @@ function buildWizardServer(options, lifetime) {
   // Production path (still default-off): the WAM-written apps.json `browser` facts plus durable outcome
   // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
   const browserAdapters = !browserBoundary.enabled ? null
-    : options.browserAdapterWam ? ((wam, tickets) => createBrowserAdapters({
+    : options.browserAdapterWam ? ((wam, tickets, receipts) => createBrowserAdapters({
       ...wam,
       tickets,
       operations: createNotificationsOperations({
         fetchImpl: options.browserAdapterWam.fetchImpl,
         listenerCredential: p => wam.resolveListenerCredential(p.installationId),
-        receipts: createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }),
+        receipts,
         tickets,
+      }),
+      // ChatGPT/Claude connection pages (shell intents): one receipts store and the same listener credential path.
+      ai: createAiAccountsOperations({
+        fetchImpl: options.browserAdapterWam.fetchImpl,
+        listenerCredential: p => wam.resolveListenerCredential(p.installationId),
+        receipts,
       }),
     }))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
       // Scoped content tickets need their own non-owner origin; without one, notifications.media is unsupported.
-      browserContentTickets = options.browserAdapterWam.content?.publicBase ? createContentTickets({ ...options.browserAdapterWam.content }) : null)
+      browserContentTickets = options.browserAdapterWam.content?.publicBase ? createContentTickets({ ...options.browserAdapterWam.content }) : null,
+      createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }))
     : options.browserAdapterPrototype ? createBrowserAdapters(options.browserAdapterPrototype) : null
   if (options.ownerPrivateNotes === true && !browserBoundary.enabled) throw new Error('Private notebooks require the browser boundary')
   const baseRequireAccess = options.requireAccess ?? true
