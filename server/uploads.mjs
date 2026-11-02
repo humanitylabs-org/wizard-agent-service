@@ -373,12 +373,20 @@ export function createUploadStore(options) {
     if (record.share_id) failShare(record.share_id, error)
   }
 
-  async function completeUpload(id) {
+  // expected.sha256 (browser upload port, wizard-os ADAPTER-SKETCH §6): the hash the client computed, checked against
+  // the staged bytes before the file is placed. A completed upload answers only the same hash.
+  async function completeUpload(id, expected = {}) {
     const first = UPLOAD_ID.test(String(id)) ? row(id) : null
     if (!first) throw new UploadError(404, 'not_found')
+    const want = expected?.sha256 === undefined ? '' : String(expected.sha256)
+    if (want && !HEX64.test(want)) throw new UploadError(400, 'invalid_request', { field: 'sha256' })
     const record = await withLock(id, async () => {
       let current = row(id)
-      if (current.status === 'complete') return current
+      if (current.status === 'complete') {
+        const got = fileOf(current)?.sha256 || current.sha256
+        if (want && got && got !== want) throw new UploadError(422, 'sha256_mismatch')
+        return current
+      }
       if (current.status !== 'uploading') throw new UploadError(410, current.error || 'upload_failed')
       if (current.mode === 'stream') current = await getUpload(id)
       if (current.offset !== current.bytes) throw new UploadError(409, 'upload_incomplete', { offset: current.offset })
@@ -401,7 +409,7 @@ export function createUploadStore(options) {
           return row(id)
         }
         const actual = await sha256File(current.staging_path)
-        if (current.sha256 && actual !== current.sha256) { failUpload(current, 'sha256_mismatch'); throw new UploadError(422, 'sha256_mismatch') }
+        if ((current.sha256 && actual !== current.sha256) || (want && actual !== want)) { failUpload(current, 'sha256_mismatch'); throw new UploadError(422, 'sha256_mismatch') }
         if (tgt.kind === 'drop') {
           file = await pushStagedToDrop(current, actual)
           try { unlinkSync(current.staging_path) } catch { /* gone */ }
@@ -415,6 +423,19 @@ export function createUploadStore(options) {
     })
     if (record.share_id) void maybeDeliver(record.share_id)
     return record
+  }
+
+  /** Stop an unfinished upload and drop its staged bytes. The real outcome: aborted, or complete (too late). */
+  async function abortUpload(id) {
+    const first = UPLOAD_ID.test(String(id)) ? row(id) : null
+    if (!first) throw new UploadError(404, 'not_found')
+    active.get(id)?.destroy()
+    return withLock(id, async () => {
+      const current = row(id)
+      if (current.status === 'complete') return 'committed'
+      if (current.status === 'uploading') failUpload(current, 'aborted')
+      return 'aborted'
+    })
   }
 
   // ---- shares ------------------------------------------------------------------------------------
@@ -550,6 +571,7 @@ export function createUploadStore(options) {
     getUpload,
     patchUpload,
     completeUpload,
+    abortUpload,
     publicUpload,
     createShare,
     replayShare,

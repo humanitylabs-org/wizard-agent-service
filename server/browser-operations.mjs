@@ -61,6 +61,13 @@ export const OPERATIONS = Object.freeze({
   'claude_code.cancel': Object.freeze({ kind: 'write' }),
   'claude_code.logout': Object.freeze({ kind: 'write', consent: 'owner' }),
   'claude_code.test': Object.freeze({ kind: 'write' }),
+  // First-party Files view (wizard-os #385 card 2 / #386 card 3; browser-files.mjs): the installation's own upstream.
+  // Each id is its own owner grant; files.upload covers create/chunk/status/commit/abort of one upload port.
+  'files.list': Object.freeze({ kind: 'read' }),
+  'files.index': Object.freeze({ kind: 'read' }),
+  'files.thumbnail': Object.freeze({ kind: 'read' }),
+  'files.content': Object.freeze({ kind: 'media' }),
+  'files.upload': Object.freeze({ kind: 'upload' }),
 })
 export const WRITE_OPERATIONS = Object.freeze(Object.keys(OPERATIONS).filter(k => OPERATIONS[k].kind === 'write'))
 
