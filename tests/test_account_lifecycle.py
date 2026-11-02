@@ -18,8 +18,11 @@ path=Path(sys.argv[1]); args=sys.argv[2:]
 rows=json.loads(path.read_text())
 assert args[:1]==['auth']
 if args[1]=='remove':
-    assert args[3]=='aa11bb'
+    assert args[3] in ('aa11bb','cc33dd') and len(args)==4
     rows=[r for r in rows if r['id']!=args[3]]
+elif args[1]=='refresh':
+    assert args[2]=='anthropic' and len(args)==4
+    sys.exit(0 if [r for r in rows if r['id']==args[3] and r.get('label')!='dead'] else 1)
 elif args[1]=='priority':
     assert args[2]=='anthropic' and args[4]=='0' and len(args)==5
     moved=[r for r in rows if r['id']==args[3]]
@@ -120,6 +123,36 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(out['inputRequired']); self.assertIn('https://claude.ai/oauth/authorize?',out['url'])
         self.b.submit('claude',j['id'],'fixture#state')
         out=self.wait(j); self.assertEqual(out['status'],'succeeded'); self.assertNotIn('fixture#state',json.dumps(out))
+    def claude_add(self, existing_label='Old'):
+        rows=json.loads(self.path.read_text()); rows[0]['label']=existing_label; self.path.write_text(json.dumps(rows))
+        j=self.b.start('claude','add',confirmed=True); self.wait(j,True)
+        self.b.submit('claude',j['id'],'fixture#state')
+        return self.wait(j)
+    def test_claude_duplicate_add_is_removed_when_the_existing_grant_renews(self):
+        # cc33dd is the new grant; aa11bb is the same Claude account (same email hash).
+        self.b.identify=lambda r: {'aa11bb':'h1','cc33dd':'h1','ee55ff':'h2'}.get(r.get('id'))
+        out=self.claude_add()
+        self.assertEqual(out['status'],'succeeded')
+        self.assertEqual((out['duplicateOf'],out['duplicateRemoved']),('aa11bb',True))
+        self.assertEqual([r['id'] for r in json.loads(self.path.read_text())],['aa11bb','ee55ff'])
+    def test_claude_duplicate_add_is_kept_when_the_existing_grant_no_longer_renews(self):
+        self.b.identify=lambda r: {'aa11bb':'h1','cc33dd':'h1'}.get(r.get('id'))
+        out=self.claude_add('dead')
+        self.assertEqual((out['status'],out['duplicateOf'],out['duplicateRemoved']),('succeeded','aa11bb',False))
+        self.assertIn('cc33dd',[r['id'] for r in json.loads(self.path.read_text())])
+    def test_claude_add_of_a_new_or_unknown_account_is_kept(self):
+        for ids in ({'aa11bb':'h1','cc33dd':'h3'}, {}):
+            self.path.write_text(json.dumps(self.original))
+            self.b.identify=lambda r, ids=ids: ids.get(r.get('id'))
+            out=self.claude_add()
+            self.assertEqual((out['status'],out['duplicateOf'],out['duplicateRemoved']),('succeeded',None,False))
+            self.assertEqual(len(json.loads(self.path.read_text())),3)
+    def test_seeded_claude_code_login_is_never_the_duplicate_kept_over_a_new_grant(self):
+        rows=json.loads(self.path.read_text()); rows[0]['source']='claude_code'; self.path.write_text(json.dumps(rows))
+        self.b.identify=lambda r: 'h1' if r.get('id') in ('aa11bb','cc33dd') else None
+        j=self.b.start('claude','add',confirmed=True); self.wait(j,True); self.b.submit('claude',j['id'],'fixture#state')
+        out=self.wait(j)
+        self.assertEqual((out['duplicateOf'],out['duplicateRemoved']),(None,False))
     def test_output_errors_never_returned(self):
         out=self.wait(self.b.start('chatgpt','add',label='fail',confirmed=True))
         self.assertEqual(out['status'],'failed'); self.assertNotIn('SECRET',json.dumps(out))

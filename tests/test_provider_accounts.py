@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timezone
 import unittest
+import unittest.mock
 
 SPEC = importlib.util.spec_from_file_location('accounts', Path(__file__).parents[1] / 'hermes-plugin/wizard-os/dashboard/provider_accounts.py')
 m = importlib.util.module_from_spec(SPEC)
@@ -109,6 +110,30 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(len(m.claude_model_cooldowns(read=lambda _: rows)['grants']), 3)
         rows[-1]['auth_type'] = 'api_key'  # Unknown alternate grant: no authoritative projection.
         self.assertIsNone(m.claude_model_cooldowns(read=lambda _: rows))
+
+    def test_claude_grants_with_one_email_are_one_account(self):
+        def claude(id, priority, source='manual:hermes_pkce'):
+            r = row(id=id, label='Subscription' if id == 'dup' else 'oscar'); r.update(source=source, priority=priority)
+            r['access_token'] = 'opaque-' + id
+            return r
+        emails = {'opaque-main': 'oscar@example.com', 'opaque-dup': 'Oscar@example.com', 'opaque-other': 'miguel@example.com'}
+        def get(path, token):
+            if path == 'profile':
+                return {'account': {'email': emails[token]}, 'organization': {'rate_limit_tier': 'default_claude_max_20x'}}
+            return {'limits': [{'kind': 'weekly_all', 'percent': 20, 'resets_at': '2026-11-07T18:00:00Z'}]}
+        with unittest.mock.patch.object(m, '_anthropic_get', get):
+            rows = [claude('dup', 2), claude('main', 0), claude('other', 1)]
+            out = m.provider_accounts('claude', lambda _: rows, self.fetch)
+            self.assertEqual(out['accountCount'], 2)
+            folded = [a for a in out['accounts'] if a['credentialCount'] == 2][0]
+            self.assertEqual([c['id'] for c in folded['credentials']], ['main', 'dup'])
+            self.assertEqual((folded['priority'], folded['preferred']), (0, True))
+            self.assertEqual(len({a['emailHash'] for a in out['accounts']}), 2)
+            self.assertEqual(m.email_hash_of(rows[0]), folded['emailHash'])
+            self.assertIsNone(m.email_hash_of({'access_token': ''}))
+            text = json.dumps(out)
+            for secret in ('opaque-', 'oscar@example.com', 'miguel@example.com'):
+                self.assertNotIn(secret, text)
 
     def test_claude_is_not_invented_from_another_volume(self):
         out = m.provider_accounts('claude', lambda _: [], self.fetch)
