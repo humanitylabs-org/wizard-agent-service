@@ -18,6 +18,16 @@ export const image = `data:image/png;base64,${png.toString('base64')}`
 export const owner = { 'X-Wizard-Owner-Proof': 'parity-synthetic-owner-proof-0123456789abcdef' }
 export const post = body => ({ method: 'POST', headers: { ...owner, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) })
 
+export const runWrites = s => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+export const runInput = row => row.body.input ?? row.body.message
+export async function pick(s, model, revision) {
+  const response = await s.request('/api/sessions/wizard_parity/model', post({ model, provider: 'anthropic', selection_version: revision, selection_request_id: crypto.randomUUID() }))
+  if (response.status !== 200) throw Error('Picker refused: ' + await response.text())
+  const ack = await response.json()
+  if (ack.runtime?.model !== model || ack.runtime?.provider !== 'anthropic' || ack.runtime?.model_lock !== 'accepted') throw Error('Picker did not acknowledge exact configured route')
+  return ack.selection?.version ?? ack.runtime.selection_version
+}
+
 // Real Wizard server, synthetic upstream API. Restricted really uses an ingress
 // Unix socket; profile really uses /p/<profile>. No production agent is opened.
 export async function scene(kind, serverOptions = {}) {
@@ -43,7 +53,7 @@ export async function scene(kind, serverOptions = {}) {
   writeFileSync(join(agentHome, 'synthetic.png'), png)
   writeFileSync(join(agentHome, 'synthetic.txt'), 'PARITY_SYNTHETIC_DOCUMENT\n')
   const stt = { text: 'Synthetic voice words.' }
-  const signin = { ready: false }
+  const signin = { ready: false, unavailableProbes: 0 }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
   titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL,
     source TEXT, model TEXT, ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0,
@@ -180,7 +190,7 @@ export async function scene(kind, serverOptions = {}) {
   if (supervisorParity) installSupervisorAssets(agentHome)
   const options = { ...(supervisorParity ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: mainMcpToken, agentGatewayUrl: 'http://gateway/wizard/mcp', supervisorStatePath: join(root, 'supervisor.sqlite3'), supervisorIntervalMs: 3_600_000, heavyToken } : {}), appsJsonPath:join(root,'apps.json'), upstreamOrigin, sttOrigin: upstreamOrigin, hermesHome, hermesStatePath: kind === 'main' ? join(root, 'hermes-state.db') : '', agentArtifactDir: join(root, 'artifacts'), agentArtifactRoots: [agentHome], threadSeenStatePath: join(root, 'seen.json'), threadTitleStatePath: join(root, 'titles.json'), subjectsPath: join(root, 'subjects.json'), hermesKey: 'parity-main-secret', ownerProof: owner['X-Wizard-Owner-Proof'], requireAccess: false, wizardOsHome: osHome, settingsPath: join(osHome, 'settings.json'), agentBridge: followUpParity || supervisorParity, joinedDelegation: 'off', followThrough: false, requireJoinedDelegationCapability: false,
     runQueueStatePath: join(root, 'queue.sqlite3'), archivedSessionReader: () => [], pendingFirstSendReader: () => [], runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
-    providerSignInReady: async () => signin.ready,
+    providerSignInReady: async () => { if (!signin.ready) signin.unavailableProbes++; return signin.ready },
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
     agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }

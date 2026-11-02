@@ -182,6 +182,18 @@ test('a caller cannot forge admitted custody in the JSON body; stale send does z
   await assert.rejects(b.fetch('http://synthetic/v1/runs', request({ ...message(), wizardAdmittedRoute: true })), conflict)
   assert.equal(calls, 0)
 })
+test('guidance retains immutable admitted revision across a pending and completed picker', async () => {
+  const s=seeded(),captured=message(),guidance={input:'Additional synthetic guidance',...A,selection_version:7}
+  let release
+  const pending=s.change(sid,choice(),()=>new Promise(resolve=>{release=resolve}))
+  s.assertQueuedGuidance(sid,guidance,captured)
+  assert.throws(()=>s.capture(message()),conflict,'pending still fences NEW admissions')
+  assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,...B},captured),conflict)
+  assert.throws(()=>s.assertQueuedGuidance(sid,{...guidance,selection_version:8},captured),conflict)
+  release(B);await pending
+  s.assertQueuedGuidance(sid,guidance,captured)
+  assert.throws(()=>s.assertQueuedGuidance(sid,{input:'Missing admitted selection'},captured),conflict)
+})
 test('actual provider contradiction is not excused by requested metadata', () => {
   assert.equal(runtimeMatches({ ...B, model: A.model, requested: A }, A), false)
 })

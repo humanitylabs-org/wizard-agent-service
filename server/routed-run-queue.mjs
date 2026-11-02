@@ -3,7 +3,7 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
+import { DurableRunQueue, queuedInputTextOf, queueRequestHash, PENDING_STEER_REPLAY_PREFIX } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 import { ModelSelections, ModelSelectionConflict } from './model-selection.mjs'
@@ -36,6 +36,30 @@ export function resolveAgentTransport(agent, options, route) {
 // legacy routing. Configuration prefill is not a deliberate picker selection.
 const unselectedEnvelope = body => body && typeof body === 'object' && !Array.isArray(body)
   && !Object.keys(body).some(key => /model|provider|lock|selection|version|route|runtime|transport|retry/i.test(key))
+// Only exact source-derived original bytes prove absent authority. No live
+// session/config/picker read belongs in historical admission classification.
+export function historicalUnselected(record, agentId) {
+  if (record.runtime !== 'direct' || record.agent_id !== agentId || record.retrySourceId
+    || typeof record.sessionId !== 'string' || /(?:^|[:/])incog_/u.test(record.sessionId)
+    || !/^[0-9a-f]{64}$/.test(record.requestHash)) return false
+  let original
+  try { original = JSON.parse(record.body) } catch { return false }
+  if (!original || typeof original !== 'object' || Array.isArray(original)
+    || original.session_id !== record.sessionId || JSON.stringify(original) !== record.body) return false
+  if (Object.hasOwn(original, 'model')) {
+    // Absent model was appended by baseline prefill, not overwritten in place.
+    if (Object.keys(original).at(-1) !== 'model' || typeof original.model !== 'string' || !original.model) return false
+    delete original.model
+  }
+  if (!unselectedEnvelope(original)) return false
+  const matches = value => createHash('sha256').update(JSON.stringify(value)).digest('hex') === record.requestHash
+  if (matches(original)) return true
+  // Baseline HTTP proxy appended instructions when the inbound key was absent.
+  // Original instructions/removed fields/non-roundtripping encodings stay unknown.
+  if (Object.keys(original).at(-1) !== 'instructions') return false
+  delete original.instructions
+  return matches(original)
+}
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
 export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null }) {
@@ -92,10 +116,14 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           if (publicAgent) {
             const body = JSON.parse(record.body)
             let transport = transports.rows.get(record.requestHash)
-            if (!transport && record.retrySourceId) {
-              const source = queue.get(record.retrySourceId), previous = source && JSON.parse(source.body)
+            const sourceId = record.retrySourceId || (record.idempotencyKey.startsWith(PENDING_STEER_REPLAY_PREFIX) ? record.idempotencyKey.slice(PENDING_STEER_REPLAY_PREFIX.length) : '')
+            if (!transports.rows.has(record.requestHash) && sourceId) {
+              const source = queue.get(sourceId), previous = source && JSON.parse(source.body)
               if (previous?.model === body.model && previous?.provider === body.provider) transport = transports.rows.get(source.requestHash)
               if (transport) { transports.rows.set(record.requestHash, transport); transports.save() }
+            }
+            if (!transports.rows.has(record.requestHash) && historicalUnselected(record, agent.id)) {
+              transport={legacyUnselected:true};transports.rows.set(record.requestHash,transport);transports.save()
             }
             if (!transport) throw new ModelSelectionConflict(null, 'admitted_agent_route_unproven')
             if (transport.legacyUnselected === true) {
@@ -214,9 +242,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           const response=await raw(`/api/sessions/${encodeURIComponent(body.session_id)}`)
           if(response.ok) project(await response.json()); else await response.body?.cancel()
         }
-        const previous = queue.latestForSession(body.session_id)
-        const previousLegacy = !previous || transports.rows.get(previous.requestHash)?.legacyUnselected === true
-        if (previousLegacy && !selections.current(body.session_id) && !selections.pending.has(body.session_id)
+        if (!selections.current(body.session_id) && !selections.pending.has(body.session_id)
           && !/(?:^|[:/])incog_/u.test(body.session_id) && unselectedEnvelope(body)) {
           transport = {legacyUnselected:true}
         } else {
@@ -229,13 +255,20 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
         }
         if (Object.hasOwn(body, 'wizard_retry_run_id')) {
           try {
-            const {record,replayed} = await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body, selections ? record => {transports.rows.set(record.requestHash,transport);transports.save()} : undefined)
+            // retrySaved dispatches before returning. Persist custody under its exact
+            // source-owned envelope hash first, never the caller's preview input.
+            const source = queue.get(body.wizard_retry_run_id)
+            if (selections && source?.sessionId === body.session_id) {
+              const value = JSON.parse(source.body)
+              if (body.model) Object.assign(value, {model:body.model, ...(body.provider ? {provider:body.provider} : {}), require_model_lock:true})
+              transports.rows.set(queueRequestHash(source.runtime, JSON.stringify(value)), transport);transports.save()
+            }
+            const {record,replayed} = await queue.retrySaved(body.wizard_retry_run_id, body.session_id, body)
             const response = json(202,queue.publicPayload(record))
             if (replayed) response.headers.set('Idempotency-Replayed','true')
             return response
           } catch(error) { if(Number.isInteger(error.status))return json(error.status,{error:error.code||'saved_retry_unavailable'});throw error }
         }
-        if (selections) { transports.rows.set(requestHash,transport);transports.save() }
         if (!body.model) {
           let session = null
           try { const response = await direct(`/api/sessions/${encodeURIComponent(body.session_id)}`); if(response.ok) { const payload=await response.json();session=payload.session||payload } else await response.body?.cancel() } catch {}
@@ -246,6 +279,11 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
           ? {kind:'watch',preserve_archived:headers.get('X-Wizard-Watcher-Preserve')==='1',agent_id:agent.id} : null
         if (transport?.legacyUnselected && (selections.current(body.session_id) || selections.pending.has(body.session_id)))
           throw new ModelSelectionConflict(selections.current(body.session_id))
+        if (selections) {
+          if (transports.rows.has(requestHash)) {
+            if (JSON.stringify(transports.rows.get(requestHash)) !== JSON.stringify(transport)) throw new ModelSelectionConflict(null, 'admitted_agent_route_unproven')
+          } else {transports.rows.set(requestHash,transport);transports.save()}
+        }
         try {
           const replay = queue.replay('direct', body.session_id, key, requestHash)
           const {record}=await queue.admit({runtime:'direct',sessionId:body.session_id,idempotencyKey:key,requestHash,body:JSON.stringify(body),agent_id:agent.id,continuation})
@@ -264,7 +302,7 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       }
       if(method==='POST'&&action==='steer'&&!record.upstreamRunId) {
         const guidance=JSON.parse(init.body)
-        if (selections) selections.assertQueuedGuidance(record.sessionId, guidance, JSON.parse(record.body))
+        if (selections && !(transports.rows.get(record.requestHash)?.legacyUnselected === true && unselectedEnvelope(guidance))) selections.assertQueuedGuidance(record.sessionId, guidance, JSON.parse(record.body))
         record=await queue.appendGuidance(record.publicRunId,guidance.input)
         return json(200,queue.publicPayload(record))
       }
@@ -292,8 +330,15 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       }
       if (selections && method === 'POST' && action === 'steer' && record.upstreamRunId) {
         const guidance=JSON.parse(init.body), captured=JSON.parse(record.body), transport=transports.rows.get(record.requestHash)
+        if (transport?.legacyUnselected === true && unselectedEnvelope(guidance)) {
+          // Native unselected admission remains native even after a later picker.
+          const upstream=await raw(path.replace(record.publicRunId,record.upstreamRunId),init)
+          return new Response((await upstream.text()).replaceAll(record.upstreamRunId,record.publicRunId),{status:upstream.status,headers:upstream.headers})
+        }
         selections.assertQueuedGuidance(record.sessionId,guidance,captured)
-        const active=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+        const response=await direct(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+        if (!response.ok) throw new ModelSelectionConflict(null,'model_selection_steer_mismatch')
+        const active=await response.json()
         if(!transport || active.runtime?.model_lock !== 'confirmed' || !publicRuntimeMatches(active.runtime,transport)) throw new ModelSelectionConflict(null,'model_selection_steer_mismatch')
         init={...init,body:JSON.stringify({...guidance,...transport})}
       }

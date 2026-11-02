@@ -131,11 +131,19 @@ describe('Chats list over HTTP', () => {
   async function boot(apps: object[], failure: object) {
     const sessions = [{ id: 'wizard_nolan', source: 'api_server', title: 'Plan my week', status: 'failed', message_count: 2, hidden: false, archived: false, updated_at: new Date().toISOString() }]
     let status = 'running'
+    const runtime = { model: 'claude-opus-5-5', provider: CLAUDE_ROUTE }
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://fixture.local')
       const json = (code: number, value: unknown) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)) }
       if (req.method === 'POST' && url.pathname === '/v1/runs') { for await (const _ of req) { /* drain */ } json(202, { run_id: 'run_n', session_id: 'wizard_nolan', status: 'running' }); return }
-      if (req.method === 'GET' && url.pathname === '/v1/runs/run_n') { json(200, status === 'running' ? { run_id: 'run_n', status } : { run_id: 'run_n', session_id: 'wizard_nolan', ...failure }); return }
+      if (req.method === 'POST' && url.pathname === '/api/sessions/wizard_nolan/chat/stream') {
+        let raw = ''; for await (const chunk of req) raw += chunk
+        const body = JSON.parse(raw)
+        expect(body).toMatchObject({ ...runtime, require_model_lock: true, message: 'Plan my week' })
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        return res.end(`event: run.started\ndata: ${JSON.stringify({ run_id: 'run_n', session_id: 'wizard_nolan', runtime: { ...runtime, model_lock: 'accepted' } })}\n\n`)
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/runs/run_n') { json(200, { run_id: 'run_n', session_id: 'wizard_nolan', ...(status === 'running' ? { status } : failure), runtime: { ...runtime, model_lock: 'confirmed' } }); return }
       if (req.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(url.pathname)) { json(200, { object: 'list', data: [] }); return }
       if (req.method === 'GET' && url.pathname === '/api/sessions') { json(200, { object: 'list', data: sessions }); return }
       if (req.method === 'GET' && url.pathname === '/v1/capabilities') { json(200, {}); return }
@@ -164,6 +172,7 @@ describe('Chats list over HTTP', () => {
     const call = async (path: string, init: RequestInit = {}) => { const r = await fetch(origin + path, init); const t = await r.text(); return t ? JSON.parse(t) : null }
     const admitted = await call('/wizard/hermes/v1/runs', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'nolan-1' },
       body: JSON.stringify({ session_id: 'wizard_nolan', input: 'Plan my week', model: 'claude-opus-5-5', provider: CLAUDE_ROUTE }) })
+    expect(admitted.run_id).toMatch(/^wizardq_/)
     // Hermes stamps the failed_turn boundary row; it is not a reply.
     const w = new DatabaseSync(statePath)
     w.prepare("INSERT INTO messages VALUES ('wizard_nolan','user',NULL,'Plan my week','',?,1)").run(Date.now() / 1000)

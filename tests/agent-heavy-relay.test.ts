@@ -50,6 +50,18 @@ function fakeRuntime() {
     if (u.pathname === '/api/sessions') return json({ data: [{ id: 'shared' }], has_more: false })
     if (u.pathname === '/api/sessions/shared') return json({ session: { id: 'shared' } })
     if (u.pathname === '/api/sessions/shared/messages') return json({ data: [{ id: states.humanId, role: 'user', content: states.human }] })
+    if (u.pathname === '/api/sessions/shared/chat/stream' && init.method === 'POST') {
+      const headers = new Headers(init.headers), key = `${id}:${headers.get('idempotency-key') || posts.length}`
+      const body = JSON.parse(init.body)
+      let receipt = receipts.get(key)
+      if (!receipt) {
+        posts.push({ id, body, headers })
+        receipt = { run_id: `${id}-run-${posts.length}`, status: 'running', session_id: 'shared' }
+        receipts.set(key, receipt)
+      }
+      const runtime = { model: body.model, provider: body.provider, model_lock: 'accepted' }
+      return new Response(`event: run.started\ndata: ${JSON.stringify({ ...receipt, runtime })}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } })
+    }
     if (u.pathname.startsWith('/api/sessions/')) return json({ error: 'missing' }, 404)
     if (states.originMissing && u.pathname.startsWith('/v1/runs/')) return json({ error: 'lost' }, 404)
     if (u.pathname.startsWith('/v1/runs/wizardq_')) return json({ error: 'public id is not a Hermes id' }, 404)
@@ -62,7 +74,7 @@ function fakeRuntime() {
       receipts.set(key, receipt)
       return json(receipt, 202)
     }
-    if (u.pathname === '/api/model/options') return json({ providers: [] })
+    if (u.pathname === '/api/model/options') return json({ provider: 'fixture', providers: [{ slug: 'fixture', models: ['model-a'] }] })
     return json({ error: 'fixture missing' }, 404)
   }
   const admitted = new Set<string>()
@@ -595,7 +607,9 @@ it('wires routed origin observation through the real Service before agent-heavy 
   expect(submitted.status).toBe(200)
   const job = await submitted.json()
   expect(job.route_state).toBe('pending_origin')
-  fake.states.runtime = { model: 'completed-actual-model', provider: 'completed-actual-provider' }
+  // A native locked origin can only confirm its actual admitted route. The
+  // separate unlocked-origin test above covers deferred arbitrary route binding.
+  fake.states.runtime = { model: 'model-a', provider: 'fixture' }
   fake.states.workerDone = true; fake.states.originDone = true
   await vi.waitFor(async () => {
     const response = await fetch(base + path('status'), { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ job_id: job.job_id }) })
@@ -606,7 +620,7 @@ it('wires routed origin observation through the real Service before agent-heavy 
   })
   const continuations = fake.posts.filter(row => row.headers.get('idempotency-key') === `wizard-heavy-${job.job_id}`)
   expect(continuations).toHaveLength(1)
-  expect(continuations[0].body).toMatchObject({ model: 'completed-actual-model', provider: 'completed-actual-provider', require_model_lock: true })
+  expect(continuations[0].body).toMatchObject({ model: 'model-a', provider: 'fixture', require_model_lock: true })
   expect(fake.reads.some(row => /^\/v1\/runs\/wizardq_/.test(row.path))).toBe(false)
 })
 

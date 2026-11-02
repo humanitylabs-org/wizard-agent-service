@@ -49,14 +49,14 @@ export class ModelSelections {
       version: Number(stored.version) || 1, state: 'confirmed', source: 'existing_lock' } : null
   }
   assertQueuedGuidance(sessionId, guidance, captured) {
-    const current = this.current(sessionId)
     const envelope = value => value !== null && typeof value === 'object' && !Array.isArray(value)
     const unselected = value => envelope(value) && !Object.keys(value).some(key => /model|provider|lock|selection|version|route|runtime|transport|retry/i.test(key))
-    const pending = this.pending.has(sessionId) || current?.state === 'pending'
+
     // Only two genuinely unselected legacy envelopes retain the old path. This
     // exception is local to queued guidance, never admission/retry or migration.
-    if (!pending && !current && unselected(guidance) && unselected(captured)) return
-    if (pending || !envelope(guidance) || !envelope(captured) || !sameRoute(guidance, captured)
+    if (unselected(guidance) && unselected(captured)) return
+    // Admitted custody, not a later picker (including an in-flight change), owns guidance.
+    if (!envelope(guidance) || !envelope(captured) || !sameRoute(guidance, captured)
       || guidance.selection_version !== captured.selection_version
       || (Object.hasOwn(guidance, 'selection_version') !== Object.hasOwn(captured, 'selection_version'))
       || (Object.hasOwn(captured, 'selection_version') && (!Number.isSafeInteger(captured.selection_version) || captured.selection_version < 0)))

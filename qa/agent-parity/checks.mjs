@@ -6,6 +6,8 @@ import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
 
 const featureScenes = { 'scheduler-notifications': kind => notificationScene(kind, true),
+  // Status reads refresh one run; these automatic-drain contracts need a real dispatcher.
+  ...Object.fromEntries(['provider-signin-recovery', 'queue-busy', 'queue-restart', 'model-lock', 'pending-steer-replay', 'retry-input'].map(id => [id, kind => scene(kind, { runQueuePollIntervalMs: 10 })])),
   'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
   // Main's cached Hermes listing with the stock running status; main admits direct here (the
   // check runs main's durable-queue path in a second scene) and without state.db, whose live
@@ -125,6 +127,7 @@ export const checks = {
     const responses = await Promise.all([retry(), retry()])
     for (const response of responses) assert.equal(response.status, 202, await response.clone().text())
     const [a, b] = await Promise.all(responses.map(r => r.json())); assert.equal(a.run_id, b.run_id)
+    for (let i = 0; i < 100 && s.seen.filter(r => r.method === 'POST' && (r.path.endsWith('/v1/runs') || r.path.endsWith('/chat/stream'))).length < 2; i++) await new Promise(r => setTimeout(r, 10))
     const writes = s.seen.filter(r => r.method === 'POST' && (r.path.endsWith('/v1/runs') || r.path.endsWith('/chat/stream')))
     assert.equal(writes.length, 2); assert.equal(writes.at(-1).body.input || writes.at(-1).body.message, 'One synthetic send')
     assert.equal(writes.at(-1).body.wizard_retry_run_id, undefined)
