@@ -92,6 +92,7 @@ import { createWamInstallationResolver } from './browser-installations.mjs'
 import { createNotificationsOperations } from './browser-operations.mjs'
 import { createAiAccountsOperations } from './browser-ai-accounts.mjs'
 import { createOperationReceipts } from './browser-operation-receipts.mjs'
+import { browserShellHttp, createShellOperations } from './browser-shell-operations.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -2549,8 +2550,14 @@ function buildWizardServer(options, lifetime) {
   // owner-fetch handler or production WAM registry integration is installed here.
   // Production path (still default-off): the WAM-written apps.json `browser` facts plus durable outcome
   // receipts. Needs the boundary AND an explicit adapter configuration; never a manifest self-grant.
+  let browserShellOperations = null
   const browserAdapters = !browserBoundary.enabled ? null
-    : options.browserAdapterWam ? ((wam, tickets, receipts) => createBrowserAdapters({
+    : options.browserAdapterWam ? ((wam, tickets, receipts) => (browserShellOperations = createShellOperations({
+      // The shell document's own reads (model picker): same WAM facts and listener credential, not the app-frame path.
+      resolveInstallation: wam.resolveInstallation,
+      listenerCredential: p => wam.resolveListenerCredential(p.installationId),
+      fetchImpl: options.browserAdapterWam.fetchImpl,
+    }), createBrowserAdapters({
       ...wam,
       tickets,
       operations: createNotificationsOperations({
@@ -2565,7 +2572,7 @@ function buildWizardServer(options, lifetime) {
         listenerCredential: p => wam.resolveListenerCredential(p.installationId),
         receipts,
       }),
-    }))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
+    })))(createWamInstallationResolver({ appsJsonPath: options.browserAdapterWam.appsJsonPath || (options.appsJsonPath ? resolve(String(options.appsJsonPath)) : '') }),
       // Scoped content tickets need their own non-owner origin; without one, notifications.media is unsupported.
       browserContentTickets = options.browserAdapterWam.content?.publicBase ? createContentTickets({ ...options.browserAdapterWam.content }) : null,
       createOperationReceipts({ path: options.browserAdapterWam.receiptsPath, ...(options.browserAdapterWam.receiptLimits || {}) }))
@@ -5052,7 +5059,12 @@ function buildWizardServer(options, lifetime) {
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
       )
-      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest })) {
+      // Box-local health probes from programs (Troubleshooter, Guardian, App Manager) carry no shell token, no browser
+      // headers and no network identity. Without this they read 401 under the boundary and the Guardian would restart a
+      // healthy Agent Service. Never on the tailnet ingress, never with a browser or proxy identity header.
+      const healthRequest = browserBoundary.enabled && !tailnetIngress && request.method === 'GET' && url.pathname === '/wizard/health'
+        && !['origin', 'sec-fetch-site', 'sec-fetch-dest', 'cookie', 'referer', 'tailscale-user-login', 'x-forwarded-for', 'forwarded', 'cf-connecting-ip'].some(name => request.headers[name] !== undefined)
+      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest, healthRequest })) {
         sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
         return
       }
@@ -5075,6 +5087,11 @@ function buildWizardServer(options, lifetime) {
           return
         }
       }
+      if (url.pathname === '/wizard/v1/browser-shell/call' && await browserShellHttp(request, response, url, {
+        enabled: browserBoundary.enabled, principal,
+        access: !requireAccess || await accessVerified(request, accessVerifier),
+        operations: browserShellOperations, readBody: readBoundedBody, send: sendJson,
+      })) return
       if (url.pathname.startsWith('/wizard/v1/browser-adapters/') && await browserAdaptersHttp(request, response, url, {
         enabled: browserBoundary.enabled, principal,
         access: !requireAccess || await accessVerified(request, accessVerifier),
