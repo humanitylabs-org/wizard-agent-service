@@ -1516,6 +1516,12 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       && !(Array.isArray(message.tool_calls) && message.tool_calls.length)
       && Boolean(safeHistoryText(projected.content, 1_000).trim())
       && !legacyInternalHistoryMessage(message)
+    // The reply's own status line (hidden from the text above) carries a plain-words ask written for someone reading
+    // cold. Keep it on the row so a shell can lead a long reply with it (wizard-ux --wos-reply-summary).
+    if (role === 'assistant') {
+      const status = parseStatus(historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n'))
+      if (status) { projected.wizard_ask = status.ask; projected.wizard_state = status.state }
+    }
     const wakeup = historyProcessWakeup(message, projected.content)
     if (wakeup) Object.assign(projected, wakeup)
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)

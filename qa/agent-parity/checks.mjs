@@ -100,7 +100,12 @@ export const checks = {
     const row = s.sessions.get('wizard_parity')
     row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000, content: 'Synthetic reply\n[WIZARD_STATUS_V1]{"state":"needs_you","subject":"Synthetic subject","ask":"Choose"}[/WIZARD_STATUS_V1]' })
     const r = await s.request('/api/sessions/wizard_parity/messages?view=wizard'); assert.equal(r.status, 200)
-    assert.ok(!JSON.stringify(await r.json()).includes('[WIZARD_STATUS_V1]'))
+    const history = await r.json()
+    assert.ok(!JSON.stringify(history).includes('[WIZARD_STATUS_V1]'))
+    // The reply keeps its plain-words ask on the row (shell reply summary), for every agent kind.
+    const rows = history.data ?? history.messages ?? history
+    const reply = rows.findLast(m => m.role === 'assistant' && String(m.content).startsWith('Synthetic reply'))
+    assert.equal(reply?.wizard_ask, 'Choose'); assert.equal(reply?.wizard_state, 'needs_you')
   },
   'retry-input': async s => {
     const r = await s.request('/api/sessions/wizard_parity?view=detail'); assert.equal(r.status, 200)

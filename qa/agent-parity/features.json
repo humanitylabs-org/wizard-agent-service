@@ -327,14 +327,16 @@
     },
     {
       "id": "status-hidden",
-      "description": "Return WIZARD_STATUS_V1 in an assistant reply",
+      "description": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history hides the marker and keeps its ask and state on that row (wizard_ask, wizard_state) for the shell's reply summary",
       "layer": "server",
-      "how_to_test": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history must hide the wire marker.",
+      "how_to_test": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history must hide the wire marker and carry wizard_ask/wizard_state on that assistant row.",
       "source_refs": [
-        "server/thread-status.mjs"
+        "server/thread-status.mjs",
+        "server/service.mjs"
       ],
       "reference_tests": [
-        "tests/thread-status.test.ts"
+        "tests/thread-status.test.ts",
+        "tests/reply-summary-field.test.ts"
       ],
       "fixture": "status-hidden",
       "policy_exemptions": []
