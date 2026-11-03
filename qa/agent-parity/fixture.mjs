@@ -176,7 +176,8 @@ export async function scene(kind, serverOptions = {}) {
   if (kind !== 'main') {
     const runtime = kind === 'host-profile' ? { kind: 'profile', profile: 'parity-profile' } : { kind: 'container', app_id: 'agent-parity-agent', port: containerPort, ...(kind === 'restricted' ? { isolation: 'restricted' } : {}) }
     const preset = PRESETS.find(p => p.id === 'standard')
-    writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: ['fixture-model', 'fixture-other'], fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
+    const allowedModels = ['fixture-model', 'fixture-other', ...(serverOptions.fixtureSelectorLock ? ['claude-sonnet-5-5', 'claude-opus-5-5'] : [])]
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: allowedModels, fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
     writeFileSync(join(folder, 'runtime.key'), 'parity-runtime-secret', { mode: 0o600 })
     writeFileSync(join(folder, 'gateway.key'), agentGatewayToken, { mode: 0o600 })
     if (kind === 'restricted') {

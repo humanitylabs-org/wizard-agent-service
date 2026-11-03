@@ -46,8 +46,7 @@ async function lockedSelectorBoundary(s) {
   assert.equal(receipt.status, 'queued')
   assert.equal(s.runs.size, 1)
   const change = await selector(sonnet)
-  assert.equal(change.status, s.kind === 'main' ? 200 : 409,
-    `${s.kind}: preserve the routed runtime's existing active-turn model-change fence`)
+  assert.equal(change.status, 200, `${s.kind}: switch between this agent's declared allowed models`)
   Object.assign([...s.runs.values()][0], { status: 'completed', output: 'Synthetic first result' })
   const until = Date.now() + 5_000
   while (s.runs.size < 2 && Date.now() < until) {
