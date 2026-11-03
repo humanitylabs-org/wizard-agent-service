@@ -45,6 +45,19 @@ jobs:
           cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs
           python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - sign-in polling excludes expired saved bodies", text), "expected main regression did not fail"; print("EXPECTED_MAIN_REGRESSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/baseline-regression.log" "$baseline_status"
           node --test tests/diagnosed-signin.node.mjs
+      - name: Reject live model override and preserve main admission locks
+        run: |
+          cp server/locked-run-bridge.mjs "$RUNNER_TEMP/regression-candidate.mjs"
+          trap 'cp "$RUNNER_TEMP/regression-candidate.mjs" server/locked-run-bridge.mjs' EXIT
+          git fetch --no-tags --depth=1 origin 7a95698b23341b0cf864c2a6fba677d88067030a
+          git show 7a95698b23341b0cf864c2a6fba677d88067030a:server/locked-run-bridge.mjs > server/locked-run-bridge.mjs
+          set +e
+          node --test --test-name-pattern 'an explicit locked send retains its admission route' tests/locked-run-bridge.test.mjs > "$RUNNER_TEMP/admission-regression.log" 2>&1
+          admission_status=$?
+          set -e
+          cp "$RUNNER_TEMP/regression-candidate.mjs" server/locked-run-bridge.mjs
+          python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - an explicit locked send retains its admission route", text), "prior port did not reproduce admitted-route regression"; print("EXPECTED_PRIOR_PORT_ADMISSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/admission-regression.log" "$admission_status"
+          node --test tests/locked-run-bridge.test.mjs
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
