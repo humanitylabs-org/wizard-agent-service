@@ -280,8 +280,18 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     // Select the newest timestamp before reading its body; inactive machine inputs
     // still determine whether this assistant reply was an automated continuation.
     const retained = retainedMessagesWhere(messageColumns)
-    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND ${retained}
-      AND timestamp=(SELECT MAX(timestamp) FROM messages WHERE session_id=? AND role='user' AND ${retained} AND timestamp<=?)
+    // Each retained range can seek backwards on (session_id,active,timestamp).
+    // COALESCE/OR in one MAX scans a session's old history for every assistant.
+    // Keep NULL-active authority and the exact predicate (including affinities),
+    // then choose the original timestamp/rowid winner before reading its body.
+    const retainedRanges = [
+      'active=1 AND COALESCE(active,1)=1', 'active IS NULL',
+      ...(messageColumns.has('compacted') ? ['active=0 AND compacted=1'] : []),
+    ]
+    const newestRetainedUser = retainedRanges.map(range => `SELECT MAX(timestamp) AS timestamp FROM messages
+      WHERE session_id=:sessionId AND role='user' AND ${range} AND timestamp<=:through`).join(' UNION ALL ')
+    const triggeringUser = db.prepare(`SELECT content FROM messages WHERE session_id=:sessionId AND role='user' AND ${retained}
+      AND timestamp=(SELECT MAX(timestamp) FROM (${newestRetainedUser}))
       ORDER BY timestamp DESC${tieOrder} LIMIT 1`)
     const hasLineage = ['parent_session_id', 'end_reason', 'source', 'model_config'].every(column => sessionColumns.has(column))
     const lineageParent = hasLineage ? db.prepare('SELECT end_reason FROM sessions WHERE id = ?') : null
@@ -310,7 +320,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
-        if (row.role === 'assistant' && isAgentToAgentRequest(triggeringUser.get(id, id, timestamp)?.content)) continue
+        if (row.role === 'assistant' && isAgentToAgentRequest(triggeringUser.get({ ':sessionId': id, ':through': timestamp })?.content)) continue
         const visibleUser = row.role === 'user' && visibleUserRequest(row.content, row.display_kind)
         const visibleAssistant = row.role === 'assistant' && visibleAssistantReply(row.content, row.display_kind, row.finish_reason)
         const provenanceAssistant = visibleProvenanceReply(row)
