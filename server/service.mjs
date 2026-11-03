@@ -79,7 +79,8 @@ import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
-import { handleAgentNotesApi } from './agent-notes-http.mjs'
+import { createAppGrantReader } from './app-grants.mjs'
+import { handleAgentNotebooksApi } from './agent-notebooks-http.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
@@ -5013,6 +5014,12 @@ function buildWizardServer(options, lifetime) {
       }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname) && !(url.pathname === '/wizard/v1/settings' && request.method === 'PUT')) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      // App grants authenticate only this read-only resource, never the owner's other APIs.
+      // Apps use the box-local listener; public/phone ingress never accepts these credentials.
+      if (!tailnetIngress && agentCtx && url.pathname.startsWith('/wizard/v1/agent-notebooks')) {
+        const appGrants = createAppGrantReader(options.appGrantsFile ?? process.env.WIZARD_GRANTS_FILE ?? join(bridgeOsHome || wizardOsHome(), 'grants', 'agent-service.json'))
+        if (await handleAgentNotebooksApi({ ...agentCtx, appGrants }, url, request, response)) return
+      }
       if (tailnetIngress) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.
@@ -5623,7 +5630,8 @@ function buildWizardServer(options, lifetime) {
         if (await handleAgentsApi(agentCtx, url, request, response)) return
       }
       if (agentCtx && url.pathname.startsWith('/wizard/v1/agent-notes')) {
-        if (await handleAgentNotesApi(agentCtx, url, request, response)) return
+        // Retired unscoped browser route: no compatibility mode may re-open private notebooks.
+        sendJson(response, 410, { error: 'app_notebook_grant_required' }, { 'Cache-Control': 'no-store' }); return
       }
       if (agentCtx && (url.pathname === '/wizard/v1/app-bindings' || url.pathname.startsWith('/wizard/v1/apps/'))) {
         if (await handleAppBindingApi(agentCtx, url, request, response)) return
