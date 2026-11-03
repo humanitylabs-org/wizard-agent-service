@@ -32,6 +32,45 @@ async function exercise(s, restart=false, model=false) {
   const after=await s.request(`/v1/runs/${b.run_id}`);assert.equal(after.status,200);assert.equal(s.runs.size,2,'a second restart must not duplicate dispatch')
   assert.equal((await after.json()).agent_id,s.id)
 }
+async function lockedSelectorBoundary(s) {
+ try {
+  const selector = model => s.request('/api/sessions/wizard_parity/model', post({ model, provider: 'anthropic' }))
+  const sonnet = 'claude-sonnet-5-5', opus = 'claude-opus-5-5'
+  assert.equal((await selector(opus)).status, 200)
+  const first = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic held turn', model: sonnet, provider: 'anthropic', require_model_lock: true }))
+  assert.equal(first.status, 202)
+  const queuedInit = post({ session_id: 'wizard_parity', input: 'Synthetic immutable Opus admission', model: opus, provider: 'anthropic', require_model_lock: true })
+  const queued = await s.request('/v1/runs', queuedInit)
+  assert.equal(queued.status, 202)
+  const receipt = await queued.json()
+  assert.equal(receipt.status, 'queued')
+  assert.equal(s.runs.size, 1)
+  const change = await selector(sonnet)
+  assert.equal(change.status, 200, `${s.kind}: switch between this agent's declared allowed models`)
+  Object.assign([...s.runs.values()][0], { status: 'completed', output: 'Synthetic first result' })
+  const until = Date.now() + 5_000
+  while (s.runs.size < 2 && Date.now() < until) {
+    await s.request(`/v1/runs/${receipt.run_id}`)
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal(s.runs.size, 2, `${s.kind}: queued work must dispatch`)
+  const sends = () => s.seen.filter(row => row.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(row.path))
+  assert.equal(sends().at(-1).body.model, opus, `${s.kind}: a later selector cannot rewrite an admitted exact lock`)
+  assert.equal(sends().at(-1).body.require_model_lock, true)
+  Object.assign([...s.runs.values()][1], { status: 'completed', output: 'Synthetic locked result' })
+  await s.request(`/v1/runs/${receipt.run_id}`)
+  await s.restart()
+  const replay = await s.request('/v1/runs', queuedInit)
+  assert.equal(replay.status, 202)
+  assert.equal((await replay.json()).run_id, receipt.run_id)
+  assert.equal(s.runs.size, 2, `${s.kind}: restart/replay cannot duplicate the admitted send`)
+  assert.equal((await selector(sonnet)).status, 200, `${s.kind}: an idle selector change remains available`)
+  assert.equal(s.runs.size, 2, `${s.kind}: picker changes are not additional chat admissions`)
+ } finally {
+   // Also drain native fixture streams when an assertion fails.
+   for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic cleanup' })
+ }
+}
 // A steer the run accepted but never consumed (Hermes ends the run with it in `pending_steer`)
 // becomes exactly one ordinary turn in the same thread on the same model, and survives a restart.
 async function pendingSteer(s) {
@@ -56,4 +95,5 @@ export const queueChecks = {
  'queue-busy': s=>exercise(s),
  'queue-restart': s=>exercise(s,true),
  'model-lock': s=>exercise(s,true,true),
+ 'locked-selector-boundary': lockedSelectorBoundary,
 }

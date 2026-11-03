@@ -1055,6 +1055,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "locked-selector-boundary",
+      "description": "Explicit admitted locks survive later selector changes without an app/model-specific dispatch override",
+      "layer": "server",
+      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: declare the synthetic Opus/Sonnet models in each agent's allowed_models, hold a first turn, admit a required Opus lock, change the selector to Sonnet and release the queue. Verify Opus remains immutable, then restart/replay without duplication and confirm picker edits do not admit chat turns. Main fixture persists browser_model_lock in synthetic SQLite. An earlier live bridge override fails this queued-admission regression; shared main already preserves it and must not adopt that override. Undeclared models remain forbidden by existing model_not_allowed tests. Fixture-only, not real-provider acceptance.",
+      "source_refs": ["server/locked-run-bridge.mjs", "server/run-queue.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/locked-run-bridge.test.mjs", "qa/agent-parity/queue-checks.mjs"],
+      "fixture": "locked-selector-boundary",
+      "policy_exemptions": []
+    },
+    {
       "id": "model-lock",
       "description": "Queue/steer/retry on one route while changing global default",
       "layer": "server",
@@ -1267,6 +1277,16 @@
       "source_refs": ["server/agent-bridge.mjs", "server/agents.mjs"],
       "reference_tests": ["tests/agents-sealed-apps.test.ts", "qa/agent-parity/server-checks.mjs"],
       "fixture": "agent-app-access",
+      "policy_exemptions": []
+    },
+    {
+      "id": "ai-apps-chat-drawer",
+      "description": "The AI apps shell view (Miguel's off-by-default tweak miguel/ai-apps) lists and acts on chats in its drawer (phone) and sidebar (desktop) for the MAIN agent only: rows come from the shell's Ready / Working / Snoozed / Archive groups and every row action (done, snooze, restore, unread, rename) lands on the main Chats window through Chats' own threadAct / openRenameSheet. Host-profile, container and restricted agents' Chats windows open beside it keep their own threads and lists untouched.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux, node --test tests/ai-apps-agent-parity.test.mjs runs the real phone (web/app.js) and desktop (web/desktop/desktop.js) adapter code with a main, host-profile, container and restricted Chats window open (a routed one in front): the drawer lists only the main agent's rows, and done, snooze and rename each land on the main window once with no routed window touched. Synthetic source-executed evidence; write-free browser checks recorded on wizard-ux PR #888.",
+      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/desktop/desktop.js", "wizard-ux/web/layouts/ai-apps/layout.js", "wizard-ux/web/layouts/ai-apps/desktop.js"],
+      "reference_tests": ["wizard-ux/tests/ai-apps-agent-parity.test.mjs"],
+      "fixture": null,
       "policy_exemptions": []
     }
   ]
