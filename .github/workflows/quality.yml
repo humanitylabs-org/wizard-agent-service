@@ -32,6 +32,10 @@ jobs:
         run: |
           "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
           python3 ops/agent-runtime/test_agent_runtime.py
+      - name: Disposable private-chat synthetic regressions
+        run: |
+          node --test tests/incognito.node.mjs
+          "$WIZARD_IMPORT_PYTHON" ops/agent-runtime/test_incognito_runtime.py
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
