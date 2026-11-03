@@ -2727,7 +2727,7 @@ function buildWizardServer(options, lifetime) {
   const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
     agentId, sessionId, jobs,
     // Main still consumes optional-work witnesses for done rows. Preserve that
-    // authority until the separate #300 guard change lands; do not infer its state table.
+    // authority until the separate PR 300 guard change lands; do not infer its state table.
     nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
       ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
     isDelivered: job => {
