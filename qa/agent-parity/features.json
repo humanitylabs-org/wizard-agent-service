@@ -113,9 +113,9 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved.",
+      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved. The Markdown fact overrides only the API-server plain-text line, so the runtime's own keep-replies-brief default survives.",
       "layer": "server",
-      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules. Fixture proof covers prompt delivery, not model compliance.",
+      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules, and with the scoped Markdown override that keeps the runtime's brevity default. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
