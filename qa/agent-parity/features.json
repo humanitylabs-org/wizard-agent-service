@@ -41,6 +41,23 @@
   ],
   "features": [
     {
+      "id": "installed-ready-extension-custody",
+      "description": "Owner-level installed app Ready cards are independent of agent threads: they render/poll only at the owner root, never inside main-session, host-profile, container or restricted-agent contexts; writes require the actual shell-owned app frame.",
+      "layer": "ux",
+      "how_to_test": "Run wizard-ux/tests/app-ready-extension.test.mjs: compare root versus synthetic host-profile/container/restricted renderer and poll branches; verify browser-supplied frame provenance, revocation, wrong/nested/destroyed frames and independent failing callbacks. Run tests/app-ready-client.test.mjs for admitted-before-settlement and recovery details. These are source-executing VM fixtures, not live routed-runtime or browser proof; real installed-app browser/update acceptance remains required.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chats-view.js",
+        "wizard-ux/web/core/app-client.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/app-ready-extension.test.mjs",
+        "wizard-ux/tests/app-ready-client.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "head-row-owner-write-parity",
       "description": "Chats retains exact projected row fields across unrelated owner writes and reflects row-affecting writes on main, host-profile, container and restricted runtimes; main reuses quiet head rows.",
       "layer": "server",
