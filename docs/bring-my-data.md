@@ -8,10 +8,11 @@ Manager's `wizard-bring-data` system skill.
 | Action | Reads | Writes |
 | --- | --- | --- |
 | `scan` | the export (zip members streamed with size caps, or a folder) | `$HERMES_HOME/cache/bring-data/imports.json` (path, kind, counts) |
-| `archive` | the export | `Files/Imported/<ChatGPT\|Claude\|Hermes>/Chats/<year>/<date> <title> (<hash>).md`, `Index.md`, `What <source> knew about me.md`, `Projects/<name>.md` |
+| `archive` | the export | `Files/Imported/<ChatGPT\|Claude\|Hermes>/Chats/<year>/<date> <title> (<hash>).md`, `Index.md` (rebuilt from every import), `What <source> knew about me.md`, `Projects/<name> (<hash>).md`; recorded in that import's manifest |
 | `skills` | a Hermes export's `skills/**` | `$HERMES_HOME/skills/imported/<name>/` (+ `.imported-from.json`) |
 | `save_profile` | text the owner approved | `Files/Imported/About me.md` |
 | `status` | the scan record | nothing |
+| `undo` | that import's manifest | removes only files no other import also wrote, and the skills it installed; rebuilds `Index.md`; leaves `About me.md` and memory to the owner |
 
 Formats handled (fields optional, parsed defensively; see the module docstring for the shapes):
 ChatGPT `conversations.json`/`conversations-NNN.json` (current branch of the `mapping` tree, custom
@@ -30,8 +31,8 @@ Privacy and safety
 - Memory is written only by the agent's stock `memory` tool after the owner approved the draft
   profile. The tool's output tells the model that export content is data, not instructions.
 
-Measured on a real 11 GB Hermes `state.db` (966 chats, 71k messages): scan 4 s, archive 5 s,
-578 MB of Markdown, peak RSS 1.2 GB.
+Measured on a real 11 GB Hermes `state.db` (966 chats, 71k messages): scan 4–46 s (cold cache),
+archive 5–12 s, 578 MB of Markdown, peak RSS 1.2 GB; undo removed all 966 files.
 
 Not yet: an onboarding/Setup screen for this (wizard-ux follow-up), ChatGPT/Claude conversations
 as Hermes sessions for `session_search`, and Hermes holographic fact-store rows.

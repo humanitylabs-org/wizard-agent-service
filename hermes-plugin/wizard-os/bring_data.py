@@ -14,6 +14,7 @@ One agent tool, ``wizard_bring_data``, reads an export the owner dropped in File
                Existing skills are never replaced; secret-looking files are left behind.
 * ``save_profile``  store the owner-reviewed profile as ``Files/Imported/About me.md``.
 * ``status``   list earlier scans.
+* ``undo``     remove only what one import wrote (files no other import also wrote, its skills).
 
 The model never sees a credential: Hermes ``.env``/``auth.json``/``config.yaml`` are not read, and
 skill files that look like keys are skipped. Facts become memory only through the agent's own stock
@@ -456,7 +457,8 @@ def parse_claude(src: Source, prefix: str) -> dict:
             continue
         docs = [{"name": str(d.get("filename") or "document"), "content": str(d.get("content") or "")}
                 for d in (p.get("docs") or []) if isinstance(d, dict)]
-        projects.append({"name": str(p.get("name") or "Project"), "description": str(p.get("description") or ""),
+        projects.append({"id": str(p.get("uuid") or p.get("name") or len(projects)),
+                         "name": str(p.get("name") or "Project"), "description": str(p.get("description") or ""),
                          "instructions": str(p.get("prompt_template") or ""), "docs": docs,
                          "memory": project_memory.get(str(p.get("uuid")), "")})
 
@@ -629,8 +631,11 @@ def load(path: Path, *, with_sessions: bool = True) -> tuple[str, dict, Source, 
 
 
 def _import_id(path: Path) -> str:
+    """A zip is identified by path, size and time (a new export at the same name is a new import); a
+    folder by its path only, because a live Hermes home changes while we read it."""
     st = path.stat()
-    return hashlib.sha256(f"{path}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:12]
+    key = str(path) if path.is_dir() else f"{path}|{st.st_size}|{int(st.st_mtime)}"
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 def _registry() -> dict:
@@ -653,13 +658,14 @@ def _record(import_id: str, **fields) -> dict:
     return entry
 
 
-def _lookup(args: dict) -> Path:
+def _lookup(args: dict) -> tuple[Path, str]:
     if args.get("import_id"):
         entry = _registry().get(str(args["import_id"]))
         if not entry:
             raise ValueError("Unknown import_id. Run scan first.")
-        return Path(entry["source"])
-    return resolve_source(args.get("path"))
+        return Path(entry["source"]), str(args["import_id"])
+    path = resolve_source(args.get("path"))
+    return path, _import_id(path)
 
 
 # ---------------------------------------------------------------------------- actions
@@ -764,34 +770,62 @@ def _chat_markdown(chat: dict, label: str) -> str:
     return "\n".join(head + ["", "---"] + body) + "\n"
 
 
+def _short(identifier: str) -> str:
+    return hashlib.sha1(str(identifier).encode("utf-8")).hexdigest()[:8]
+
+
+_HEAD_COUNT = re.compile(r" · (\d+) messages · ")
+
+
+def _rebuild_index(root: Path, label: str) -> None:
+    """Index.md lists every archived chat of this source, whichever import wrote it."""
+    rows = []
+    for path in (root / "Chats").glob("*/*.md") if (root / "Chats").is_dir() else []:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                title, meta = handle.readline()[2:].strip(), (handle.readline(), handle.readline())[1]
+        except OSError:
+            continue
+        count = _HEAD_COUNT.search(meta)
+        rel = path.relative_to(root).as_posix()
+        rows.append((path.name[:10], title, rel, count.group(1) if count else ""))
+    rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
+    if not rows:
+        try:
+            (root / "Index.md").unlink()
+        except OSError:
+            pass
+        return
+    lines = [f"# {label} chats", "",
+             f"{len(rows)} chats, newest first. Your Wizard searches these files when you ask about past chats.",
+             "", "| Started | Chat | Messages |", "| --- | --- | --- |"]
+    lines += [f"| {d} | [{t.replace('|', '/').replace(']', ')')}](<{rel}>) | {n} |" for d, t, rel, n in rows]
+    _atomic_write(root / "Index.md", "\n".join(lines) + "\n")
+
+
 def _chat_relpath(chat: dict) -> str:
     year = _day(chat.get("created") or chat.get("updated"))[:4]
-    short = hashlib.sha1(chat["id"].encode("utf-8")).hexdigest()[:8]  # ids often share a prefix
+    short = _short(chat["id"])  # ids often share a prefix, titles repeat
     return f"Chats/{year}/{_day(chat.get('created') or chat.get('updated'))} {_safe_name(chat['title'], 70)} ({short}).md"
 
 
 def archive(args: dict) -> dict:
-    path = _lookup(args)
+    path, import_id = _lookup(args)
     kind, data, src, _p = load(path)
     src.close()
     label = SOURCES[kind]
     root = files_root() / IMPORT_DIR / label
     root.mkdir(parents=True, exist_ok=True)
-    rows, written = [], 0
-    for chat in sorted(data["chats"], key=lambda c: c.get("created") or c.get("updated") or 0, reverse=True):
+    written, mine = 0, []
+    for chat in data["chats"]:
         rel = _chat_relpath(chat)
         target = root / rel
         if not _within(target, root):
             continue
         _atomic_write(target, _chat_markdown(chat, label))
         written += 1
-        rows.append(f"| {_day(chat.get('created'))} | [{chat['title'].replace('|', '/').replace(']', ')')}]"
-                    f"(<{rel}>) | {len(chat['messages'])} |")
-    index = [f"# {label} chats", "",
-             f"Imported {datetime.now(timezone.utc).strftime('%Y-%m-%d')} from `{path.name}`. "
-             f"{written} chats, newest first. Your Wizard searches these files when you ask about past chats.",
-             "", "| Started | Chat | Messages |", "| --- | --- | --- |", *rows]
-    _atomic_write(root / "Index.md", "\n".join(index) + "\n")
+        mine.append(f"{label}/{rel}")
+    _rebuild_index(root, label)
 
     about = [f"# What {label} knew about you", "",
              "Copied as-is from your export. Your Wizard only remembers what you approve in *About me.md*.", ""]
@@ -817,17 +851,19 @@ def archive(args: dict) -> dict:
             doc += ["## Project memory", "", project["memory"], ""]
         for item in project["docs"]:
             doc += [f"## Document: {item['name']}", "", item["content"], ""]
-        _atomic_write(root / "Projects" / f"{_safe_name(project['name'])}.md", "\n".join(doc) + "\n")
+        rel = f"Projects/{_safe_name(project['name'], 70)} ({_short(project['id'])}).md"
+        _atomic_write(root / rel, "\n".join(doc) + "\n")
+        mine.append(f"{label}/{rel}")
         extra += 1
-    import_id = _import_id(path)
-    _record(import_id, source=str(path), kind=kind, archived_at=int(time.time()), archived_chats=written)
+    _record(import_id, source=str(path), kind=kind, archived_at=int(time.time()), archived_chats=written,
+            files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)))
     return {"import_id": import_id, "source": label, "chats_written": written, "other_files": extra,
             "folder": f"{IMPORT_DIR}/{label}", "index": f"{IMPORT_DIR}/{label}/Index.md",
             "search_hint": f"search_files with path {files_root() / IMPORT_DIR / label} to find past chats"}
 
 
 def install_skills(args: dict) -> dict:
-    path = _lookup(args)
+    path, import_id = _lookup(args)
     wanted = args.get("names")
     if not isinstance(wanted, list) or not wanted:
         raise ValueError("List the skill names the owner approved in `names`.")
@@ -871,6 +907,9 @@ def install_skills(args: dict) -> dict:
                     shutil.rmtree(staging, ignore_errors=True)
             existing.add(skill["name"].lower())
             installed.append({"name": skill["name"], "folder": str(dest), "left_behind": skill["flagged"]})
+        if installed:
+            _record(import_id, source=str(path), kind=kind, skills_installed=sorted(set(
+                _registry().get(import_id, {}).get("skills_installed", [])) | {Path(i["folder"]).name for i in installed}))
         missing = sorted(wanted_lower - {s["name"].lower() for s in data["skills"]})
         return {"installed": installed, "skipped": skipped, "not_found": missing,
                 "note": "New skills load in the next chat." if installed else ""}
@@ -892,20 +931,75 @@ def save_profile(args: dict) -> dict:
             "next": "Add the few facts that matter every day to memory with the memory tool (owner-approved only)."}
 
 
+def undo(args: dict) -> dict:
+    """Remove only what one import wrote: its chat/project files no other import also wrote, and the
+    skills it installed. Owner-approved About me.md and memory entries are left for the owner to decide."""
+    import_id = str(args.get("import_id") or "")
+    reg = _registry()
+    entry = reg.get(import_id)
+    if not entry:
+        raise ValueError("Unknown import_id. Use status to list imports.")
+    others = [v for k, v in reg.items() if k != import_id]
+    claimed = {f for v in others for f in v.get("files", [])}
+    base = files_root() / IMPORT_DIR
+    removed_files = 0
+    for rel in entry.get("files", []):
+        target = base / rel
+        if rel in claimed or not _within(target, base) or not target.is_file():
+            continue
+        target.unlink()
+        removed_files += 1
+    label = SOURCES.get(entry.get("kind"), "")
+    root = base / label if label else None
+    if root and root.is_dir():
+        same_source = [v for v in others if v.get("kind") == entry.get("kind") and v.get("archived_at")]
+        if not same_source:
+            for leftover in (root / f"What {label} knew about me.md",):
+                if leftover.is_file():
+                    leftover.unlink()
+        _rebuild_index(root, label)
+        for folder in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            try:
+                folder.rmdir()  # only empty folders
+            except OSError:
+                pass
+        try:
+            root.rmdir()
+        except OSError:
+            pass
+    skills_root = hermes_home() / "skills" / SKILL_CATEGORY
+    removed_skills = []
+    for name in entry.get("skills_installed", []):
+        folder = skills_root / name
+        marker = folder / ".imported-from.json"
+        try:
+            ours = json.loads(marker.read_text("utf-8")).get("source") == entry.get("source")
+        except (OSError, ValueError):
+            ours = False
+        if ours and _within(folder, skills_root):
+            shutil.rmtree(folder)
+            removed_skills.append(name)
+    del reg[import_id]
+    _save_registry(reg)
+    return {"removed_files": removed_files, "removed_skills": removed_skills,
+            "kept": "Files/Imported/About me.md and memory entries were approved by the owner: ask which to remove."}
+
+
 def status(_args: dict) -> dict:
     reg = _registry()
     return {"imports": [{"import_id": k, **{f: v.get(f) for f in (
         "kind", "source", "scanned_at", "archived_at", "chats", "archived_chats")}} for k, v in reg.items()]}
 
 
-ACTIONS = {"scan": scan, "archive": archive, "skills": install_skills, "save_profile": save_profile, "status": status}
+ACTIONS = {"scan": scan, "archive": archive, "skills": install_skills, "save_profile": save_profile, "status": status,
+           "undo": undo}
 
 SCHEMA = {
     "name": TOOL_NAME,
     "description": (
         "Bring the owner's ChatGPT, Claude or Hermes data into this Wizard. scan an export (a zip in Files, "
         "e.g. Inbox/…zip, or a Hermes folder/backup), archive its chats as searchable Markdown in "
-        "Files/Imported, install owner-approved Hermes skills, and save the owner-reviewed profile. "
+        "Files/Imported, install owner-approved Hermes skills, save the owner-reviewed profile, or undo one import. "
         "Load the wizard-bring-data skill first."
     ),
     "parameters": {

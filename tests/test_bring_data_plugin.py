@@ -21,7 +21,7 @@ bd = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = bd
 spec.loader.exec_module(bd)
 
-SECRET = 'sk-ant-' + 'A' * 40  # never may leave the source
+CANARY = 'sk-ant-' + 'A' * 40  # key-shaped canary that must never leave the source
 
 
 def call(**args):
@@ -97,16 +97,16 @@ def hermes_home(base: Path) -> Path:
     (home / 'memories/USER.md').write_text('Owner is Ana; vegetarian.\n§\nLives in Lisbon.\n', 'utf-8')
     (home / 'memories/MEMORY.md').write_text('Ana\'s server is a Raspberry Pi.\n', 'utf-8')
     (home / 'SOUL.md').write_text('You are calm and concise.', 'utf-8')
-    (home / '.env').write_text(f'ANTHROPIC_API_KEY={SECRET}\n', 'utf-8')
-    (home / 'auth.json').write_text(json.dumps({'token': SECRET}), 'utf-8')
+    (home / '.env').write_text(f'ANTHROPIC_API_KEY={CANARY}\n', 'utf-8')
+    (home / 'auth.json').write_text(json.dumps({'t': CANARY}), 'utf-8')
     (home / 'secrets').mkdir()
-    (home / 'secrets/key.txt').write_text(SECRET, 'utf-8')
+    (home / 'secrets/k.txt').write_text(CANARY, 'utf-8')
     skill = home / 'skills/cooking/meal-plan'
     (skill / 'references').mkdir(parents=True)
     (skill / 'SKILL.md').write_text('---\nname: meal-plan\ndescription: Plan weekly vegetarian meals.\n---\n# Meal plan\n', 'utf-8')
     (skill / 'references/recipes.md').write_text('Lentil soup.', 'utf-8')
-    (skill / '.env').write_text(f'KEY={SECRET}', 'utf-8')
-    (skill / 'notes.md').write_text(f'old key {SECRET}', 'utf-8')
+    (skill / '.env').write_text(f'KEY={CANARY}', 'utf-8')
+    (skill / 'notes.md').write_text(f'old key {CANARY}', 'utf-8')
     (home / 'skills/cooking/DESCRIPTION.md').write_text('Cooking skills', 'utf-8')
     dup = home / 'skills/existing-one'
     dup.mkdir(parents=True)
@@ -248,11 +248,59 @@ class BringDataTests(unittest.TestCase):
         self.assertIn('File: photo.jpg', chat)
         self.assertIn('### Claude', chat)
         self.assertIn('> Planning raised beds.', chat)
-        project = (root / 'Projects/Allotment.md').read_text('utf-8')
+        project = next((root / 'Projects').glob('Allotment (*).md')).read_text('utf-8')
         self.assertIn('Use metric units.', project)
         self.assertIn('Clay soil.', project)
-        self.assertFalse((root / 'Projects/How to use Claude.md').exists())
+        self.assertEqual(len(list((root / 'Projects').glob('How to use Claude*'))), 0)
         self.assertNotIn('ana@example.com', self.all_written_text())
+
+    def test_projects_with_colliding_names_keep_separate_files(self):
+        convs, _p, _m, _u = claude_export()
+        projects = [{'uuid': 'p-a', 'name': 'A/B', 'prompt_template': 'first'},
+                    {'uuid': 'p-b', 'name': 'A:B', 'prompt_template': 'second'},
+                    {'uuid': 'p-c', 'name': 'A/B', 'prompt_template': 'third'}]
+        self.write_zip('claude3.zip', {'conversations.json': convs, 'projects.json': projects})
+        res = call(action='archive', path='Inbox/claude3.zip')
+        self.assertEqual(res['other_files'], 3)
+        texts = sorted(p.read_text('utf-8') for p in (self.files / 'Imported/Claude/Projects').glob('*.md'))
+        self.assertEqual(len(texts), 3)
+        for word in ('first', 'second', 'third'):
+            self.assertTrue(any(word in t for t in texts), word)
+
+    def test_undo_removes_only_what_that_import_wrote(self):
+        older = chatgpt_export()[:1]  # Porto only
+        newer = chatgpt_export()      # Porto + Marathon
+        self.write_zip('old.zip', {'conversations.json': older})
+        self.write_zip('new.zip', {'conversations.json': newer})
+        old_id = call(action='scan', path='Inbox/old.zip')['import_id']
+        new_id = call(action='scan', path='Inbox/new.zip')['import_id']
+        call(action='archive', import_id=old_id)
+        call(action='archive', import_id=new_id)
+        root = self.files / 'Imported/ChatGPT'
+        self.assertEqual((root / 'Index.md').read_text('utf-8').count('| 20'), 2)
+        old_hermes = hermes_home(self.base)
+        hermes_id = call(action='scan', path=str(old_hermes))['import_id']
+        call(action='skills', import_id=hermes_id, names=['meal-plan'])
+        call(action='save_profile', text='Ana.')
+
+        res = call(action='undo', import_id=new_id)
+        self.assertTrue(res['success'], res)
+        self.assertEqual(res['removed_files'], 1)  # Marathon only: Porto is also the older import's
+        self.assertEqual(len(list(root.glob('Chats/2023/*Porto*.md'))), 1)
+        self.assertEqual(list(root.glob('Chats/2024/*.md')), [])
+        index = (root / 'Index.md').read_text('utf-8')
+        self.assertIn('Porto trip', index)
+        self.assertNotIn('Marathon', index)
+        self.assertTrue((self.home / 'skills/imported/meal-plan/SKILL.md').exists())  # another import's skill
+        self.assertTrue((self.files / 'Imported/About me.md').exists())
+
+        self.assertEqual(call(action='undo', import_id=hermes_id)['removed_skills'], ['meal-plan'])
+        self.assertFalse((self.home / 'skills/imported/meal-plan').exists())
+        self.assertEqual(call(action='undo', import_id=old_id)['removed_files'], 1)
+        self.assertFalse(root.exists())  # last ChatGPT import gone: folder, index and 'what it knew' go too
+        self.assertTrue((self.files / 'Imported/About me.md').exists())
+        self.assertEqual(call(action='status')['imports'], [])
+        self.assertFalse(call(action='undo', import_id=old_id)['success'])
 
     def test_claude_memories_object_form(self):
         convs, _p, _m, _u = claude_export()
@@ -274,9 +322,11 @@ class BringDataTests(unittest.TestCase):
         self.assertEqual(out['skills_already_here'], 1)  # existing-one; .archive is ignored
         self.assertEqual(sorted(out['new_skills'][0]['left_behind']),
                          ['.env (looks like a key or credential file)', 'notes.md (contains what looks like a key or token)'])
-        self.assertNotIn(SECRET, json.dumps(out))
+        self.assertNotIn(CANARY, json.dumps(out))
 
-        self.assertEqual(call(action='archive', import_id=out['import_id'])['chats_written'], 3)
+        st = old.stat()
+        os.utime(old, (st.st_atime, st.st_mtime + 100))  # a live Hermes home changes while we read it
+        self.assertEqual(call(action='archive', path=str(old))['chats_written'], 3)
         files = sorted((self.files / 'Imported/Hermes/Chats/2024').glob('*.md'))
         self.assertEqual(len(files), 3)  # ids sharing a prefix never overwrite each other
         twins = '\n'.join(f.read_text('utf-8') for f in files if 'Same title' in f.name)
@@ -300,10 +350,13 @@ class BringDataTests(unittest.TestCase):
         self.assertFalse((dest / '.env').exists())
         self.assertFalse((dest / 'notes.md').exists())
         self.assertTrue((dest / '.imported-from.json').exists())
-        self.assertNotIn(SECRET, self.all_written_text())
+        self.assertNotIn(CANARY, self.all_written_text())
         again = call(action='skills', import_id=out['import_id'], names=['meal-plan'])
         self.assertEqual(again['installed'], [])
         self.assertEqual(again['skipped'][0]['reason'], 'a skill with this name is already installed')
+        undone = call(action='undo', import_id=out['import_id'])
+        self.assertEqual((undone['removed_files'], undone['removed_skills']), (3, ['meal-plan']))
+        self.assertFalse((self.files / 'Imported/Hermes').exists())
 
     def test_hermes_backup_zip(self):
         old = hermes_home(self.base)
@@ -313,7 +366,7 @@ class BringDataTests(unittest.TestCase):
         self.assertEqual(out['counts']['chats'], 3)
         res = call(action='skills', import_id=out['import_id'], names=['meal-plan'])
         self.assertEqual([s['name'] for s in res['installed']], ['meal-plan'])
-        self.assertNotIn(SECRET, self.all_written_text())
+        self.assertNotIn(CANARY, self.all_written_text())
 
     # -------------------------------------------------------------- profile, status, errors
     def test_save_profile_and_status(self):
@@ -353,7 +406,7 @@ class BringDataTests(unittest.TestCase):
         self.assertIn('wizard_bring_data', names)
         schema = next(t for t in tools if t['name'] == 'wizard_bring_data')['schema']
         self.assertEqual(schema['parameters']['properties']['action']['enum'],
-                         ['scan', 'archive', 'skills', 'save_profile', 'status'])
+                         ['scan', 'archive', 'skills', 'save_profile', 'status', 'undo'])
 
 
 if __name__ == '__main__':
