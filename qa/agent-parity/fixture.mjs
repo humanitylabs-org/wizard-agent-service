@@ -50,6 +50,7 @@ export async function scene(kind, serverOptions = {}) {
     parent_session_id TEXT, last_activity_at REAL, pinned INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
     CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);`)
+  if (serverOptions.fixtureSelectorLock) titleDb.exec('ALTER TABLE sessions ADD COLUMN model_config TEXT')
   const searchDb = serverOptions.fixtureSearchIndex && kind!=='main' ? new DatabaseSync(join(agentHome,'state.db')) : null
   if(searchDb) searchDb.exec('CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,finish_reason TEXT,content TEXT,display_kind TEXT,timestamp REAL); CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT,model TEXT,title TEXT,started_at REAL,ended_at REAL,end_reason TEXT,message_count INTEGER,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER,archived INTEGER,hidden INTEGER)')
   const searchStore=searchDb||titleDb
@@ -133,7 +134,14 @@ export async function scene(kind, serverOptions = {}) {
         const rows = url.searchParams.get('order') === 'latest' ? [...row.messages].reverse() : row.messages
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
-      if (req.method === 'PATCH' || sm[2] === 'model') { Object.assign(row, body); if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id) }
+      if (req.method === 'PATCH' || sm[2] === 'model') {
+        Object.assign(row, body)
+        if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id)
+        if (serverOptions.fixtureSelectorLock && sm[2] === 'model' && body.model && body.provider) {
+          const config = JSON.stringify({ browser_model_lock: { confirmed: true, model: body.model, provider: body.provider, updated_at: Date.now() } })
+          titleDb.prepare('UPDATE sessions SET model=?,model_config=? WHERE id=?').run(body.model, config, row.id)
+        }
+      }
       return json(200, { session: row })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
@@ -168,7 +176,8 @@ export async function scene(kind, serverOptions = {}) {
   if (kind !== 'main') {
     const runtime = kind === 'host-profile' ? { kind: 'profile', profile: 'parity-profile' } : { kind: 'container', app_id: 'agent-parity-agent', port: containerPort, ...(kind === 'restricted' ? { isolation: 'restricted' } : {}) }
     const preset = PRESETS.find(p => p.id === 'standard')
-    writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: ['fixture-model', 'fixture-other'], fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
+    const allowedModels = ['fixture-model', 'fixture-other', ...(serverOptions.fixtureSelectorLock ? ['claude-sonnet-5-5', 'claude-opus-5-5'] : [])]
+    writeFileSync(join(folder, 'agent.json'), JSON.stringify({ schema: 1, id, label: 'Parity synthetic agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 45 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: allowedModels, fallback: false }, permissions: { preset: 'standard', ...preset.permissions }, runtime, created_at: Date.now() / 1000 }))
     writeFileSync(join(folder, 'runtime.key'), 'parity-runtime-secret', { mode: 0o600 })
     writeFileSync(join(folder, 'gateway.key'), agentGatewayToken, { mode: 0o600 })
     if (kind === 'restricted') {

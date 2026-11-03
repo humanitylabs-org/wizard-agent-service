@@ -1055,6 +1055,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "locked-selector-boundary",
+      "description": "Explicit admitted locks survive later selector changes without an app/model-specific dispatch override",
+      "layer": "server",
+      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: declare the synthetic Opus/Sonnet models in each agent's allowed_models, hold a first turn, admit a required Opus lock, change the selector to Sonnet and release the queue. Verify Opus remains immutable, then restart/replay without duplication and confirm picker edits do not admit chat turns. Main fixture persists browser_model_lock in synthetic SQLite. An earlier live bridge override fails this queued-admission regression; shared main already preserves it and must not adopt that override. Undeclared models remain forbidden by existing model_not_allowed tests. Fixture-only, not real-provider acceptance.",
+      "source_refs": ["server/locked-run-bridge.mjs", "server/run-queue.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/locked-run-bridge.test.mjs", "qa/agent-parity/queue-checks.mjs"],
+      "fixture": "locked-selector-boundary",
+      "policy_exemptions": []
+    },
+    {
       "id": "model-lock",
       "description": "Queue/steer/retry on one route while changing global default",
       "layer": "server",
