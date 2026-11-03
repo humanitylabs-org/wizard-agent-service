@@ -50,6 +50,7 @@ export async function scene(kind, serverOptions = {}) {
     parent_session_id TEXT, last_activity_at REAL, pinned INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
     CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);`)
+  if (serverOptions.fixtureSelectorLock) titleDb.exec('ALTER TABLE sessions ADD COLUMN model_config TEXT')
   const searchDb = serverOptions.fixtureSearchIndex && kind!=='main' ? new DatabaseSync(join(agentHome,'state.db')) : null
   if(searchDb) searchDb.exec('CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,finish_reason TEXT,content TEXT,display_kind TEXT,timestamp REAL); CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT,model TEXT,title TEXT,started_at REAL,ended_at REAL,end_reason TEXT,message_count INTEGER,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER,archived INTEGER,hidden INTEGER)')
   const searchStore=searchDb||titleDb
@@ -133,7 +134,14 @@ export async function scene(kind, serverOptions = {}) {
         const rows = url.searchParams.get('order') === 'latest' ? [...row.messages].reverse() : row.messages
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
-      if (req.method === 'PATCH' || sm[2] === 'model') { Object.assign(row, body); if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id) }
+      if (req.method === 'PATCH' || sm[2] === 'model') {
+        Object.assign(row, body)
+        if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id)
+        if (serverOptions.fixtureSelectorLock && sm[2] === 'model' && body.model && body.provider) {
+          const config = JSON.stringify({ browser_model_lock: { confirmed: true, model: body.model, provider: body.provider, updated_at: Date.now() } })
+          titleDb.prepare('UPDATE sessions SET model=?,model_config=? WHERE id=?').run(body.model, config, row.id)
+        }
+      }
       return json(200, { session: row })
     }
     if (path === '/v1/runs' && req.method === 'POST') {

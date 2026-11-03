@@ -15,11 +15,12 @@ export function neverSent(error) {
 const fail = (message, status = 422) => Object.assign(new Error(message), { status })
 
 // A stale client can keep sending its old Opus default after the thread was locked elsewhere.
-// Deliberate picker changes persist the new lock first, so a stored Opus selection still wins.
+// This is only an unlocked legacy composer hint. An explicit required lock is an
+// immutable admission snapshot (queued/recovered/continuation work), not a hint.
 export function selectLockedRoute(value, stored, log) {
   const explicit = value.model && value.provider ? { model: value.model, provider: value.provider } : null
   const confirmed = stored?.model && stored?.provider ? { model: stored.model, provider: stored.provider } : null
-  if (typeof explicit?.model === 'string' && explicit.model.startsWith('claude-opus')
+  if (value.require_model_lock !== true && typeof explicit?.model === 'string' && explicit.model.startsWith('claude-opus')
     && confirmed && typeof confirmed.model === 'string' && !confirmed.model.startsWith('claude-opus')) {
     log('[locked-run] stale Opus send retained the confirmed non-Opus session route')
     return confirmed

@@ -50,6 +50,20 @@ test('stale Opus sends retain the confirmed non-Opus route throughout launch and
   assert.equal(completed.status,'completed');assert.equal(completed.output,'OK');assert.equal(completed.runtime.model,stored.model);
  }
 });
+test('an explicit locked send retains its admission route after the thread selector changes',async()=>{
+ const admitted={model:'claude-opus-5-5',provider:'anthropic'};
+ let stored={...admitted};const calls=[];
+ const queued={session_id:'wizard_synthetic',input:'Synthetic admitted work',...admitted,require_model_lock:true};
+ const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:()=>{},fetchImpl:async(_,init)=>{
+  const body=JSON.parse(init.body);calls.push(body);
+  return stream(frame('run.started',{run_id:'run_delayed',runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}}))
+ }});
+ // The durable queue already captured queued; a later picker edit is not its owner.
+ stored={model:'claude-sonnet-5-5',provider:'anthropic'};
+ const response=await b.fetch('http://localhost:8865/v1/runs',start(queued));
+ assert.equal((await response.json()).runtime.model,admitted.model);
+ assert.equal(calls[0].model,admitted.model);assert.equal(calls[0].provider,admitted.provider)
+});
 test('a deliberate Opus pick updates the stored route before sending and is honored',async()=>{
  let stored={model:'claude-sonnet-5-5',provider:'anthropic'};const calls=[];const logs=[];
  const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(_,init)=>{
