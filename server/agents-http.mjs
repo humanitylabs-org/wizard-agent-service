@@ -51,6 +51,12 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
 export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
+  // One batched evidence read for the whole list (state.db, helper and supervisor waits, heavy
+  // ledger snapshot) instead of opening the agent's databases three times per row.
+  let openAsk = null
+  if (ctx.projectOpenAsk && ctx.prepareOpenAsk) {
+    try { openAsk = ctx.prepareOpenAsk(agent, rows.map(row => row?.id)) } catch { openAsk = null }
+  }
   let next = 0
   await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
     while (next < rows.length) {
@@ -100,7 +106,7 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
         }
         projected = attention ? { ...projected, wizard_attention: attention } : projected
         if (ctx.projectOpenAsk) {
-          projected = ctx.projectOpenAsk(agent, projected, askReplies, askUserAt)
+          projected = ctx.projectOpenAsk(agent, projected, askReplies, askUserAt, openAsk)
           attention = projected.wizard_attention ?? null
         }
         result[index] = ctx.routedPresentation ? await ctx.routedPresentation.project(agent, projected, attention, assistantAt, headers) : projected

@@ -1,3 +1,4 @@
+import './chats-list-head.node.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { cacheableRow, createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from '../server/session-list-cache.mjs'
@@ -33,15 +34,15 @@ test('only quiet rows are cacheable: Working, failed, waiting and helper rows ne
   }
 })
 
-test('idle archive threads are served from cache; the newest batch is always rebuilt', async () => {
+test('idle archive threads and unchanged head rows are served from cache', async () => {
   const w = world()
   const p = createHybridProjector({ now: () => 0 })
   const first = await p.project({ sessions: w.sessions, projectBatch: w.projectBatch })
   assert.equal(first.projected, 250)
   w.projected.length = 0
   const second = await p.project({ sessions: w.sessions, projectBatch: w.projectBatch })
-  assert.equal(second.projected, 100)
-  assert.equal(second.cached, 150)
+  assert.equal(second.projected, 0)
+  assert.equal(second.cached, 250)
   assert.deepEqual(second.rows.map((r) => r.id), w.sessions.map((s) => s.id))
 })
 
@@ -94,12 +95,12 @@ test('an archive thread whose old queue run is pruned (or changes) is re-project
   w.projected.length = 0
   const quiet = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(quiet.rows, 's200').wizard_last_run_id, 'wizardq_old')
-  assert.equal(w.projected.length, 100, 'nothing changed: only the newest batch')
+  assert.equal(w.projected.length, 0, 'nothing changed: reuse the head too')
   lastRun.delete('s200')  // 7-day retention deleted the row
   w.projected.length = 0
   const pruned = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(pruned.rows, 's200').wizard_last_run_id, undefined)
-  assert.deepEqual(w.projected.slice(100), ['s200'])
+  assert.deepEqual(w.projected, ['s200'])
   lastRun.set('s180', 'wizardq_new')
   const added = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(added.rows, 's180').wizard_last_run_id, 'wizardq_new')
@@ -117,7 +118,7 @@ test('a saved background result that appears or clears on an archive thread re-p
   w.projected.length = 0
   const shown = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(shown.rows, 's210').wizard_background_result.id, 'bg_1')
-  assert.deepEqual(w.projected.slice(100), ['s210'])
+  assert.deepEqual(w.projected, ['s210'])
   results.delete('s210')
   const cleared = await p.project({ sessions: w.sessions, stamps: stamps(), projectBatch })
   assert.equal(row(cleared.rows, 's210').wizard_background_result, undefined)
@@ -133,14 +134,14 @@ test('warm (recently active, quiet) threads are rebuilt once a minute, not on ev
   await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
   w.projected.length = 0; t = 30_000
   await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
-  assert.deepEqual(w.projected.slice(100), [], 'within a minute: served from cache')
+  assert.deepEqual(w.projected, [], 'within a minute: served from cache')
   w.projected.length = 0; t = 61_000
   await p.project({ sessions: w.sessions, warm, projectBatch: w.projectBatch })
-  assert.deepEqual(w.projected.slice(100).filter((id) => warm.has(id)).sort(), ['s150', 's160'])
+  assert.deepEqual(w.projected.filter((id) => warm.has(id)).sort(), ['s150', 's160'])
   const changed = w.sessions.map((s) => (s.id === 's160' ? { ...s, message_count: 9 } : s))
   w.projected.length = 0; t = 62_000
   await p.project({ sessions: changed, warm, projectBatch: w.projectBatch })
-  assert.deepEqual(w.projected.slice(100), ['s160'], 'a new message still rebuilds at once')
+  assert.deepEqual(w.projected, ['s160'], 'a new message still rebuilds at once')
 })
 
 test('removed threads drop out; new threads appear', async () => {
@@ -151,7 +152,7 @@ test('removed threads drop out; new threads appear', async () => {
   const out = await p.project({ sessions: next, projectBatch: w.projectBatch })
   assert.equal(row(out.rows, 's210'), undefined)
   assert.equal(row(out.rows, 'late').title, 'L')
-  assert.equal(p.size(), 150)
+  assert.equal(p.size(), 250)
 })
 
 test('a change no signal saw is corrected by the rolling sweep, at ~100 threads a minute', async () => {
@@ -164,7 +165,7 @@ test('a change no signal saw is corrected by the rolling sweep, at ~100 threads 
   for (clock = 15_000; clock <= 20 * 60_000; clock += 15_000) {
     w.projected.length = 0
     const out = await p.project({ sessions: w.sessions, projectBatch: w.projectBatch })
-    assert(w.projected.length - 100 <= 25 + 1, 'sweep budget per 15 s poll stays near 25 threads')
+    assert(w.projected.length - out.head_projected <= 25 + 1, 'cold sweep budget per 15 s poll stays near 25 threads')
     if (!seenAt && row(out.rows, 's399').status === 'idle-but-changed') seenAt = clock
   }
   assert(seenAt !== null && seenAt <= 14 * 60_000, `corrected within one sweep cycle, got ${seenAt}`)
