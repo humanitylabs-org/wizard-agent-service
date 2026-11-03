@@ -686,6 +686,20 @@ export function createAgentRegistry(options = {}) {
   }
   function addGrant(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'grant.body')
+    if (body.kind === 'app-notebook') {
+      const appId = typeof body.reader === 'string' && /^app:([a-z0-9][a-z0-9-]{0,63})$/u.exec(body.reader)?.[1]
+      const apps = readJson(appsJsonPath)?.apps
+      if (!appId || !Array.isArray(apps) || !apps.some(app => app?.id === appId)) fail(404, 'app_not_found', 'grant.reader')
+      const source = typeof body.source === 'string' ? read(body.source) : null
+      if (!source || source.role === 'recovery' || source.hidden === true || source.privacy !== 'standard' || !source.notes_dir) fail(404, 'agent_not_found', 'grant.source')
+      if (body.scope !== 'read') fail(400, 'invalid_grant', 'grant.scope')
+      const current = grants()
+      const existing = current.find(grant => grant.kind === 'app-notebook' && grant.reader === body.reader && grant.source === source.id)
+      const grant = { id: existing?.id ?? `grant_${randomBytes(6).toString('hex')}`, kind: 'app-notebook', reader: body.reader, source: source.id, scope: 'read', created_at: Math.floor(now() / 1000) }
+      mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+      writeJsonAtomic(grantsPath, { schema: 1, grants: [...current.filter(item => item.id !== grant.id), grant] })
+      return grant
+    }
     if ((body.kind ?? 'agent-data') !== 'agent-data') fail(400, 'unknown_grant_kind', 'grant.kind')
     const reader = read(String(body.reader ?? ''))
     if (!reader) fail(404, 'agent_not_found', 'grant.reader')
@@ -722,6 +736,7 @@ export function createAgentRegistry(options = {}) {
       for (const agent of agents) if (agent.id !== reader.id && agent.privacy === 'standard' && agent.permissions.shared_with_agents) out.set(agent.id, reader.permissions.other_agents)
     }
     for (const grant of grants()) {
+      if ((grant.kind ?? 'agent-data') !== 'agent-data') continue
       if (grant.reader !== reader.id) continue
       const source = agents.find((agent) => agent.id === grant.source)
       if (!source || source.privacy !== 'standard' || !source.permissions.shared_with_agents || source.id === reader.id) continue

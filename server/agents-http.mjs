@@ -229,20 +229,29 @@ export async function handleAgentsApi(ctx, url, request, response) {
       if (grantMatch[1]) {
         if (method !== 'DELETE') throw new AgentError(405, 'method_not_allowed', 'grant.route')
         const existing = registry.grants().find((grant) => grant.id === grantMatch[1])
-        if (existing) assertAgentTargets(registry, request, [existing.reader, existing.source])
+        if (existing?.kind === 'app-notebook') {
+          if (principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'grant.owner')
+        } else if (existing) assertAgentTargets(registry, request, [existing.reader, existing.source])
         registry.removeGrant(grantMatch[1])
         sendJson(response, 200, { ok: true })
       } else if (method === 'GET') {
         const reader = url.searchParams.get('reader') ?? ''
-        if (reader && (!registry.read(reader) || !visibleAgent(registry, request, reader))) throw new AgentError(404, 'agent_not_found', 'grant.reader')
+        const appReader = /^app:[a-z0-9][a-z0-9-]{0,63}$/u.test(reader)
+        if (appReader && principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'grant.owner')
+        if (reader && !appReader && (!registry.read(reader) || !visibleAgent(registry, request, reader))) throw new AgentError(404, 'agent_not_found', 'grant.reader')
         const grants = registry.grants().filter((grant) => (!reader || grant.reader === reader)
-          && visibleAgent(registry, request, grant.reader) && visibleAgent(registry, request, grant.source))
-        sendJson(response, 200, { grants, ...(reader ? { readable_sources: registry.readableSources(reader) } : {}) })
+          && (grant.kind === 'app-notebook' ? principalOf(request).kind === 'owner' : visibleAgent(registry, request, grant.reader)) && visibleAgent(registry, request, grant.source))
+        sendJson(response, 200, { grants, ...(reader && !appReader ? { readable_sources: registry.readableSources(reader) } : {}) })
       } else if (method === 'POST') {
         const body = await readJson(ctx, request)
         // Check exactly the ids addGrant will store: anything but a plain string is refused before any check.
         for (const field of ['reader', 'source']) if (typeof body[field] !== 'string') throw new AgentError(400, 'invalid_request', `grant.${field}`)
         // Same order as addGrant (shape, kind, reader, source); hidden ids answer exactly like missing ones.
+        if (body.kind === 'app-notebook') {
+          if (principalOf(request).kind !== 'owner') throw new AgentError(403, 'owner_required', 'grant.owner')
+          sendJson(response, 201, { grant: registry.addGrant(body) })
+          return true
+        }
         if ((body.kind ?? 'agent-data') !== 'agent-data') throw new AgentError(400, 'unknown_grant_kind', 'grant.kind')
         assertKnownTargets(registry, request, [body.reader], () => new AgentError(404, 'agent_not_found', 'grant.reader'))
         assertKnownTargets(registry, request, [body.source], () => new AgentError(404, 'agent_not_found', 'grant.source'))
