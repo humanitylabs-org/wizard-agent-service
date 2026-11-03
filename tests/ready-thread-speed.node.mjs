@@ -151,7 +151,7 @@ test('isolated Ready port preserves the current main guard and fresh done-row au
   assert.equal(reads(), 100, 'main still consumes done-row optional-work witnesses; #300 changes that separately')
 })
 
-test('heavy status decoration preserves pending and delivered status semantics without evidence reads', async () => {
+test('heavy status decoration preserves main status semantics and reads only its done-row witnesses', async () => {
   const { run, reads, guardHeavyStatus } = await serviceHeavyStatus()
   for (const agentId of ['hermes', 'synthetic-agent']) for (const state of ['done', 'check', 'needs_you', 'fyi']) {
     const status = { state, ask: 'Synthetic', subject: 'Tests' }
@@ -161,5 +161,5 @@ test('heavy status decoration preserves pending and delivered status semantics w
       assert.deepEqual(run(agentId, 'synthetic', status, jobs), expected)
     }
   }
-  assert.equal(reads(), 0)
+  assert.equal(reads(), 2, 'only the two Hermes done states consume optional-work witnesses on current main')
 })
