@@ -2835,6 +2835,7 @@ function buildWizardServer(options, lifetime) {
     prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : agentVisionHelper(agent) ? 'text-only-helper' : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
+      if (agent.runtime.kind === 'external') throw new AgentError(409, 'external_agent_read_only', 'agent.runtime')
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
       try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }

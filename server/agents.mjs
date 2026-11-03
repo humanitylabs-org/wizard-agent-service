@@ -295,14 +295,17 @@ export function threadAgent(agent) {
 export function parseAgentFile(value, id) {
   if (!value || typeof value !== 'object' || value.schema !== AGENT_SCHEMA || value.id !== id || !ID_RE.test(id) || id === MAIN_AGENT_ID) return null
   if (value.hidden !== undefined && typeof value.hidden !== 'boolean') return null
-  if (value.harness !== 'hermes' || !['private', 'standard'].includes(value.privacy)) return null
+  if (!['hermes', 'pi'].includes(value.harness) || !['private', 'standard'].includes(value.privacy)) return null
   if (value.role !== undefined && value.role !== 'standard') return null
   const model = value.model
   if (!model || typeof model.provider !== 'string' || typeof model.model !== 'string' || !Array.isArray(model.allowed_models)) return null
   const permissions = value.permissions
   if (!permissions || typeof permissions !== 'object') return null
   const runtime = value.runtime
-  if (!runtime || !['container', 'profile'].includes(runtime.kind)) return null
+  if (!runtime || !['container', 'profile', 'external'].includes(runtime.kind)) return null
+  // Pi is a reply-only, file-provisioned external runtime. Never feed it to the Hermes driver.
+  if (value.harness === 'pi' && (runtime.kind !== 'external' || value.privacy !== 'standard')) return null
+  if (runtime.kind === 'external' && (value.harness !== 'pi' || !Number.isInteger(runtime.port) || runtime.port < 1024 || runtime.port > 65535)) return null
   if (runtime.kind === 'container' && (typeof runtime.app_id !== 'string' || !Number.isInteger(runtime.port))) return null
   if (runtime.kind === 'profile' && (typeof runtime.profile !== 'string' || !ID_RE.test(runtime.profile))) return null
   try {
@@ -584,7 +587,7 @@ export function createAgentRegistry(options = {}) {
         const privateFresh = privateApps()
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.imported || agent.runtime.kind === "profile" || agent.runtime?.admission === 'importing') continue
+          if (!agent || agent.imported || ["profile", "external"].includes(agent.runtime.kind) || agent.runtime?.admission === 'importing') continue
           if (agent.privacy !== 'private') continue
           const joining = fresh.filter((app) => privateFresh.has(app))
           if (!joining.length) continue
@@ -614,7 +617,7 @@ export function createAgentRegistry(options = {}) {
         const turned = new Set(turnedPrivate)
         for (const id of folderIds()) {
           const agent = readRaw(id)
-          if (!agent || agent.privacy === 'private' || agent.runtime.kind === 'profile' || agent.runtime?.admission === 'importing') continue
+          if (!agent || agent.privacy === 'private' || ['profile', 'external'].includes(agent.runtime.kind) || agent.runtime?.admission === 'importing') continue
           const wizard_apps = listIds(agent.permissions.wizard_apps).filter((app) => !turned.has(app))
           const agent_apps = listIds(agent.permissions.agent_apps).filter((app) => !turned.has(app))
           if (wizard_apps.length === listIds(agent.permissions.wizard_apps).length && agent_apps.length === listIds(agent.permissions.agent_apps).length) continue
@@ -763,6 +766,8 @@ export function createAgentRegistry(options = {}) {
   }
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
+    // Fixed loopback only: the host owns any tailnet/SSH transport, never a browser-selected URL.
+    if (agent.runtime.kind === 'external') return `http://127.0.0.1:${agent.runtime.port}`
     if (agent.runtime.kind === 'profile') {
       if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
       return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
@@ -791,11 +796,11 @@ export function createAgentRegistry(options = {}) {
   async function probe(agent, { fresh = false } = {}) {
     const cached = statusCache.get(agent.id)
     if (!fresh && cached && now() - cached.at < 3000) return cached.value
-    const state = agent.runtime.kind === 'profile' ? {} : serviceState(agent.id)
+    const state = ['profile', 'external'].includes(agent.runtime.kind) ? {} : serviceState(agent.id)
     let value
     let healthy = false
     try {
-      const headers = agent.runtime.kind === 'profile' ? { Authorization: `Bearer ${apiKey(agent.id)}` } : {}
+      const headers = ['profile', 'external'].includes(agent.runtime.kind) ? { Authorization: `Bearer ${apiKey(agent.id)}` } : {}
       const response = await fetchAgent(agent, '/health', { headers, redirect: 'error', signal: AbortSignal.timeout(1500) })
       await response.body?.cancel().catch(() => undefined)
       healthy = response.ok
@@ -899,7 +904,7 @@ export function createAgentRegistry(options = {}) {
 
   /** True when the agent's managed config.yaml is not what this release would write (a new release changed it). */
   function harnessStale(agent) {
-    if (agent.runtime.kind === 'profile') return false
+    if (['profile', 'external'].includes(agent.runtime.kind)) return false
     const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
     const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
     // Compare against the stamp of what the Service last wrote: Hermes itself may normalise config.yaml on start.
@@ -908,6 +913,7 @@ export function createAgentRegistry(options = {}) {
   }
 
   function writeHarnessFiles(agent, { rotateKey = false } = {}) {
+    if (agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime')
     // Imported agents keep their full memory/settings/auth. Their host driver merges
     // only Wizard-owned fields on start/apply; a fresh generated config would erase
@@ -1075,6 +1081,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
+    if (agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
     if (agent.runtime.kind === 'profile') {
       // Sharing metadata is Service-owned even for a file-provisioned host profile.
       if (Object.keys(body).some(key => !['permissions', 'notes_dir'].includes(key))
@@ -1192,6 +1199,7 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (id === MAIN_AGENT_ID) fail(409, 'main_agent_read_only', 'agent.main')
+    if (agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime', 'external runtimes have their own lifecycle')
     if (agent.runtime.kind === 'profile') fail(409, 'profile_agent_read_only', 'agent.runtime', 'host profiles are always on with the main gateway')
     if (!runtime) fail(503, 'runtime_unavailable', 'agent.runtime')
     // An imported Hermes keeps its keys from admission; never start it with a missing key (fail closed, nothing regenerated).
@@ -1427,6 +1435,7 @@ export function createAgentRegistry(options = {}) {
       const agent = read(id)
       if (!agent) return ''
       if (id === MAIN_AGENT_ID) return options.mainHome || ''
+      if (agent.runtime.kind === 'external') return ''
       if (agent.runtime.kind === 'profile') return options.mainHome ? join(options.mainHome, 'profiles', agent.runtime.profile) : ''
       return join(folder(id), 'home')
     },
