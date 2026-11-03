@@ -20,6 +20,9 @@ export function createListEvidenceReader(hermesStatePath) {
         return followUps.get(id)
       }
       const sessionTruth = readHermesSessionTruth(hermesStatePath, ids, now / 1000)
+      // Current main's truth reader predates the shared callback in #300. Collect
+      // the same build-local optional-work witnesses explicitly until it lands.
+      for (const id of ids) nonHoldingFor(id)
       const helperStatuses = readHelperStatuses(hermesStatePath, ids, { now, nonHoldingFor, activeSessionIds: new Set(activeSessionIds) })
       for (const [id, helperStatus] of helperStatuses) { const t = sessionTruth.get(id); if (t) t.helperStatus = helperStatus }
       if (!operator) {
