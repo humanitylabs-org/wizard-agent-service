@@ -18,6 +18,7 @@ import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
+import { createListEvidenceLane } from './list-evidence-lane.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -3737,6 +3738,8 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
   }
 
+  const listEvidenceLane = createListEvidenceLane({ hermesStatePath, enabled: options.listEvidenceWorker !== false })
+  lifetime.own(() => listEvidenceLane.close(), () => listEvidenceLane.close())
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
@@ -4085,7 +4088,7 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
-  const projectSessionListCore = async (result, operator, canonicalPage, firstPage) => {
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, useEvidenceWorker = true) => {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
@@ -4108,9 +4111,17 @@ function buildWizardServer(options, lifetime) {
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
+          let sessionTruth
+          if (useEvidenceWorker) {
+            const evidence = await listEvidenceLane.read({ ids: listedSessionIds,
+              activeSessionIds: [...queueProjections, ...directRuns.values(), ...externalRuns].filter(r => ACTIVE_RUN_STATUSES.has(r.status)).map(r => r.sessionId),
+              heavyJobs: heavyJobRows(), supervisorStatePath: options.supervisorStatePath, operator, now: Date.now() })
+            sessionTruth = evidence.sessionTruth
+          } else {
+          // Keep the independent full-list oracle on the original main reader path.
+          sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
           const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           if (!operator) {
@@ -4130,6 +4141,7 @@ function buildWizardServer(options, lifetime) {
           }
           if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true })) {
             const t = sessionTruth.get(id); if (t) t.supervisorPending = true
+          }
           }
           result = filterSessionList(
             result,
@@ -4205,12 +4217,12 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectBatch = async (sessions, firstPage) =>
-      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    const projectBatch = async (sessions, firstPage, independent = false) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, !independent)).toString('utf8')).data
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
-      for (let index = 0; index < all.length; index += 100) rows.push(...await projectBatch(all.slice(index, index + 100), index === 0))
+      for (let index = 0; index < all.length; index += 100) rows.push(...await projectBatch(all.slice(index, index + 100), index === 0, true))
       return rows
     }
     const gate = () => {
@@ -4236,9 +4248,10 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
-      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
+      const supervisorSignals = await listEvidenceLane.read({ kind: 'signals', ids: [...recent], supervisorStatePath: options.supervisorStatePath, now: Date.now() })
+      for (const id of supervisorSignals.supervisorWaitIds) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
+      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), supervisorSignals.supervisorStamps)
       return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {

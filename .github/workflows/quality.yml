@@ -32,6 +32,8 @@ jobs:
         run: |
           "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
           python3 ops/agent-runtime/test_agent_runtime.py
+      - name: List evidence worker and fair per-run polling regressions
+        run: node --test tests/chats-list-fairness.node.mjs
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
