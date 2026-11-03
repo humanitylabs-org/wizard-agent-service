@@ -28,7 +28,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -1522,7 +1522,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       // Only a terminal marker is the reply's own status; a quoted example mid-reply is not (helper-continuation.mjs).
       const raw = historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n')
       const status = /\[\/WIZARD_STATUS_V1\]\s*$/u.test(raw) ? parseStatus(raw) : null
-      if (status) { projected.wizard_ask = status.ask; projected.wizard_state = status.state }
+      if (status) { projected.wizard_ask = fullStatusAsk(raw) || status.ask; projected.wizard_state = status.state }
     }
     const wakeup = historyProcessWakeup(message, projected.content)
     if (wakeup) Object.assign(projected, wakeup)

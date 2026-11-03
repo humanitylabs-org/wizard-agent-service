@@ -31,6 +31,15 @@ describe('reply summary on Wizard history rows', () => {
     expect(JSON.stringify(row)).not.toContain('WIZARD_STATUS_V1')
   })
 
+  it('keeps a long ask whole on the row (the 140-char clip is only for the chat list)', () => {
+    const ask = "Short-answer-plus-Details is a Wizard OS feature, on only for you for now. Asked James's team on GitHub to merge it and consider it for everyone"
+    expect(ask.length).toBeGreaterThan(140)
+    const long = { ...reply, content: `Long technical body.\n\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'fyi', ask, subject: 'Wizard OS' })}[/WIZARD_STATUS_V1]` }
+    const [row] = viewOf([long])
+    expect(row.wizard_ask).toBe(ask)
+    expect(row.wizard_ask).not.toContain('…')
+  })
+
   it('adds nothing for replies without a status, malformed ones, or owner text quoting a marker', () => {
     const rows = viewOf([
       { ...reply, id: 1, content: 'No status here.' },
