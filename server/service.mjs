@@ -1519,7 +1519,9 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     // The reply's own status line (hidden from the text above) carries a plain-words ask written for someone reading
     // cold. Keep it on the row so a shell can lead a long reply with it (wizard-ux --wos-reply-summary).
     if (role === 'assistant') {
-      const status = parseStatus(historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n'))
+      // Only a terminal marker is the reply's own status; a quoted example mid-reply is not (helper-continuation.mjs).
+      const raw = historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n')
+      const status = /\[\/WIZARD_STATUS_V1\]\s*$/u.test(raw) ? parseStatus(raw) : null
       if (status) { projected.wizard_ask = status.ask; projected.wizard_state = status.state }
     }
     const wakeup = historyProcessWakeup(message, projected.content)
