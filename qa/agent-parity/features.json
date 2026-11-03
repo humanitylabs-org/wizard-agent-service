@@ -1058,7 +1058,7 @@
       "id": "locked-selector-boundary",
       "description": "Explicit admitted locks survive selector changes; only unlocked main legacy hints inherit the current selector",
       "layer": "server",
-      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: hold a first turn, admit a required Opus lock, change the selector to Sonnet, release/dispatch the queued turn and verify Opus remains immutable. Restart and replay the exact request without duplication. Then send a fresh unlocked legacy Opus hint: main uses its persisted selector, while routed agents retain their own explicit route. Main fixture persists browser_model_lock in a synthetic SQLite database, not just an in-memory selector. Fixture-only, not real-provider acceptance.",
+      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: hold a first turn and admit a required Opus lock. Main permits a selector change to Sonnet; routed runtimes must keep their existing 409 active-turn model-change fence. Release/dispatch the queue and verify Opus remains immutable, then restart/replay the exact request without duplication. Once idle every kind permits the selector change. A fresh unlocked legacy Opus hint inherits main's selector only; routed agents retain their own explicit route. Main fixture persists browser_model_lock in synthetic SQLite, not just an in-memory selector. Fixture-only, not real-provider acceptance.",
       "source_refs": ["server/locked-run-bridge.mjs", "server/run-queue.mjs", "server/agents-http.mjs"],
       "reference_tests": ["tests/locked-run-bridge.test.mjs", "qa/agent-parity/queue-checks.mjs"],
       "fixture": "locked-selector-boundary",

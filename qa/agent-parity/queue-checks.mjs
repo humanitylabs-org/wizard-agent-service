@@ -36,17 +36,18 @@ async function lockedSelectorBoundary(s) {
  try {
   const selector = model => s.request('/api/sessions/wizard_parity/model', post({ model, provider: 'anthropic' }))
   const sonnet = 'claude-sonnet-5-5', opus = 'claude-opus-5-5'
-  assert.equal((await selector(sonnet)).status, 200)
+  assert.equal((await selector(opus)).status, 200)
   const first = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic held turn', model: sonnet, provider: 'anthropic', require_model_lock: true }))
   assert.equal(first.status, 202)
-  assert.equal((await selector(opus)).status, 200)
   const queuedInit = post({ session_id: 'wizard_parity', input: 'Synthetic immutable Opus admission', model: opus, provider: 'anthropic', require_model_lock: true })
   const queued = await s.request('/v1/runs', queuedInit)
   assert.equal(queued.status, 202)
   const receipt = await queued.json()
   assert.equal(receipt.status, 'queued')
   assert.equal(s.runs.size, 1)
-  assert.equal((await selector(sonnet)).status, 200)
+  const change = await selector(sonnet)
+  assert.equal(change.status, s.kind === 'main' ? 200 : 409,
+    `${s.kind}: preserve the routed runtime's existing active-turn model-change fence`)
   Object.assign([...s.runs.values()][0], { status: 'completed', output: 'Synthetic first result' })
   const until = Date.now() + 5_000
   while (s.runs.size < 2 && Date.now() < until) {
@@ -64,6 +65,7 @@ async function lockedSelectorBoundary(s) {
   assert.equal(replay.status, 202)
   assert.equal((await replay.json()).run_id, receipt.run_id)
   assert.equal(s.runs.size, 2, `${s.kind}: restart/replay cannot duplicate the admitted send`)
+  assert.equal((await selector(sonnet)).status, 200, `${s.kind}: an idle selector change remains available`)
   const fresh = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic unlocked legacy composer', model: opus, provider: 'anthropic' }))
   assert.equal(fresh.status, 202)
   assert.equal(sends().at(-1).body.model, s.kind === 'main' ? sonnet : opus,
