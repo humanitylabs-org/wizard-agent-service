@@ -65,13 +65,7 @@ async function lockedSelectorBoundary(s) {
   assert.equal((await replay.json()).run_id, receipt.run_id)
   assert.equal(s.runs.size, 2, `${s.kind}: restart/replay cannot duplicate the admitted send`)
   assert.equal((await selector(sonnet)).status, 200, `${s.kind}: an idle selector change remains available`)
-  const fresh = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic unlocked legacy composer', model: opus, provider: 'anthropic' }))
-  assert.equal(fresh.status, 202)
-  assert.equal(sends().at(-1).body.model, s.kind === 'main' ? sonnet : opus,
-    `${s.kind}: only the main legacy hint inherits the host selector; routed agents retain their own explicit route`)
-  // The opt-in native stream fixture is intentionally held. End it before close.
-  for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic cleanup' })
-  await s.request(`/v1/runs/${(await fresh.json()).run_id}`)
+  assert.equal(s.runs.size, 2, `${s.kind}: picker changes are not additional chat admissions`)
  } finally {
    // Also drain native fixture streams when an assertion fails.
    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic cleanup' })

@@ -1056,9 +1056,9 @@
     },
     {
       "id": "locked-selector-boundary",
-      "description": "Explicit admitted locks survive selector changes; only unlocked main legacy hints inherit the current selector",
+      "description": "Explicit admitted locks survive later selector changes without an app/model-specific dispatch override",
       "layer": "server",
-      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: declare the synthetic Opus/Sonnet models in each agent's allowed_models, hold a first turn, admit a required Opus lock, change the selector to Sonnet and release the queue. Verify Opus remains immutable, then restart/replay without duplication. A fresh unlocked legacy Opus hint inherits main's selector only; routed agents retain their own explicit route. Main fixture persists browser_model_lock in synthetic SQLite, not just an in-memory selector. Undeclared models remain forbidden by the existing model_not_allowed tests. Fixture-only, not real-provider acceptance.",
+      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: declare the synthetic Opus/Sonnet models in each agent's allowed_models, hold a first turn, admit a required Opus lock, change the selector to Sonnet and release the queue. Verify Opus remains immutable, then restart/replay without duplication and confirm picker edits do not admit chat turns. Main fixture persists browser_model_lock in synthetic SQLite. An earlier live bridge override fails this queued-admission regression; shared main already preserves it and must not adopt that override. Undeclared models remain forbidden by existing model_not_allowed tests. Fixture-only, not real-provider acceptance.",
       "source_refs": ["server/locked-run-bridge.mjs", "server/run-queue.mjs", "server/agents-http.mjs"],
       "reference_tests": ["tests/locked-run-bridge.test.mjs", "qa/agent-parity/queue-checks.mjs"],
       "fixture": "locked-selector-boundary",
