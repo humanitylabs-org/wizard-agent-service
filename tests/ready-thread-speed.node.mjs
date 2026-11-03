@@ -140,11 +140,14 @@ const serviceHeavyStatus = async () => {
 }
 
 test('heavy status decoration never reads discarded follow-up evidence for done rows', async () => {
-  const { run, reads } = await serviceHeavyStatus()
+  const { run, reads, guardHeavyStatus } = await serviceHeavyStatus()
   const status = { state: 'done', ask: 'Finished', title: 'Synthetic', subject: 'Tests', app_id: 'wizard-quest' }
   const jobs = [{ sessionId: 'synthetic', state: 'completed', resume: 'delivered' },
     { session_id: 'synthetic', state: 'running', resume: '' }]
-  for (let row = 0; row < 100; row++) assert.equal(run('hermes', 'synthetic', status, jobs), status)
+  // This main-based PR must preserve main's guard semantics, not assume the
+  // separate #300 guard change already landed. Only dead evidence reads change.
+  const expected = guardHeavyStatus(status, { agentId: 'hermes', sessionId: 'synthetic', jobs })
+  for (let row = 0; row < 100; row++) assert.deepEqual(run('hermes', 'synthetic', status, jobs), expected)
   assert.equal(reads(), 0, 'cached done rows must not synchronously read evidence the guard discards')
 })
 
