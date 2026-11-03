@@ -1081,7 +1081,8 @@ export function createAgentRegistry(options = {}) {
     const agent = read(id)
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
-    if (agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
+    // The main Hermes also has an external runtime, but keeps its Service-owned settings.
+    if (agent.harness === 'pi' && agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
     if (agent.runtime.kind === 'profile') {
       // Sharing metadata is Service-owned even for a file-provisioned host profile.
       if (Object.keys(body).some(key => !['permissions', 'notes_dir'].includes(key))

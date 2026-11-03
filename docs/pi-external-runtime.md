@@ -24,6 +24,26 @@ The adapter advertises `run_steer: false`, `run_approval_response: false`, no sk
 no audio, and no delegation. Stop and streamed text are supported. Native Pi JSONL and adapter metadata persist
 on Forum under `~/wizard-local/pi-agent/data`. There are no app, file, history-sharing or private-data grants.
 
+## Phase-one regression diagnosis
+
+The Pi-specific Service change starts at `895b1c5`; its parent `37b9973` is the inherited
+live-source baseline (not `main`). The first Forum attempt reported 9 failures / 115 passes:
+
+- Eight failures were Pi-caused: the main Hermes already has `runtime.kind: external`.
+  Pi's update/delivery guards must match `harness: pi` as well, preserving the main
+  agent's Service-owned app/visibility settings and assistant-only app deliveries.
+- The sandbox MEDIA test also fails on the unmodified parent when Docker runs as root:
+  root bypasses the fixture's `chmod(000)`. Parent results: 123/124 as root, 124/124 as
+  `node`; locally under the normal user, 124/124. No production MEDIA change is needed.
+- The Pi worker now runs the same seven suites as `node` with `--configLoader native`
+  (avoids a bundled-config write in root-owned `/app`). Fixed Service: 124/124 in the
+  Forum container; external registry tests: 4/4, including the main-Hermes distinction.
+  No suites, assertions, or privacy/lifecycle guards were removed.
+
+These are short synthetic tests in the existing canary image with candidate server/tests
+mounted read-only, not a completed image build or real-model acceptance. The fresh queued
+worker must still build the exact revisions and complete its through-Service acceptance.
+
 ## Release gate
 
 This is a feature, not a fix. Do not deploy it directly onto the owner's live Agent Service.

@@ -30,6 +30,20 @@ test('Pi accepts only reply-only standard external records with bounded loopback
   assert.equal(parseAgentFile({ ...fixture(), harness: 'hermes' }, 'pi'), null)
 })
 
+test('The main external Hermes retains Service-owned settings while Pi remains read-only', async () => {
+  const b = box()
+  try {
+    const registry = createAgentRegistry({ agentsDir: join(b.dir, 'agents') })
+    const main = registry.read('hermes')
+    assert.equal(main.harness, 'hermes')
+    assert.equal(main.runtime.kind, 'external')
+    assert.equal((await registry.update('hermes', { hidden: true })).hidden, true)
+    assert.notEqual((await registry.update('hermes', { hidden: false })).hidden, true)
+    await assert.rejects(registry.update('hermes', { label: 'Changed' }), e => e.status === 409 && e.check === 'agent.main')
+    await assert.rejects(registry.update('pi', { hidden: true }), e => e.status === 409 && e.error === 'external_agent_read_only')
+  } finally { rmSync(b.dir, { recursive: true }) }
+})
+
 test('External origins are fixed loopback even with container-network mode; dedicated health auth', async () => {
   const b = box(); const seen = []
   try {
