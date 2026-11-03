@@ -216,6 +216,8 @@ export const serverChecks = {
       assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
       for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
       assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
+      // The Markdown override is scoped: stock Hermes' own brevity default survives it on every agent kind.
+      assert.ok(own.includes('Only that plain-text line is overridden') && own.includes('keep replies brief and conversational, not a document, still applies'), `${s.kind}: ${style} keeps the runtime's brevity default`)
     }
   },
   'chats-spaces': async s => {
