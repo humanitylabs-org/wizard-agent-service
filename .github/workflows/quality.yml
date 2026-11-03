@@ -45,6 +45,8 @@ jobs:
           cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs
           python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - sign-in polling excludes expired saved bodies", text), "expected main regression did not fail"; print("EXPECTED_MAIN_REGRESSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/baseline-regression.log" "$baseline_status"
           node --test tests/diagnosed-signin.node.mjs
+      - name: Chats CPU and speed-meter regressions
+        run: node --test tests/chats-list-cpu.node.mjs tests/speed-meter.node.mjs tests/agent-service-cpu.node.mjs tests/chats-list-head.node.mjs tests/chats-head-runtime-parity.node.mjs tests/chats-list-truth.node.mjs tests/session-list-cache.node.mjs tests/session-list-cache-http.node.mjs tests/chats-list-poll.node.mjs
       - name: Reject live model override and preserve main admission locks
         run: |
           cp server/locked-run-bridge.mjs "$RUNNER_TEMP/regression-candidate.mjs"

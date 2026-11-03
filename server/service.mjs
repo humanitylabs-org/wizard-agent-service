@@ -1,3 +1,4 @@
+import { createSpeedMeter } from './speed-meter.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -16,8 +17,8 @@ import { contentDisposition } from './content-disposition.mjs'
 import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps } from './session-list-cache.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -28,7 +29,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -2724,11 +2725,11 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
-    agentId, sessionId, jobs,
-    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
-      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
-    isDelivered: job => {
+  // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
+  // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
+  const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
+    nonHolding: (_agentId, sessionId) => readNonHoldingFollowUps(hermesStatePath, sessionId),
+    isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
       return run?.session_id === sessionId && run?.heavy_origin === job.origin
@@ -2754,16 +2755,35 @@ function buildWizardServer(options, lifetime) {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const routedOpenAskEvidence = (agent, ids) => {
+    const home = routedAgentMedia(agent)?.home
+    const path = home ? join(home, 'state.db') : ''
+    const wanted = [...new Set((ids ?? []).filter(id => typeof id === 'string' && id))]
+    const evidence = new Map(wanted.map(id => [id, { truth: undefined, helperStatus: undefined, supervisorPending: false }]))
+    const now = Date.now()
+    // Same 100-thread batches as the main list (readers cap at 200; helper evidence caps per batch).
+    for (let at = 0; at < wanted.length; at += 100) {
+      const batch = wanted.slice(at, at + 100)
+      for (const [id, truth] of readHermesSessionTruth(path, batch, now / 1000)) if (evidence.has(id)) evidence.get(id).truth = truth
+      for (const [id, status] of readHelperStatuses(path, batch, { now })) if (evidence.has(id)) evidence.get(id).helperStatus = status
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
+    }
+    // One heavy-ledger snapshot for the whole list as well.
+    evidence.heavyJobs = heavyWork?.queue.rows()
+    return evidence
+  }
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
-    projectOpenAsk: (agent, row, replies, lastUserAt) => {
-      const home = routedAgentMedia(agent)?.home
-      const path = home ? join(home, 'state.db') : ''
-      const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
-      truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' })?.state === 'fyi'
-      truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
+    // One read of the agent's state.db per 100 listed threads, not three opens per row:
+    // projectProfileSessions prepares this once per list and passes it to projectOpenAsk.
+    prepareOpenAsk: (agent, ids) => routedOpenAskEvidence(agent, ids),
+    projectOpenAsk: (agent, row, replies, lastUserAt, prepared) => {
+      const evidence = prepared?.get(row.id) ?? routedOpenAskEvidence(agent, [row.id]).get(row.id)
+      const truth = { ...(evidence?.truth ?? {}) }
+      truth.helperStatus = evidence?.helperStatus
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
+      truth.supervisorPending = !!evidence?.supervisorPending
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
@@ -3501,13 +3521,8 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
-  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
-  let heavyRowsAt = 0, heavyRowsCache = []
-  const heavyJobRows = () => {
-    if (!heavyWork?.queue?.rows) return []
-    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
-    return heavyRowsCache
-  }
+  // The queue owns the data-version snapshot; every projection sees writes immediately.
+  const heavyJobRows = () => heavyWork?.queue.rows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -3737,11 +3752,13 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
   }
 
+  const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
+  lifetime.own(() => listTruthReader.close())
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
-    busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
+    busy: options.backgroundResultsBusyReader ?? (id => listTruthReader.busy(id)),
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
@@ -3818,7 +3835,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
+  const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -3842,7 +3859,9 @@ function buildWizardServer(options, lifetime) {
       }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
-          try { return await listCache.served() }
+          // The window selector normalizes into separate objects and never mutates
+          // these rows. Keep identity so its selection can be shared across polls.
+          try { return await listCache.served(true) }
           catch (error) { listCache.fellBack(error) }
         }
         const q = searchParams.get('q')
@@ -4020,13 +4039,14 @@ function buildWizardServer(options, lifetime) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
-  const enrichSessionListMessages = async (result, operator, sessionTruth = null) => {
+  const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
+          const position = Array.isArray(previewOffset) ? previewOffset[index] : previewOffset + index
+          if (position >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -4085,11 +4105,11 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
-  const projectSessionListCore = async (result, operator, canonicalPage, firstPage) => {
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0, includePendingFirstSend = true) => {
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
-          if (!operator && runQueue && firstPage) {
+          if (!operator && runQueue && firstPage && includePendingFirstSend) {
             try {
               const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
               result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
@@ -4108,20 +4128,26 @@ function buildWizardServer(options, lifetime) {
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
+          // Build-local only: never retain evidence by aggregate list signature.
+          // Truth and helper status share the same optional-follow-up witness.
+          const followUps = new Map()
+          const nonHoldingFor = id => {
+            if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+            return followUps.get(id)
+          }
+          const sessionTruth = listTruthReader.read(listedSessionIds, Date.now() / 1000, { nonHoldingFor })
           // One queue read per batch: both consumers below need the same newest-run projection.
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
+          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { nonHoldingFor, activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
           for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
           if (!operator) {
             // A thread whose own Thales job is still owed stays in Working, not Ready.
             try {
-              const followUps = new Map()
+              const listedSet = new Set(listedSessionIds)
               const holdingJobs = heavyJobRows().filter(job => {
                 const id = job.sessionId ?? job.session_id
-                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
-                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
-                return !followUps.get(id).has(job.job_id ?? job.id)
+                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSet.has(id)) return true
+                return !nonHoldingFor(id).has(job.job_id ?? job.id)
               })
               for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
                 const t = sessionTruth.get(id); if (t) t.heavyPending = true
@@ -4144,10 +4170,10 @@ function buildWizardServer(options, lifetime) {
           )
           if (!operator) result = await decorateReconnectRows(result)
           if (backgroundResults) {
-            try { result = await backgroundResults.project(result) }
+            try { result = await backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth) }
             catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
+          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
           if (!operator) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
@@ -4196,7 +4222,7 @@ function buildWizardServer(options, lifetime) {
     let messageMark = Number.NaN
     let lastFallbackLogAt = 0
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
-      last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+      last_build_ms: 0, head_ms: 0, hot_ms: 0, head_reused: 0, head_projected: 0, head_blocked: {}, head_extras: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
     const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
@@ -4205,8 +4231,18 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectBatch = async (sessions, firstPage) =>
-      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    // Head rows keep their original list position, so a sparse re-projection obeys the same
+    // 48-row preview cap as a full head projection (previewOffset is a number or per-row positions).
+    const projectBatch = async (sessions, firstPage, previewOffset = 0, includePendingFirstSend = true) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, previewOffset, includePendingFirstSend)).toString('utf8')).data
+    // Owner-controlled global inputs read by the direct core. Titles/pins/model are in
+    // raw canonical rows; subjects, spaces, agent metadata and follow-ups are decorated
+    // on every snapshot build. Operator workers are read only for operator lists.
+    // Keep the broad owner revision for snapshot freshness, NOT per-row invalidation.
+    const headContext = () => JSON.stringify([
+      appCatalog().map(app => app.id).sort(),
+      [...dismissedFailureStore.dismissals].filter(([, record]) => record.agent_id === 'hermes').sort(([a], [b]) => a.localeCompare(b)),
+    ])
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
@@ -4238,17 +4274,39 @@ function buildWizardServer(options, lifetime) {
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
       for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
-      return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
+      const stamps = mergeStamps(mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath)),
+        directRunStamps(directRuns.values()))
+      // One cheap per-thread signature over the queue-owned immutable snapshot.
+      // Delivery/resume can change without a new Hermes message or run transition.
+      const heavyStamps = heavyJobStamps(heavyJobRows())
+      const combinedStamps = mergeStamps(stamps, heavyStamps)
+      return { hot, warm, stamps: combinedStamps, reset: delta.roots === null, mark: delta.maxId }
     }
     const buildHybrid = async () => {
       const started = performance.now()
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
+      // Legacy enrichment appends pending first-send rows once, after the 100-row head batch.
+      // Project those exceptions fresh, separately from cacheable canonical rows, keeping
+      // their order and preview positions.
+      let reuseHead = true, pending = []
+      try { if (runQueue) pending = pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)) } catch { reuseHead = false }
+      const projectHeadExtras = async () => {
+        const extras = new Map()
+        if (pending.length) {
+          const head = all.slice(0, 100)
+          const known = new Set(head.map(session => session.id))
+          const appended = pending.filter(session => !known.has(session.id))
+          if (appended.length) extras.set(head.length, await projectBatch(appended, true, head.length, false))
+        }
+        return extras
+      }
+      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', headContext: headContext(), reuseHead,
+        projectBatch: (batch, first, offset) => projectBatch(batch, first, offset, !reuseHead), projectHeadExtras })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
+        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms), head_reused: result.head_reused, head_projected: result.head_projected, head_blocked: result.head_blocked, head_extras: result.head_extras,
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
@@ -4295,9 +4353,9 @@ function buildWizardServer(options, lifetime) {
         }
         return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
       },
-      served: async () => {
+      served: async (shared = false) => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
-        return rows.map((row) => ({ ...row }))
+        return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {
         stats.fallbacks++
@@ -4305,7 +4363,9 @@ function buildWizardServer(options, lifetime) {
         messageMark = Number.NaN
         if (Date.now() - lastFallbackLogAt > 60_000) { lastFallbackLogAt = Date.now(); console.log(`[list-cache] fell back to the full rebuild: ${error?.message ?? error}`) }
       },
-      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 10 * 60_000),
+      // Keep the independent full oracle and explicit check endpoint intact.
+      // Normal operation audits every 30 minutes; shadow rollout remains 2 minutes.
+      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 30 * 60_000),
     }
   })()
 
@@ -4982,8 +5042,11 @@ function buildWizardServer(options, lifetime) {
   }
 
   const standardRetrievalRate = new Map()
+  const speedMeter = createSpeedMeter()
+  lifetime.own(() => speedMeter.close(), () => speedMeter.close())
   const server = createServer(async (request, response) => {
-    if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+    const meterDone = speedMeter.begin(request)
+    if (lifetime.closing) { try { sendJson(response, 503, { error: 'service_unavailable' }) } finally { meterDone() }; return }
     const requestDone = lifetime.request()
     const tailnetIngress = request[TAILNET_INGRESS] === true
     const requireAccess = tailnetIngress || baseRequireAccess
@@ -4991,7 +5054,11 @@ function buildWizardServer(options, lifetime) {
     // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
     // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
-    if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
+    // A durable idempotency replay admits no work. Delay invalidation for this
+    // route until its outcome is known; real admissions still expire the snapshot.
+    const deferredListTouch = request.method === 'POST' && request.url === '/wizard/hermes/v1/runs'
+    let readOnlyRunReplay = false
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !deferredListTouch) listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
@@ -5102,7 +5169,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, listCache.stats())
+        sendJson(response, 200, { ...listCache.stats(), speed: speedMeter.stats() })
         return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
@@ -6354,6 +6421,7 @@ function buildWizardServer(options, lifetime) {
             const replay = runQueue.replay(runtime, sessionId, idempotencyKey, requestHash)
             if (replay) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
+              readOnlyRunReplay = true
               return
             }
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
@@ -6748,7 +6816,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { requestDone() }
+    } finally {
+      if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
+      meterDone(); requestDone()
+    }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {

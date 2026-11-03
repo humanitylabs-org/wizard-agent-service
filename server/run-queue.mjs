@@ -1,3 +1,4 @@
+import { createSlowTickLogger } from './speed-meter.mjs'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -161,6 +162,7 @@ export class DurableRunQueue {
     if (typeof launch !== 'function' || typeof lookup !== 'function') throw new Error('Wizard run queue transport is required')
     if (typeof agentId !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(agentId)) throw new Error('Wizard run queue agent is invalid')
     this.agentId = agentId
+    this.logSlowTick = createSlowTickLogger(`run-queue:${agentId}`)
     this.statePath = resolve(statePath)
     this.maxActive = maxActive
     if (!Number.isSafeInteger(reservedInteractive) || reservedInteractive < 0 || reservedInteractive >= maxActive) throw new Error('Wizard interactive reservation is invalid')
@@ -501,18 +503,18 @@ export class DurableRunQueue {
     return `${newest?.id ?? 0}:${newest?.n ?? 0}:${rows.map((row) => `${row.public_run_id}=${row.status}`).sort().join(',')}`
   }
 
-  // Per-thread fingerprint of every queue row (id=status), for the Chats list cache: a thread
+  // Per-thread fingerprint of every queue row (rowid/id/status/update), for the Chats list cache: a thread
   // whose rows were added, changed or pruned by retention must be re-projected. Reads status
   // from the index and session_id from the row head, never the body (~10 ms for ~1,800 rows).
   sessionStamps() {
     const rows = this.database.prepare(`
-      SELECT session_id, public_run_id, status FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
+      SELECT rowid, session_id, public_run_id, status, updated_at FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
     `).all()
     const parts = new Map()
     for (const row of rows) {
       const id = String(row.session_id)
       if (!parts.has(id)) parts.set(id, [])
-      parts.get(id).push(`${row.public_run_id}=${row.status}`)
+      parts.get(id).push(`${row.rowid}:${row.public_run_id}=${row.status}:${row.updated_at}`)
     }
     return new Map([...parts].map(([id, list]) => [id, list.sort().join(',')]))
   }
@@ -599,7 +601,8 @@ export class DurableRunQueue {
 
   // Durable insertion order rather than UUID order for same-millisecond admissions.
   latestForSession(sessionId) {
-    const row = this.database.prepare('SELECT * FROM wizard_run_queue WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(sessionId)
+    const latest = this.database.prepare('SELECT MAX(rowid) AS rowid FROM wizard_run_queue WHERE session_id=?').get(sessionId)
+    const row = latest?.rowid == null ? null : this.database.prepare('SELECT * FROM wizard_run_queue WHERE rowid=?').get(latest.rowid)
     return row ? this._record(row) : null
   }
 
@@ -1020,7 +1023,8 @@ export class DurableRunQueue {
   async tick(force = false) {
     if (this.closed) return
     if (this.tickPromise) return this.tickPromise
-    this.tickPromise = this._tick(force).finally(() => { this.tickPromise = null })
+    const started = performance.now()
+    this.tickPromise = this._tick(force).finally(() => { this.tickPromise = null; this.logSlowTick(started) })
     return this.tickPromise
   }
 
