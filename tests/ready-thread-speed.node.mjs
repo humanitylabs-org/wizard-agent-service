@@ -139,7 +139,7 @@ const serviceHeavyStatus = async () => {
   return { run: wrap(guardHeavyStatus, undefined, read, 'synthetic-only-unused', runQueue, agents), reads: () => reads, guardHeavyStatus }
 }
 
-test('heavy status decoration never reads discarded follow-up evidence for done rows', async () => {
+test('isolated Ready port preserves the current main guard and fresh done-row authority', async () => {
   const { run, reads, guardHeavyStatus } = await serviceHeavyStatus()
   const status = { state: 'done', ask: 'Finished', title: 'Synthetic', subject: 'Tests', app_id: 'wizard-quest' }
   const jobs = [{ sessionId: 'synthetic', state: 'completed', resume: 'delivered' },
@@ -148,7 +148,7 @@ test('heavy status decoration never reads discarded follow-up evidence for done 
   // separate #300 guard change already landed. Only dead evidence reads change.
   const expected = guardHeavyStatus(status, { agentId: 'hermes', sessionId: 'synthetic', jobs })
   for (let row = 0; row < 100; row++) assert.deepEqual(run('hermes', 'synthetic', status, jobs), expected)
-  assert.equal(reads(), 0, 'cached done rows must not synchronously read evidence the guard discards')
+  assert.equal(reads(), 100, 'main still consumes done-row optional-work witnesses; #300 changes that separately')
 })
 
 test('heavy status decoration preserves pending and delivered status semantics without evidence reads', async () => {

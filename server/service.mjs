@@ -2726,8 +2726,10 @@ function buildWizardServer(options, lifetime) {
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
     agentId, sessionId, jobs,
-    // The guard only changes check; done returns unchanged. Do not synchronously
-    // read transcript evidence that this guard cannot consume on cached list rows.
+    // Main still consumes optional-work witnesses for done rows. Preserve that
+    // authority until the separate #300 guard change lands; do not infer its state table.
+    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
+      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
     isDelivered: job => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
