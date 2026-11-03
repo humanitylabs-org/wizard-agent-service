@@ -14,6 +14,19 @@ export function neverSent(error) {
 }
 const fail = (message, status = 422) => Object.assign(new Error(message), { status })
 
+// A stale client can keep sending its old Opus default after the thread was locked elsewhere.
+// Deliberate picker changes persist the new lock first, so a stored Opus selection still wins.
+export function selectLockedRoute(value, stored, log) {
+  const explicit = value.model && value.provider ? { model: value.model, provider: value.provider } : null
+  const confirmed = stored?.model && stored?.provider ? { model: stored.model, provider: stored.provider } : null
+  if (typeof explicit?.model === 'string' && explicit.model.startsWith('claude-opus')
+    && confirmed && typeof confirmed.model === 'string' && !confirmed.model.startsWith('claude-opus')) {
+    log('[locked-run] stale Opus send retained the confirmed non-Opus session route')
+    return confirmed
+  }
+  return explicit || confirmed
+}
+
 export function runtimeMatches(runtime, route) {
   if (runtime?.model !== route.model) return false
   if (runtime.provider === route.provider) return true
@@ -99,11 +112,10 @@ export class LockedRunBridge {
     let value
     try { value = JSON.parse(init.body.toString()) }
     catch { throw fail('Invalid model-route request', 400) }
-    // Explicit body route is the immutable send-time selection. Older clients inherit a confirmed stored selection.
+    // Resolve once: the effective route must drive launch, the journal and runtime checks alike.
     const stored = this.sessionRoute(value.session_id)
     if (!value.require_model_lock && !stored) return this.rawFetch(url, init)
-    const route = value.model && value.provider ? { model: value.model, provider: value.provider }
-      : stored ? { model: stored.model, provider: stored.provider } : null
+    const route = selectLockedRoute(value, stored, this.log)
     if (!route && !value.require_model_lock) return this.rawFetch(url, init)
     if (!route?.model || !route?.provider || !idPattern.test(value.session_id || ''))
       throw fail('No confirmed model/provider for this message', 400)
