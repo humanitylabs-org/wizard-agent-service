@@ -32,6 +32,19 @@ jobs:
         run: |
           "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
           python3 ops/agent-runtime/test_agent_runtime.py
+      - name: Regression fails on frozen shared main, passes on this head
+        run: |
+          git fetch --no-tags --depth=1 origin aba3efa925a7ba1f11560b1732976e9ba57c0179
+          cp server/run-queue.mjs "$RUNNER_TEMP/regression-candidate.mjs"
+          trap 'cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs' EXIT
+          git show aba3efa925a7ba1f11560b1732976e9ba57c0179:server/run-queue.mjs > server/run-queue.mjs
+          set +e
+          node --test tests/diagnosed-signin.node.mjs > "$RUNNER_TEMP/baseline-regression.log" 2>&1
+          baseline_status=$?
+          set -e
+          cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs
+          python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - sign-in polling excludes expired saved bodies", text), "expected main regression did not fail"; print("EXPECTED_MAIN_REGRESSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/baseline-regression.log" "$baseline_status"
+          node --test tests/diagnosed-signin.node.mjs
       # npm test includes the fail-closed per-agent parity/coverage gate.
       - run: npm test
         env:
