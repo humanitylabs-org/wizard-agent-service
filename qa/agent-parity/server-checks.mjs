@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSyn
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 import { post, png, scene } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -47,6 +48,48 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'head-row-owner-write-parity': async s => {
+    if (s.kind === 'main') {
+      const db = new DatabaseSync(join(s.root, 'hermes-state.db'))
+      try { db.exec("ALTER TABLE sessions ADD COLUMN last_activity_description TEXT DEFAULT ''") } finally { db.close() }
+    }
+    const row = s.sessions.get('wizard_parity')
+    Object.assign(row, { hidden: false, title: 'Synthetic cache parity' })
+    row.messages.push({ role: 'user', content: 'Synthetic cache request', timestamp: Date.now() / 1000 - 2 },
+      { role: 'assistant', content: 'Synthetic result.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Synthetic result"}[/WIZARD_STATUS_V1]', timestamp: Date.now() / 1000 - 1 })
+    const listed = async title => {
+      let last = []
+      for (let attempt = 0; attempt < 40; attempt++) {
+        // Refresh the fixture's HTTP canonical census before the window snapshot:
+        // it was seeded in memory after startup's intentionally empty census.
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        const response = await s.request('/api/sessions?view=list&window=archive-50&limit=100')
+        assert.equal(response.status, 200)
+        const data = (await response.json()).data
+        last = data
+        const item = data.find(value => value.id === row.id)
+        if (item?.title === title) return data
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      assert.fail(`${s.kind}: ${title} did not reach the projected list: ${JSON.stringify(last)}`)
+    }
+    const before = await listed(row.title)
+    for (let i = 0; i < 8; i++) {
+      const response = await fetch(`${s.origin()}/wizard/thread-seen`, { method: 'PUT',
+        headers: { ...s.ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ initializedAt: Date.now(), threads: {} }) })
+      assert.equal(response.status, 200)
+    }
+    assert.deepEqual(await listed(row.title), before, 'unrelated owner writes preserve every row field on every runtime')
+    if (s.kind === 'main') {
+      const stats = await (await fetch(`${s.origin()}/wizard/list-cache`, { headers: s.ownerHeaders })).json()
+      assert(stats.head_reused > 0, JSON.stringify(stats))
+      assert.equal(stats.fallbacks, 0)
+    }
+    const renamed = await s.request(`/api/sessions/${row.id}`, { ...post({ title: 'Synthetic owner rename' }), method: 'PATCH' })
+    assert.equal(renamed.status, 200)
+    const after = (await listed('Synthetic owner rename')).find(value => value.id === row.id)
+    assert.equal(after.title, 'Synthetic owner rename', 'row-affecting owner writes remain immediately visible')
+  },
   'owned-open-work': async s => {
     await admit(s, { input: 'Synthetic approved backend fix' })
     assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), false, 'persona-owned follow-up style is never imposed at any runtime HTTP boundary')
