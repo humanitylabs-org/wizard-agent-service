@@ -101,6 +101,31 @@ class ImporterApiTests(unittest.TestCase):
                                          headers={"X-Wizard-Import": "1"}).status_code, 409)
         self.assertEqual(list(self.home.rglob("*")), [])
 
+    def test_dest_is_an_agent_id_and_reaches_that_agents_home(self):
+        registry = Path(self.tmp.name) / "wizard-os/agents"
+        home = registry / "studio/home"
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text("memory: {}\n", "utf-8")
+        (registry / "studio/agent.json").write_text(json.dumps({"schema": 1, "id": "studio", "label": "Studio", "runtime": {
+            "kind": "container", "app_id": "agent-studio", "port": 18700}}), "utf-8")
+        os.environ["WIZARD_AGENTS_DIR"] = str(registry)
+        self.addCleanup(os.environ.pop, "WIZARD_AGENTS_DIR", None)
+        self.assertEqual([d["id"] for d in self.client.get(P + "/sources").json()["into"]], ["studio"])
+        for bad in ("../studio", "/tmp", "Studio", 7):
+            r = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "dest": bad}, headers=H)
+            self.assertEqual(r.status_code, 400, bad)
+        scan = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "dest": "studio"}, headers=H).json()
+        self.assertEqual(scan["into"], "Studio")
+        done = self.client.post(P + "/import", json={"import_id": scan["import_id"], "chats": True, "dest": "studio"}, headers=H)
+        self.assertEqual(done.status_code, 200, done.text)
+        self.assertTrue((home / "cache/bring-data/imports.json").is_file())
+        self.assertFalse((self.home / "cache").exists())
+        self.assertEqual(len(self.client.get(P + "/imports?dest=studio").json()["imports"]), 1)
+        self.assertEqual(self.client.get(P + "/imports").json()["imports"], [])
+        undo = self.client.post(P + "/undo", json={"import_id": scan["import_id"], "dest": "studio"}, headers=H)
+        self.assertEqual(undo.status_code, 200, undo.text)
+        self.assertEqual(self.client.get(P + "/imports?dest=studio").json()["imports"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

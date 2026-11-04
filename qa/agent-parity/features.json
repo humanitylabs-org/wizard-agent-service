@@ -1396,7 +1396,7 @@
     },
     {
       "id": "bring-my-data",
-      "description": "An owner's ChatGPT/Claude/Hermes export dropped in Files is archived as searchable chats in the owner's Files, and picked Hermes skills install only into the importing agent's own home.",
+      "description": "An owner's ChatGPT/Claude/Hermes export dropped in Files is archived as searchable chats in the owner's Files, and picked Hermes skills install only into the importing agent's own home, or, from the Importer app, into another Wizard OS agent the owner picks (dest: a standard container or host profile agent; restricted agents are never offered).",
       "layer": "server",
       "how_to_test": "For every runtime kind, upload a synthetic ChatGPT export and a synthetic Hermes backup through the Service's Files upload, run the wizard-os bring_data tool with that kind's own HERMES_HOME and the owner Files root, then assert scan counts, the archived chat under Files/Imported/ChatGPT, the scan record and the installed skill under that agent's home only, and that no credential from the export appears in tool output. Synthetic fixture evidence, not live/browser evidence.",
       "source_refs": [
@@ -1404,7 +1404,8 @@
         "hermes-plugin/wizard-os/__init__.py"
       ],
       "reference_tests": [
-        "tests/test_bring_data_plugin.py"
+        "tests/test_bring_data_plugin.py",
+        "tests/test_bring_data_importer.py"
       ],
       "fixture": "bring-my-data",
       "policy_exemptions": []

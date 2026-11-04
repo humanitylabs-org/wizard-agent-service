@@ -10,6 +10,8 @@ import builtins
 import importlib.util
 import json
 import os
+import shutil
+import sqlite3
 import sys
 import tempfile
 import types
@@ -87,6 +89,26 @@ def claude_code_home(base: Path) -> Path:
     (home / 'agents').mkdir()
     (home / 'agents/reviewer.md').write_text('---\nname: reviewer\ndescription: Reviews my code\n---\nBe strict.\n', 'utf-8')
     return home
+
+
+def fact_store(path: Path, facts) -> None:
+    """The stock holographic plugin's tables (facts with its full-text triggers, entities)."""
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS facts (fact_id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL UNIQUE,
+            category TEXT DEFAULT 'general', tags TEXT DEFAULT '', trust_score REAL DEFAULT 0.5,
+            retrieval_count INTEGER DEFAULT 0, helpful_count INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, hrr_vector BLOB);
+        CREATE TABLE IF NOT EXISTS fact_entities (fact_id INTEGER, entity_id INTEGER, PRIMARY KEY (fact_id, entity_id));
+        CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(content, tags, content=facts, content_rowid=fact_id);
+        CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+            INSERT INTO facts_fts(rowid, content, tags) VALUES (new.fact_id, new.content, new.tags); END;
+        CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content, tags) VALUES ('delete', old.fact_id, old.content, old.tags); END;
+    """)
+    con.executemany("INSERT INTO facts (content, category, trust_score) VALUES (?, ?, ?)", facts)
+    con.commit()
+    con.close()
 
 
 class FakeMemory:
@@ -272,8 +294,9 @@ class ImporterTests(unittest.TestCase):
         result = call('sources')
         self.assertTrue(result['success'], result)
         local = {(s['kind'], s['label']) for s in result['local']}
-        self.assertEqual(local, {('claude-code', 'Claude Code on this box'), ('hermes', 'Hermes on this box'),
-                                 ('hermes', 'Hermes profile “work”')})
+        self.assertEqual(local, {('claude-code', 'Claude Code on this box'), ('hermes', 'This box’s main agent'),
+                                 ('hermes', 'Hermes profile work')})
+        self.assertEqual(result['into'], [])
         files = {f['name']: f for f in result['files']}
         self.assertEqual(set(files), {'export.zip', 'data-2026.json'})
         self.assertEqual(files['export.zip']['kind'], 'chatgpt')
@@ -286,6 +309,201 @@ class ImporterTests(unittest.TestCase):
         refused = call('scan', path=str(self.base / 'user/.hermes'))
         self.assertFalse(refused['success'])
         self.assertIn("own agent", refused['error'])
+
+    # ------------------------------------------------------------------ other agents on this box
+    def test_a_profile_inside_this_agent_is_another_agent(self):
+        """The owner's box lists "Hermes profile history" (~/.hermes/profiles/history) while the engine runs in
+        ~/.hermes: tapping it must scan that profile, not refuse it as this agent."""
+        main = self.base / 'user/.hermes'
+        os.environ['HERMES_HOME'] = str(main)
+        (main / 'memories').mkdir(parents=True)
+        (main / 'memories/USER.md').write_text('MAIN ONLY\n', 'utf-8')
+        history = main / 'profiles/history'
+        (history / 'memories').mkdir(parents=True)
+        (history / 'memories/USER.md').write_text('Ana keeps bees.\n', 'utf-8')
+        (history / '.env').write_text(f'ANTHROPIC_API_KEY={CANARY}\n', 'utf-8')
+        listed = call('sources')['local']
+        self.assertEqual([(s['label'], s['path']) for s in listed], [('Hermes profile history', str(history))])
+        scan = call('scan', path=str(history))
+        self.assertTrue(scan['success'], scan)
+        self.assertEqual(scan['memories'], ['Ana keeps bees.'])
+        self.assertNotIn(CANARY, json.dumps(scan))
+        for refused in (main, main / 'memories', main / 'profiles'):
+            result = call('scan', path=str(refused))
+            self.assertFalse(result['success'], refused)
+            self.assertIn('own agent', result['error'])
+
+    def test_this_agent_is_never_its_own_source_without_another_agent(self):
+        own = self.base / 'user/.hermes'
+        os.environ['HERMES_HOME'] = str(own)
+        (own / 'memories').mkdir(parents=True)
+        self.assertEqual(call('sources')['local'], [])
+        registry = self.registry()
+        self.container_agent(registry, 'studio', 'Studio')
+        result = call('sources')
+        self.assertEqual(result['local'], [{'kind': 'hermes', 'self': True, 'label': 'This box’s main agent (Oscar)',
+                                            'path': str(own)}])
+        self.assertEqual(result['into'], [{'id': 'studio', 'label': 'Studio', 'kind': 'container', 'where': 'Inside Wizard OS'}])
+        self.assertFalse(call('scan', path=str(own))['success'])  # not into itself
+
+    def registry(self):
+        registry = self.base / 'wizard-os/agents'
+        registry.mkdir(parents=True)
+        (registry.parent / 'settings.json').write_text(json.dumps({'agent': {'name': 'Oscar'}}), 'utf-8')
+        os.environ['WIZARD_AGENTS_DIR'] = str(registry)
+        self.addCleanup(os.environ.pop, 'WIZARD_AGENTS_DIR', None)
+        return registry
+
+    def container_agent(self, registry, agent_id, label, **runtime):
+        folder = registry / agent_id
+        (folder / 'home').mkdir(parents=True)
+        (folder / 'home/config.yaml').write_text('memory:\n  provider: holographic\n', 'utf-8')
+        (folder / 'agent.json').write_text(json.dumps({'schema': 1, 'id': agent_id, 'label': label, 'runtime': {
+            'kind': 'container', 'app_id': f'agent-{agent_id}', 'port': 18700, **runtime}}), 'utf-8')
+        return folder / 'home'
+
+    def alongside_hermes(self):
+        """This agent's own home, shaped like Oscar's: SOUL, memories, a skill, chats, a fact store, credentials."""
+        own = self.base / 'user/.hermes'
+        os.environ['HERMES_HOME'] = str(own)
+        (own / 'memories').mkdir(parents=True)
+        (own / 'memories/USER.md').write_text('Ana lives in Lisbon.\n§\nPrefers short answers.\n', 'utf-8')
+        (own / 'memories/MEMORY.md').write_text('Box runs Wizard OS alongside.\n', 'utf-8')
+        (own / 'SOUL.md').write_text('You are Oscar, direct and kind.\n', 'utf-8')
+        (own / '.env').write_text(f'ANTHROPIC_API_KEY={CANARY}\n', 'utf-8')
+        (own / 'auth.json').write_text(json.dumps({'token': CANARY}), 'utf-8')
+        (own / 'config.yaml').write_text(f'model:\n  api_key: {CANARY}\n', 'utf-8')
+        skill = own / 'skills/devops/box-care'
+        skill.mkdir(parents=True)
+        (skill / 'SKILL.md').write_text('---\nname: box-care\ndescription: Keep the box healthy.\n---\n# Box\n', 'utf-8')
+        (skill / 'token.txt').write_text(CANARY, 'utf-8')
+        con = sqlite3.connect(own / 'state.db')
+        con.executescript("CREATE TABLE sessions (id TEXT, title TEXT, source TEXT, started_at REAL, parent_session_id TEXT);"
+                          "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL);")
+        con.execute("INSERT INTO sessions VALUES ('s1', 'Plan the move', 'cli', 1790000000, NULL)")
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'Move me into Wizard OS', 1790000001)")
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'assistant', 'On it.', 1790000002)")
+        con.commit(); con.close()
+        fact_store(own / 'memory_store.db', [('Ana’s box is called garden-box.', 'general', 0.9),
+                                             ('Ana likes plain words.', 'preference', 0.7),
+                                             (f'The key is {CANARY}', 'general', 0.5)])
+        return own
+
+    def tree(self, root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file()}
+
+    def test_move_this_agent_into_an_agent_inside_wizard_os(self):
+        own = self.alongside_hermes()
+        registry = self.registry()
+        dest = self.container_agent(registry, 'oscar-os', 'Oscar in Wizard OS')
+        before = self.tree(own)
+        listed = call('sources')
+        self.assertTrue(listed['local'][0]['self'])
+        scan = call('scan', path=str(own), dest='oscar-os')
+        self.assertTrue(scan['success'], scan)
+        self.assertEqual(scan['into'], 'Oscar in Wizard OS')
+        self.assertEqual(scan['counts']['facts'], 2)  # the key-looking fact stays behind
+        self.assertEqual(scan['fact_store'], {'found': 2, 'here': None})
+        self.assertEqual(scan['personality'], {'found': True, 'here': 'none'})
+        self.assertEqual([s['name'] for s in scan['new_skills']], ['box-care'])
+        result = call('import', import_id=scan['import_id'], dest='oscar-os', chats=True, skills='all', personality=True,
+                      facts=True, about={'facts': ['Ana lives in Lisbon.']})
+        self.assertTrue(result['success'], result)
+        self.assertEqual(result['errors'], {})
+        self.assertEqual(result['done']['facts']['facts_added'], 2)
+        self.assertTrue(result['done']['facts']['provider_on'])
+        self.assertEqual((dest / 'SOUL.md').read_text('utf-8'), 'You are Oscar, direct and kind.\n')
+        self.assertTrue((dest / 'skills/imported/box-care/SKILL.md').is_file())
+        self.assertFalse((dest / 'skills/imported/box-care/token.txt').exists())
+        con = sqlite3.connect(dest / 'memory_store.db')
+        self.assertEqual(sorted(r[0] for r in con.execute('SELECT content FROM facts')),
+                         ['Ana likes plain words.', 'Ana’s box is called garden-box.'])
+        self.assertEqual(con.execute("SELECT trust_score FROM facts WHERE category = 'preference'").fetchone()[0], 0.7)
+        self.assertEqual(con.execute("SELECT count(*) FROM facts_fts WHERE facts_fts MATCH 'plain'").fetchone()[0], 1)
+        con.close()
+        self.assertTrue(list((self.files / 'Imported/Hermes/Chats').rglob('*Plan the move*.md')))
+        self.assertTrue((dest / 'cache/bring-data/imports.json').is_file())
+        self.assertEqual(self.tree(own), before)  # the source agent is only read
+        self.assertNotIn(CANARY, self.written())
+        for name in ('.env', 'auth.json', 'config.yaml'):
+            self.assertNotIn(CANARY, (dest / name).read_text('utf-8') if (dest / name).exists() else '')
+        self.assertEqual(call('status')['imports'], [])  # this agent's own list stays empty
+        listed = call('status', dest='oscar-os')['imports']
+        self.assertEqual([(i['facts_added'], i['personality']) for i in listed], [(2, True)])
+        undone = call('undo', import_id=scan['import_id'], dest='oscar-os')
+        self.assertTrue(undone['success'], undone)
+        self.assertEqual(undone['removed_facts'], 2)
+        self.assertEqual(undone['personality'], 'removed')
+        self.assertFalse((dest / 'SOUL.md').exists())
+        self.assertFalse((dest / 'skills/imported/box-care').exists())
+        self.assertEqual(self.tree(own), before)
+
+    def test_facts_merge_into_an_existing_store_and_undo_keeps_the_agents_own(self):
+        own = self.alongside_hermes()
+        dest = self.container_agent(self.registry(), 'studio', 'Studio')
+        fact_store(dest / 'memory_store.db', [('Ana likes plain words.', 'general', 0.4), ('Studio fact.', 'general', 0.5)])
+        scan = call('scan', path=str(own), dest='studio')
+        self.assertEqual(scan['fact_store'], {'found': 2, 'here': 2})
+        done = call('import', import_id=scan['import_id'], dest='studio', facts=True)['done']['facts']
+        self.assertEqual((done['facts_added'], done['already_here']), (1, 1))
+        call('undo', import_id=scan['import_id'], dest='studio')
+        con = sqlite3.connect(dest / 'memory_store.db')
+        self.assertEqual(sorted((r[0], r[1]) for r in con.execute('SELECT content, trust_score FROM facts')),
+                         [('Ana likes plain words.', 0.4), ('Studio fact.', 0.5)])
+        con.close()
+
+    def test_fact_store_into_this_agent_from_another_hermes(self):
+        other = self.alongside_hermes()
+        os.environ['HERMES_HOME'] = str(self.home)
+        scan = call('scan', path=str(other))
+        self.assertEqual(scan['counts']['facts'], 2)
+        done = call('import', import_id=scan['import_id'], facts=True)
+        self.assertEqual(done['done']['facts']['facts_added'], 2)
+        self.assertTrue((self.home / 'memory_store.db').is_file())
+
+    def test_only_writable_standard_agents_are_destinations(self):
+        own = self.alongside_hermes()
+        registry = self.registry()
+        self.container_agent(registry, 'sealed', 'Sealed', isolation='restricted')
+        self.container_agent(registry, 'arriving', 'Arriving', admission='importing')
+        unprepared = self.container_agent(registry, 'bare', 'Bare')
+        (unprepared / 'config.yaml').unlink()
+        (registry / 'Bad_Id').mkdir()
+        escape = self.container_agent(registry, 'escape', 'Escape')
+        shutil.rmtree(escape)
+        escape.symlink_to(own, target_is_directory=True)
+        self.assertEqual(call('sources')['into'], [])
+        refused = call('scan', path=str(own), dest='sealed')
+        self.assertFalse(refused['success'])
+        self.assertIn('not on this box', refused['error'])
+        self.assertFalse(call('scan', path=str(own), dest='../user')['success'])
+
+    def test_files_not_writable_is_caught_before_and_after_and_a_rerun_brings_only_the_rest(self):
+        """An owner's real Claude Code import: the Files root belongs to the Files app's user, so the agent could not create
+        Files/Imported. Skills came in; chats and About me failed with a raw "[Errno 13] Permission denied: <path>"."""
+        cc = claude_code_home(self.base)
+        os.chmod(self.files, 0o555)
+        self.addCleanup(os.chmod, self.files, 0o755)
+        scan = call('scan', path=str(cc))
+        self.assertEqual(set(scan['blocked']), {'chats', 'about'})
+        self.assertIn('Files › Imported', scan['blocked']['chats'])
+        result = call('import', import_id=scan['import_id'], chats=True, skills='all', about={'facts': ['I am Ana.']})
+        self.assertTrue(result['success'], result)
+        self.assertEqual(set(result['errors']), {'chats', 'about'})
+        for reason in result['errors'].values():
+            self.assertNotIn('Errno', reason)
+            self.assertNotIn(str(self.files), reason)
+            self.assertIn('Try again', reason)
+        self.assertTrue(result['done']['skills']['installed'])
+        self.assertEqual(result['done']['about']['memory_added'], 1)  # memory still saved without the file
+        os.chmod(self.files, 0o755)
+        self.assertEqual(call('scan', path=str(cc))['blocked'], {})
+        again = call('import', import_id=scan['import_id'], chats=True, skills='all', about={'facts': ['I am Ana.']})
+        self.assertEqual(again['errors'], {})
+        self.assertEqual(again['done']['chats']['chats_written'], 2)
+        self.assertEqual(again['done']['skills']['installed'], [])
+        self.assertEqual((again['done']['about']['memory_added'], again['done']['about']['already_known']), (0, 1))
+        self.assertTrue((self.files / 'Imported/About me.md').is_file())
 
     def test_allowed_paths(self):
         cc = claude_code_home(self.base)
