@@ -38,6 +38,10 @@ test('valid JSON scalars and malformed rows fail closed',t=>{
  }
  f.publish([null,{}, {id:'agent-example',agent_runtime:null}]); assert.deepEqual(appAgentRuntimes(f.apps,f.grants),[]);
 });
+test('app manifests cannot claim confidential provider identity', t=>{
+ const f=fixture(t);
+ for(const provider of ['tinfoil','local']) { f.app.agent_runtime.model.provider=provider; f.publish([f.app]); assert.equal(f.registry.read('example'),null); }
+});
 test('runtime identity belongs to its app and any leftover agent folder blocks adoption',t=>{
  const f=fixture(t); f.app.id='other-app'; f.publish([f.app]);
  writeFileSync(f.grants,JSON.stringify({outgoing:{'other-app':'a'.repeat(64)},provider_endpoints:{'other-app':'http://other-app:18659'}}));

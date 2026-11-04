@@ -39,7 +39,7 @@ test('any harness is admitted using a scoped grant; uninstall and reinstall pres
 
 test('duplicates, reserved identities, missing grants and untrusted endpoints fail closed', t => {
   const f = fixture(t);
-  f.publish([f.app, { ...f.app, id: 'second-runtime' }]); assert.equal(f.registry.read('example-agent'), null);
+  f.publish([f.app, { ...f.app }]); assert.equal(f.registry.read('example-agent'), null);
   f.runtime.id = 'main'; f.publish(); assert.equal(f.registry.list().length, 1);
   f.runtime.id = 'example-agent'; f.publish();
   writeFileSync(f.grants, JSON.stringify({ outgoing: { 'agent-example-agent': f.key() }, provider_endpoints: { 'agent-example-agent': 'http://attacker.example:18659' } }));

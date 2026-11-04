@@ -7,7 +7,7 @@ export function appAgentRuntimes(appsPath, grantsPath) {
   const apps = read(appsPath).apps;
   if (!Array.isArray(apps)) return [];
   const grants = read(grantsPath);
-  const candidates = apps.filter(a => a?.agent_runtime && typeof a.id === 'string' && id.test(a.id));
+  const candidates = apps.filter(a => a?.agent_runtime && typeof a.id === 'string' && id.test(a.id) && a.id === `agent-${a.agent_runtime.id}`);
   const counts = new Map();
   for (const a of candidates) counts.set(a.agent_runtime.id, (counts.get(a.agent_runtime.id) || 0) + 1);
   return candidates.flatMap(a => {
@@ -15,7 +15,7 @@ export function appAgentRuntimes(appsPath, grantsPath) {
     if (counts.get(r.id) !== 1 || typeof r.id !== 'string' || !/^[a-z][a-z0-9-]{1,30}$/u.test(r.id) || ['main', 'hermes', 'default', 'new', 'options'].includes(r.id) || typeof r.harness !== 'string' || !id.test(r.harness)
         || a.id !== `agent-${r.id}` || a.type !== 'agent' || a.privacy === 'private' || typeof r.label !== 'string' || !r.label.trim() || r.label.length > 80
         || !Number.isInteger(r.port) || r.port < 1024 || r.port > 65535 || !Number.isInteger(r.host_port) || r.host_port < 1024 || r.host_port > 65535
-        || !m || typeof m.provider !== 'string' || typeof m.model !== 'string' || !m.provider || !m.model) return [];
+        || ['tinfoil', 'local'].includes(m?.provider) || !m || typeof m.provider !== 'string' || typeof m.model !== 'string' || !m.provider || !m.model) return [];
     const key = grants.outgoing?.[a.id];
     if (typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)) return [];
     // Endpoint is compiled by WAM from its recipe, never supplied by the app at runtime.
