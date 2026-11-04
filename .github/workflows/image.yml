@@ -1,0 +1,17 @@
+name: Candidate image recipe
+# Candidate build/publish runs ONLY on Thales under the shared worker lock.
+# This workflow validates packaging lightly; no image publication or heavy build on hosted runners.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recipe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate candidate metadata
+        run: |
+          python3 -c 'import json; x=json.load(open("runtipi/config.json")); assert x["id"] == "wizard-agent-service"; assert "candidate" in x["version"]'
+          test -f wizard.md
+          test -f Dockerfile

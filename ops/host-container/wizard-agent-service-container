@@ -1,0 +1,71 @@
+#!/bin/bash
+# ExecStart/ExecStop for a systemd-managed Agent Service that runs in its own container.
+#
+#   wizard-agent-service-container           start (foreground; systemd supervises it)
+#   wizard-agent-service-container --stop    graceful stop (ExecStop/ExecStopPost)
+#
+# Same code, same data, same port as the native unit: the container runs the release the deploy tool
+# installed, with the home directory bound at the same path and host networking, so Hermes, Wizard Files,
+# the agent runtime and the service's own listener keep their addresses. systemd still owns restart,
+# environment and deploy; the unit's environment is passed to docker by NAME (values never reach argv).
+# Linux only (systemd, sg, GNU env). See README.md in this folder.
+#
+# Settings (all optional; defaults derive from the account running the unit):
+#   WIZARD_CONTAINER_NAME     container name                  (wizard-agent-service)
+#   WIZARD_CONTAINER_IMAGE    runtime image                   (wizard-agent-service-runtime:node22.22.3-py3)
+#   WIZARD_CONTAINER_HOME     host directory bound at the same path inside the container   ($HOME)
+#   WIZARD_CONTAINER_ENTRY    service entry point             (${XDG_DATA_HOME:-$HOME/.local/share}/wizard-mobile-server/current/server/index.mjs)
+#   WIZARD_CONTAINER_WORKDIR  working directory               (the unit's WorkingDirectory when inside the home, else the home)
+#   WIZARD_CONTAINER_USER     uid:gid inside the container    ($(id -u):$(id -g))
+#   Rehearsal knobs: WIZARD_CONTAINER_HOME_RO=1 binds the home read-only; WIZARD_CONTAINER_RW="src=dst,src=dst"
+#   overlays writable binds (fresh copies of the service's state) on top of it.
+set -euo pipefail
+: "${HOME:?HOME must be set}"
+NAME=${WIZARD_CONTAINER_NAME:-wizard-agent-service}
+IMAGE=${WIZARD_CONTAINER_IMAGE:-wizard-agent-service-runtime:node22.22.3-py3}
+HOST_HOME=${WIZARD_CONTAINER_HOME:-$HOME}
+ENTRY=${WIZARD_CONTAINER_ENTRY:-${XDG_DATA_HOME:-$HOME/.local/share}/wizard-mobile-server/current/server/index.mjs}
+case "$PWD/" in "$HOST_HOME"/*) default_workdir=$PWD ;; *) default_workdir=$HOST_HOME ;; esac
+WORKDIR=${WIZARD_CONTAINER_WORKDIR:-$default_workdir}
+RUN_AS=${WIZARD_CONTAINER_USER:-$(id -u):$(id -g)}
+
+# systemd user units do not carry the docker group; re-enter through sg (the account must be a docker member).
+if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+  [ -n "${WIZARD_CONTAINER_SG:-}" ] && { echo "docker socket unavailable even under sg" >&2; exit 70; }
+  export WIZARD_CONTAINER_SG=1
+  cmd="exec $(printf '%q' "$0")"; [ $# -gt 0 ] && cmd+=" $(printf '%q ' "$@")"
+  exec sg docker -c "$cmd"
+fi
+
+graceful_stop() {
+  if docker container inspect "$NAME" >/dev/null 2>&1; then
+    docker stop -t 25 "$NAME" >/dev/null 2>&1 || true
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
+}
+
+if [ "${1:-}" = "--stop" ]; then graceful_stop; exit 0; fi
+graceful_stop   # a leftover from a crashed client never blocks the restart
+
+skip='^(PATH|PWD|OLDPWD|SHLVL|_|INVOCATION_ID|JOURNAL_STREAM|MANAGERPID|SYSTEMD_EXEC_PID|MEMORY_PRESSURE_WATCH|MEMORY_PRESSURE_WRITE|DBUS_SESSION_BUS_ADDRESS|SSH_AUTH_SOCK|XDG_[A-Z_]*|QT_ACCESSIBILITY|GSM_SKIP_SSH_AGENT_WORKAROUND|WIZARD_CONTAINER_[A-Z_]*)$'
+envargs=()
+while IFS= read -r -d '' kv; do
+  k=${kv%%=*}
+  [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  [[ $k =~ $skip ]] && continue
+  envargs+=(-e "$k")
+done < <(env -0)
+
+home_mount="type=bind,src=$HOST_HOME,dst=$HOST_HOME"
+[ "${WIZARD_CONTAINER_HOME_RO:-0}" = 1 ] && home_mount+=",readonly"
+mounts=(--mount "$home_mount")
+IFS=, read -r -a rw <<<"${WIZARD_CONTAINER_RW:-}"
+for pair in "${rw[@]}"; do [ -n "$pair" ] || continue; mounts+=(--mount "type=bind,src=${pair%%=*},dst=${pair#*=}"); done
+
+exec docker run --rm --name "$NAME" --init --network host --user "$RUN_AS" \
+  --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --log-opt max-size=10m --log-opt max-file=3 --stop-timeout 25 \
+  --label org.wizard.role=agent-service \
+  "${mounts[@]}" -w "$WORKDIR" "${envargs[@]}" \
+  "$IMAGE" sh -c 'umask 077 && exec node "$0"' "$ENTRY"

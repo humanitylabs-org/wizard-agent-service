@@ -1,0 +1,12 @@
+test_ambiguous_claim_with_reused_pid_is_never_signalled_or_reexecuted (__main__.WorkerTests.test_ambiguous_claim_with_reused_pid_is_never_signalled_or_reexecuted) ... ok
+test_android_helper_uses_inherited_lock_not_recursive_wait (__main__.WorkerTests.test_android_helper_uses_inherited_lock_not_recursive_wait) ... ok
+test_busy_queue_duplicate_and_receipt (__main__.WorkerTests.test_busy_queue_duplicate_and_receipt) ... ok
+test_cancel_running_group_and_queued (__main__.WorkerTests.test_cancel_running_group_and_queued) ... ok
+test_crash_then_cancel_kills_group_and_advances_without_duplicate (__main__.WorkerTests.test_crash_then_cancel_kills_group_and_advances_without_duplicate) ... ok
+test_dispatcher_crash_does_not_repeat_running_job (__main__.WorkerTests.test_dispatcher_crash_does_not_repeat_running_job) ... ok
+test_recovered_deadline_kills_group_and_starts_next (__main__.WorkerTests.test_recovered_deadline_kills_group_and_starts_next) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 20.010s
+
+OK

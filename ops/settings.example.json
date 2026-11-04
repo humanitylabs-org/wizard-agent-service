@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "owner": {
+  "name": "Your name",
+  "place": "City, Country"
+ },
+ "agent": {
+  "name": "Wizard"
+ },
+ "clock": {
+  "timezone": "Europe/Lisbon",
+  "day_starts_at": "06:00"
+ },
+ "voice": {
+  "language": "en",
+  "vocabulary": [
+   "Wizard",
+   "Hermes"
+  ]
+ }
+}

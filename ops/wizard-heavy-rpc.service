@@ -1,0 +1,15 @@
+[Unit]
+Description=Wizard heavy-work SSH transport (no model slots)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/wizard-mobile/heavy.env
+ExecStart=/usr/bin/node %h/.local/share/wizard-mobile-server/current/server/heavy-rpc-server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

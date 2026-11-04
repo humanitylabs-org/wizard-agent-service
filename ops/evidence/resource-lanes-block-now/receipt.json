@@ -1,0 +1,62 @@
+{
+  "source_commit": "996b3f7c6325f1944a87907bf36eae71562bdca7",
+  "host_platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+  "started_at_utc": "2026-10-15T19:35:28Z",
+  "verified_source_files_before": 119,
+  "checks": [
+    {
+      "name": "vitest",
+      "command": [
+        "npm",
+        "test",
+        "--",
+        "--maxWorkers=2",
+        "--reporter=json",
+        "--outputFile=/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/block-now-996b3f7/vitest.json"
+      ],
+      "exit_code": 0,
+      "seconds": 41.564,
+      "counts": {
+        "numPassedTests": 582,
+        "numFailedTests": 0,
+        "numPendingTests": 3,
+        "numTotalTests": 585,
+        "success": true
+      }
+    },
+    {
+      "name": "process",
+      "command": [
+        "/opt/homebrew/bin/python3",
+        "tests/heavy-worker.remote.py"
+      ],
+      "exit_code": 0,
+      "seconds": 20.096
+    },
+    {
+      "name": "plugin",
+      "command": [
+        "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/scope-venv/bin/python",
+        "tests/heavy-plugin.remote.py"
+      ],
+      "exit_code": 0,
+      "seconds": 2.232
+    }
+  ],
+  "hermes_scope_source_commit": "818c13be1dc4fd28987e1e881a9408224afd4535",
+  "hermes_scope_import_closure": {
+    "agent/__init__.py": "4b8495cff6ef2502e6cf2f42e384670d5da7a9cfe7d155e4b52fe971afc4c362",
+    "agent/jiter_preload.py": "98e6b8131e74255f21000f55f4d77709e8c34200374819654dbea763cdbf6d1a",
+    "agent/secret_scope.py": "5f2584dc93be49ef7e4de23f9f92a4abd05aa42aab8fc2fac40f54f9f8b9c664",
+    "hermes_constants.py": "5d43e6102c69748a2e64fc91623a49e1b0d76623416ce4ec37f23f216c3ce91f",
+    "hermes_yaml.py": "cb7dd9f6b3a8b9652335fcd8c5b872adca4bc0ee45d2af330b5a37263c7e29ad",
+    "utils.py": "c46d55ef54828906b1de34bd38c1d0338b2ea25fa1c604538debc83d05dfa14d"
+  },
+  "verified_source_files_after": 119,
+  "finished_at_utc": "2026-10-15T19:36:32Z",
+  "log_sha256": {
+    "plugin.log": "7e85ae76c1c22ae4efef1015ed4230ad99bb02aa63bd4d0b1f34b8be54b5cd04",
+    "process.log": "b6ab1af44b427cfadb6f3b7357da42f45e1c956932f1f108f0d4004fea58c07d",
+    "vitest.log": "3a830860e96d06122a2eba244946339304c2d7baa847c7c1e60ce0e75c3e899d"
+  }
+}

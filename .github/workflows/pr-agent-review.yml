@@ -1,0 +1,13 @@
+# Agent review on every PR (Wizard OS team rule, 23 Oct 2026). The reviewer lives in one place,
+# humanitylabs-org/wizard-ux .github/workflows/pr-agent-review.yml; this file only calls it.
+# It reads the PR through the GitHub API and never checks out or runs PR code.
+name: Agent review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    uses: humanitylabs-org/wizard-ux/.github/workflows/pr-agent-review.yml@main

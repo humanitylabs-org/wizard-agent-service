@@ -1,0 +1,59 @@
+{
+  "name": "Wizard Agent Service",
+  "id": "wizard-agent-service",
+  "wizard_type": "service",
+  "available": true,
+  "short_desc": "Wizard API, durable runs and single app gateway.",
+  "author": "Humanity Labs",
+  "port": 8797,
+  "categories": [
+    "utilities"
+  ],
+  "description": "Headless Wizard API; independently installed shell. Host Hermes in alongside mode.",
+  "tipi_version": 2,
+  "version": "0.3.0-candidate.20261012",
+  "source": "https://github.com/humanitylabs-org/wizard-agent-service",
+  "exposable": false,
+  "supported_architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "created_at": 1791630000000,
+  "updated_at": 1791630000000,
+  "dynamic_config": true,
+  "min_tipi_version": "4.8.0",
+  "uid": 1000,
+  "gid": 1000,
+  "form_fields": [
+    {
+      "type": "password",
+      "label": "Hermes API key",
+      "env_variable": "WIZARD_HERMES_API_KEY",
+      "required": true,
+      "min": 8,
+      "hint": "The HERMES_API_KEY of your hermes-agent app (Runtipi > Hermes Agent > Settings)."
+    },
+    {
+      "type": "text",
+      "label": "Orb router URL (optional)",
+      "env_variable": "WIZARD_ROUTER_URL",
+      "required": false,
+      "default": "",
+      "hint": "OpenAI-compatible chat completions URL for a fast, cheap model. Leave empty to send every orb request to the agent."
+    },
+    {
+      "type": "text",
+      "label": "Orb router model (optional)",
+      "env_variable": "WIZARD_ROUTER_MODEL",
+      "required": false,
+      "default": ""
+    },
+    {
+      "type": "password",
+      "label": "Orb router key (optional)",
+      "env_variable": "WIZARD_ROUTER_KEY",
+      "required": false,
+      "default": ""
+    }
+  ]
+}
