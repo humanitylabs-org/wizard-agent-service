@@ -246,6 +246,71 @@ def claude_model_cooldowns(read=None, inventory=None):
     return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
 
 
+def _hash_email(raw):
+    exact = str(raw or '').strip().lower()
+    if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
+        return hashlib.sha256(exact.encode()).hexdigest()[:16]
+    return None
+
+
+def email_hash_of(row):
+    """Provider-attested email hash for one stored Claude grant (profile lookup with its current access token; never
+    refreshes, never returns the email). None when unknown. The account broker uses it to spot a duplicate sign-in."""
+    token = (row or {}).get('access_token') or ''
+    if not token:
+        return None
+    key = ('email', hashlib.sha256(token.encode()).hexdigest())
+    with _LOCK:
+        raw = _CACHE.get(key)
+    if raw is None:
+        try:
+            raw = str((_anthropic_get('profile', token).get('account') or {}).get('email') or '').strip() or None
+        except Exception:
+            return None  # never leak provider errors or tokens
+        with _LOCK:
+            _CACHE[key] = raw
+    return _hash_email(raw)
+
+
+_STATE_RANK = {'ready': 0, 'rate_limited': 1, 'exhausted': 2, 'needs_attention': 3, 'disabled': 4, 'expired': 5}
+
+
+def _fold_same_email(accounts):
+    """Claude: two grants with the same provider-attested email are one account (one row, both sign-ins listed).
+    Signing in to an already-added account again (for example a browser still signed in to it) used to show a second
+    row for it. ChatGPT is never folded here: one email can own several workspaces with separate quota."""
+    groups, order = {}, []
+    for a in accounts:
+        h = a.get('emailHash')
+        # The Claude Code login mirror keeps its own row: the connection app folds it into its original sign-in.
+        if not h or a.get('mirror'):
+            order.append([a])
+        elif h in groups:
+            groups[h].append(a)
+        else:
+            groups[h] = [a]
+            order.append(groups[h])
+    out = []
+    big = 1 << 30
+    for rows in order:
+        if len(rows) == 1:
+            out.append(rows[0])
+            continue
+        lead = sorted(rows, key=lambda a: (_STATE_RANK.get(a.get('status'), 3), a.get('usage') is None,
+                                           a['priority'] if a.get('priority') is not None else big))[0]
+        merged = dict(lead)
+        # The sign-in the agent can put first (an added one, lowest priority) comes first: Use first targets it.
+        merged['credentials'] = sorted((c for a in rows for c in a.get('credentials') or []),
+                                       key=lambda c: (c.get('managed') is not True,
+                                                      c['priority'] if c.get('priority') is not None else big))
+        merged['credentialCount'] = sum(a.get('credentialCount') or 0 for a in rows)
+        merged['id'] = min(a['id'] for a in rows)
+        merged['priority'] = min((a['priority'] for a in rows if a.get('priority') is not None), default=None)
+        merged['actions'] = {k: any((a.get('actions') or {}).get(k) is True for a in rows) for k in lead.get('actions') or {}}
+        out.append(merged)
+    return out
+
+
 def _rank(row):
     value = row.get('priority')
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
@@ -308,9 +373,8 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
         # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
         # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
-        exact = str(raw or '').strip().lower()
-        if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
-            extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
+        if _hash_email(raw):
+            extra['emailHash'] = _hash_email(raw)
         state = str(row.get('last_status') or 'ready')
         # Hermes calls a healthy OAuth grant "ok"; the connection apps use "ready".
         if state == 'ok':
@@ -337,6 +401,8 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         accounts = list(executor.map(project, grouped.items()))
+    if slug == 'anthropic':
+        accounts = _fold_same_email(accounts)
     # Hermes tries the lowest priority first (fill_first); the projection keeps that order explicit.
     first = min((a['priority'] for a in accounts if a['priority'] is not None), default=None)
     for a in accounts:

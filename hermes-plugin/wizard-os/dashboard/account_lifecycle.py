@@ -4,6 +4,11 @@ Reconnect is a fresh login, not refresh: old grants are retained for explicit
 removal. A successful login is reconciled against the read-only pool inventory.
 Prefer moves one existing sign-in to priority 0 with stock `hermes auth priority`
 (tried first under fill_first); it never signs in, out or removes anything.
+
+A Claude add that lands on an account the agent already has (same provider-attested email hash as an
+existing added grant) reports `duplicateOf`. When that existing grant still renews (stock
+`hermes auth refresh`), the just-added duplicate is removed again with stock `hermes auth remove`
+(`duplicateRemoved`); otherwise both are kept and the listing shows them as one account.
 """
 import atexit
 import fcntl
@@ -33,8 +38,10 @@ class BrokerError(ValueError):
 
 
 class Broker:
-    def __init__(self, read=read_pool, command=None, ttl=600, lock_path=None):
+    def __init__(self, read=read_pool, command=None, ttl=600, lock_path=None, identify=None):
         self.lock_path = lock_path
+        # identify(row) -> provider-attested email hash or None (wired by plugin_api; None disables the check).
+        self.identify = identify
         self.stock_cli = command is None
         self.read = read
         self.command = command or ['hermes']
@@ -126,6 +133,7 @@ class Broker:
             job = dict(id=secrets.token_urlsafe(24), provider=provider, action=action,
                        target=target, status='running', expiresAt=time.time()+self.ttl,
                        url=None, userCode=None, inputRequired=False, credentialIds=[],
+                       duplicateOf=None, duplicateRemoved=False,
                        proc=proc, lease=lease, before=before, stop=None, submitted=False)
             self.jobs[job['id']] = job
             # Bound retained completed job metadata.
@@ -137,7 +145,8 @@ class Broker:
 
     def view(self, job):
         return {k: job[k] for k in ('id', 'provider', 'action', 'target', 'status', 'expiresAt',
-                                   'url', 'userCode', 'inputRequired', 'credentialIds')}
+                                   'url', 'userCode', 'inputRequired', 'credentialIds',
+                                   'duplicateOf', 'duplicateRemoved')}
 
     def get(self, provider, jid):
         job = self.jobs.get(jid)
@@ -233,9 +242,15 @@ class Broker:
                 else:
                     ok = bool(added)
                 unexpected_loss = job['before'] - after - ({job['target']} if job['action'] == 'remove' else set())
-                job['status'] = ('needs_review' if unexpected_loss else
-                                 'succeeded' if ok and proc.returncode == 0 else
-                                 'needs_review' if ok or added else job['stop'] or 'failed')
+                status = ('needs_review' if unexpected_loss else
+                          'succeeded' if ok and proc.returncode == 0 else
+                          'needs_review' if ok or added else job['stop'] or 'failed')
+            # The duplicate check finishes before the job turns terminal, so a poller never sees a half answer.
+            if job['action'] == 'add' and status == 'succeeded' and len(added) == 1 \
+                    and PROVIDERS[job['provider']] == 'anthropic' and self.identify is not None:
+                self._dedupe(job, rows, added[0])
+            with self.lock:
+                job['status'] = status
         except Exception:
             self._kill(proc)
             proc.wait()
@@ -246,6 +261,40 @@ class Broker:
             os.close(job['lease'])
             with self.lock:
                 job.update(url=None, userCode=None, inputRequired=False)
+
+    def _cli(self, args):
+        """Run one stock Hermes CLI command quietly (no output kept, it may echo account details)."""
+        try:
+            return subprocess.run(self.command + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=90, start_new_session=True,
+                                  env=dict(os.environ, BROWSER='/bin/true')).returncode
+        except Exception:
+            return -1
+
+    def _dedupe(self, job, rows, new_id):
+        """The browser was still signed in to an account the agent already has: never leave a second grant for it
+        when the existing one still renews. Failure anywhere keeps the new grant (fail-safe)."""
+        slug = PROVIDERS[job['provider']]
+        try:
+            new = next((r for r in rows if r.get('id') == new_id), None)
+            mine = self.identify(new) if new else None
+            if not mine:
+                return
+            for row in rows:
+                if row.get('id') == new_id or row.get('id') not in job['before'] or not str(row.get('source', '')).startswith('manual:'):
+                    continue
+                if self.identify(row) != mine:
+                    continue
+                with self.lock:
+                    job['duplicateOf'] = row['id']
+                if self._cli(['auth', 'refresh', slug, row['id']]) != 0:
+                    return  # the older grant no longer renews: keep the new one
+                if self._cli(['auth', 'remove', slug, new_id]) == 0 and new_id not in {r.get('id') for r in self.rows(job['provider'])}:
+                    with self.lock:
+                        job['duplicateRemoved'] = True
+                return
+        except Exception:
+            return
 
     def close(self):
         with self.lock:
