@@ -1452,6 +1452,12 @@ def import_facts(args: dict) -> dict:
                     for content in secret:  # the same facts the scan left out never arrive here either
                         dest.execute("DELETE FROM fact_entities WHERE fact_id IN (SELECT fact_id FROM facts WHERE content = ?)", (content,))
                         dest.execute("DELETE FROM facts WHERE content = ?", (content,))
+                    # only the facts the scan showed (the first MAX_STORE_FACTS), never more
+                    over = "SELECT fact_id FROM facts WHERE fact_id NOT IN (SELECT fact_id FROM facts ORDER BY fact_id LIMIT ?)"
+                    dest.execute(f"DELETE FROM fact_entities WHERE fact_id IN ({over})", (MAX_STORE_FACTS,))
+                    dropped = dest.execute(f"DELETE FROM facts WHERE fact_id IN ({over})", (MAX_STORE_FACTS,)).rowcount
+                    if secret or dropped:
+                        _drop_orphans(dest)
                     dest.commit()
                     added = [str(c) for (c,) in dest.execute("SELECT content FROM facts")]
                 finally:
@@ -1516,6 +1522,20 @@ def _merge_facts(target: Path, facts: list[dict]) -> list[str]:
     return added
 
 
+def _drop_orphans(con, banks: bool = True) -> None:
+    """Entities no fact links to any more, and the derived memory banks (the plugin rebuilds them on its next
+    write), so removed facts leave nothing of themselves behind."""
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if {"entities", "fact_entities"} <= tables:
+        con.execute("DELETE FROM entities WHERE entity_id NOT IN (SELECT entity_id FROM fact_entities)")
+    if "entity_aliases" in tables and "entities" in tables:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(entity_aliases)")}
+        if "entity_id" in cols:
+            con.execute("DELETE FROM entity_aliases WHERE entity_id NOT IN (SELECT entity_id FROM entities)")
+    if banks and "memory_banks" in tables:
+        con.execute("DELETE FROM memory_banks")
+
+
 def _holographic_on() -> bool:
     """Whether this agent's config picks the holographic memory provider (names only; no values read)."""
     try:
@@ -1543,16 +1563,32 @@ def _undo_facts(entry: dict) -> int:
             for fact_id in ids:
                 con.execute("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
                 con.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
+            _drop_orphans(con)
             con.commit()
-            return len(ids)
+            removed = len(ids)
     finally:
         con.close()
-    store = store_class(db_path=str(target))
-    try:
-        for fact_id in ids:
-            removed += bool(store.remove_fact(fact_id))
-    finally:
-        store.close()
+    if store_class is not None:
+        store = store_class(db_path=str(target))
+        try:
+            for fact_id in ids:
+                removed += bool(store.remove_fact(fact_id))
+        finally:
+            store.close()
+    if entry.get("facts_created") and _fact_count(target) == 0:
+        # this import created the whole store and nothing else has been added since: remove it entirely
+        for name in (FACT_DB, FACT_DB + "-wal", FACT_DB + "-shm"):
+            try:
+                (target.parent / name).unlink()
+            except OSError:
+                pass
+    elif store_class is not None:  # the plugin rebuilt the banks; it leaves entities nothing links to
+        con = sqlite3.connect(str(target), timeout=30)
+        try:
+            _drop_orphans(con, banks=False)
+            con.commit()
+        finally:
+            con.close()
     return removed
 
 
@@ -1736,7 +1772,9 @@ def destinations() -> list[dict]:
                 agent = json.loads((entry / "agent.json").read_text("utf-8"))
             except (OSError, ValueError):
                 continue
-            runtime = agent.get("runtime") if isinstance(agent, dict) else None
+            if not isinstance(agent, dict):
+                continue
+            runtime = agent.get("runtime")
             if agent.get("schema") != 1 or agent.get("id") != agent_id or not isinstance(runtime, dict):
                 continue
             if runtime.get("admission") == "importing" or agent.get("privacy") == "private" or agent.get("role") == "recovery":
@@ -1830,8 +1868,8 @@ def undo(args: dict) -> dict:
     entry = reg.get(import_id)
     if not entry:
         raise ValueError("Unknown import_id. Use status to list imports.")
-    others = [v for k, v in reg.items() if k != import_id]
-    claimed = {f for v in others for f in v.get("files", [])}
+    others = [v for k, v in reg.items() if k != import_id] + _other_agents_imports()
+    claimed = {f for v in others for f in v.get("files", [])}  # Files/Imported is shared by every agent
     base = files_root() / IMPORT_DIR
     removed_files = 0
     for rel in entry.get("files", []):
@@ -1882,6 +1920,23 @@ def undo(args: dict) -> dict:
         "Files/Imported/About me.md and memory entries were approved by the owner: ask which to remove."
     return {"removed_files": removed_files, "removed_skills": removed_skills, "removed_facts": removed_facts,
             **restored, "kept": kept}
+
+
+def _other_agents_imports() -> list[dict]:
+    """Import records of every other agent this engine can import into (and this agent's own when an undo runs
+    in a destination): they share Files/Imported, so a file another agent's import also wrote stays."""
+    current = hermes_home().resolve()
+    homes = [own_home()] + [d["home"] for d in destinations()]
+    out, seen = [], {current}
+    for home in homes:
+        if home.resolve() in seen:
+            continue
+        seen.add(home.resolve())
+        try:
+            out += list(json.loads((home / "cache" / "bring-data" / "imports.json").read_text("utf-8")).values())
+        except (OSError, ValueError, AttributeError):
+            continue
+    return out
 
 
 def _undo_owner_side(import_id: str, entry: dict) -> dict:

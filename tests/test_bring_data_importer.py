@@ -505,6 +505,70 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual((again['done']['about']['memory_added'], again['done']['about']['already_known']), (0, 1))
         self.assertTrue((self.files / 'Imported/About me.md').is_file())
 
+    def test_undo_keeps_chat_files_another_agents_import_still_has(self):
+        own = self.alongside_hermes()
+        registry = self.registry()
+        self.container_agent(registry, 'one', 'One')
+        self.container_agent(registry, 'two', 'Two')
+        ids = {}
+        for dest in ('one', 'two'):
+            scan = call('scan', path=str(own), dest=dest)
+            ids[dest] = scan['import_id']
+            self.assertEqual(call('import', import_id=scan['import_id'], dest=dest, chats=True)['errors'], {})
+        chats = list((self.files / 'Imported/Hermes/Chats').rglob('*.md'))
+        self.assertTrue(chats)
+        call('undo', import_id=ids['one'], dest='one')
+        self.assertTrue(all(c.is_file() for c in chats))  # still recorded by Two's import
+        call('undo', import_id=ids['two'], dest='two')
+        self.assertFalse(any(c.exists() for c in chats))
+
+    def test_undo_of_a_copied_store_leaves_none_of_its_data(self):
+        own = self.alongside_hermes()
+        con = sqlite3.connect(own / 'memory_store.db')
+        con.executescript("CREATE TABLE entities (entity_id INTEGER PRIMARY KEY, name TEXT);"
+                          "CREATE TABLE memory_banks (bank_id INTEGER PRIMARY KEY, bank_name TEXT, vector BLOB);"
+                          "INSERT INTO entities VALUES (1, 'Ana'); INSERT INTO fact_entities VALUES (1, 1);"
+                          "INSERT INTO memory_banks VALUES (1, 'general', x'00');")
+        con.commit(); con.close()
+        dest = self.container_agent(self.registry(), 'studio', 'Studio')
+        scan = call('scan', path=str(own), dest='studio')
+        call('import', import_id=scan['import_id'], dest='studio', facts=True)
+        self.assertTrue((dest / 'memory_store.db').is_file())
+        call('undo', import_id=scan['import_id'], dest='studio')
+        self.assertFalse((dest / 'memory_store.db').exists())
+
+    def test_a_new_store_brings_only_the_facts_the_scan_counted(self):
+        own = self.alongside_hermes()
+        dest = self.container_agent(self.registry(), 'studio', 'Studio')
+        old = bd.MAX_STORE_FACTS
+        bd.MAX_STORE_FACTS = 1
+        self.addCleanup(setattr, bd, 'MAX_STORE_FACTS', old)
+        scan = call('scan', path=str(own), dest='studio')
+        self.assertEqual(scan['counts']['facts'], 1)
+        done = call('import', import_id=scan['import_id'], dest='studio', facts=True)['done']['facts']
+        self.assertEqual(done['facts_added'], 1)
+        self.assertEqual(bd._fact_count(dest / 'memory_store.db'), 1)
+
+    def test_a_host_profile_agent_is_a_destination(self):
+        own = self.alongside_hermes()
+        registry = self.registry()
+        profile = own / 'profiles/quick'
+        (profile / 'memories').mkdir(parents=True)
+        (profile / 'config.yaml').write_text('memory: {}\n', 'utf-8')
+        (registry / 'quick').mkdir()
+        (registry / 'quick/agent.json').write_text(json.dumps({'schema': 1, 'id': 'quick', 'label': 'Quick',
+                                                               'runtime': {'kind': 'profile', 'profile': 'quick'}}), 'utf-8')
+        (registry / 'junk').mkdir()
+        (registry / 'junk/agent.json').write_text('[1, 2]', 'utf-8')  # valid JSON, not a record: skipped
+        self.assertEqual(call('sources')['into'], [{'id': 'quick', 'label': 'Quick', 'kind': 'profile',
+                                                    'where': 'A Hermes profile on this box'}])
+        scan = call('scan', path=str(own), dest='quick')
+        result = call('import', import_id=scan['import_id'], dest='quick', skills='all', personality=True)
+        self.assertEqual(result['errors'], {})
+        self.assertTrue((profile / 'skills/imported/box-care/SKILL.md').is_file())
+        self.assertTrue((profile / 'SOUL.md').is_file())
+        self.assertFalse((own / 'skills/imported').exists())
+
     def test_allowed_paths(self):
         cc = claude_code_home(self.base)
         self.assertTrue(bd.allowed_path(str(cc)))
