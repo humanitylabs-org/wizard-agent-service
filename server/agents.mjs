@@ -678,8 +678,13 @@ export function createAgentRegistry(options = {}) {
     const ids = body?.agents
     if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
     const wanted = new Set(ids)
+    // Validate before list(): it synchronizes new/private app grants on disk.
+    // A rejected external-runtime selection must not perform those writes.
+    for (const id of wanted) {
+      const agent = readRaw(id)
+      if (!agent || agent.role === 'recovery' || agent.harness === 'pi') fail(404, 'agent_not_found', 'agent.id', id)
+    }
     const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
-    for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)
       if (has === wanted.has(agent.id)) continue
