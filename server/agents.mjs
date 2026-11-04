@@ -412,17 +412,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // The app gateway serves this agent only the apps on its own list (#58), keyed by its own gateway token.
   // No gateway and no shared skills for an agent without one: nothing outside its own home is reachable.
   const standardUrl = standardChatsEndpoint(gatewayUrl,standardChatsUrl)
-  const privateSearch = agent.privacy === 'private' && agent.model.provider === TINFOIL.id
-  if (wantsGateway(agent, gatewayUrl) || privateSearch || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
+  if (wantsGateway(agent, gatewayUrl) || (agent.privacy === 'private' && agent.permissions.read_standard_chats === true && standardUrl)) {
     lines.push('mcp_servers:')
-    if (privateSearch) {
-      // Second official attested proxy in the inference sidecar's network namespace.
-      // Never connect MCP directly to public HTTPS or fall back to ordinary search.
-      lines.push('  tinfoil_search:', `    url: ${yamlString(`http://agent-${agent.id}-tinfoil:3302/mcp`)}`,
-        '    headers:', '      Authorization: "Bearer ${TINFOIL_API_KEY}"',
-        '      X-Tinfoil-Tool-PII-Check: "true"', '      X-Tinfoil-Tool-Injection-Check: "true"',
-        '    timeout: 180', '    connect_timeout: 90', '    sampling:', '      enabled: false')
-    }
     if (gatewayUrl) lines.push('  wizard:', `    url: ${yamlString(gatewayUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
     if (agent.privacy === 'private' && agent.permissions.read_standard_chats === true) {
       lines.push('  standard_chats:', `    url: ${yamlString(standardUrl)}`, '    headers:', '      Authorization: "Bearer ${WIZARD_MCP_TOKEN}"')
@@ -669,7 +660,7 @@ export function createAgentRegistry(options = {}) {
     const kind = appKinds().get(appId)
     if (!kind) fail(404, 'app_not_found', 'app.id')
     const privateApp = privateApps().has(appId)
-    const all = list().filter(agent => agent.role !== 'recovery')
+    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
     return {
       app_id: appId, kind, privacy: privateApp ? 'private' : 'standard',
       // A private app on a box with no private agent: the install sheet offers to set one up (James, 23 Oct 2026).
@@ -685,8 +676,13 @@ export function createAgentRegistry(options = {}) {
     const ids = body?.agents
     if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
     const wanted = new Set(ids)
-    const all = list().filter(agent => agent.role !== 'recovery')
-    for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
+    // Validate before list(): it synchronizes new/private app grants on disk.
+    // A rejected external-runtime selection must not perform those writes.
+    for (const id of wanted) {
+      const agent = readRaw(id)
+      if (!agent || agent.role === 'recovery' || agent.harness === 'pi') fail(404, 'agent_not_found', 'agent.id', id)
+    }
+    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)
       if (has === wanted.has(agent.id)) continue
@@ -1278,10 +1274,13 @@ export function createAgentRegistry(options = {}) {
   }
   function pin(sessionId, agentId, provenance = 'service_admission') {
     if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(provenance)) return
-    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || !readRaw(agentId)) return
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) return
     const current = pins()
     const key = threadKey(agentId, sessionId)
     if (['runtime_verified', 'service_admission', 'migrated_pin'].includes(current[key]?.provenance)) return
+    // A known authoritative pair is a no-op. In particular, observing a cached Chats
+    // list must not stat/clone the main-agent configuration again for every row.
+    if (!readRaw(agentId)) return
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
     const next = { ...current, [key]: { ...threadReference(sessionId, agentId), provenance } }
     writeJsonAtomic(threadsPath, { schema: 2, threads: next })

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createAgentRegistry, parseAgentFile } from '../server/agents.mjs'
@@ -61,6 +61,21 @@ test('External origins are fixed loopback even with container-network mode; dedi
   } finally { rmSync(b.dir, { recursive: true }) }
 })
 
+test('Rejected Pi app selection cannot synchronize or persist unrelated app grants', async () => {
+  const b = box()
+  try {
+    const apps = join(b.dir, 'apps.json'); writeFileSync(apps, JSON.stringify({ apps: [] }))
+    const registry = createAgentRegistry({ agentsDir: join(b.dir, 'agents'), appsJsonPath: apps })
+    registry.list()
+    const seen = readFileSync(join(b.dir, 'agents', '.apps-seen.json'), 'utf8')
+    const names = readdirSync(join(b.dir, 'agents')).sort()
+    writeFileSync(apps, JSON.stringify({ apps: [{ id: 'new-app', name: 'New', view: '/app/' }] }))
+    await assert.rejects(registry.setAppAgents('new-app', { agents: ['hermes', 'pi'] }), e => e.status === 404 && e.error === 'agent_not_found')
+    assert.equal(readFileSync(join(b.dir, 'agents', '.apps-seen.json'), 'utf8'), seen)
+    assert.deepEqual(readdirSync(join(b.dir, 'agents')).sort(), names)
+  } finally { rmSync(b.dir, { recursive: true }) }
+})
+
 test('External lifecycle, config, auto-upgrade and app sync never invoke Hermes driver or write a home', async () => {
   const b = box(); const calls = []
   try {
@@ -74,6 +89,14 @@ test('External lifecycle, config, auto-upgrade and app sync never invoke Hermes 
     await assert.rejects(registry.create(fixture()), e => e.status === 400)
     writeFileSync(apps, JSON.stringify({ apps: [{ id: 'new-app', name: 'New', view: '/app/' }] }))
     registry.list(); await registry.migrateManagedHarnesses()
+    // Standard apps join main by design. Establish an explicit owner opt-out
+    // before asserting that a rejected Pi selection cannot change that grant.
+    assert.equal(registry.appAgents('new-app').agents.find(a => a.id === 'hermes').enabled, true)
+    await registry.setAppAgents('new-app', { agents: [] })
+    assert.equal(registry.appAgents('new-app').agents.find(a => a.id === 'hermes').enabled, false)
+    assert.equal(registry.appAgents('new-app').agents.some(a => a.id === 'pi'), false)
+    await assert.rejects(registry.setAppAgents('new-app', { agents: ['hermes', 'pi'] }), e => e.status === 404 && e.error === 'agent_not_found')
+    assert.equal(registry.appAgents('new-app').agents.find(a => a.id === 'hermes').enabled, false)
     assert.equal(readFileSync(join(b.folder, 'agent.json'), 'utf8'), before)
     assert.deepEqual(calls, []); assert.equal(existsSync(join(b.folder, 'home')), false)
     assert.equal(existsSync(join(b.folder, 'service-state.json')), false)

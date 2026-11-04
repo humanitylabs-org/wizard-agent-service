@@ -19,6 +19,7 @@ const fail = (message, status = 422) => Object.assign(new Error(message), { stat
 export function selectLockedRoute(value, stored, log) {
   const explicit = value.model && value.provider ? { model: value.model, provider: value.provider } : null
   const confirmed = stored?.model && stored?.provider ? { model: stored.model, provider: stored.provider } : null
+  if (value.require_model_lock && explicit) return explicit
   if (typeof explicit?.model === 'string' && explicit.model.startsWith('claude-opus')
     && confirmed && typeof confirmed.model === 'string' && !confirmed.model.startsWith('claude-opus')) {
     log('[locked-run] stale Opus send retained the confirmed non-Opus session route')

@@ -1,7 +1,7 @@
 """Wizard OS plugin for stock Hermes.
 
 Registers one system-prompt section, ``wizard-os.kernel``: a FIXED Wizard OS orientation (under
-900 characters, the same on every box, no per-app list). Apps are discovered through the
+1300 characters, the same on every box, no per-app list). Apps are discovered through the
 ``wizard-job-<job>`` pointer skills in ``~/.wizard-os/skills`` (``skills.external_dirs``); this
 plugin rewrites them from ``apps.json`` when the Agent Service has not. Mid-thread installs arrive
 as a one-line per-run delta from the Agent Service. No Hermes core change, no SOUL/memory edit.
@@ -21,10 +21,12 @@ try:  # loaded as a package by Hermes
     from . import kernel as _kernel
     from . import media as _media
     from . import app_skill_guard as _app_skill_guard
+    from . import bring_data as _bring_data
 except ImportError:  # loaded as a plain module (tests)
     import kernel as _kernel  # type: ignore[no-redef]
     import media as _media  # type: ignore[no-redef]
     import app_skill_guard as _app_skill_guard  # type: ignore[no-redef]
+    import bring_data as _bring_data  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 SECTION_ID = "wizard-os.kernel"
@@ -155,6 +157,10 @@ def register(ctx) -> None:
     ctx.register_system_prompt_section(SECTION_ID, _section, position="after_memory", max_chars=2000)
     ctx.register_tool(name="wizard_follow_up", toolset="wizard_os", schema=_FOLLOW_UP_SCHEMA,
                       handler=_follow_up_request, emoji="👁")
+    # Bring my ChatGPT / Claude / Hermes: the owner's own exports become searchable files and
+    # owner-reviewed context (bring_data.py; workflow in the wizard-bring-data system skill).
+    ctx.register_tool(name=_bring_data.TOOL_NAME, toolset="wizard_os", schema=_bring_data.SCHEMA,
+                      handler=_bring_data.handle, emoji="📥")
     # Every MEDIA: file the agent sends lands where Wizard chats can show it (media.py).
     if hasattr(ctx, "register_hook"):
         ctx.register_hook("transform_llm_output", _media.transform_llm_output)

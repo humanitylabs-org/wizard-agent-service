@@ -34,23 +34,37 @@ test('heavy session index returns exactly the ledger-order jobs of one agent thr
 
 test('heavyStatus never reads the ledger per listed row and decides exactly like the full-ledger guard', () => {
   const jobs = ledger(300, 4)
-  let reads = 0
+  const done = { state: 'done', ask: 'finished' }
+  let reads = 0, followUpReads = 0
   const delivered = []
-  const heavyStatus = createHeavyStatusGuard({ rows: () => { reads++; return jobs }, isDelivered: (agentId, sessionId, job) => { delivered.push([agentId, sessionId, job.job_id]); return false } })
-  // Non-check statuses cannot change: no ledger read at all.
-  for (let s = 0; s < 300; s++) heavyStatus('hermes', `wizard_s${s}`, { state: 'done' })
+  const nonHoldingFor = new Set(['job_1_3'])
+  const heavyStatus = createHeavyStatusGuard({ rows: () => { reads++; return jobs },
+    isDelivered: (agentId, sessionId, job) => { delivered.push([agentId, sessionId, job.job_id]); return false },
+    nonHolding: () => { followUpReads++; return nonHoldingFor } })
+  // States the guard cannot change never read the ledger or follow-up evidence.
+  for (let s = 0; s < 300; s++) for (const state of ['needs_you', 'fyi']) heavyStatus('hermes', `wizard_s${s}`, { state })
   assert.equal(reads, 0)
-  // A list projection passes one snapshot for all rows.
+  assert.equal(heavyStatus('hermes', 'wizard_s1', undefined), undefined)
+  // A list projection passes one snapshot for all rows; check and done decide as the full guard does.
   for (let s = 0; s < 300; s++) {
-    for (const agentId of ['hermes', 'helper']) {
-      const got = heavyStatus(agentId, `wizard_s${s}`, check, jobs)
-      const want = guardHeavyStatus(check, { agentId, sessionId: `wizard_s${s}`, jobs, isDelivered: () => false })
-      assert.deepEqual(got, want, `${agentId} wizard_s${s}`)
+    for (const agentId of ['hermes', 'helper']) for (const status of [check, done]) {
+      const got = heavyStatus(agentId, `wizard_s${s}`, status, jobs)
+      const want = guardHeavyStatus(status, { agentId, sessionId: `wizard_s${s}`, jobs, isDelivered: () => false,
+        nonHoldingIds: agentId === 'hermes' && status.state === 'done' ? nonHoldingFor : new Set() })
+      assert.deepEqual(got, want, `${agentId} wizard_s${s} ${status.state}`)
     }
   }
   assert.equal(reads, 0, 'rows() is not called per session when a snapshot is passed')
   assert(delivered.every(([agentId, sessionId, id]) => id.startsWith(`job_${sessionId.slice(9)}_`) && ['hermes', 'helper'].includes(agentId)),
     'delivery callbacks only see the row\'s own jobs')
+  // Follow-up evidence is read only for a done main-agent row that owns a job, never for check or helpers.
+  followUpReads = 0
+  heavyStatus('hermes', 'missing', done, jobs)
+  heavyStatus('hermes', 'wizard_s1', check, jobs)
+  heavyStatus('helper', 'wizard_s3', done, jobs)
+  assert.equal(followUpReads, 0)
+  heavyStatus('hermes', 'wizard_s1', done, jobs)
+  assert.equal(followUpReads, 1)
   // Without a snapshot it reads the queue's (cached) snapshot once per call, not a scan per row.
   assert.equal(heavyStatus('hermes', 'wizard_s1', check).state, 'fyi')
   assert.equal(reads, 1)

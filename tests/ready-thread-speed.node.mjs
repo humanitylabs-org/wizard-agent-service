@@ -140,13 +140,13 @@ const serviceHeavyStatus = async () => {
   return { run: wrap(guardHeavyStatus, createHeavyStatusGuard, heavyJobsForSession, undefined, read, 'synthetic-only-unused', runQueue, agents), reads: () => reads, guardHeavyStatus }
 }
 
-test('heavy status decoration never reads discarded follow-up evidence for done rows', async () => {
+test('heavy status decoration preserves main false-done guard and non-holding evidence for done rows', async () => {
   const { run, reads } = await serviceHeavyStatus()
   const status = { state: 'done', ask: 'Finished', title: 'Synthetic', subject: 'Tests', app_id: 'wizard-quest' }
   const jobs = [{ sessionId: 'synthetic', state: 'completed', resume: 'delivered' },
     { session_id: 'synthetic', state: 'running', resume: '' }]
-  for (let row = 0; row < 100; row++) assert.equal(run('hermes', 'synthetic', status, jobs), status)
-  assert.equal(reads(), 0, 'cached done rows must not synchronously read evidence the guard discards')
+  for (let row = 0; row < 100; row++) assert.equal(run('hermes', 'synthetic', status, jobs).state, 'fyi')
+  assert.equal(reads(), 100, 'main non-holding policy must not be erased by a performance optimization')
 })
 
 test('heavy status decoration preserves pending and delivered status semantics without evidence reads', async () => {
@@ -159,5 +159,5 @@ test('heavy status decoration preserves pending and delivered status semantics w
       assert.deepEqual(run(agentId, 'synthetic', status, jobs), expected)
     }
   }
-  assert.equal(reads(), 0)
+  assert.equal(reads(), 2, 'only main done rows with an owned job consult non-holding evidence')
 })

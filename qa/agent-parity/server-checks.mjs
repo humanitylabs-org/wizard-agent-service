@@ -216,6 +216,8 @@ export const serverChecks = {
       assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
       for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
       assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
+      // The Markdown override is scoped: stock Hermes' own brevity default survives it on every agent kind.
+      assert.ok(own.includes('Only that plain-text line is overridden') && own.includes('keep replies brief and conversational, not a document, still applies'), `${s.kind}: ${style} keeps the runtime's brevity default`)
     }
   },
   'chats-spaces': async s => {
@@ -344,6 +346,41 @@ export const serverChecks = {
     assert.deepEqual(await served(), png)
     writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
     assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
+  },
+  'bring-my-data': async s => {
+    // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's
+    // own home, archives chats into the owner's Files and installs picked skills only into this agent's home.
+    const files = join(s.root, 'files')
+    const make = `import io,json,sys,zipfile
+b=io.BytesIO(); z=zipfile.ZipFile(b,'w')
+if sys.argv[1]=='chatgpt':
+  m={'r':{'id':'r','message':None,'parent':None,'children':['u']},'u':{'id':'u','parent':'r','children':['a'],'message':{'author':{'role':'user'},'create_time':1700000000,'content':{'content_type':'text','parts':['PARITY_IMPORT_QUESTION']}}},'a':{'id':'a','parent':'u','children':[],'message':{'author':{'role':'assistant'},'create_time':1700000001,'recipient':'all','content':{'content_type':'text','parts':['PARITY_IMPORT_ANSWER']}}}}
+  z.writestr('conversations.json',json.dumps([{'title':'Parity import','create_time':1700000000,'update_time':1700000001,'mapping':m,'current_node':'a','conversation_id':'parity-conv'}]))
+else:
+  z.writestr('memories/USER.md','Parity owner fact.'); z.writestr('skills/parity-skill/SKILL.md','---\\nname: parity-skill\\ndescription: Synthetic.\\n---\\n'); z.writestr('.env','KEY=parity-runtime-secret')
+z.close(); sys.stdout.buffer.write(b.getvalue())`
+    const exportZip = kind => execFileSync('python3', ['-c', make, kind])
+    const tool = args => JSON.parse(execFileSync('python3', ['-c', "import importlib.util,json,sys\nspec=importlib.util.spec_from_file_location('bd',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nprint(m.handle(json.loads(sys.argv[2])))", join(pluginRoot, 'bring_data.py'), JSON.stringify(args)],
+      { encoding: 'utf8', env: { ...process.env, HERMES_HOME: s.agentHome, WIZARD_FILES_ROOT: files } }))
+    const dropped = async (kind, name) => {
+      const r = await s.upload(exportZip(kind), name, 'application/zip'); assert.equal(r.status, 201)
+      const id = (await r.json()).file.id
+      return JSON.parse(readFileSync(join(s.root, 'media.json'))).files.find(f => f.id === id).rel
+    }
+    const scan = tool({ action: 'scan', path: await dropped('chatgpt', 'chatgpt-export.zip') })
+    assert.equal(scan.success, true, JSON.stringify(scan)); assert.equal(scan.kind, 'chatgpt'); assert.equal(scan.counts.chats, 1)
+    assert.ok(existsSync(join(s.agentHome, 'cache/bring-data/imports.json')), 'scan record lives in this agent home')
+    assert.equal(tool({ action: 'archive', import_id: scan.import_id }).chats_written, 1)
+    const index = readFileSync(join(files, 'Imported/ChatGPT/Index.md'), 'utf8')
+    const rel = index.match(/\(<(Chats\/[^>]+)>\)/)[1]
+    const chat = readFileSync(join(files, 'Imported/ChatGPT', rel), 'utf8')
+    assert.ok(chat.includes('PARITY_IMPORT_QUESTION') && chat.includes('PARITY_IMPORT_ANSWER'), 'archived chat is in the owner Files')
+    const hermes = tool({ action: 'scan', path: await dropped('hermes', 'hermes-backup.zip') })
+    assert.deepEqual(hermes.new_skills.map(x => x.name), ['parity-skill'])
+    assert.deepEqual(tool({ action: 'skills', import_id: hermes.import_id, names: ['parity-skill'] }).installed.map(x => x.name), ['parity-skill'])
+    assert.ok(existsSync(join(s.agentHome, 'skills/imported/parity-skill/SKILL.md')), 'skill lands in this agent home')
+    assert.ok(!existsSync(join(files, 'skills')), 'nothing agent-side is written into Files')
+    assert.ok(!JSON.stringify([scan, hermes]).includes('parity-runtime-secret'))
   },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)
@@ -527,6 +564,22 @@ export const serverChecks = {
     }
     install([parityQa, app]); await s.restart()
     const text = await kernel()
+    // Inspect the real gateway handler's initialize output on EACH runtime transport,
+    // not renderKernel() or a source-text assertion. Upstream Hermes remains synthetic.
+    const assertRules = value => {
+      assert.equal(typeof value, 'string', `${s.kind}: gateway kernel instructions`)
+      const lines = value.split('\n')
+      for (const rule of [
+        'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+        'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
+      ]) assert.ok(lines.includes(rule), `${s.kind}: gateway delivers exact app-first/source/error rule: ${rule}`)
+      assert.ok(value.includes('Use registered exact names only.'), `${s.kind}: registered exact tool names, not invented names`)
+      assert.ok(!value.includes('If it is not in your tool list, run it with tool_call and that exact name.'), `${s.kind}: no speculative tool-name instruction`)
+      assert.ok(value.includes('3. For ordinary app use:'), `${s.kind}: ordinary-app safety step survives`)
+      assert.ok(value.indexOf('Never ask the owner') > value.indexOf('3. For ordinary app use:'))
+      if (value.includes('Jobs on this box:')) assert.ok(value.indexOf('Report tool errors.') < value.indexOf('Jobs on this box:'))
+    }
+    assertRules(text)
     if (s.kind === 'main') {
       assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
@@ -538,6 +591,7 @@ export const serverChecks = {
     }
     install([parityQa]); await s.restart()
     const after = await kernel()
+    assertRules(after)
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
     assert.doesNotMatch(after, /Synthetic Video/u)
   },

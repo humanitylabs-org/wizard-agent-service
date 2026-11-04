@@ -82,6 +82,15 @@ runpy.run_module('hermes_cli.main',run_name='__main__')
 '''
 # All secrets arrive through stdin, then stay in the disposable home. Never argv/env/logs.
 INSTALL = r'''import os,json,sys,pathlib,yaml
+def seal_gateway(c,values):
+ # Incognito is not a standard agent principal: never copy its durable gateway authority.
+ for k in list(values):
+  if k.startswith(('WIZARD_MCP_','WIZARD_AGENT_BRIDGE_')): values.pop(k,None)
+ servers=c.get('mcp_servers',{})
+ if isinstance(servers,dict):
+  for k in list(servers):
+   if 'wizard' in k.lower() or 'WIZARD_MCP_TOKEN' in json.dumps(servers[k]): servers.pop(k,None)
+ return c,values
 p=json.load(sys.stdin); home=pathlib.Path('/opt/data');os.umask(0o077)
 c=yaml.safe_load((home/'config.yaml').read_text()) or {}
 c.setdefault('agent',{})['disabled_toolsets']=list(dict.fromkeys(c.get('agent',{}).get('disabled_toolsets',[])+['cronjob','kanban','delegation','send_message','wizard-schedule','wizard-heavy']))
@@ -99,12 +108,13 @@ for name in names:
 c.setdefault('gateway',{}).setdefault('api_server',{})['max_concurrent_runs']=1
 plugins=c.setdefault('plugins',{});enabled=plugins.setdefault('enabled',[])
 if 'wizard-incognito-policy' not in enabled: enabled.append('wizard-incognito-policy')
-# Keep provider, fallbacks, MCP, toolsets, memory backend, skills and plugins untouched.
-(home/'config.yaml').write_text(yaml.safe_dump(c,sort_keys=False))
+# Preserve provider/memory configuration; remove Wizard gateway authority below.
 from dotenv import dotenv_values
 os.environ.update(p['environment'])
 values={**p['environment'],**dict(dotenv_values(home/'.env'))}
 values.update(HOME='/opt/data',HERMES_HOME='/opt/data',HERMES_WORKDIR='/opt/data',XDG_CACHE_HOME='/opt/data/.cache',API_SERVER_ENABLED='true',API_SERVER_HOST='0.0.0.0',API_SERVER_PORT='8642',API_SERVER_KEY=p['key'])
+c,values=seal_gateway(c,values)
+(home/'config.yaml').write_text(yaml.safe_dump(c,sort_keys=False))
 # Gateway env overrides must not re-enable a copied messaging platform.
 for name in names:
  if name!='api_server': values[name.upper().replace('-','_')+'_ENABLED']='false'
@@ -121,7 +131,7 @@ print(json.dumps(meta))
 POLICY = '''import re
 def block(tool_name, args=None, **kw):
  name=tool_name.split('__')[-1]
- persistent = r'(?:^|_)(?:wizard_schedule|kanban|wizard_heavy|delegate|send_message)(?:_|$)'
+ persistent = r'(?:^|_)(?:wizard_schedule|wizard_start_thread|wizard_follow_up|wizard_remind|kanban|wizard_heavy|delegate|send_message)(?:_|$)'
  exact = r'(?:^|_)(?:cron|cronjob|supervisor_report|supervisor_ask|supervisor_answer|supervisor_build|supervisor_close|session_history_write|session_history_append)$'
  if re.search(persistent,name) or re.search(exact,name):
   return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
@@ -137,7 +147,7 @@ def block(tool_name, args=None, **kw):
 def register(ctx):
  ctx.register_hook('pre_tool_call',block)
 '''
-VERIFY = "import sys;sys.path.insert(0,'/opt/hermes');from hermes_cli.plugins import discover_plugins,get_pre_tool_call_directive;discover_plugins();assert get_pre_tool_call_directive('wizard_schedule',{})[0]=='block';assert get_pre_tool_call_directive('memory',{})[0] is None"
+VERIFY = "import sys;sys.path.insert(0,'/opt/hermes');from hermes_cli.plugins import discover_plugins,get_pre_tool_call_directive;discover_plugins();assert all(get_pre_tool_call_directive(n,{})[0]=='block' for n in ['wizard_schedule','wizard_start_thread','wizard_follow_up','wizard_remind','mcp_wizard_wizard_start_thread']);assert get_pre_tool_call_directive('memory',{})[0] is None"
 
 
 def _docker_command(args):

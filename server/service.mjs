@@ -50,7 +50,7 @@ import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
-import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
+import { readNonHoldingFollowUps, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
@@ -163,7 +163,7 @@ This is a same-profile private-Operator experience pilot. Describe it accurately
 // the Own reply style leaves them out so the owner's existing agent keeps its own habits.
 const WIZARD_CLIENT_INTRO = 'You are serving the user through Wizard, a first-party mobile client for their Hermes Agent.'
 const WIZARD_STYLE_INTRO = 'Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require.'
-const WIZARD_CLIENT_FACTS = `Wizard renders Markdown (code fences, lists, tables, headings). Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients. Whether and how much to format is up to your own persona. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
+const WIZARD_CLIENT_FACTS = `Wizard renders Markdown (code fences, lists, tables, headings). Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients. Only that plain-text line is overridden; the same note's ask to keep replies brief and conversational, not a document, still applies. Whether and how much to format is up to your own persona. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
 const WIZARD_OUTCOME_OWNERSHIP = 'The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.'
 const WIZARD_FINISH_SHAPE = 'Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.'
 
@@ -2620,7 +2620,7 @@ function buildWizardServer(options, lifetime) {
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
-      appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome,
+      appsJsonPath, osHome: options.bridgeSkillsHome ? resolve(String(options.bridgeSkillsHome)) : bridgeOsHome, grantsHome: bridgeOsHome,
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
       fetchImpl, writeSkills: !gatewayOnly && options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
@@ -2731,11 +2731,10 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  // The guard only reads this thread's jobs and only for check; never fetch or scan the whole
-  // ledger for other states. Callers projecting a list pass one snapshot for all rows.
+  // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
+  // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
   const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
-    // The guard only changes check; done returns unchanged. Do not synchronously
-    // read transcript evidence that this guard cannot consume on cached list rows.
+    nonHolding: (_agentId, sessionId) => readNonHoldingFollowUps(hermesStatePath, sessionId),
     isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
@@ -2789,7 +2788,7 @@ function buildWizardServer(options, lifetime) {
       const evidence = prepared?.get(row.id) ?? routedOpenAskEvidence(agent, [row.id]).get(row.id)
       const truth = { ...(evidence?.truth ?? {}) }
       truth.helperStatus = evidence?.helperStatus
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'check', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
       truth.supervisorPending = !!evidence?.supervisorPending
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
@@ -3846,7 +3845,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
+  const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -3870,7 +3869,9 @@ function buildWizardServer(options, lifetime) {
       }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
-          try { return await listCache.served() }
+          // The window selector normalizes into separate objects and never mutates
+          // these rows. Keep identity so its selection can be shared across polls.
+          try { return await listCache.served(true) }
           catch (error) { listCache.fellBack(error) }
         }
         const q = searchParams.get('q')
@@ -4309,18 +4310,18 @@ function buildWizardServer(options, lifetime) {
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      // Legacy enrichment appends pending rows to EACH original 20-row head slice.
-      // Project those exceptions fresh, separately from cacheable canonical rows,
-      // retaining duplicates, order and preview positions (including partial slices).
+      // Legacy enrichment appends pending first-send rows once, after the 100-row head batch.
+      // Project those exceptions fresh, separately from cacheable canonical rows, keeping
+      // their order and preview positions.
       let reuseHead = true, pending = []
       try { if (runQueue) pending = pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)) } catch { reuseHead = false }
       const projectHeadExtras = async () => {
         const extras = new Map()
-        if (pending.length) for (let offset = 0; offset < Math.min(100, all.length); offset += 20) {
-          const slice = all.slice(offset, Math.min(offset + 20, 100))
-          const known = new Set(slice.map(session => session.id))
+        if (pending.length) {
+          const head = all.slice(0, 100)
+          const known = new Set(head.map(session => session.id))
           const appended = pending.filter(session => !known.has(session.id))
-          if (appended.length) extras.set(offset + slice.length, await projectSlice(appended, true, offset + slice.length, false))
+          if (appended.length) extras.set(head.length, await projectBatch(appended, true, head.length, false))
         }
         return extras
       }
@@ -4378,9 +4379,9 @@ function buildWizardServer(options, lifetime) {
         }
         return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
       },
-      served: async () => {
+      served: async (shared = false) => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
-        return rows.map((row) => ({ ...row }))
+        return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {
         stats.fallbacks++
@@ -5097,7 +5098,11 @@ function buildWizardServer(options, lifetime) {
     // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
     // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
-    if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
+    // A durable idempotency replay admits no work. Delay invalidation for this
+    // route until its outcome is known; real admissions still expire the snapshot.
+    const deferredListTouch = request.method === 'POST' && request.url === '/wizard/hermes/v1/runs'
+    let readOnlyRunReplay = false
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !deferredListTouch) listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
@@ -6464,6 +6469,7 @@ function buildWizardServer(options, lifetime) {
             const replay = runQueue.replay(runtime, sessionId, idempotencyKey, requestHash)
             if (replay) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
+              readOnlyRunReplay = true
               return
             }
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
@@ -6800,7 +6806,7 @@ function buildWizardServer(options, lifetime) {
         // get the shell's own policy rather than the legacy client's.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data: https://derp1.tailscale.com/generate_204; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
         // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
@@ -6858,7 +6864,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { meterDone(); requestDone() }
+    } finally {
+      if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
+      meterDone(); requestDone()
+    }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {

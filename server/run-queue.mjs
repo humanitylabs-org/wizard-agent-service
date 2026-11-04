@@ -1029,12 +1029,21 @@ export class DurableRunQueue {
     return this.tickPromise
   }
 
-  // Status reads refresh only their run, never join a whole-queue reconciliation
-  // (provider probes, unrelated upstream runs and recovery may take seconds).
+  // Active status reads stay narrow. Queued/terminal reads must retain the
+  // admission/recovery tick: they can reconcile lost acknowledgements, release
+  // capacity, cancel superseded helpers and dispatch the next waiting run.
   async refreshRun(publicRunId) {
     const record = this.get(publicRunId)
     if (!record || this.closed) return record
-    return this._refresh(record, true)
+    if (!record.upstreamRunId || TERMINAL.has(record.status)) {
+      await this.tick(true)
+      return this.get(publicRunId)
+    }
+    const refreshed = await this._refresh(record, true)
+    // An in-flight tick already owns reconciliation. Never join it from this
+    // independent running-status read (it may be blocked on another provider).
+    if (TERMINAL.has(refreshed.status) && !this.tickPromise) await this.tick(true)
+    return this.get(publicRunId)
   }
 
   async _refresh(record, force) {

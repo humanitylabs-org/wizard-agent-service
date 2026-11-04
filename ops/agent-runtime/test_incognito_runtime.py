@@ -30,6 +30,22 @@ def metadata():
 AGENT={'schema':1,'id':'synthetic','privacy':'private','model':{'provider':'tinfoil','model':'synthetic-model'},'runtime':{'kind':'container','port':18001,'app_id':'agent-synthetic'}}
 SID='incog_'+'a'*32
 class Tests(unittest.TestCase):
+ def test_install_removes_gateway_credentials_even_from_terminal_environment(self):
+  import ast
+  tree=ast.parse(INSTALL);definition=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='seal_gateway')
+  scope={'json':json};exec(compile(ast.Module(body=[definition],type_ignores=[]),'<actual-install-seal>','exec'),scope)
+  config={'mcp_servers':{'wizard':{'token':'synthetic'},'custom-reader':{'url':'https://example.invalid'}}}
+  values={'WIZARD_MCP_TOKEN':'synthetic','WIZARD_MCP_URL':'http://gateway','WIZARD_AGENT_BRIDGE_KEY':'synthetic','TINFOIL_API_KEY':'synthetic-provider'}
+  c,v=scope['seal_gateway'](config,values)
+  self.assertEqual(v,{'TINFOIL_API_KEY':'synthetic-provider'})
+  self.assertEqual(list(c['mcp_servers']),['custom-reader'])
+  self.assertIn('c,values=seal_gateway(c,values)',INSTALL)
+ def test_incognito_blocks_every_scheduler_entrypoint_and_mcp_wrapper(self):
+  policy={};exec(POLICY,policy);block=policy['block']
+  for name in ['wizard_start_thread','wizard_follow_up','wizard_remind','wizard_schedule','mcp_wizard_wizard_start_thread','mcp__wizard__wizard_follow_up','mcp_wizard_wizard_remind']:
+   self.assertEqual(block(name,{})['action'],'block',name)
+   self.assertEqual(block('tool_call',{'calls':[{'name':name,'arguments':{}}]})['action'],'block',name)
+  self.assertIsNone(block('memory',{}))
  def test_staging_owner_label_scopes_startup_and_periodic_sweeps(self):
   r=Rig();m=r.manager(owner='incognito-preview');m.start(AGENT,SID);m.sweep()
   create=next(a for a,_ in r.calls if a[0]=='create')
@@ -187,11 +203,16 @@ class Tests(unittest.TestCase):
  def test_install_preserves_configuration_and_enables_policy_in_ram(self):
   import yaml
   with tempfile.TemporaryDirectory() as d:
-   root=Path(d);(root/'config.yaml').write_text(yaml.safe_dump({'toolsets':['all'],'mcp_servers':{'synthetic':{'command':'synthetic'}},'model':{'provider':'tinfoil','fallbacks':['local']},'plugins':{'enabled':['synthetic']}}));(root/'.env').write_text('AUTH=synthetic\n')
+   root=Path(d);(root/'config.yaml').write_text(yaml.safe_dump({'toolsets':['all'],'mcp_servers':{'synthetic':{'command':'synthetic'},'wizard':{'url':'http://gateway/wizard/mcp','headers':{'Authorization':'Bearer synthetic-env-secret'}}},'model':{'provider':'tinfoil','fallbacks':['local']},'plugins':{'enabled':['synthetic']}}));(root/'.env').write_text('AUTH=synthetic\nWIZARD_MCP_TOKEN=synthetic-env-secret\nWIZARD_AGENT_BRIDGE_KEY=synthetic-file-secret\n')
    script=INSTALL.replace("pathlib.Path('/opt/data')",'pathlib.Path('+repr(d)+')').replace('from gateway.config import Platform',"from types import SimpleNamespace\nPlatform=[SimpleNamespace(value=x) for x in ['api_server','telegram']]")
-   result=subprocess.check_output([sys.executable,'-c',script],input=json.dumps({'key':'synthetic-new','environment':{},'policy':POLICY}).encode())
+   result=subprocess.check_output([sys.executable,'-c',script],input=json.dumps({'key':'synthetic-new','environment':{'WIZARD_MCP_TOKEN':'synthetic-process-secret','WIZARD_AGENT_BRIDGE_KEY':'synthetic-bridge-secret'},'policy':POLICY}).encode())
    cfg=yaml.safe_load((root/'config.yaml').read_text());self.assertEqual(cfg['toolsets'],['all']);self.assertIn('synthetic',cfg['mcp_servers']);self.assertEqual(cfg['model']['fallbacks'],['local'])
    self.assertIn('synthetic',cfg['plugins']['enabled']);self.assertIn('wizard-incognito-policy',cfg['plugins']['enabled']);self.assertEqual(json.loads(result)['history_search'],'unavailable')
+   for name in ['.env','.incognito-environment.json','config.yaml']:
+    written=(root/name).read_text()
+    for secret in ['synthetic-env-secret','synthetic-file-secret','synthetic-process-secret','synthetic-bridge-secret']:
+     self.assertNotIn(secret,written)
+   self.assertNotIn('wizard',cfg['mcp_servers'])
    self.assertFalse((root/'.ready').exists());self.assertFalse((root/'.lease').exists())
  def test_stream_copy_is_bounded_binary_pipe_not_archive_file(self):
   with patch('incognito_runtime._docker_command',lambda a:a):
