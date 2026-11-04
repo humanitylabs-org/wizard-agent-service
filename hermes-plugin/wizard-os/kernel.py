@@ -15,7 +15,7 @@ from pathlib import Path
 
 MCP_SERVER_NAME = "wizard"
 META_TOOL = "wizard_apps"
-KERNEL_LIMIT = 900
+KERNEL_LIMIT = 1300
 JOB_SKILL_PREFIX = "wizard-job-"
 JOB_MAP_LINES = 12
 DEFAULT_FILES_ROOT = "~/runtipi/media"
@@ -120,10 +120,12 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         f"Files root: {files_root}; app tool paths are relative to it.",
         "When a request matches a wizard-job-<job> skill in your skills:" if pointers else "When a request matches a job below:",
         "1. Load it with skill_view for tool names and purposes." if pointers else "1. Use the app named for that job.",
-        f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`{id_note}."
-        + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
+        f"2. Call the app's tool on the `{MCP_SERVER_NAME}` MCP server, named `{name}`{id_note}. Use registered exact names only."
+        + (" Use tool_call if needed." if hermes else ""),
         "3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.",
         "Use the installed app for its job.",
+        "Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.",
+        "Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.",
         f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
         "Save routing-only app-job skills.",
     ]
