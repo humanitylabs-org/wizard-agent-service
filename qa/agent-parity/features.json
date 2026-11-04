@@ -543,7 +543,7 @@
       "id": "ready-ask-contract",
       "description": "Deliver the cold-readable, situation-first Ready ask contract to every runtime kind",
       "layer": "server",
-      "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
+      "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban, including the rule that an unbuilt plan/diagnosis/audit/proposal for requested work must either start in the same turn with fyi and a verified running mechanism or ask needs_you with a reply word that starts it; only explicitly research-only or hypothetical requests may finish at the plan. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
