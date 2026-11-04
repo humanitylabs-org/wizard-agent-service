@@ -2,7 +2,7 @@
 // filesystem provisioning, profile access, or Hermes runtime driver involvement.
 import { readFileSync } from 'node:fs';
 const id = /^[a-z0-9][a-z0-9-]{1,40}$/u;
-const read = path => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
+const read = path => { try { const value = JSON.parse(readFileSync(path, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; } };
 export function appAgentRuntimes(appsPath, grantsPath) {
   const apps = read(appsPath).apps;
   if (!Array.isArray(apps)) return [];
@@ -13,7 +13,7 @@ export function appAgentRuntimes(appsPath, grantsPath) {
   return candidates.flatMap(a => {
     const r = a.agent_runtime, m = r.model;
     if (counts.get(r.id) !== 1 || typeof r.id !== 'string' || !/^[a-z][a-z0-9-]{1,30}$/u.test(r.id) || ['main', 'hermes', 'default', 'new', 'options'].includes(r.id) || typeof r.harness !== 'string' || !id.test(r.harness)
-        || a.type !== 'agent' || a.privacy === 'private' || typeof r.label !== 'string' || !r.label.trim() || r.label.length > 80
+        || a.id !== `agent-${r.id}` || a.type !== 'agent' || a.privacy === 'private' || typeof r.label !== 'string' || !r.label.trim() || r.label.length > 80
         || !Number.isInteger(r.port) || r.port < 1024 || r.port > 65535 || !Number.isInteger(r.host_port) || r.host_port < 1024 || r.host_port > 65535
         || !m || typeof m.provider !== 'string' || typeof m.model !== 'string' || !m.provider || !m.model) return [];
     const key = grants.outgoing?.[a.id];
@@ -25,7 +25,7 @@ export function appAgentRuntimes(appsPath, grantsPath) {
         || endpoint.username || endpoint.password || endpoint.pathname !== '/' || endpoint.search || endpoint.hash) return [];
     return [{ schema: 1, id: r.id, label: r.label, harness: r.harness, privacy: 'standard',
       model: { ...m, allowed_models: [m.model], fallback: false },
-      permissions: { preset: 'standard', outside_tools: [], files: 'own', wizard_apps: [], agent_apps: [], other_agents: 'none', shared_with_agents: false },
+      permissions: { preset: 'standard', outside_tools: [], files: 'none', wizard_apps: [], agent_apps: [], other_agents: 'none', shared_with_agents: false },
       runtime: { kind: 'external', managed_by: 'app', app_id: a.id, api: endpoint.origin, port: r.host_port }, key }];
   });
 }

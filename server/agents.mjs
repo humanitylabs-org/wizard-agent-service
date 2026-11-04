@@ -526,7 +526,7 @@ export function createAgentRegistry(options = {}) {
 
   const folder = (id) => join(agentsDir, id)
   const appRuntimes = () => appAgentRuntimes(appsJsonPath, options.appRuntimeGrantsPath || process.env.WIZARD_GRANTS_FILE || '/wizard/grants.json')
-    .filter(a => !existsSync(join(folder(a.id), 'agent.json')))
+    .filter(a => !existsSync(folder(a.id)))
   const appRuntime = id => appRuntimes().find(a => a.id === id)
   const readRaw = (id) => {
     if (id === MAIN_AGENT_ID) return mainAgent()
@@ -660,7 +660,7 @@ export function createAgentRegistry(options = {}) {
     const kind = appKinds().get(appId)
     if (!kind) fail(404, 'app_not_found', 'app.id')
     const privateApp = privateApps().has(appId)
-    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
+    const all = list().filter(agent => agent.role !== 'recovery' && (agent.id === MAIN_AGENT_ID || agent.runtime.kind !== 'external'))
     return {
       app_id: appId, kind, privacy: privateApp ? 'private' : 'standard',
       // A private app on a box with no private agent: the install sheet offers to set one up (James, 23 Oct 2026).
@@ -680,9 +680,9 @@ export function createAgentRegistry(options = {}) {
     // A rejected external-runtime selection must not perform those writes.
     for (const id of wanted) {
       const agent = readRaw(id)
-      if (!agent || agent.role === 'recovery' || agent.harness === 'pi') fail(404, 'agent_not_found', 'agent.id', id)
+      if (!agent || agent.role === 'recovery' || (agent.id !== MAIN_AGENT_ID && agent.runtime.kind === 'external')) fail(404, 'agent_not_found', 'agent.id', id)
     }
-    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
+    const all = list().filter(agent => agent.role !== 'recovery' && (agent.id === MAIN_AGENT_ID || agent.runtime.kind !== 'external'))
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)
       if (has === wanted.has(agent.id)) continue
@@ -772,7 +772,7 @@ export function createAgentRegistry(options = {}) {
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
     // Fixed loopback only: the host owns any tailnet/SSH transport, never a browser-selected URL.
-    if (agent.runtime.kind === 'external') return agent.runtime.managed_by === 'app' && upstreamMode === 'network' ? agent.runtime.api : `http://127.0.0.1:${agent.runtime.port}`
+    if (agent.runtime.kind === 'external') return agent.runtime.managed_by === 'app' ? agent.runtime.api : `http://127.0.0.1:${agent.runtime.port}`
     if (agent.runtime.kind === 'profile') {
       if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
       return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
@@ -881,7 +881,7 @@ export function createAgentRegistry(options = {}) {
     const base = label.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 24) || 'agent'
     const start = /^[a-z]/u.test(base) ? base : `agent-${base}`.slice(0, 24)
     let id = RESERVED.has(start) ? `${start}-agent` : start
-    for (let n = 2; existsSync(folder(id)); n += 1) id = `${start}-${n}`
+    for (let n = 2; existsSync(folder(id)) || appRuntime(id); n += 1) id = `${start}-${n}`
     return id
   }
 

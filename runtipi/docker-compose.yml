@@ -29,7 +29,6 @@ services:
       WIZARD_ROUTER_URL: ${WIZARD_ROUTER_URL}
       WIZARD_ROUTER_MODEL: ${WIZARD_ROUTER_MODEL}
       WIZARD_ROUTER_KEY: ${WIZARD_ROUTER_KEY}
-      WIZARD_AGENT_UPSTREAM: network
     volumes:
       - ${APP_DATA_DIR}/data:/state
       # Hermes's own data (hermes-agent app, same store): session history only, never written.
