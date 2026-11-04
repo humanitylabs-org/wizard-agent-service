@@ -7,7 +7,7 @@ runs in a container instead of directly on the host.
 
 | File | Install as |
 | --- | --- |
-| `Dockerfile` | runtime image (node + python3, no code baked in) |
+| `Dockerfile` | runtime image (node + python3 + git + OpenSSH client, no code baked in) |
 | `wizard-agent-service-container` | `~/.local/bin/wizard-agent-service-container` (ExecStart/ExecStop) |
 | `99-agent-service-container.conf` | `~/.config/systemd/user/<unit>.service.d/99-agent-service-container.conf` |
 
@@ -57,6 +57,37 @@ curl -fsS http://127.0.0.1:${WIZARD_PORT:-8923}/wizard/health
 
 The drop-in must sort after every other drop-in that sets `ExecStart` (hence `99-`). Back up the run-queue and
 upload databases before the restart if you want a rollback point; the container uses them in place.
+
+## Runtime dependency and write checks
+
+The runtime image must carry every binary the service shells out to, not only Node:
+
+- `server/pages.mjs` uses `git` for every Pages save/history call, including shared Look skin and tweaks.
+- `server/service.mjs` and `server/chat-photo-projection.mjs` use `python3` (stdlib SQLite and photo helpers).
+- `server/heavy-queue.mjs` uses `ssh` for the direct heavy-worker transport (a host RPC bridge is also supported).
+- `server/system-jobs.mjs` uses host `systemctl` and owner-configured job commands when host jobs are
+  explicitly enabled. Those are host capabilities, not supplied by this Alpine image; keep host jobs
+  disabled in this container unless a separate host integration has been verified.
+
+The Dockerfile executes version/import checks at build time. `tests/host-container-image.test.ts` runs
+in the normal unit suite and guards the package list and build checks against accidental removal.
+After any containerization or runtime-image change, check a real write, not just health/bootstrap:
+
+1. Verify `git --version`, `ssh -V`, `python3 --version` and `node --version` inside the candidate image.
+2. Preserve the currently running image ID under a rollback tag before replacing the launcher's image tag.
+3. Restart once; wait for bootstrap, then read an existing page's history (HTTP 200).
+4. PUT a harmless text file with `version: null` under a unique QA page slug; GET it and compare both
+   text and returned version, then verify its history contains the save commit. Never probe by changing
+   the owner's Look. Remove the QA page through the API if supported; otherwise report the tiny artifact.
+
+For example, preserve an existing runtime before building/replacing its default tag:
+
+```sh
+sg docker -c 'docker tag wizard-agent-service-runtime:node22.22.3-py3 wizard-agent-service-runtime:node22.22.3-py3-pre-git'
+```
+
+A healthy listener does not prove Pages saves work: missing `git` surfaces as `pages_history_failed`
+with `spawnSync git ENOENT` only when the service attempts history/write operations.
 
 ## Undo
 
