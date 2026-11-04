@@ -30,6 +30,16 @@ def metadata():
 AGENT={'schema':1,'id':'synthetic','privacy':'private','model':{'provider':'tinfoil','model':'synthetic-model'},'runtime':{'kind':'container','port':18001,'app_id':'agent-synthetic'}}
 SID='incog_'+'a'*32
 class Tests(unittest.TestCase):
+ def test_install_removes_gateway_credentials_even_from_terminal_environment(self):
+  import ast
+  tree=ast.parse(INSTALL);definition=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='seal_gateway')
+  scope={'json':json};exec(compile(ast.Module(body=[definition],type_ignores=[]),'<actual-install-seal>','exec'),scope)
+  config={'mcp_servers':{'wizard':{'token':'synthetic'},'custom-reader':{'url':'https://example.invalid'}}}
+  values={'WIZARD_MCP_TOKEN':'synthetic','WIZARD_MCP_URL':'http://gateway','WIZARD_AGENT_BRIDGE_KEY':'synthetic','TINFOIL_API_KEY':'synthetic-provider'}
+  c,v=scope['seal_gateway'](config,values)
+  self.assertEqual(v,{'TINFOIL_API_KEY':'synthetic-provider'})
+  self.assertEqual(list(c['mcp_servers']),['custom-reader'])
+  self.assertIn('c,values=seal_gateway(c,values)',INSTALL)
  def test_incognito_blocks_every_scheduler_entrypoint_and_mcp_wrapper(self):
   policy={};exec(POLICY,policy);block=policy['block']
   for name in ['wizard_start_thread','wizard_follow_up','wizard_remind','wizard_schedule','mcp_wizard_wizard_start_thread','mcp__wizard__wizard_follow_up','mcp_wizard_wizard_remind']:
