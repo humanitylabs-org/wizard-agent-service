@@ -65,6 +65,7 @@ describe('thread status tag', () => {
       expect(instructions).toContain('a plan, diagnosis, audit or proposal for a fix or feature the user wants is not done while the work itself is unbuilt')
       expect(instructions).toContain('start it in the same turn, then use fyi and name the verified running mechanism in the reply')
       expect(instructions).toContain('or use needs_you with one reply word that starts it ("Fix plan is ready. Reply build to implement it")')
+      expect(instructions).toContain('An explicit "do not implement or change anything" limits the request to research-only')
       expect(instructions).toContain('Only an explicitly research-only or hypothetical request may end done or fyi without starting the work or asking to start it')
     }
   })

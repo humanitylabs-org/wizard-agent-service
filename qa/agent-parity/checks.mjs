@@ -187,6 +187,7 @@ export const checks = {
       'a plan, diagnosis, audit or proposal for a fix or feature the user wants is not done while the work itself is unbuilt',
       'start it in the same turn, then use fyi and name the verified running mechanism in the reply',
       'or use needs_you with one reply word that starts it ("Fix plan is ready. Reply build to implement it")',
+      'An explicit "do not implement or change anything" limits the request to research-only',
       'Only an explicitly research-only or hypothetical request may end done or fyi without starting the work or asking to start it']) {
       assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
     }
