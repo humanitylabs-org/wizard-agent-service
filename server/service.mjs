@@ -2652,6 +2652,7 @@ function buildWizardServer(options, lifetime) {
     mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
+    appRuntimeGrantsPath: options.appRuntimeGrantsPath,
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,
@@ -2834,7 +2835,7 @@ function buildWizardServer(options, lifetime) {
     prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : agentVisionHelper(agent) ? 'text-only-helper' : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
-      if (agent.harness === 'pi' && agent.runtime.kind === 'external') throw new AgentError(409, 'external_agent_read_only', 'agent.runtime')
+      if (agent.id !== MAIN_AGENT_ID && agent.runtime.kind === 'external') throw new AgentError(409, 'external_agent_read_only', 'agent.runtime')
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
       try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
