@@ -9,6 +9,27 @@ import { DatabaseSync } from 'node:sqlite'
 import { ownerGate } from './delegation-receipts.mjs'
 
 export const HEAVY_WAIT_CAP_SECONDS = 12 * 3600
+
+// One (agent, thread) -> jobs index per heavy-ledger snapshot. Status guards run once per listed
+// thread; scanning the whole ledger (1,000+ historical jobs) for every row made each Chats list
+// O(threads x jobs). The index is keyed by the snapshot array, so a new snapshot (any queue
+// write) builds a new index and an unchanged snapshot reuses it. Ledger order is preserved.
+const heavySessionIndexes = new WeakMap()
+const heavyKey = (agentId, sessionId) => `${agentId}\0${sessionId}`
+export function heavyJobsForSession(jobs, agentId, sessionId) {
+  if (!Array.isArray(jobs) || !jobs.length) return []
+  let index = heavySessionIndexes.get(jobs)
+  if (!index) {
+    index = new Map()
+    for (const job of jobs) {
+      const key = heavyKey(job?.agent_id ?? 'hermes', job?.sessionId ?? job?.session_id)
+      const list = index.get(key)
+      if (list) list.push(job); else index.set(key, [job])
+    }
+    heavySessionIndexes.set(jobs, index)
+  }
+  return index.get(heavyKey(agentId, sessionId)) ?? []
+}
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 export const heavyCompletionDropped = job => terminal.has(job.state) && !job.completion_delivered_at
   && (job.cancel_requested || job.continuation_invalidated || ['superseded', 'suppressed'].includes(job.resume))
