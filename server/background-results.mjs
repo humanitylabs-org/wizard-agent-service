@@ -85,7 +85,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     return [...unique.values()]
   }
   const admitted = key => queue()?.byIdempotencyKey('direct', key)
-  const isBusy = id => busy(id) || ACTIVE.has(queue()?.latestStatus(id))
+  const isBusy = (id, sessionTruth) => (sessionTruth?.has(id) ? sessionTruth.get(id)?.active === true : busy(id)) || ACTIVE.has(queue()?.latestStatus(id))
   const consumed = (rows, delegationId, at, messageId, sourceKind = 'transcript') => rows.some(row => {
     if (delegationId && row.role === 'user' && textOf(row).includes(`${RECEIPT_PREFIX}${delegationId}\n`)) return true
     if (delegationId && Number(row.timestamp) > at && (row.role === 'tool' || row.role === 'assistant' && row.tool_calls?.length)) {
@@ -239,12 +239,18 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       }))
       return { results: pending.map(publicRecord), sessions, scan_complete: !inflight && !discovery && !c.error && c.complete, scanning: Boolean(inflight || discovery), available: !c.error }
     },
-    async project(result) {
+    async project(result, sessionTruth) {
       void refresh()
       const c = cache
-      const bySession = new Map(c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId) && !isBusy(row.readId)).map(row => [row.sessionId, row]))
       let payload
       try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+      const ids = new Set([...rowsOf(payload), ...(payload.session ? [payload.session] : [])].map(row => String(row._lineage_root_id || row.id || '')))
+      const busyById = new Map()
+      const busyFor = id => {
+        if (!busyById.has(id)) busyById.set(id, isBusy(id, sessionTruth))
+        return busyById.get(id)
+      }
+      const bySession = new Map(c.records.filter(row => ids.has(row.sessionId) && !admitted(row.key) && !busyFor(row.sessionId) && !busyFor(row.readId)).map(row => [row.sessionId, row]))
       const decorate = row => {
         const id = String(row._lineage_root_id || row.id || '')
         const pending = bySession.get(id)

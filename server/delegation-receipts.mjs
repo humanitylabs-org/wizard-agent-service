@@ -2,6 +2,7 @@
 // use the delegation identity and the same durable consumption/gate checks.
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import { preparedRead } from './read-only-sqlite.mjs'
 import { parseStatus } from './thread-status.mjs'
 export const RECEIPT_PREFIX = '[Wizard follow-through] Recovered helper receipt '
 export const receiptKey = id => `wizard-helper-receipt-${id}`
@@ -19,11 +20,11 @@ export const retainedMessagesWhere = columns => !columns.has('active') ? '1'
 const internal = internalHelperMessage
 
 export function currentOwnerResult(db, sessionId) {
-  const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
+  const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(r=>r.name))
   // Compaction changes model context, not the owner's request/answer boundary.
   // Only compacted inactive rows remain authoritative for gates and supersession.
   const kind = columns.has('display_kind') ? ', display_kind' : ''
-  const rows = db.prepare(`SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
+  const rows = preparedRead(db, `SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
     AND ${retainedMessagesWhere(columns)} AND role IN ('user','assistant') AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
   let assistant, userAt=0, inspected=0
   for (const row of rows) {
@@ -59,11 +60,26 @@ export function isReceiptDelivery(row, id) {
 }
 export function receiptConsumed(db, sessionId, id, completedAt) {
   const after = Number.isFinite(Number(completedAt)) ? Number(completedAt) : 0
-  const rows = db.prepare(`SELECT role,content FROM messages WHERE session_id=? AND timestamp>=?
+  const rows = preparedRead(db, `SELECT role,content FROM messages WHERE session_id=? AND timestamp>=?
     AND role IN ('user','tool') AND instr(COALESCE(content,''),?)>0
     ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId,after,id)
   // Incomplete evidence blocks automatic redelivery, never proves integration.
   return rows.length > 512 || rows.some(row => isReceiptDelivery(row,id))
+}
+// One SQL call for a bounded batch, with the exact per-receipt 513-row fence.
+// The correlated seek uses the existing session index, never a global body scan.
+export function receiptsConsumed(db, receipts) {
+  if (!receipts.length) return []
+  const input = receipts.map(row => [row.sessionId, row.id, Number.isFinite(Number(row.completedAt)) ? Number(row.completedAt) : 0])
+  const rows = preparedRead(db, `SELECT r.key, (SELECT json_group_array(json_object('role',role,'content',content)) FROM (
+    SELECT role,content FROM messages WHERE session_id=json_extract(r.value,'$[0]') AND timestamp>=json_extract(r.value,'$[2]')
+      AND role IN ('user','tool') AND instr(COALESCE(content,''),json_extract(r.value,'$[1]'))>0
+      ORDER BY timestamp DESC,id DESC LIMIT 513
+    )) AS evidence FROM json_each(?) r`).all(JSON.stringify(input))
+  return rows.map(row => {
+    const evidence = JSON.parse(row.evidence)
+    return evidence.length > 512 || evidence.some(message => isReceiptDelivery(message, receipts[Number(row.key)].id))
+  })
 }
 export function continuationAllowed(path, sessionId, id, now=Date.now()) {
   if(!path || !existsSync(path)) return false
@@ -71,37 +87,40 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
   try {
     db=new DatabaseSync(path,{readOnly:true})
     if (ownerGate(db,sessionId) || id && receiptConsumed(db,sessionId,id)) return false
-    if(db.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(sessionId,now/1000)) return false
+    if(preparedRead(db, 'SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>? LIMIT 1').get(sessionId,now/1000)) return false
     return true
   } catch { return false } finally { db?.close() }
 }
 // The owner has taken the thread forward since the helper finished: the result is stale for this
 // thread, and resuming it would override what the owner asked for next. It stays queryable in Hermes.
 export function ownerMovedOn(db, sessionId, completedAt) {
-  const columns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(r=>r.name))
-  const rows = db.prepare(`SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
+  const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(r=>r.name))
+  const rows = preparedRead(db, `SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
     AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
   return rows.length>512 || rows.some(row => isHumanRequest({ ...row, role: 'user' }))
 }
 // Automatic resumption is for the turn that was waiting on the helper; after two hours it is stale.
-export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=2*3600,includeDelivered=false,delegationId}={}) {
+export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSeconds=2*3600,includeDelivered=false,delegationId,db: suppliedDb,sessionIds}={}) {
   if(!path || !existsSync(path)) return []
   let db
   try {
-    db=new DatabaseSync(path,{readOnly:true})
-    const columns=new Set(db.prepare('PRAGMA table_info(async_delegations)').all().map(r=>r.name))
+    db=suppliedDb ?? new DatabaseSync(path,{readOnly:true})
+    const columns=new Set(preparedRead(db, 'PRAGMA table_info(async_delegations)').all().map(r=>r.name))
     if(!['delegation_id','state','delivery_state','result_json','completed_at'].every(k=>columns.has(k))) return []
     const origins=['origin_session_id','parent_session_id','origin_ui_session_id'].filter(k=>columns.has(k))
     if(!origins.length) return []
     const origin=origins.length===1 ? origins[0] : `COALESCE(${origins.map(k=>`NULLIF(${k},'')`).join(',')})`
-    const rows=db.prepare(`SELECT delegation_id,${origin} AS session_id,completed_at,result_json FROM async_delegations
+    const rows=preparedRead(db, `SELECT delegation_id,${origin} AS session_id,completed_at,result_json FROM async_delegations
       WHERE state IN ('completed','failed','interrupted') ${includeDelivered?'':"AND delivery_state IN ('pending','dropped')"}
-      AND ${delegationId?'delegation_id=?':'completed_at>=?'} ORDER BY completed_at`).all(delegationId ?? now/1000-maxAgeSeconds)
+      AND ${delegationId?'delegation_id=?':'completed_at>=?'} ${sessionIds ? `AND ${origin} IN (SELECT value FROM json_each(?))` : ''} ORDER BY completed_at`)
+      .all(delegationId ?? now/1000-maxAgeSeconds, ...(sessionIds ? [JSON.stringify(sessionIds)] : []))
+    const valid = rows.filter(row => /^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/.test(String(row.session_id||'')) && /^[A-Za-z0-9_-]+$/.test(String(row.delegation_id||'')))
+    const consumed = receiptsConsumed(db, valid.map(row => ({ sessionId: String(row.session_id), id: String(row.delegation_id), completedAt: row.completed_at })))
     const receipts=[]
-    for(const row of rows) {
+    for(const [index, row] of valid.entries()) {
       const sessionId=String(row.session_id||''),id=String(row.delegation_id||'')
       if(!/^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/.test(sessionId)||!/^[A-Za-z0-9_-]+$/.test(id)) continue
-      if(receiptConsumed(db,sessionId,id,row.completed_at)||ownerGate(db,sessionId)) continue
+      if(consumed[index]||ownerGate(db,sessionId)) continue
       if(ownerMovedOn(db,sessionId,row.completed_at) || Number(row.completed_at)<now/1000-maxAgeSeconds) continue
       let results;try{results=JSON.parse(row.result_json)?.results}catch{continue}
       if(!Array.isArray(results)) continue
@@ -111,7 +130,7 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
         input:RECEIPT_PREFIX+id+'\nThese are saved helper findings, not verified completion. Continue the original request through its remaining acceptance checks. Preserve the latest user instructions and original release authority. Keep internal progress in Working; return a final answer only when there is a verified result or one specific owner-only gate.\n\n'+text})
     }
     return receipts
-  } catch{return []}finally{db?.close()}
+  } catch{return []}finally{if (!suppliedDb) db?.close()}
 }
 export function findIdleUndeliveredHelperReceipts(path,options={}) {
   return readUndeliveredHelperReceipts(path,options).filter(r=>continuationAllowed(path,r.sessionId,r.delegationId,options.now??Date.now()))
