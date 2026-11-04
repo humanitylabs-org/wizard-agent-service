@@ -176,7 +176,12 @@ export const checks = {
     assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1)
     assert.ok(sent.body.instructions.includes(STATUS_PROTOCOL_INSTRUCTIONS), 'the shared status protocol reaches the runtime')
-    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR']) {
+    for (const rule of ['read cold', '140 characters', 'first say what is waiting in everyday words, then the exact thing to do', 'if the action is a reply word, the sentence says what that word does', 'no PR',
+      'implementing requested work is never an optional next step',
+      'a plan, diagnosis, audit or proposal for a fix or feature the user wants is not done while the work itself is unbuilt',
+      'start it in the same turn, then use fyi and name the verified running mechanism in the reply',
+      'or use needs_you with one reply word that starts it ("Fix plan is ready. Reply build to implement it")',
+      'Only an explicitly research-only or hypothetical request may end done or fyi without starting the work or asking to start it']) {
       assert.ok(sent.body.instructions.includes(rule), `missing Ready ask rule: ${rule}`)
     }
     assert.ok(!sent.body.instructions.includes('under 90 characters'))

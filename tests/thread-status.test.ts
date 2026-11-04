@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { CONCISE_REPLY_INSTRUCTIONS, SUMMARY_REPLY_INSTRUCTIONS, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
+import { CONCISE_REPLY_INSTRUCTIONS, SUMMARY_REPLY_INSTRUCTIONS, FINISH_REPORT_INSTRUCTIONS, STATUS_INSTRUCTIONS, statusInstructions, StatusBackfill, normalizeStatus, parseStatus, projectStatusMarkers, stripStatus } from '../server/thread-status.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, latestVisibleSessionMessages, runInstructions } from '../server/service.mjs'
 import { AGENT_RUN_INSTRUCTIONS } from '../server/agents-http.mjs'
 
@@ -43,13 +43,30 @@ describe('thread status tag', () => {
   it('defines done as verified-finished and check as the user\'s judgment call', () => {
     // James, 10 Oct 2026: "If you've QA'd something and you're 'Yep, the bug you reported is fixed', that should just be
     // reported as done. The QA ones for me should be like, you need me to see if this is what I meant or if I like it."
-    expect(STATUS_INSTRUCTIONS).toContain('done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check)')
+    expect(STATUS_INSTRUCTIONS).toContain('done (the request is finished and you verified it yourself, including a bug the user reported that you fixed and tested; a suggestion to try it never makes it check;')
     expect(STATUS_INSTRUCTIONS).toContain('check (only when the user\'s own judgment is the missing piece')
     expect(STATUS_INSTRUCTIONS).toContain('confirmed installed on their device')
     expect(STATUS_INSTRUCTIONS).toContain('send check only after it has landed')
     expect(STATUS_INSTRUCTIONS).toContain('whether they like it (look, feel, wording, taste)')
     expect(STATUS_INSTRUCTIONS).toContain('never "Test that X works"')
     expect(STATUS_INSTRUCTIONS).not.toMatch(/should try or QA/)
+  })
+
+  it('keeps plans for requested work open until implementation starts or the owner can start it', () => {
+    // A finished consultation is not a finished fix. This must survive Own-style protocol slicing
+    // and reach both the main runtime and the shared host-profile/container/restricted contract.
+    for (const instructions of [
+      STATUS_INSTRUCTIONS,
+      ...['summary', 'concise', 'own'].map(statusInstructions),
+      ...(['summary', 'concise', 'own'] as const).map(response_style => runInstructions({ join: true, response_style })),
+      AGENT_RUN_INSTRUCTIONS,
+    ]) {
+      expect(instructions).toContain('implementing requested work is never an optional next step')
+      expect(instructions).toContain('a plan, diagnosis, audit or proposal for a fix or feature the user wants is not done while the work itself is unbuilt')
+      expect(instructions).toContain('start it in the same turn, then use fyi and name the verified running mechanism in the reply')
+      expect(instructions).toContain('or use needs_you with one reply word that starts it ("Fix plan is ready. Reply build to implement it")')
+      expect(instructions).toContain('Only an explicitly research-only or hypothetical request may end done or fyi without starting the work or asking to start it')
+    }
   })
 
   it('keeps Ready asks understandable cold, situation-first, and free of internal jargon', () => {
