@@ -36,6 +36,12 @@ _lifecycle = module_from_spec(_lspec)
 _lspec.loader.exec_module(_lifecycle)
 
 router = APIRouter()
+# Importer app: the bring_data engine behind /bring-data/* (bring_data_api.py).
+_bspec = spec_from_file_location('wizard_bring_data_api', Path(__file__).with_name('bring_data_api.py'))
+assert _bspec is not None and _bspec.loader is not None
+_bring = module_from_spec(_bspec)
+_bspec.loader.exec_module(_bring)
+router.include_router(_bring.router)
 
 # Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
 # auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a

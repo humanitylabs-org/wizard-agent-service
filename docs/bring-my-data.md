@@ -34,5 +34,26 @@ Privacy and safety
 Measured on a real 11 GB Hermes `state.db` (966 chats, 71k messages): scan 4–46 s (cold cache),
 archive 5–12 s, 578 MB of Markdown, peak RSS 1.2 GB; undo removed all 966 files.
 
-Not yet: an onboarding/Setup screen for this (wizard-ux follow-up), ChatGPT/Claude conversations
-as Hermes sessions for `session_search`, and Hermes holographic fact-store rows.
+## Importer app (screen) and Setup step
+
+The Importer app is the screen for the same engine; Setup's optional "Bring your AI" step opens it. It talks
+to the agent's dashboard (the ChatGPT connection app's login pattern) at `/api/plugins/wizard-os/bring-data/`:
+
+| Route | Does |
+| --- | --- |
+| `GET sources` | Agent folders on this box (`~/.claude`, other Hermes homes and profiles, never this agent's own home; `WIZARD_BRING_DATA_LOCAL_ROOTS` adds mounted homes) and `.zip`/Claude link-list `.json` files in Files `Inbox/` and `Downloads/` |
+| `POST scan` | `{path}` or `{paths}` (a Claude export in parts); counts, `draft_facts` for the "What I know about you" card, new skills, personality |
+| `POST import` | `{import_id, chats, skills: [names], personality, about: {facts, text}}`: archive, install skills, make SOUL.md the personality (old file kept), save About me.md and add each approved fact to memory with the stock memory tool (its limits and approval gate apply; facts that don't fit are reported) |
+| `GET imports`, `POST undo` | Per-import list and undo. An Importer import's undo also removes the memory entries it added and restores About me.md / SOUL.md, each only while unchanged since |
+| `PUT upload?name=` | Streams an export into `Files/Inbox/` (never overwrites) |
+
+Writes need `X-Wizard-Import: 1` and are refused cross-site. Paths are limited to Files and the offered
+agent folders. `WIZARD_BRING_DATA_READ_ONLY=1` is preview mode: scan answers, nothing at all is written.
+
+Claude Code (`~/.claude`): `CLAUDE.md` → instructions; `projects/<cwd>/memory/*.md` → memories (descriptions)
+and project notes; `projects/<cwd>/<session>.jsonl` → chats (user/assistant text only: no tool results,
+thinking, sub-agent runs or command echoes); `skills/**/SKILL.md`, `commands/*.md`, `agents/*.md` → skills.
+`.credentials.json`, `.claude.json`, `settings*.json`, `history.jsonl` and `plugins/` are never read.
+
+Not yet: ChatGPT/Claude conversations as Hermes sessions for `session_search`, Hermes holographic
+fact-store rows, and streaming very large exports (a conversations file is read whole).
