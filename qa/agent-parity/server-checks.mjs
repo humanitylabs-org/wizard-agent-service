@@ -347,6 +347,41 @@ export const serverChecks = {
     writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
     assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
   },
+  'bring-my-data': async s => {
+    // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's
+    // own home, archives chats into the owner's Files and installs picked skills only into this agent's home.
+    const files = join(s.root, 'files')
+    const make = `import io,json,sys,zipfile
+b=io.BytesIO(); z=zipfile.ZipFile(b,'w')
+if sys.argv[1]=='chatgpt':
+  m={'r':{'id':'r','message':None,'parent':None,'children':['u']},'u':{'id':'u','parent':'r','children':['a'],'message':{'author':{'role':'user'},'create_time':1700000000,'content':{'content_type':'text','parts':['PARITY_IMPORT_QUESTION']}}},'a':{'id':'a','parent':'u','children':[],'message':{'author':{'role':'assistant'},'create_time':1700000001,'recipient':'all','content':{'content_type':'text','parts':['PARITY_IMPORT_ANSWER']}}}}
+  z.writestr('conversations.json',json.dumps([{'title':'Parity import','create_time':1700000000,'update_time':1700000001,'mapping':m,'current_node':'a','conversation_id':'parity-conv'}]))
+else:
+  z.writestr('memories/USER.md','Parity owner fact.'); z.writestr('skills/parity-skill/SKILL.md','---\\nname: parity-skill\\ndescription: Synthetic.\\n---\\n'); z.writestr('.env','KEY=parity-runtime-secret')
+z.close(); sys.stdout.buffer.write(b.getvalue())`
+    const exportZip = kind => execFileSync('python3', ['-c', make, kind])
+    const tool = args => JSON.parse(execFileSync('python3', ['-c', "import importlib.util,json,sys\nspec=importlib.util.spec_from_file_location('bd',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nprint(m.handle(json.loads(sys.argv[2])))", join(pluginRoot, 'bring_data.py'), JSON.stringify(args)],
+      { encoding: 'utf8', env: { ...process.env, HERMES_HOME: s.agentHome, WIZARD_FILES_ROOT: files } }))
+    const dropped = async (kind, name) => {
+      const r = await s.upload(exportZip(kind), name, 'application/zip'); assert.equal(r.status, 201)
+      const id = (await r.json()).file.id
+      return JSON.parse(readFileSync(join(s.root, 'media.json'))).files.find(f => f.id === id).rel
+    }
+    const scan = tool({ action: 'scan', path: await dropped('chatgpt', 'chatgpt-export.zip') })
+    assert.equal(scan.success, true, JSON.stringify(scan)); assert.equal(scan.kind, 'chatgpt'); assert.equal(scan.counts.chats, 1)
+    assert.ok(existsSync(join(s.agentHome, 'cache/bring-data/imports.json')), 'scan record lives in this agent home')
+    assert.equal(tool({ action: 'archive', import_id: scan.import_id }).chats_written, 1)
+    const index = readFileSync(join(files, 'Imported/ChatGPT/Index.md'), 'utf8')
+    const rel = index.match(/\(<(Chats\/[^>]+)>\)/)[1]
+    const chat = readFileSync(join(files, 'Imported/ChatGPT', rel), 'utf8')
+    assert.ok(chat.includes('PARITY_IMPORT_QUESTION') && chat.includes('PARITY_IMPORT_ANSWER'), 'archived chat is in the owner Files')
+    const hermes = tool({ action: 'scan', path: await dropped('hermes', 'hermes-backup.zip') })
+    assert.deepEqual(hermes.new_skills.map(x => x.name), ['parity-skill'])
+    assert.deepEqual(tool({ action: 'skills', import_id: hermes.import_id, names: ['parity-skill'] }).installed.map(x => x.name), ['parity-skill'])
+    assert.ok(existsSync(join(s.agentHome, 'skills/imported/parity-skill/SKILL.md')), 'skill lands in this agent home')
+    assert.ok(!existsSync(join(files, 'skills')), 'nothing agent-side is written into Files')
+    assert.ok(!JSON.stringify([scan, hermes]).includes('parity-runtime-secret'))
+  },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)
     const r = await s.upload(png, 'download.png', 'image/png'); assert.equal(r.status, 201)

@@ -1,4 +1,4 @@
 name: wizard-os
-version: "0.4.2"
-description: "Wizard OS: routes jobs through installed apps, keeps wizard-job-* pointer skills current, and guards app workflows against private or installed skill-copy edits."
+version: "0.5.0"
+description: "Wizard OS: routes jobs through installed apps, keeps wizard-job-* pointer skills current, guards app workflows against private or installed skill-copy edits, and brings in the owner's ChatGPT, Claude or Hermes data."
 author: "Humanity Labs"
