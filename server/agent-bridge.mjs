@@ -21,6 +21,8 @@ export const JOB_MAP_LINES = 12
 export const DEFAULT_FILES_ROOT = '~/runtipi/media'
 const JOB_STAMP = '.wizard-jobs'
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
+// How long a client may reuse this tool list without asking again (1 day); a changed app list also sends list_changed.
+const TOOLS_LIST_TTL_MS = 24 * 60 * 60 * 1000
 const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
 
 function clean(value, max) {
@@ -623,7 +625,9 @@ export function createAgentBridge({
         })
       }
       if (method === 'ping') return reply({})
-      if (method === 'tools/list') return reply({ tools: await listTools(agentId) })
+      // ttlMs/cacheScope (SEP-2549): clients that cache tool lists (Hermes `lazy: true`) can register the app tools
+      // the moment a chat starts instead of racing the first connect; apps.json changes still send list_changed.
+      if (method === 'tools/list') return reply({ tools: await listTools(agentId), ttlMs: TOOLS_LIST_TTL_MS, cacheScope: 'private' })
       if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId))
       if (method === 'resources/list') return reply({ resources: [] })
       if (method === 'prompts/list') return reply({ prompts: [] })
