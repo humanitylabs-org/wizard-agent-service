@@ -1040,7 +1040,9 @@ export class DurableRunQueue {
       return this.get(publicRunId)
     }
     const refreshed = await this._refresh(record, true)
-    if (TERMINAL.has(refreshed.status)) await this.tick(true)
+    // An in-flight tick already owns reconciliation. Never join it from this
+    // independent running-status read (it may be blocked on another provider).
+    if (TERMINAL.has(refreshed.status) && !this.tickPromise) await this.tick(true)
     return this.get(publicRunId)
   }
 
