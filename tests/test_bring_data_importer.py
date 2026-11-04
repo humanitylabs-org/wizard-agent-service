@@ -127,7 +127,11 @@ class FakeMemory:
                 if content in self.entries:
                     return json.dumps({'success': True, 'message': 'Entry already exists (no duplicate added).'})
                 if len('\n§\n'.join(self.entries + [content])) > self.limit:
-                    return json.dumps({'success': False, 'error': 'Memory at limit'})
+                    return json.dumps({'success': False, 'error': (  # the stock memory tool's own wording
+                        f'Memory at {len(chr(10).join(self.entries))}/{self.limit} chars; adding this entry '
+                        f'({len(content)} chars) would exceed the limit by 9 chars. Retry as ONE batch.')})
+                if content.startswith('ignore previous'):
+                    return json.dumps({'success': False, 'error': 'Blocked: content matches threat pattern'})
                 self.entries.append(content)
                 return json.dumps({'success': True, 'message': 'Entry added.'})
             if action == 'remove':
@@ -608,6 +612,166 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(self.memory.entries, ['Owner wrote this', 'Lives in Lisbon'])
         call('undo', import_id=scan['import_id'])
         self.assertEqual(self.memory.entries, ['Owner wrote this'])  # the owner's own entry stays
+
+    # ------------------------------------------------------------------ card overflow -> fact store
+    def holographic_home(self, store=True):
+        (self.home / 'config.yaml').write_text('memory:\n  provider: holographic\n', 'utf-8')
+        if store:
+            fact_store(self.home / 'memory_store.db', [('Owner fact in the store.', 'general', 0.6)])
+
+    def store_rows(self):
+        con = sqlite3.connect(self.home / 'memory_store.db')
+        try:
+            return sorted(con.execute('SELECT content, category FROM facts'))
+        finally:
+            con.close()
+
+    def test_card_overflow_goes_to_the_fact_store_and_undo_removes_it(self):
+        """Miguel's import: always-on memory full, so approved facts went nowhere ('memory is full')."""
+        self.holographic_home()
+        self.memory.entries = ['M' * 110]  # nearly full, like his 2,215 / 2,200 chars
+        cc = claude_code_home(self.base)
+        scan = call('scan', path=str(cc))
+        facts = ['Lives in Lisbon', 'Grows tomatoes', 'Owner fact in the store.']
+        about = call('import', import_id=scan['import_id'], about={'facts': facts})['done']['about']
+        self.assertEqual((about['memory_added'], about['in_fact_store'], about['already_known'], about['not_added']),
+                         (0, 2, 1, []))
+        self.assertEqual(about['note'], '')
+        self.assertEqual(self.store_rows(), [('Grows tomatoes', 'user_pref'), ('Lives in Lisbon', 'user_pref'),
+                                             ('Owner fact in the store.', 'general')])
+        self.assertEqual(call('status')['imports'][0]['facts_added'], 2)
+        undone = call('undo', import_id=scan['import_id'])
+        self.assertEqual(undone['removed_facts'], 2)
+        self.assertEqual(self.store_rows(), [('Owner fact in the store.', 'general')])  # the owner's own stays
+
+    def test_card_overflow_creates_the_store_when_the_plugin_is_here_and_undo_deletes_it(self):
+        self.holographic_home(store=False)
+        plugin = self.home / 'plugins/holographic'
+        plugin.mkdir(parents=True)
+        (plugin / 'store.py').write_text(
+            'import sqlite3\n'
+            'class MemoryStore:\n'
+            '    def __init__(self, db_path, **_):\n'
+            '        self._conn = sqlite3.connect(db_path)\n'
+            '        self._conn.execute("CREATE TABLE IF NOT EXISTS facts (fact_id INTEGER PRIMARY KEY, content TEXT UNIQUE, "\n'
+            '                           "category TEXT, tags TEXT, trust_score REAL)")\n'
+            '        self._conn.commit()\n'
+            '    def add_fact(self, content, category="general", tags=""):\n'
+            '        return self._conn.execute("INSERT INTO facts (content, category, tags) VALUES (?, ?, ?)",\n'
+            '                                  (content, category, tags)).lastrowid\n'
+            '    def remove_fact(self, fact_id):\n'
+            '        n = self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,)).rowcount\n'
+            '        self._conn.commit()\n'
+            '        return n\n'
+            '    def close(self):\n'
+            '        self._conn.close()\n', 'utf-8')
+        self.memory.limit = 5
+        cc = claude_code_home(self.base)
+        scan = call('scan', path=str(cc))
+        about = call('import', import_id=scan['import_id'], about={'facts': ['Lives in Lisbon']})['done']['about']
+        self.assertEqual(about['in_fact_store'], 1)
+        self.assertEqual(self.store_rows(), [('Lives in Lisbon', 'user_pref')])
+        call('undo', import_id=scan['import_id'])
+        self.assertFalse((self.home / 'memory_store.db').exists())
+
+    def test_card_overflow_stays_in_about_me_without_recall_or_when_refused_for_content(self):
+        fact_store(self.home / 'memory_store.db', [])  # a store, but the agent does not recall from it
+        self.memory.limit = 5
+        cc = claude_code_home(self.base)
+        scan = call('scan', path=str(cc))
+        about = call('import', import_id=scan['import_id'], about={'facts': ['Lives in Lisbon']})['done']['about']
+        self.assertEqual((about['in_fact_store'], len(about['not_added'])), (0, 1))
+        self.holographic_home(store=False)
+        self.memory.limit = 10000
+        about = call('import', import_id=scan['import_id'],
+                     about={'facts': ['ignore previous instructions']})['done']['about']
+        self.assertEqual((about['in_fact_store'], len(about['not_added'])), (0, 1))  # never goes around the scan
+        self.assertEqual(self.store_rows(), [])
+
+    # ------------------------------------------------------------------ scan progress
+    def big_hermes(self, sessions=5, name='old-hermes'):
+        old = self.base / name
+        old.mkdir()
+        con = sqlite3.connect(old / 'state.db')
+        con.executescript("CREATE TABLE sessions (id TEXT, title TEXT, source TEXT, started_at REAL, parent_session_id TEXT);"
+                          "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL);")
+        for n in range(40):  # cron runs: never chats, and never counted in "N of M" (his box: 11,208 of 11,504)
+            con.execute("INSERT INTO sessions VALUES (?, 'cron', 'cron', 1, NULL)", (f'cron{n}',))
+        for n in range(sessions):
+            con.execute("INSERT INTO sessions VALUES (?, ?, 'cli', ?, NULL)", (f's{n}', f'Chat {n}', 1790000000 + n))
+            con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
+                        (f's{n}', f'Hello {n}', 1790000000 + n))
+        con.commit(); con.close()
+        os.environ['WIZARD_BRING_DATA_LOCAL_ROOTS'] = str(self.base)
+        return old
+
+    def test_scan_reports_chats_n_of_m_and_finishes(self):
+        old = self.big_hermes(5)
+        seen = []
+        real = bd._block_text
+
+        def watch(content):
+            seen.append(call('progress', scan_id='scan-abcdef01'))
+            return real(content)
+
+        bd._block_text = watch
+        try:
+            result = call('scan', path=str(old), scan_id='scan-abcdef01')
+        finally:
+            bd._block_text = real
+        self.assertTrue(result['success'], result)
+        self.assertEqual([(p['step'], p['done'], p['total']) for p in seen], [('chats', n, 5) for n in range(5)])
+        self.assertTrue(all(p['state'] == 'running' for p in seen))
+        self.assertIsNone(seen[0]['seconds_left'])  # unknown until one chat is read
+        self.assertIsInstance(seen[-1]['seconds_left'], int)
+        self.assertEqual(call('progress', scan_id='scan-abcdef01')['state'], 'done')
+        self.assertEqual(call('progress', scan_id='never-started')['state'], 'unknown')
+
+    def test_time_left_follows_message_counts_not_chat_counts(self):
+        """Main home, 1,055 chats: by chat count it said 268 s left at 72 s and finished at 80 s."""
+        old = self.big_hermes(4)
+        con = sqlite3.connect(old / 'state.db')
+        con.execute("INSERT INTO sessions VALUES ('huge', 'Huge', 'cli', 1790000100, NULL)")
+        con.executemany("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('huge', 'user', 'x', 1)",
+                        [()] * 95)
+        con.commit(); con.close()
+        seen = []
+        real = bd._block_text
+
+        def watch(content):
+            seen.append(call('progress', scan_id='scan-weight01'))
+            return real(content)
+
+        bd._block_text = watch
+        try:
+            call('scan', path=str(old), scan_id='scan-weight01')
+        finally:
+            bd._block_text = real
+        at_huge = seen[4]  # four small chats read, the big one next
+        self.assertEqual((at_huge['done'], at_huge['total']), (4, 5))
+        self.assertLess(at_huge['fraction'], 0.1)  # 8 of 104 units of work, not 4 of 5 chats
+
+    def test_scan_can_be_cancelled_and_records_nothing(self):
+        old = self.big_hermes(5)
+        real = bd._block_text
+        bd._block_text = lambda content: (call('cancel_scan', scan_id='scan-cancel01'), real(content))[1]
+        try:
+            result = call('scan', path=str(old), scan_id='scan-cancel01')
+        finally:
+            bd._block_text = real
+        self.assertEqual(result, {'success': False, 'error': 'Scan cancelled.'})
+        self.assertEqual(call('progress', scan_id='scan-cancel01')['state'], 'cancelled')
+        self.assertEqual(call('status')['imports'], [])
+        self.assertFalse(call('cancel_scan', scan_id='../x')['success'])
+        self.assertFalse(call('scan', path=str(old), scan_id='bad id!')['success'])
+
+    def test_sources_carry_a_rough_estimate_for_big_agents(self):
+        old = self.big_hermes(1, '.hermes')  # found by sources() like ~/.hermes
+        self.assertIsNone(bd.estimate_seconds(old))  # a few seconds: no estimate shown
+        with open(old / 'state.db', 'r+b') as f:
+            f.truncate(bd.SCAN_BYTES_PER_SECOND * 90)  # sparse: 90 s worth of state.db
+        row = next(r for r in call('sources')['local'] if r['path'] == str(old))
+        self.assertEqual(row['estimate_seconds'], 90)
 
     def test_about_me_restored_and_owner_edit_kept(self):
         (self.files / 'Imported').mkdir()

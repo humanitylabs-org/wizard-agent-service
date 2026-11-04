@@ -102,6 +102,133 @@ need new no not now of on or our out over please should so some such than that t
 they this to too up us use using vs was way we were what when where which while who why will with would you your
 yours get got want ideas idea best tips guide question questions chat conversation untitled new-chat""".split())
 
+# ---------------------------------------------------------------------------- scan progress
+
+# A scan of a big agent home (hundreds of chats in an 11 GB state.db) takes minutes. The Importer passes a
+# random ``scan_id`` with the scan and polls ``progress`` with it (step, N of M, time left) and can ``cancel`` it.
+_SCAN_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_SCAN: ContextVar = ContextVar("wizard_bring_data_scan", default=None)
+_PROGRESS: dict = {}
+_CANCELLED: dict = {}  # scan id -> when the owner cancelled (a cancel may arrive before the scan starts)
+_PROGRESS_KEEP = 600
+
+
+class ScanCancelled(ValueError):
+    def __init__(self):
+        super().__init__("Scan cancelled.")
+
+
+def _tick(step: str | None = None, done: int | None = None, total: int | None = None,
+          work: float | None = None, work_total: float | None = None) -> None:
+    """Report where the running scan is; raises ScanCancelled once the owner has cancelled it. ``work`` weighs the
+    items (a chat's message count) when they differ a lot in size, so the time left follows the real work."""
+    scan_id = _SCAN.get()
+    if not scan_id:
+        return
+    if scan_id in _CANCELLED:
+        raise ScanCancelled()
+    entry, now = _PROGRESS.get(scan_id), time.time()
+    if entry is None:
+        return
+    if step is not None and step != entry["step"]:
+        entry.update(step=step, step_started=now, done=0, total=0, work=0.0, work_total=0.0)
+    if total is not None:
+        entry["total"] = int(total)
+    if done is not None:
+        entry["done"] = int(done)
+    if work_total is not None:
+        entry["work_total"] = float(work_total)
+    if work is not None:
+        entry["work"] = float(work)
+    entry["updated"] = now
+
+
+def _forget_old_scans() -> None:
+    cutoff = time.time() - _PROGRESS_KEEP
+    for table, key in ((_PROGRESS, "updated"), (_CANCELLED, None)):
+        for scan_id in [k for k, v in table.items() if (v[key] if key else v) < cutoff]:
+            table.pop(scan_id, None)
+
+
+@contextmanager
+def _scan_progress(scan_id):
+    if not scan_id:
+        yield
+        return
+    if not isinstance(scan_id, str) or not _SCAN_ID.fullmatch(scan_id):
+        raise ValueError("Invalid scan_id.")
+    _forget_old_scans()
+    now = time.time()
+    _PROGRESS[scan_id] = {"state": "running", "step": "opening", "done": 0, "total": 0, "started": now,
+                          "step_started": now, "updated": now}
+    token = _SCAN.set(scan_id)
+    try:
+        _tick()
+        yield
+        _PROGRESS[scan_id].update(state="done", updated=time.time())
+    except ScanCancelled:
+        _PROGRESS[scan_id].update(state="cancelled", updated=time.time())
+        raise
+    except BaseException:
+        _PROGRESS[scan_id].update(state="failed", updated=time.time())
+        raise
+    finally:
+        _SCAN.reset(token)
+
+
+def progress(args: dict) -> dict:
+    """Where a scan is: step, N of M, seconds since it last moved, and a rough time left (None until known)."""
+    scan_id = str(args.get("scan_id") or "")
+    entry = _PROGRESS.get(scan_id)
+    if not entry:
+        return {"state": "cancelled" if scan_id in _CANCELLED else "unknown"}
+    now = time.time()
+    done, total = entry["done"], entry["total"]
+    work, work_total = entry.get("work") or 0.0, entry.get("work_total") or 0.0
+    if not work_total:
+        work, work_total = float(done), float(total)
+    left = fraction = None
+    if total:
+        fraction = round(min(1.0, work / work_total), 3) if work_total else 0.0
+    if entry["state"] == "running" and work_total and 0 < work <= work_total:
+        left = int(round((now - entry["step_started"]) / work * (work_total - work)))
+    return {"state": entry["state"], "step": entry["step"], "done": done, "total": total, "fraction": fraction,
+            "elapsed": int(now - entry["started"]), "idle": int(now - entry["updated"]), "seconds_left": left}
+
+
+def cancel_scan(args: dict) -> dict:
+    scan_id = str(args.get("scan_id") or "")
+    if not _SCAN_ID.fullmatch(scan_id):
+        raise ValueError("Invalid scan_id.")
+    _forget_old_scans()
+    _CANCELLED[scan_id] = time.time()
+    return {"cancelled": True}
+
+
+# Rough scan speed for the estimate on a source row. Measured read-only on a real box (Nov 2026): an 11.4 GB
+# Hermes profile (296 chats, 55k messages) took 52 s cold (7 s with the disk cache warm) and a 10.9 GB main home
+# (1,055 chats, 72k messages) 80 s cold (18 s warm). Rough on purpose: the row says "about 1 min".
+SCAN_BYTES_PER_SECOND = 150 * 1000 * 1000
+
+
+def estimate_seconds(path: Path) -> int | None:
+    """A cheap up-front guess of how long a scan takes: the size of what it reads (state.db, Claude Code
+    sessions, an export zip) at the measured speed. None when it would be a few seconds anyway."""
+    try:
+        if path.is_file():
+            size = path.stat().st_size
+        elif (path / "state.db").is_file():
+            size = (path / "state.db").stat().st_size
+        elif (path / "projects").is_dir():
+            size = sum(f.stat().st_size for f in (path / "projects").glob("*/*.jsonl"))
+        else:
+            return None
+    except OSError:
+        return None
+    seconds = int(size / SCAN_BYTES_PER_SECOND)
+    return seconds if seconds >= 10 else None
+
+
 # ---------------------------------------------------------------------------- paths
 
 
@@ -448,9 +575,15 @@ def parse_chatgpt(src: Source, prefix: str) -> dict:
     names = [n for n in src.names() if n.startswith(prefix) and re.fullmatch(
         r"conversations(-\d+)?\.json", n[len(prefix):])]
     chats, instructions, memory = [], {}, (0.0, "")
+    _tick("reading")
+    seen, total = 0, 0
     for name in sorted(names):
         data = src.json(name)
+        total += len(data) if isinstance(data, list) else 0
+        _tick("chats", seen, total)
         for conv in data if isinstance(data, list) else []:
+            seen += 1
+            _tick(done=seen)
             if not isinstance(conv, dict):
                 continue
             updated = _epoch(conv.get("update_time")) or _epoch(conv.get("create_time")) or 0.0
@@ -524,9 +657,12 @@ def _claude_message_text(msg: dict) -> str:
 
 
 def parse_claude(src: Source, prefix: str) -> dict:
+    _tick("reading")
     data = src.json(prefix + "conversations.json") if (prefix + "conversations.json") in src.names() else []
     chats = []
-    for conv in data if isinstance(data, list) else []:
+    _tick("chats", 0, len(data) if isinstance(data, list) else 0)
+    for seen, conv in enumerate(data if isinstance(data, list) else [], 1):
+        _tick(done=seen)
         if not isinstance(conv, dict):
             continue
         messages = []
@@ -695,14 +831,25 @@ def _read_sessions(con) -> list[dict]:
     mcols = {r[1] for r in con.execute("PRAGMA table_info(messages)")}
     if not {"id", "started_at"} <= scols or not {"session_id", "role", "content"} <= mcols:
         return []
-    where = "WHERE parent_session_id IS NULL" if "parent_session_id" in scols else ""
+    conds = (["parent_session_id IS NULL"] if "parent_session_id" in scols else []) + \
+        (["(source IS NULL OR source != 'cron')"] if "source" in scols else [])  # cron runs are no chats
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     title = "title" if "title" in scols else "NULL"
     source = "source" if "source" in scols else "NULL"
     order = "timestamp, id" if "timestamp" in mcols else "id"
     stamp = "timestamp" if "timestamp" in mcols else "NULL"
     chats = []
     sessions = con.execute(f"SELECT id, {title}, {source}, started_at FROM sessions {where} ORDER BY started_at").fetchall()
-    for sid, stitle, ssource, started in sessions:
+    try:  # each chat's message count (a covering index: a fraction of a second), so time left follows the work
+        weights = dict(con.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id").fetchall())
+    except sqlite3.DatabaseError:
+        weights = {}
+    weight = (lambda sid: 1.0 + weights.get(sid, 0)) if weights else (lambda sid: 1.0)
+    _tick("chats", 0, len(sessions), 0.0, sum(weight(row[0]) for row in sessions))
+    work = 0.0
+    for number, (sid, stitle, ssource, started) in enumerate(sessions, 1):
+        _tick(done=number - 1, work=work)
+        work += weight(sid)
         if ssource == "cron":
             continue
         messages = []
@@ -763,9 +910,12 @@ def parse_hermes(src: Source, prefix: str, with_sessions: bool = True) -> dict:
         if name in src.names():
             memories += _split_memory(src.text(name))
     soul = src.text(prefix + "SOUL.md") if (prefix + "SOUL.md") in src.names() else ""
-    return {"chats": _hermes_sessions(src, prefix) if with_sessions else [], "memories": memories,
-            "instructions": [], "projects": [], "skills": hermes_skills(src, prefix), "soul": soul.strip(),
-            "account_name": "", "facts": _hermes_facts(src, prefix)}
+    chats = _hermes_sessions(src, prefix) if with_sessions else []
+    _tick("skills")
+    skills = hermes_skills(src, prefix)
+    _tick("facts")
+    return {"chats": chats, "memories": memories, "instructions": [], "projects": [], "skills": skills,
+            "soul": soul.strip(), "account_name": "", "facts": _hermes_facts(src, prefix)}
 
 
 # Claude Code (~/.claude): CLAUDE.md (global instructions), projects/<cwd slug>/memory/*.md (auto memory,
@@ -852,6 +1002,9 @@ def parse_claude_code(src: Source, prefix: str, with_sessions: bool = True) -> d
             instructions.append({"label": f"Claude Code rule ({name[len(prefix) + 6:-3]})", "text": text})
     projects, memories, chats = {}, [], []
     pattern = re.compile(re.escape(prefix) + r"projects/([^/]+)/(memory/([^/]+)\.md|([^/]+)\.jsonl)$")
+    sessions = sum(1 for n in names if n.endswith(".jsonl") and pattern.match(n)) if with_sessions else 0
+    _tick("chats", 0, sessions)
+    read = 0
     for name in sorted(names):
         match = pattern.match(name)
         if not match:
@@ -872,6 +1025,8 @@ def parse_claude_code(src: Source, prefix: str, with_sessions: bool = True) -> d
         else:
             project["sessions"] += 1
             if with_sessions:
+                _tick(done=read)
+                read += 1
                 try:
                     chat = _cc_session(src, name)
                 except ValueError:
@@ -1000,9 +1155,15 @@ def _existing_skill_names() -> set[str]:
 
 
 def scan(args: dict) -> dict:
+    with _scan_progress(args.get("scan_id")):
+        return _scan(args)
+
+
+def _scan(args: dict) -> dict:
     path = resolve_sources(args)
     kind, data, src, _prefix_ = load(path)
     src.close()
+    _tick("checking")
     import_id = _import_id(path)
     chats = data["chats"]
     times = sorted(t for c in chats for t in (c.get("created"), c.get("updated")) if t)
@@ -1367,6 +1528,18 @@ def remember(args: dict) -> dict:
                 added.append(fact)
             else:
                 not_added.append({"fact": fact, "reason": _clip(result.get("error") or message or "not saved", 200)})
+    # The always-on memory is small (a couple of thousand characters). What does not fit there goes into the
+    # agent's long-term fact store, the same store the fact-store import fills, so it is still recalled.
+    in_store, stored_here, store_created = [], [], False
+    if not_added:
+        try:
+            in_store, stored_here, store_created = _remember_in_store(
+                [n["fact"] for n in not_added if _NO_ROOM.search(n["reason"])])
+        except (OSError, sqlite3.DatabaseError, ImportError):
+            pass  # they stay listed as not added; About me.md still has them
+        kept_in_store = set(in_store) | set(stored_here)
+        not_added = [n for n in not_added if n["fact"] not in kept_in_store]
+        kept_already += stored_here
     if import_id:
         backup = ""
         if about_before is not None:
@@ -1375,13 +1548,48 @@ def remember(args: dict) -> dict:
                 _atomic_write(_state_dir() / backup, about_before)
         prior = _registry().get(import_id, {})
         fields = {"memory_added": sorted(set(prior.get("memory_added", [])) | set(added))}
+        if in_store:  # undo removes them from the fact store like a fact-store import's own facts
+            fields["facts_added"] = sorted(set(prior.get("facts_added") or []) | set(in_store))
+            fields["about_in_store"] = sorted(set(prior.get("about_in_store") or []) | set(in_store))
+            fields["facts_created"] = bool(prior.get("facts_created")) or store_created
         if about_text is not None:
             fields["about"] = {"sha": _sha(about_text), "backup": backup}
         _record(import_id, **fields)
-    return {"saved": saved["saved"], "file_error": file_error, "memory_added": len(added), "already_known": len(kept_already),
-            "waiting_for_approval": len(staged), "not_added": not_added,
-            "note": ("Some facts did not fit in memory; they are still in About me.md, which your Wizard can read."
+    return {"saved": saved["saved"], "file_error": file_error, "memory_added": len(added), "in_fact_store": len(in_store),
+            "already_known": len(kept_already), "waiting_for_approval": len(staged), "not_added": not_added,
+            "note": ("Some facts could not be saved to memory; they are still in About me.md, which your Wizard can read."
                      if not_added else "")}
+
+
+# The memory tool's "no room" answers (over its char limit, its retry cap after several of those, or the
+# built-in store switched off). A fact it refused for its content (e.g. its injection scan) never goes around it.
+_NO_ROOM = re.compile(r"exceed the limit|char limit|consolidation failed|writes are disabled", re.I)
+
+
+def _remember_in_store(facts: list[str]) -> tuple[list[str], list[str], bool]:
+    """Owner-approved facts the always-on memory had no room for, added to this agent's holographic fact store
+    (category ``user_pref``, like the plugin's own copy of ``memory`` user entries). Returns (added, already
+    there, whether this created the store). Only when the agent recalls from that store (holographic provider on): otherwise they would never
+    come back, and About me.md keeps them. A store this creates is removed again by undo once empty."""
+    if not facts or not _holographic_on():
+        return [], [], False
+    target = hermes_home() / FACT_DB
+    created = not target.exists()
+    store_class = _fact_store_class() if created else None
+    if created and store_class is None:
+        return [], [], False  # no plugin to lay out a new store; About me.md keeps them
+    if store_class is not None:
+        store_class(db_path=str(target)).close()
+        os.chmod(target, 0o600)
+    con = sqlite3.connect(str(target), timeout=30)
+    try:
+        have = {str(c) for (c,) in con.execute("SELECT content FROM facts")}
+    finally:
+        con.close()
+    already = [f for f in facts if f in have]
+    added = _merge_facts(target, [{"content": f, "category": "user_pref", "tags": "imported,about-me", "trust": 0.5}
+                                  for f in facts if f not in have])
+    return added, already, created
 
 
 def _fact_count(path: Path):
@@ -1814,6 +2022,11 @@ def _here_label() -> str:
     return next((d["label"] for d in destinations() if d["home"] == target), _home_label(target))
 
 
+def _estimated(row: dict, path: Path | None = None) -> dict:
+    seconds = estimate_seconds(path or Path(row["path"]))
+    return {**row, "estimate_seconds": seconds} if seconds else row
+
+
 def sources(_args: dict) -> dict:
     """What the Importer can offer: agent folders on this box (one tap, no export) and exports in Files.
     This agent itself is offered only as "Move into Wizard OS", when another agent can take it."""
@@ -1823,7 +2036,7 @@ def sources(_args: dict) -> dict:
     for root in _home_candidates():
         claude = root / ".claude"
         if claude.is_dir() and any((claude / n).exists() for n in ("projects", "CLAUDE.md", "skills", "commands")):
-            local.append({"kind": "claude-code", "label": "Claude Code on this box", "path": str(claude)})
+            local.append(_estimated({"kind": "claude-code", "label": "Claude Code on this box", "path": str(claude)}))
         hermes = root / ".hermes"
         homes = [hermes] + (sorted(p for p in (hermes / "profiles").iterdir() if p.is_dir() and not p.name.startswith("."))
                             if (hermes / "profiles").is_dir() else [])
@@ -1832,9 +2045,9 @@ def sources(_args: dict) -> dict:
                 continue
             if home.resolve() == own:
                 continue
-            local.append({"kind": "hermes", "label": _home_label(home), "path": str(home)})
+            local.append(_estimated({"kind": "hermes", "label": _home_label(home), "path": str(home)}))
     if into and any((own / n).exists() for n in ("state.db", "SOUL.md", "memories", FACT_DB)):
-        local.insert(0, {"kind": "hermes", "self": True, "label": _home_label(own), "path": str(own)})
+        local.insert(0, _estimated({"kind": "hermes", "self": True, "label": _home_label(own), "path": str(own)}))
     files = []
     for folder in ("Inbox", "Downloads"):
         base = files_root() / folder
@@ -1844,7 +2057,8 @@ def sources(_args: dict) -> dict:
             if item.is_symlink() or not item.is_file() or item.suffix.lower() not in {".zip", ".json"}:
                 continue
             st = item.stat()
-            entry = {"path": f"{folder}/{item.name}", "name": item.name, "size": st.st_size, "modified": int(st.st_mtime)}
+            entry = _estimated({"path": f"{folder}/{item.name}", "name": item.name, "size": st.st_size,
+                                "modified": int(st.st_mtime)}, item)
             if item.suffix.lower() == ".zip":
                 entry["kind"] = _guess(item)
             else:
@@ -2012,7 +2226,8 @@ def status(_args: dict) -> dict:
 ACTIONS = {"scan": scan, "archive": archive, "skills": install_skills, "save_profile": save_profile, "status": status,
            "undo": undo}
 # The Importer app's extra steps (dashboard API only; the chat flow keeps the stock memory tool in the model's hands).
-APP_ACTIONS = {**ACTIONS, "sources": sources, "import": run_import, "personality": set_personality, "remember": remember}
+APP_ACTIONS = {**ACTIONS, "sources": sources, "import": run_import, "personality": set_personality, "remember": remember,
+               "progress": progress, "cancel_scan": cancel_scan}
 
 SCHEMA = {
     "name": TOOL_NAME,

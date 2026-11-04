@@ -6,7 +6,9 @@ engine is the same module the ``wizard_bring_data`` agent tool uses; nothing her
 GET  sources   agent folders on this box (Claude Code, other Hermes homes) + exports in Files Inbox/Downloads,
                and ``into``: other Wizard OS agents an import can go into (then this agent is a source too)
 GET  imports?dest=<agent>   earlier imports (for per-import Undo)
-POST scan      {path} or {paths: [...]}, dest?    -> counts, draft facts, skills, personality, fact store
+POST scan      {path} or {paths: [...]}, dest?, scan_id?    -> counts, draft facts, skills, personality, fact store
+GET  progress?scan_id=<id>   where that scan is: step, done/total, idle seconds, seconds_left
+POST cancel    {scan_id}     stop that scan at its next step (it answers "Scan cancelled.")
 POST import    {import_id, chats, skills, personality, facts, about: {facts, text}, dest?}
 POST undo      {import_id, dest?}
 
@@ -113,9 +115,21 @@ async def scan(request: Request, response: Response):
     _guard(request)
     args = await _body(request)
     dest = _dest(args.get("dest"))
-    args = {k: args[k] for k in ("path", "paths") if k in args}
+    args = {k: args[k] for k in ("path", "paths", "scan_id") if k in args}
     _paths_ok(args)
     return await _answer(response, "scan", {**args, **dest})
+
+
+@router.get("/progress")
+async def progress(response: Response, scan_id: str = ""):
+    return await _answer(response, "progress", {"scan_id": scan_id})
+
+
+@router.post("/cancel")
+async def cancel(request: Request, response: Response):
+    _guard(request)
+    body = await _body(request)
+    return await _answer(response, "cancel_scan", {"scan_id": str(body.get("scan_id") or "")})
 
 
 @router.post("/import")

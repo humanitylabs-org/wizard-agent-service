@@ -70,6 +70,16 @@ class ImporterApiTests(unittest.TestCase):
         self.assertEqual(self.client.post(P + "/undo", json={"import_id": iid}, headers=H).status_code, 200)
         self.assertEqual(self.client.get(P + "/imports").json()["imports"], [])
 
+    def test_scan_progress_and_cancel(self):
+        scan = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "scan_id": "scan-api-0001"}, headers=H)
+        self.assertEqual(scan.status_code, 200, scan.text)
+        done = self.client.get(P + "/progress?scan_id=scan-api-0001")
+        self.assertEqual((done.status_code, done.json()["state"]), (200, "done"))
+        self.assertEqual(self.client.post(P + "/cancel", json={"scan_id": "scan-api-0002"}).status_code, 403)
+        self.assertEqual(self.client.post(P + "/cancel", json={"scan_id": "scan-api-0002"}, headers=H).status_code, 200)
+        refused = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "scan_id": "scan-api-0002"}, headers=H)
+        self.assertEqual((refused.status_code, refused.json()["detail"]), (409, "Scan cancelled."))
+
     def test_scan_refuses_paths_outside_files_and_agent_folders(self):
         for path in ("/etc", "../../etc", str(self.home)):
             r = self.client.post(P + "/scan", json={"path": path}, headers=H)
