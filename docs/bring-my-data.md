@@ -43,7 +43,8 @@ to the agent's dashboard (the ChatGPT connection app's login pattern) at `/api/p
 | --- | --- |
 | `GET sources` | Agent folders on this box (`~/.claude`, other Hermes homes and profiles, never this agent's own home; `WIZARD_BRING_DATA_LOCAL_ROOTS` adds mounted homes) and `.zip`/Claude link-list `.json` files in Files `Inbox/` and `Downloads/` |
 | `POST scan` | `{path}` or `{paths}` (a Claude export in parts); counts, `draft_facts` for the "What I know about you" card, new skills, personality |
-| `POST import` | `{import_id, chats, skills: [names], personality, about: {facts, text}}`: archive, install skills, make SOUL.md the personality (old file kept), save About me.md and add each approved fact to memory with the stock memory tool (its limits and approval gate apply; facts that don't fit are reported) |
+| `POST import` | `{import_id, chats, skills: [names], personality, about: {facts, text}}`: archive, install skills, make SOUL.md the personality (old file kept), save About me.md and add each approved fact to memory with the stock memory tool (its limits and approval gate apply). Facts the always-on memory has no room for (over its char limit, or built-in memory off) go into the holographic fact store (`memory_store.db`, category `user_pref`, tags `imported,about-me`) when the agent recalls from it, so they are still recalled; `in_fact_store` counts them and undo removes them. A fact the memory tool refused for its content never goes around it |
+| `POST scan` `scan_id`, `GET progress?scan_id=`, `POST cancel` | The screen picks a random `scan_id`; while the scan reads, `progress` answers `{state, step (opening/reading/chats/skills/facts/checking), done, total, elapsed, idle, seconds_left}` and `cancel` stops it at its next step ("Scan cancelled.", nothing recorded). `sources` rows carry `estimate_seconds` when the scan would take 10 s or more (size read at ~150 MB/s; measured read-only on a real box: an 11.4 GB profile with 296 chats 52 s cold / 7 s warm, a 10.9 GB main home with 1,055 chats 80 s cold / 18 s warm); time left is weighted by each chat's message count |
 | `GET imports`, `POST undo` | Per-import list and undo. An Importer import's undo also removes the memory entries it added and restores About me.md / SOUL.md, each only while unchanged since |
 | `PUT upload?name=` | Streams an export into `Files/Inbox/` (never overwrites) |
 
@@ -57,3 +58,33 @@ thinking, sub-agent runs or command echoes); `skills/**/SKILL.md`, `commands/*.m
 
 Not yet: ChatGPT/Claude conversations as Hermes sessions for `session_search`, Hermes holographic
 fact-store rows, and streaming very large exports (a conversations file is read whole).
+
+## Into another agent, and "Move this agent into Wizard OS"
+
+Alongside mode (Hermes on the host) is a bridge; the goal is an agent that is just another app inside Wizard OS.
+The Importer reaches that with the same engine, no second migration system:
+
+- `sources` returns `into`: other Wizard OS agents from the Agents registry (`<agents dir>/<id>/agent.json`) whose
+  Hermes home this process can write: a standard container agent (`<agents dir>/<id>/home`) or a host profile
+  agent (`runtime.kind: profile`). Restricted agents (sealed home owned by the container user), agents still being
+  imported, private and recovery agents are never offered.
+- `scan`, `import`, `undo` and `imports` take `dest` (an agent id, never a path). The call then runs inside that
+  agent's home through Hermes' own context-local home override: skills, `SOUL.md`, the stock memory tool (with that
+  agent's config limits), the fact store and the import registry all land there. Chats stay in `Files/Imported`.
+- With a destination chosen, this agent's own home becomes a valid source, so `sources` lists it (`self: true`)
+  only when `into` is not empty. The app shows it as "Move into Wizard OS".
+- Another named profile inside this agent's home (`<home>/profiles/<name>`) is a separate agent and a valid source;
+  scanning the home itself never walks `profiles/`.
+- Fact store: `memory_store.db` (stock holographic plugin). An agent without one gets an exact SQLite backup copy
+  of the source's (vectors, entities, banks); an agent with one gets each new fact through the plugin's own store
+  (plain SQL with the table's FTS triggers when the plugin is not on this box), keeping trust scores. Key-looking
+  facts stay behind. Undo removes exactly the facts that import added.
+- Credentials never move (`.env`, `auth.json`, `config.yaml` are not read). A whole-agent move with credentials and
+  runtime stays the owner CLI `ops/agent-runtime/hermes_import.py`.
+- `scan` reports `blocked` when Files can't take chats or About me (the Files root often belongs to the Files
+  app's user), before the owner approves; a failed part comes back as plain words, never an errno, and running
+  the import again with only the failed parts is safe.
+
+Rehearsal (real Hermes runtime, live alongside home read-only, throwaway container-agent home): 1,051 chats,
+169 skills, 466 facts, SOUL.md and 5 approved facts moved in 81 s; the stock runtime image read all 466 facts
+from the copied store; undo removed every file, skill, fact, memory entry and the personality.

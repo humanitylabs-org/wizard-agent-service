@@ -3,11 +3,16 @@
 Mounted by plugin_api.py under /api/plugins/wizard-os/bring-data/ (stock dashboard login required). The
 engine is the same module the ``wizard_bring_data`` agent tool uses; nothing here parses an export.
 
-GET  sources   agent folders on this box (Claude Code, other Hermes homes) + exports in Files Inbox/Downloads
-GET  imports   earlier imports (for per-import Undo)
-POST scan      {path} or {paths: [...]}           -> counts, draft facts, skills, personality
-POST import    {import_id, chats, skills, personality, about: {facts, text}}
-POST undo      {import_id}
+GET  sources   agent folders on this box (Claude Code, other Hermes homes) + exports in Files Inbox/Downloads,
+               and ``into``: other Wizard OS agents an import can go into (then this agent is a source too)
+GET  imports?dest=<agent>   earlier imports (for per-import Undo)
+POST scan      {path} or {paths: [...]}, dest?, scan_id?    -> counts, draft facts, skills, personality, fact store
+GET  progress?scan_id=<id>   where that scan is: step, done/total, idle seconds, seconds_left
+POST cancel    {scan_id}     stop that scan at its next step (it answers "Scan cancelled.")
+POST import    {import_id, chats, skills, personality, facts, about: {facts, text}, dest?}
+POST undo      {import_id, dest?}
+
+``dest`` is an agent id from ``sources.into`` (never a path); omitted means this agent.
 PUT  upload?name=<file>.zip   raw body -> Files/Inbox/<file>.zip (streamed, size-capped)
 
 Every write needs ``X-Wizard-Import: 1`` (a cross-site form cannot send it) and is refused cross-site.
@@ -36,6 +41,15 @@ _LOCK = threading.Lock()  # one import, undo or upload at a time
 MAX_UPLOAD = int(os.environ.get("WIZARD_BRING_DATA_MAX_UPLOAD", str(8 * 1024 * 1024 * 1024)))
 MAX_BODY = 256 * 1024
 _NAME = re.compile(r"^[^/\\\x00-\x1f]{1,120}\.(zip|json)$", re.IGNORECASE)
+_DEST = re.compile(r"^(here|[a-z][a-z0-9-]{0,30})$")
+
+
+def _dest(value) -> dict:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, str) or not _DEST.fullmatch(value):
+        raise HTTPException(400, "Unknown agent")
+    return {"dest": value}
 
 
 def _guard(request: Request, json_body: bool = True) -> None:
@@ -92,32 +106,46 @@ async def sources(response: Response):
 
 
 @router.get("/imports")
-async def imports(response: Response):
-    return await _answer(response, "status", {})
+async def imports(response: Response, dest: str = ""):
+    return await _answer(response, "status", _dest(dest))
 
 
 @router.post("/scan")
 async def scan(request: Request, response: Response):
     _guard(request)
     args = await _body(request)
-    args = {k: args[k] for k in ("path", "paths") if k in args}
+    dest = _dest(args.get("dest"))
+    args = {k: args[k] for k in ("path", "paths", "scan_id") if k in args}
     _paths_ok(args)
-    return await _answer(response, "scan", args)
+    return await _answer(response, "scan", {**args, **dest})
+
+
+@router.get("/progress")
+async def progress(response: Response, scan_id: str = ""):
+    return await _answer(response, "progress", {"scan_id": scan_id})
+
+
+@router.post("/cancel")
+async def cancel(request: Request, response: Response):
+    _guard(request)
+    body = await _body(request)
+    return await _answer(response, "cancel_scan", {"scan_id": str(body.get("scan_id") or "")})
 
 
 @router.post("/import")
 async def run_import(request: Request, response: Response):
     _guard(request)
     body = await _body(request)
-    args = {k: body[k] for k in ("import_id", "chats", "skills", "personality", "about") if k in body}
-    return await _answer(response, "import", args, lock=True)
+    args = {k: body[k] for k in ("import_id", "chats", "skills", "personality", "facts", "about") if k in body}
+    return await _answer(response, "import", {**args, **_dest(body.get("dest"))}, lock=True)
 
 
 @router.post("/undo")
 async def undo(request: Request, response: Response):
     _guard(request)
     body = await _body(request)
-    return await _answer(response, "undo", {"import_id": str(body.get("import_id") or "")}, lock=True)
+    return await _answer(response, "undo", {"import_id": str(body.get("import_id") or ""), **_dest(body.get("dest"))},
+                         lock=True)
 
 
 @router.put("/upload")
