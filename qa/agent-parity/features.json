@@ -45,6 +45,16 @@
   ],
   "features": [
     {
+      "id": "mcp-tool-list-cache-freshness",
+      "description": "Tool discovery is reusable only while complete and fresh for its requesting agent; unavailable apps, changed grants and replaced registries cannot certify a stale tool list.",
+      "layer": "server",
+      "fixture": null,
+      "how_to_test": "Run tests/agent-bridge-cache.node.mjs for synthetic production-gateway wire/source cases: incomplete discovery, cached failures, recovery, valid empty tools, remaining source freshness and grant/registry changes during discovery. These shared-gateway fixtures do not establish routed parity. Before merge, add an executable per-kind main/host-profile/container/restricted fixture through each actual configured gateway route and independently exercise Hermes cached-client registration/reconnect; a missing fixture is deliberately a coverage failure, not an exemption. Do not use owner/private agent homes.",
+      "source_refs": ["server/agent-bridge.mjs"],
+      "reference_tests": ["tests/agent-bridge-cache.node.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "hosted-thread-draft-custody",
       "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
       "layer": "ux",

@@ -21,6 +21,9 @@ export const JOB_MAP_LINES = 12
 export const DEFAULT_FILES_ROOT = '~/runtipi/media'
 const JOB_STAMP = '.wizard-jobs'
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
+// No longer than downstream discovery's own freshness window. Registry edits
+// notify connected clients; schemas changed without a registry edit still expire.
+const TOOLS_LIST_TTL_MS = 60_000
 const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
 
 function clean(value, max) {
@@ -453,20 +456,29 @@ export function createAgentBridge({
     return c
   }
 
-  async function appTools(app) {
+  async function discoverTools(app) {
     const cached = toolCache.get(app.id)
-    if (cached && Date.now() - cached.at < 60_000) return cached.tools
-    if (app.status !== 'running') return cached?.tools ?? []
+    if (app.status !== 'running') return { tools: cached?.tools ?? [], at: 0, complete: false }
+    if (cached && Date.now() - cached.at < TOOLS_LIST_TTL_MS) return cached
     try {
       const result = await client(app).request('tools/list', {})
-      const tools = (Array.isArray(result?.tools) ? result.tools : []).filter((t) => typeof t?.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(t.name))
-      toolCache.set(app.id, { tools, at: Date.now() })
-      return tools
+      if (!Array.isArray(result?.tools)) throw new Error('invalid tools/list response')
+      const tools = result.tools.filter((t) => typeof t?.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(t.name))
+      // This gateway does not follow downstream pages: page one is not complete.
+      const entry = { tools, at: Date.now(), complete: tools.length === result.tools.length && result.nextCursor == null }
+      // A discovery begun before a registry replacement must not warm its cache.
+      if (apps.includes(app)) toolCache.set(app.id, entry)
+      return entry
     } catch (error) {
       log(`tools/list ${app.id} failed: ${clean(error?.message, 120)}`)
-      toolCache.set(app.id, { tools: cached?.tools ?? [], at: Date.now() - 50_000 }) // retry in ~10 s
-      return cached?.tools ?? []
+      const entry = { tools: cached?.tools ?? [], at: Date.now() - 50_000, complete: false } // retry in ~10 s
+      if (apps.includes(app)) toolCache.set(app.id, entry)
+      return entry
     }
+  }
+
+  async function appTools(app) {
+    return (await discoverTools(app)).tools
   }
 
   /** The apps one agent may use (#58). */
@@ -509,19 +521,31 @@ export function createAgentBridge({
     }
   }
 
-  async function listTools(agentId = GATEWAY_MAIN_AGENT) {
+  async function toolsSnapshot(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
+    const generation = apps
+    const mine = visible(agentId)
+    const lists = await Promise.all(mine.map(async (app) => [app, await discoverTools(app)]))
+    refresh()
+    const current = visible(agentId)
+    const stable = apps === generation && current.length === mine.length && current.every((app, i) => app === mine[i])
+    let ttlMs = stable ? TOOLS_LIST_TTL_MS : 0
     const out = [metaTool(), ...(builtins?.list?.(agentId) || []), ...shared.list()]
-    const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
-    for (const [app, tools] of lists) {
+    for (const [app, entry] of lists) {
+      if (!current.includes(app)) continue // do not return a revoked/replaced app's tools
+      ttlMs = Math.min(ttlMs, entry.complete ? Math.max(0, entry.at + TOOLS_LIST_TTL_MS - Date.now()) : 0)
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
-      for (const t of tools) {
+      for (const t of entry.tools) {
         const name = `${app.prefix}__${t.name}`
         if (name.length > 51) continue // mcp__wizard__ + name must stay within 64 characters
         out.push({ ...t, name, description: `${tag} ${clean(t.description, 1000)}`.trim(), inputSchema: t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object', properties: {} } })
       }
     }
-    return out
+    return { tools: out, ttlMs, cacheScope: 'private' }
+  }
+
+  async function listTools(agentId = GATEWAY_MAIN_AGENT) {
+    return (await toolsSnapshot(agentId)).tools
   }
 
   async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
@@ -623,7 +647,7 @@ export function createAgentBridge({
         })
       }
       if (method === 'ping') return reply({})
-      if (method === 'tools/list') return reply({ tools: await listTools(agentId) })
+      if (method === 'tools/list') return reply(await toolsSnapshot(agentId))
       if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId))
       if (method === 'resources/list') return reply({ resources: [] })
       if (method === 'prompts/list') return reply({ prompts: [] })
