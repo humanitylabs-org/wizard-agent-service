@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen, projectWizardMessageHistory } from '../server/service.mjs'
-import { projectStatusMarkers } from '../server/thread-status.mjs'
+import { projectStatusMarkers, askMaxFor, withAskMax, fullStatusAsk, parseStatus } from '../server/thread-status.mjs'
+import { runInstructions } from '../server/service.mjs'
+import { validateUiPreferences, updateUiPreferences } from '../server/ui-preferences.mjs'
+import { writeFileSync } from 'node:fs'
 
 // A long reply's own hidden status line already holds a plain-words ask written for someone reading cold.
 // The Wizard history view keeps it on the row (wizard_ask / wizard_state) so a shell can show it first.
@@ -70,5 +73,58 @@ describe('reply summary on Wizard history rows', () => {
     const raw = await (await fetch(`http://127.0.0.1:${address.port}/wizard/hermes/api/sessions/wizard_fixture/messages?order=oldest`)).json()
     expect(raw.data[0]).not.toHaveProperty('wizard_ask')
     expect(JSON.stringify(raw)).not.toContain('WIZARD_STATUS_V1')
+  })
+
+  it('the short-answer length sets the ask budget only while the reply-summary view is on; the list clip stays 140', () => {
+    expect(askMaxFor({})).toBe(140)
+    expect(askMaxFor({ replySummary: { on: false, length: 'paragraph' } })).toBe(140)
+    expect(askMaxFor({ replySummary: { on: true } })).toBe(140)
+    expect(askMaxFor({ replySummary: { on: true, length: 'line' } })).toBe(80)
+    expect(askMaxFor({ replySummary: { on: true, length: 'sentences' } })).toBe(140)
+    expect(askMaxFor({ replySummary: { on: true, length: 'paragraph' } })).toBe(300)
+    const base = runInstructions({ join: true })
+    expect(base).toContain('at most 140 characters')
+    expect(withAskMax(base, 140)).toBe(base)
+    const long = withAskMax(base, 300)
+    // Protocol only: the one number changes, nothing else in the run contract does.
+    expect(long).toBe(base.replace('at most 140 characters', 'at most 300 characters'))
+    const ask = 'x '.repeat(150).trim()
+    const text = `Body.\n\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'fyi', ask })}[/WIZARD_STATUS_V1]`
+    expect(fullStatusAsk(text)).toBe(ask)
+    expect(parseStatus(text)?.ask.length).toBeLessThanOrEqual(140)
+  })
+
+  it('replySummary is a strict ui-preferences key', () => {
+    expect(() => validateUiPreferences({ replySummary: { on: true, start: 'expanded', length: 'paragraph' } })).not.toThrow()
+    for (const replySummary of [{}, { on: 'yes' }, { on: true, length: 'essay' }, { on: true, start: 'open' }, { on: true, style: 'bold' }, []])
+      expect(() => validateUiPreferences({ replySummary })).toThrow('invalid_preferences')
+  })
+
+  it('a run sent while the owner chose Short paragraph carries the 300-character ask rule', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'reply-summary-run-'))
+    directories.push(directory)
+    const bodies: any[] = []
+    const upstream = createServer((request, response) => {
+      let raw = ''
+      request.on('data', c => { raw += c }).on('end', () => {
+        if (request.method === 'POST' && request.url?.startsWith('/v1/runs')) bodies.push(JSON.parse(raw))
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify(request.url?.startsWith('/v1/runs') ? { run_id: 'run_fixture', status: 'started' } : { data: [] }))
+      })
+    })
+    servers.push(upstream)
+    const upstreamAddress = await listen(upstream)
+    const proxy = createWizardServer({ requireJoinedDelegationCapability: false, upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`, hermesKey: 'fixture-server-key', requireAccess: false,
+      wizardOsHome: directory, hermesStatePath: join(directory, 'absent-state.db'), inboxDbPath: join(directory, 'absent-inbox.db') })
+    servers.push(proxy)
+    const address = await listen(proxy)
+    const send = () => fetch(`http://127.0.0.1:${address.port}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_fixture_' + bodies.length, input: 'hi' }) })
+    await send()
+    updateUiPreferences(join(directory, 'ui-preferences.json'), { replySummary: { on: true, start: 'collapsed', length: 'paragraph' } })
+    await send()
+    for (let i = 0; i < 50 && bodies.length < 2; i++) await new Promise(r => setTimeout(r, 20))
+    expect(bodies[0].instructions).toContain('at most 140 characters')
+    expect(bodies[1].instructions).toContain('at most 300 characters')
+    expect(bodies[1].instructions).not.toContain('at most 140 characters')
   })
 })
