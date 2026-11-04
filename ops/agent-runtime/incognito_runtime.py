@@ -121,7 +121,7 @@ print(json.dumps(meta))
 POLICY = '''import re
 def block(tool_name, args=None, **kw):
  name=tool_name.split('__')[-1]
- persistent = r'(?:^|_)(?:wizard_schedule|kanban|wizard_heavy|delegate|send_message)(?:_|$)'
+ persistent = r'(?:^|_)(?:wizard_schedule|wizard_start_thread|wizard_follow_up|wizard_remind|kanban|wizard_heavy|delegate|send_message)(?:_|$)'
  exact = r'(?:^|_)(?:cron|cronjob|supervisor_report|supervisor_ask|supervisor_answer|supervisor_build|supervisor_close|session_history_write|session_history_append)$'
  if re.search(persistent,name) or re.search(exact,name):
   return {'action':'block','message':'This durable operation is unavailable in Incognito.'}
@@ -137,7 +137,7 @@ def block(tool_name, args=None, **kw):
 def register(ctx):
  ctx.register_hook('pre_tool_call',block)
 '''
-VERIFY = "import sys;sys.path.insert(0,'/opt/hermes');from hermes_cli.plugins import discover_plugins,get_pre_tool_call_directive;discover_plugins();assert get_pre_tool_call_directive('wizard_schedule',{})[0]=='block';assert get_pre_tool_call_directive('memory',{})[0] is None"
+VERIFY = "import sys;sys.path.insert(0,'/opt/hermes');from hermes_cli.plugins import discover_plugins,get_pre_tool_call_directive;discover_plugins();assert all(get_pre_tool_call_directive(n,{})[0]=='block' for n in ['wizard_schedule','wizard_start_thread','wizard_follow_up','wizard_remind','mcp_wizard_wizard_start_thread']);assert get_pre_tool_call_directive('memory',{})[0] is None"
 
 
 def _docker_command(args):

@@ -662,7 +662,7 @@ export function createAgentRegistry(options = {}) {
     const kind = appKinds().get(appId)
     if (!kind) fail(404, 'app_not_found', 'app.id')
     const privateApp = privateApps().has(appId)
-    const all = list().filter(agent => agent.role !== 'recovery')
+    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
     return {
       app_id: appId, kind, privacy: privateApp ? 'private' : 'standard',
       // A private app on a box with no private agent: the install sheet offers to set one up (James, 23 Oct 2026).
@@ -678,7 +678,7 @@ export function createAgentRegistry(options = {}) {
     const ids = body?.agents
     if (!Array.isArray(ids) || ids.length > 64 || !ids.every((id) => typeof id === 'string')) fail(400, 'invalid_request', 'app.agents')
     const wanted = new Set(ids)
-    const all = list().filter(agent => agent.role !== 'recovery')
+    const all = list().filter(agent => agent.role !== 'recovery' && agent.harness !== 'pi')
     for (const id of wanted) if (!all.some((agent) => agent.id === id)) fail(404, 'agent_not_found', 'agent.id', id)
     for (const agent of all) {
       const has = agentAppIds(agent).has(appId)

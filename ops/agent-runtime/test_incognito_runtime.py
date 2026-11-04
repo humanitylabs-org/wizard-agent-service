@@ -30,6 +30,12 @@ def metadata():
 AGENT={'schema':1,'id':'synthetic','privacy':'private','model':{'provider':'tinfoil','model':'synthetic-model'},'runtime':{'kind':'container','port':18001,'app_id':'agent-synthetic'}}
 SID='incog_'+'a'*32
 class Tests(unittest.TestCase):
+ def test_incognito_blocks_every_scheduler_entrypoint_and_mcp_wrapper(self):
+  policy={};exec(POLICY,policy);block=policy['block']
+  for name in ['wizard_start_thread','wizard_follow_up','wizard_remind','wizard_schedule','mcp_wizard_wizard_start_thread','mcp__wizard__wizard_follow_up','mcp_wizard_wizard_remind']:
+   self.assertEqual(block(name,{})['action'],'block',name)
+   self.assertEqual(block('tool_call',{'calls':[{'name':name,'arguments':{}}]})['action'],'block',name)
+  self.assertIsNone(block('memory',{}))
  def test_staging_owner_label_scopes_startup_and_periodic_sweeps(self):
   r=Rig();m=r.manager(owner='incognito-preview');m.start(AGENT,SID);m.sweep()
   create=next(a for a,_ in r.calls if a[0]=='create')
