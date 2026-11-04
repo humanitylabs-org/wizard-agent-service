@@ -463,6 +463,8 @@ const sealed = (detail) => fail(409, 'private_agent_sealed', 'agent.private_seal
  * The registry. `runtime` is the driver ({ apply(id), start(id), stop(id) } -> Promise), or null when the box
  * has none (then creating or starting an agent fails with check `agent.runtime`).
  */
+import { appAgentRuntimes } from './app-agent-runtimes.mjs'
+
 export function createAgentRegistry(options = {}) {
   const agentsDir = resolve(String(options.agentsDir))
   const fetchImpl = options.fetchImpl ?? fetch
@@ -532,9 +534,14 @@ export function createAgentRegistry(options = {}) {
   })
 
   const folder = (id) => join(agentsDir, id)
+  const appRuntimes = () => appAgentRuntimes(appsJsonPath, options.appRuntimeGrantsPath || process.env.WIZARD_GRANTS_FILE || '/wizard/grants.json')
+    .filter(a => !existsSync(join(folder(a.id), 'agent.json')))
+  const appRuntime = id => appRuntimes().find(a => a.id === id)
   const readRaw = (id) => {
     if (id === MAIN_AGENT_ID) return mainAgent()
     if (typeof id !== 'string' || !ID_RE.test(id)) return null
+    const app = appRuntime(id)
+    if (app) { const { key, ...agent } = app; return { ...agent, appearance: normalizeAppearance(undefined, 'standard') } }
     return parseAgentFile(readJson(join(folder(id), 'agent.json')), id)
   }
   const folderIds = () => {
@@ -548,7 +555,7 @@ export function createAgentRegistry(options = {}) {
   const defaultAgentId = () => readSettings(options.settingsPath, { canStartAgent }).settings.agents.default_agent_id
   const list = () => {
     syncApps()
-    return [mainAgent(), ...folderIds().map(readRaw).filter(Boolean)]
+    return [mainAgent(), ...[...new Set([...folderIds(), ...appRuntimes().map(a => a.id)])].sort().map(readRaw).filter(Boolean)]
   }
 
   // ---- #58: new apps join standard agents, never private ones ----
@@ -759,6 +766,8 @@ export function createAgentRegistry(options = {}) {
     return next
   }
   const apiKey = (id) => {
+    const app = appRuntime(id)
+    if (app) return app.key
     try { return readFileSync(join(folder(id), 'runtime.key'), 'utf8').trim() } catch { return '' }
   }
   const gatewayKey = (id) => {
@@ -767,7 +776,7 @@ export function createAgentRegistry(options = {}) {
   const upstream = (agent) => {
     if (agent.id === MAIN_AGENT_ID) return null
     // Fixed loopback only: the host owns any tailnet/SSH transport, never a browser-selected URL.
-    if (agent.runtime.kind === 'external') return `http://127.0.0.1:${agent.runtime.port}`
+    if (agent.runtime.kind === 'external') return agent.runtime.managed_by === 'app' && upstreamMode === 'network' ? agent.runtime.api : `http://127.0.0.1:${agent.runtime.port}`
     if (agent.runtime.kind === 'profile') {
       if (!mainUpstreamOrigin) throw new AgentError(503, 'agent_not_ready', 'agent.runtime.origin')
       return `${new URL(mainUpstreamOrigin).origin}/p/${agent.runtime.profile}`
@@ -1082,7 +1091,7 @@ export function createAgentRegistry(options = {}) {
     if (!agent) fail(404, 'agent_not_found', 'agent.id')
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'agent.body')
     // The main Hermes also has an external runtime, but keeps its Service-owned settings.
-    if (agent.harness === 'pi' && agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
+    if (agent.id !== MAIN_AGENT_ID && agent.runtime.kind === 'external') fail(409, 'external_agent_read_only', 'agent.runtime')
     if (agent.runtime.kind === 'profile') {
       // Sharing metadata is Service-owned even for a file-provisioned host profile.
       if (Object.keys(body).some(key => !['permissions', 'notes_dir'].includes(key))
@@ -1441,7 +1450,7 @@ export function createAgentRegistry(options = {}) {
       return join(folder(id), 'home')
     },
     agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
-    credentialValues: () => folderIds().flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
+    credentialValues: () => [...new Set([...folderIds(), ...appRuntimes().map(a => a.id)])].flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
     agentForModel: (route) => agentForModel(list(), route),
