@@ -564,6 +564,22 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     }
     install([parityQa, app]); await s.restart()
     const text = await kernel()
+    // Inspect the real gateway handler's initialize output on EACH runtime transport,
+    // not renderKernel() or a source-text assertion. Upstream Hermes remains synthetic.
+    const assertRules = value => {
+      assert.equal(typeof value, 'string', `${s.kind}: gateway kernel instructions`)
+      const lines = value.split('\n')
+      for (const rule of [
+        'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+        'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
+      ]) assert.ok(lines.includes(rule), `${s.kind}: gateway delivers exact app-first/source/error rule: ${rule}`)
+      assert.ok(value.includes('Use registered exact names only.'), `${s.kind}: registered exact tool names, not invented names`)
+      assert.ok(!value.includes('If it is not in your tool list, run it with tool_call and that exact name.'), `${s.kind}: no speculative tool-name instruction`)
+      assert.ok(value.includes('3. For ordinary app use:'), `${s.kind}: ordinary-app safety step survives`)
+      assert.ok(value.indexOf('Never ask the owner') > value.indexOf('3. For ordinary app use:'))
+      if (value.includes('Jobs on this box:')) assert.ok(value.indexOf('Report tool errors.') < value.indexOf('Jobs on this box:'))
+    }
+    assertRules(text)
     if (s.kind === 'main') {
       assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
@@ -575,6 +591,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     }
     install([parityQa]); await s.restart()
     const after = await kernel()
+    assertRules(after)
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
     assert.doesNotMatch(after, /Synthetic Video/u)
   },

@@ -6805,7 +6805,7 @@ function buildWizardServer(options, lifetime) {
         // get the shell's own policy rather than the legacy client's.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data: https://derp1.tailscale.com/generate_204; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
         // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
