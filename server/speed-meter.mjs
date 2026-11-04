@@ -2,7 +2,7 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks'
 
 // Only static route words survive: never retain thread/run ids, filenames or query strings.
 const identities = new Set(['sessions', 'runs', 'agents', 'threads', 'agent-heavy', 'background-results', 'attachments', 'devices'])
-const routeWords = new Set(('api wizard v1 v2 sessions messages runs events agents health list-cache check window search titles title status cancel stop retry saved-retry steer approve approvals files attachments audio voice recovery-receipt settings models options usage devices heavy agent-heavy submit background-results continue threads attention seen read archive unarchive preferences ui-preferences apps capabilities mcp inbox notifications schedules supervisor helpers').split(' '))
+const routeWords = new Set(('api wizard v1 v2 sessions messages runs events agents health list-cache check window search titles title status cancel stop retry saved-retry steer approve approvals files attachments audio voice transcribe recovery-receipt settings models options usage devices heavy agent-heavy submit background-results continue threads attention seen read archive unarchive preferences ui-preferences apps capabilities mcp inbox notifications schedules supervisor helpers').split(' '))
 // Keep fixed single-word Wizard v1 endpoints separate instead of merging unrelated
 // bootstrap/network probes and local workspace polls into /wizard/v1/:id.
 const wizardV1Routes = new Set('bootstrap workspaces setup system-jobs pages skins my-skin provider-recovery agent-options agent-context app-bindings user-files uploads shares'.split(' '))
@@ -47,11 +47,16 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () 
         finished = true
         // Choose at completion, not entry: concurrent requests must share the same bound.
         const bucket = routes.has(key) || routes.size < maxRoutes - 1 ? key : '[overflow]'
-        const row = routes.get(bucket) || { count: 0, total_ms: 0 }
-        row.count++; row.total_ms += now() - at; routes.set(bucket, row)
+        const row = routes.get(bucket) || { count: 0, total_ms: 0, samples: [], next: 0 }
+        const elapsed = now() - at
+        row.samples[row.next] = elapsed; row.next = (row.next + 1) % 256
+        row.count++; row.total_ms += elapsed; routes.set(bucket, row)
       }
     },
-    stats: () => ({ event_loop: completed || sample(), routes: Object.fromEntries([...routes].map(([key, row]) => [key, { ...row }])) }),
+    stats: () => ({ event_loop: completed || sample(), routes: Object.fromEntries([...routes].map(([key, row]) => {
+      const sorted = [...row.samples].sort((a, b) => a - b)
+      return [key, { count: row.count, total_ms: row.total_ms, sample_count: sorted.length, p95_ms: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0 }]
+    })) }),
     close() { clearInterval(timer); delay.disable() },
   }
 }

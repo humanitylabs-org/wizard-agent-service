@@ -28,6 +28,8 @@ jobs:
           python3 -m venv .import-venv
           .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
           printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          # npm plugin tests spawn python3 too; use the same installed dependencies.
+          printf '%s/.import-venv/bin\n' "$GITHUB_WORKSPACE" >> "$GITHUB_PATH"
       - name: Supervisor Hermes adapter and restricted asset synchronization
         run: |
           "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py

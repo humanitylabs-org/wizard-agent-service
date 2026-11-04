@@ -3,6 +3,24 @@ import assert from 'node:assert/strict'
 import { createSpeedMeter, createSlowTickLogger, routeTemplate } from '../server/speed-meter.mjs'
 import { createHybridProjector } from '../server/session-list-cache.mjs'
 
+test('voice transcribe and POST runs expose independent bounded rolling p95 rows', t => {
+  let time = 0
+  const meter = createSpeedMeter({ now: () => time })
+  t.after(() => meter.close())
+  for (let i = 0; i < 600; i++) {
+    const done = meter.begin({ method: 'POST', url: '/wizard/voice/transcribe?discard=secret' })
+    time += i < 344 ? 1000 : 7; done()
+  }
+  const done = meter.begin({ method: 'POST', url: '/wizard/hermes/v1/runs' })
+  time += 13; done()
+  const routes = Object.entries(meter.stats().routes)
+  const voice = routes.find(([key]) => JSON.parse(key)[1] === '/wizard/voice/transcribe')[1]
+  const runs = routes.find(([key]) => JSON.parse(key)[1] === '/wizard/:id/v1/runs')[1]
+  assert.deepEqual(voice, { count: 600, total_ms: 345792, sample_count: 256, p95_ms: 7 })
+  assert.equal(runs.p95_ms, 13)
+  assert.doesNotMatch(JSON.stringify(routes), /secret|samples|next/)
+})
+
 test('Wizard v1 fixed endpoints do not collapse bootstrap and workspace latency into one id bucket', () => {
   for (const endpoint of ['bootstrap', 'workspaces', 'system-jobs', 'setup', 'skins', 'pages'])
     assert.equal(routeTemplate(`/wizard/v1/${endpoint}`), `/wizard/v1/${endpoint}`)
@@ -25,7 +43,7 @@ test('speed meter groups ids and queries, separates headless clients and hosts, 
   const { routes, event_loop } = meter.stats()
   assert.equal(Object.keys(routes).length, 4)
   const normal = Object.entries(routes).find(([key]) => key.includes('/api/sessions/:id/messages') && key.includes('other') && !key.includes('phone.local'))[1]
-  assert.deepEqual(normal, { count: 2, total_ms: 20 })
+  assert.deepEqual(normal, { count: 2, total_ms: 20, sample_count: 2, p95_ms: 12 })
   assert.equal(routes['[overflow]'].count, 10)
   assert.doesNotMatch(JSON.stringify(routes), /first|second|third|fourth|secret|192\.0\.2\.1/)
   assert.match(JSON.stringify(routes), /HeadlessChrome/)
