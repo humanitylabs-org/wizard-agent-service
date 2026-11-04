@@ -15,11 +15,16 @@
 // - threads:  a one-off correction for one thread's current reply. It applies only while the agent's
 //             subject for that thread is still `from`, so the next reply that names a listed subject wins.
 //
-// The file is re-read when it changes, so edits apply without a restart. No file means no list:
-// subjects pass through exactly as the agent wrote them.
+// The file is re-read when it changes, so edits apply without a restart. A missing file uses
+// the neutral seed; an explicitly empty catalog disables the list. Owner data is never rewritten.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
+
+// New installs start with an engine-neutral self-topic. A configured catalog stays owner-owned.
+export const DEFAULT_SUBJECTS = { subjects: [{ name: 'Agents', about: 'the agent itself: models, memory, skills, data providers, automations' }] }
+const selfTopic = subject => /^(?:the\s+)?agent itself(?:\b|:)/iu.test(subject.about)
+const promptSubject = subject => selfTopic(subject) ? { ...subject, name: 'Agents' } : subject
 
 const SUBJECT_MAX = 40
 const ABOUT_MAX = 120
@@ -77,7 +82,7 @@ export class SubjectCatalog {
   }
 
   load() {
-    if (!this.migrationReady || !this.path || !existsSync(this.path)) { this.mtime = -1; this.data = normalizeSubjects({}); return this.data }
+    if (!this.migrationReady || !this.path || !existsSync(this.path)) { this.mtime = -1; this.data = normalizeSubjects(this.migrationReady && this.path ? DEFAULT_SUBJECTS : {}); return this.data }
     try {
       const { mtimeMs, size } = statSync(this.path)
       if (mtimeMs === this.mtime) return this.data
@@ -112,8 +117,12 @@ export class SubjectCatalog {
   runNote(currentSubject = '') {
     const { subjects } = this.load()
     if (!subjects.length) return ''
-    const list = subjects.map((subject) => subject.about ? `${subject.name} (${subject.about})` : subject.name).join('; ')
-    const current = clean(currentSubject, SUBJECT_MAX)
+    // Legacy self-topics sometimes used an engine/persona name. Project the meaning, not that
+    // identity, into every agent's prompt; leave the stored names, aliases and historical rows alone.
+    const projected = [...new Map(subjects.map(subject => { const item = promptSubject(subject); return [subjectKey(item.name), item] })).values()]
+    const list = projected.map((subject) => subject.about ? `${subject.name} (${subject.about})` : subject.name).join('; ')
+    const currentEntry = subjects.find(subject => subjectKey(subject.name) === subjectKey(currentSubject))
+    const current = clean(currentEntry ? promptSubject(currentEntry).name : currentSubject, SUBJECT_MAX)
     return `Subjects for the status line: ${list}. Use one of these names exactly. Coin a new subject only for a sustained project or life area that will hold several threads and that none of these covers.${current ? ` This thread's subject is “${current}”: keep it unless the work has moved to a different area.` : ''}`
   }
 }

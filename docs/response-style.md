@@ -5,7 +5,7 @@ Every owner and every agent uses Own. Summary and Concise are retired. Wizard co
 Two independent layers reach an agent:
 
 1. **Wizard OS context** (product-owned): what Wizard is, Markdown/links/MEDIA/My skin rendering, files, installed apps and jobs, screen context, background-result delivery, the supervisor phrase and the `WIZARD_STATUS_V1` protocol. Detaching an alongside agent removes this layer.
-2. **The agent's own persona** (owner-owned): `SOUL.md` in its Hermes home, or the equivalent for another harness. Wizard never copies or overrides it. Lasting “reply like this from now on” requests belong there; different agents can have different voices across attach, detach and other surfaces.
+2. **The agent's own persona** (owner-owned): its own persona file, in the format and location its harness supports (for example `SOUL.md` for Hermes). The shared per-run pointer never prescribes another harness's file or identity. Wizard never copies or overrides it. Lasting “reply like this from now on” requests belong there; different agents can have different voices across attach, detach and other surfaces.
 
 Fresh installs deterministically read Own. Startup no longer makes or persists a randomized Summary/Concise assignment. Existing settings bytes and historical experiment counters remain untouched on startup. Older shells may still PUT `response_style: summary | concise | own`, but GET always returns `own` and these values never change run instructions. Owner authorization and input validation remain enforced.
 
