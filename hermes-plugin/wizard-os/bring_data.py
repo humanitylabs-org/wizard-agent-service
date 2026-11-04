@@ -1490,7 +1490,11 @@ def _undo_owner_side(import_id: str, entry: dict) -> dict:
         except OSError:
             continue
         if _sha(current) != info.get("sha"):
+            # A later import replaced what this one wrote: its backup is our text, so hand it our own backup
+            # (the owner's original) so undoing it later restores the original, not this import's value.
             out[field] = "kept (changed since the import)"
+            if _hand_backup_to_later(import_id, key, info):
+                out[field] = "kept (a later import changed it; undoing that one restores your original)"
             continue
         backup = _state_dir() / info["backup"] if info.get("backup") else None
         if backup and backup.is_file():
@@ -1501,6 +1505,27 @@ def _undo_owner_side(import_id: str, entry: dict) -> dict:
             target.unlink()
             out[field] = "removed"
     return out
+
+
+def _hand_backup_to_later(import_id: str, key: str, info: dict) -> bool:
+    """Keep the restoration chain when imports are undone out of order: the import whose backup holds exactly
+    what `import_id` wrote takes over `import_id`'s backup (or its "no file before" marker)."""
+    reg = _registry()
+    for other_id, other in reg.items():
+        theirs = other.get(key) if other_id != import_id else None
+        if not isinstance(theirs, dict) or not theirs.get("backup"):
+            continue
+        their_backup = _state_dir() / theirs["backup"]
+        try:
+            if _sha(their_backup.read_text("utf-8")) != info.get("sha"):
+                continue
+        except OSError:
+            continue
+        theirs["backup"] = info.get("backup") or ""
+        _save_registry(reg)
+        their_backup.unlink()
+        return True
+    return False
 
 
 def status(_args: dict) -> dict:

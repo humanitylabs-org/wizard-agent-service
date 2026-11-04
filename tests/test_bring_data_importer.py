@@ -356,6 +356,24 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(call('undo', import_id=scan['import_id'])['personality'], 'restored')
         self.assertEqual((self.home / 'SOUL.md').read_text('utf-8'), 'You are the new agent.')
 
+    def test_undo_out_of_order_still_restores_the_original_personality(self):
+        # Codex P1 on #336: undoing the older of two personality imports first dropped its backup.
+        (self.home / 'SOUL.md').write_text('Owner original.', 'utf-8')
+        os.environ['WIZARD_BRING_DATA_LOCAL_ROOTS'] = str(self.base)
+        ids = []
+        for name in ('first', 'second'):
+            src = self.base / name
+            (src / 'memories').mkdir(parents=True)
+            (src / 'SOUL.md').write_text(f'You are {name}.', 'utf-8')
+            scan = call('scan', path=str(src))
+            self.assertEqual(call('import', import_id=scan['import_id'], personality=True)['errors'], {})
+            ids.append(scan['import_id'])
+        self.assertEqual((self.home / 'SOUL.md').read_text('utf-8'), 'You are second.\n')
+        self.assertTrue(call('undo', import_id=ids[0])['personality'].startswith('kept'))
+        self.assertEqual((self.home / 'SOUL.md').read_text('utf-8'), 'You are second.\n')
+        self.assertEqual(call('undo', import_id=ids[1])['personality'], 'restored')
+        self.assertEqual((self.home / 'SOUL.md').read_text('utf-8'), 'Owner original.')
+
     def test_all_skills_brings_every_new_one(self):
         cc = claude_code_home(self.base)
         scan = call('scan', path=str(cc))
