@@ -3,7 +3,7 @@
 // One source, apps.json, turned into what every agent on the box needs:
 //   1. tools:       one MCP gateway (/wizard/mcp) that proxies every running app's tools as <app>__<tool>,
 //                   plus the wizard_apps meta tool, and says tools/list_changed when apps.json changes;
-//   2. orientation: a FIXED kernel (GET /wizard/v1/agent-context), under 900 characters, no app list;
+//   2. orientation: a FIXED kernel (GET /wizard/v1/agent-context), under 1300 characters, no app list;
 //   3. discovery:   one pointer skill per job (`provides`), <WIZARD_OS_HOME>/skills/wizard-job-<job>/SKILL.md,
 //                   which skills.external_dirs puts into the agent's normal skills index.
 // The Hermes plugin (hermes-plugin/wizard-os) renders the same kernel and pointers in Python;
@@ -15,7 +15,7 @@ import { isPrivateApp } from './agents.mjs'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
-export const KERNEL_LIMIT = 900
+export const KERNEL_LIMIT = 1300
 export const JOB_SKILL_PREFIX = 'wizard-job-'
 export const JOB_MAP_LINES = 12
 export const DEFAULT_FILES_ROOT = '~/runtipi/media'
@@ -122,6 +122,8 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}.${hermes ? ' If it is not in your tool list, run it with tool_call and that exact name.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
+    'Never ask the owner what an installed app can answer: call its tools first; if one seems missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+    'Answer from the source of truth, not chat history: the owning app for their data, live checks for box state, release records for what shipped. Say none found only after checking.',
     `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Save routing-only app-job skills.',
   ]

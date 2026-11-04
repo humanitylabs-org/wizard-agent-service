@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
+import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, KERNEL_LIMIT, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const PLUGIN = resolve(__dirname, '../hermes-plugin/wizard-os')
@@ -76,12 +76,12 @@ describe('agent bridge: kernel', () => {
     expect(apps.map((a) => a.id)).toEqual(['browser', 'transcriber'])
   })
 
-  it('the kernel is fixed, under 900 characters, and holds no app list', () => {
+  it('the kernel is fixed, within KERNEL_LIMIT (1300) characters, and holds no app list', () => {
     const many = Array.from({ length: 20 }, (_, i) => app(`app-number-${String(i).padStart(2, '0')}`, 1000 + i, { provides: [`job-${i}`, 'short-form-video'] }))
     const none = renderKernel([])
     const full = renderKernel(bridgeApps({ apps: many }))
     expect(full).toBe(none)
-    expect(full.length).toBeLessThanOrEqual(900)
+    expect(full.length).toBeLessThanOrEqual(KERNEL_LIMIT)
     expect(full).toContain('`mcp__wizard__wizard_apps`')
     expect(full).toContain('wizard-job-<job>')
     expect(full).toContain('Never search the disk')
@@ -104,6 +104,24 @@ describe('agent bridge: kernel', () => {
     }
     // Non-Hermes harnesses retain their own discovery path, not a nonexistent skill_view tool.
     expect(renderKernel([], { harness: 'generic' })).not.toContain('skill_view')
+  })
+
+  it('tells every harness to ask the apps, not the owner or old chats, and to answer from the source of truth', () => {
+    for (const opts of [{}, { harness: 'generic' }, { skillsIndex: false }, { jobMap: true }]) {
+      const text = renderKernel(bridgeApps({ apps: [app('hello-wizard', 1)] }), opts)
+      const lines = text.split('\n')
+      expect(lines).toContain('Never ask the owner what an installed app can answer: call its tools first; if one seems missing, search tools again or retry once. Never guess from old chats or call app URLs.')
+      expect(lines).toContain('Answer from the source of truth, not chat history: the owning app for their data, live checks for box state, release records for what shipped. Say none found only after checking.')
+      // The rules follow the routing steps and precede any job map.
+      expect(text.indexOf('Never ask the owner')).toBeGreaterThan(text.indexOf('Use the installed app for its job.'))
+      if (text.includes('Jobs on this box:')) expect(text.indexOf('Answer from the source of truth')).toBeLessThan(text.indexOf('Jobs on this box:'))
+      // Harness-neutral wording: no Hermes-only tool names in the two rules.
+      for (const l of lines.filter((l) => l.startsWith('Never ask the owner') || l.startsWith('Answer from the source'))) {
+        expect(l).not.toMatch(/skill_view|tool_call|mcp__/u)
+      }
+    }
+    expect(renderKernel([]).length).toBeLessThanOrEqual(KERNEL_LIMIT)
+    expect(renderKernel([], { harness: 'generic' }).length).toBeLessThanOrEqual(KERNEL_LIMIT)
   })
 
   it('writes one pointer skill per job, names real tools, and removes stale ones', () => {

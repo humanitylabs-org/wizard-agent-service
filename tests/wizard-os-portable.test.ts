@@ -186,6 +186,8 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     expect(first).not.toContain('http://127.0.0.1:20002/mcp')
     expect(first).not.toContain(join(dir, 'skills'))
     expect(first).toContain('Save routing-only app-job skills.')
+    expect(first).toContain('Never ask the owner what an installed app can answer: call its tools first')
+    expect(first).toContain('Answer from the source of truth, not chat history')
     expect(first).toContain('first load `wizard-builder` with skill_view')
     expect(first).toContain('For ordinary app use:')
     writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [] }))

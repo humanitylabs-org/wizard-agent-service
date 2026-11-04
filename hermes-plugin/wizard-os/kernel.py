@@ -15,7 +15,7 @@ from pathlib import Path
 
 MCP_SERVER_NAME = "wizard"
 META_TOOL = "wizard_apps"
-KERNEL_LIMIT = 900
+KERNEL_LIMIT = 1300
 JOB_SKILL_PREFIX = "wizard-job-"
 JOB_MAP_LINES = 12
 DEFAULT_FILES_ROOT = "~/runtipi/media"
@@ -124,6 +124,8 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         + (" If it is not in your tool list, run it with tool_call and that exact name." if hermes else ""),
         "3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.",
         "Use the installed app for its job.",
+        "Never ask the owner what an installed app can answer: call its tools first; if one seems missing, search tools again or retry once. Never guess from old chats or call app URLs.",
+        "Answer from the source of truth, not chat history: the owning app for their data, live checks for box state, release records for what shipped. Say none found only after checking.",
         f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
         "Save routing-only app-job skills.",
     ]
