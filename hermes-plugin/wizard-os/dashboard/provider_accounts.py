@@ -1,0 +1,357 @@
+"""Read-only account projection. Runs INSIDE Hermes; never exports credentials.
+
+Use the stock store reader, not load_pool(): enumeration must not seed or persist
+credentials. Quota requests explicitly name each credential and forbid refresh. The one
+exception is an already-expired grant: Hermes renews tokens only when it uses them, so an idle
+subscription's meter would go blank. That grant is renewed through Hermes' own pool
+(`try_refresh_matching`, which holds the cross-process single-use refresh lock), at most once per
+grant per _RENEW_EVERY seconds; a grant Hermes cannot renew is reported as `expired`.
+No provider-wide OAuth start/logout routes are exposed as account operations.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import math
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timezone
+
+PROVIDERS = {"chatgpt": "openai-codex", "claude": "anthropic"}
+_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
+_CACHE = {}
+_LOCK = threading.Lock()
+_RENEW_EVERY = 600
+_RENEWED = {}   # credential id -> monotonic time of the last renewal attempt
+
+
+def _claims(token):
+    try:
+        part = token.split('.')[1]
+        result = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+        return result if isinstance(result, dict) else {}
+    except (ValueError, IndexError, TypeError):
+        return {}
+
+
+def _expired(row, claims):
+    """True when the stored access token is already past its expiry (never a guess)."""
+    ms = row.get('expires_at_ms')
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return ms <= time.time() * 1000
+    exp = claims.get('exp')
+    if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+        return exp <= time.time()
+    return False
+
+
+def _renew(slug, row, read):
+    """Renew one expired grant through stock Hermes. Returns (fresh row or None, renewal failed)."""
+    cid = row.get('id')
+    if not cid:
+        return None, True
+    now = time.monotonic()
+    with _LOCK:
+        last = _RENEWED.get(cid)
+        if last is not None and now - last < _RENEW_EVERY:
+            return None, None          # tried recently: report what the store says, no new attempt
+        _RENEWED[cid] = now
+    try:
+        from agent.credential_pool import load_pool
+        if not load_pool(slug).try_refresh_matching(credential_id=cid):
+            return None, True
+        fresh = next((r for r in read(slug) if isinstance(r, dict) and r.get('id') == cid), None)
+        if fresh and fresh.get('access_token') and fresh.get('access_token') != row.get('access_token'):
+            return fresh, False
+        return None, True
+    except Exception:
+        return None, True   # never leak provider errors or tokens
+
+
+def _masked(value):
+    value = str(value or '')
+    if '@' not in value:
+        return None
+    local, domain = value.rsplit('@', 1)
+    return (local[:1] + '***@' + domain[:1] + '***') if local and domain else None
+
+
+def _text(value, fallback):
+    value = str(value or '')
+    if '@' in value:
+        return _masked(value) or fallback
+    # Labels are user data, not a channel to return credential-shaped strings.
+    if len(value) > 80 or re.search(r'(sk-|eyJ|Bearer\s)', value, re.I):
+        return fallback
+    return re.sub(r'[\x00-\x1f\x7f]', '', value).strip() or fallback
+
+
+def _iso(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+_CLAUDE_TIERS = {'default_claude_max_20x': 'Max 20x', 'default_claude_max_5x': 'Max 5x', 'default_claude_pro': 'Pro'}
+_CLAUDE_SUBSCRIPTIONS = {'max': 'Max', 'pro': 'Pro', 'team': 'Team', 'enterprise': 'Enterprise', 'free': 'Free'}
+_CLAUDE_WINDOWS = (('five_hour', 'Session'), ('seven_day', 'All models · weekly'),
+                   ('seven_day_opus', 'Opus · weekly'), ('seven_day_sonnet', 'Sonnet · weekly'))
+
+
+class _NoRedirect(__import__('urllib.request').request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise OSError('redirect refused')
+
+
+def _anthropic_get(path, token):
+    import urllib.request
+    req = urllib.request.Request('https://api.anthropic.com/api/oauth/' + path, method='GET', headers={
+        'Authorization': 'Bearer ' + token, 'Accept': 'application/json',
+        'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/2.1.0'})
+    with urllib.request.build_opener(_NoRedirect).open(req, timeout=15) as res:
+        data = json.loads(res.read(1 << 20).decode('utf-8'))
+    return data if isinstance(data, dict) else {}
+
+
+def _pct_row(id_, label, used, resets):
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+        return None
+    used = min(100, max(0, used))
+    when = None
+    if isinstance(resets, str) and resets.strip():
+        try:
+            from datetime import datetime
+            when = _iso(datetime.fromisoformat(resets.strip().replace('Z', '+00:00')))
+        except ValueError:
+            when = None
+    return {'id': id_, 'label': label, 'usedPercent': round(used, 1),
+            'remainingPercent': math.floor(100 - used), 'resetsAt': when}
+
+
+def _anthropic_quota(token):
+    """Claude usage the way Claude Code reads it: `limits[].percent` or `utilization` are already
+    percentages (0-100). Stock account_usage scales values <= 1 as fractions, so 1% read as 100%."""
+    from datetime import datetime
+    payload = _anthropic_get('usage', token)
+    rows = []
+    for i, entry in enumerate(payload.get('limits') or []):
+        if not isinstance(entry, dict):
+            continue
+        model = str(((entry.get('scope') or {}).get('model') or {}).get('display_name') or '').strip()[:40]
+        kind = str(entry.get('kind') or '').strip()[:40]
+        label = {'session': (model + ' · session') if model else 'Session', 'weekly_all': 'All models · weekly',
+                 'weekly_scoped': (model + ' · weekly') if model else 'Scoped · weekly'}.get(kind, model or kind or 'Limit')
+        row = _pct_row('%s:%s' % (kind or 'limit', model or entry.get('group') or i), _text(label, 'Limit'),
+                       entry.get('percent'), entry.get('resets_at'))
+        if row:
+            rows.append(row)
+    if not rows:
+        for key, label in _CLAUDE_WINDOWS:
+            window = payload.get(key)
+            if isinstance(window, dict):
+                row = _pct_row(key, label, window.get('utilization'), window.get('resets_at'))
+                if row:
+                    rows.append(row)
+    plan = email = None
+    try:
+        prof = _anthropic_get('profile', token)
+        raw = str((prof.get('account') or {}).get('email') or '').strip()
+        # The pattern already bounds the length; keep the exact address so emailHash matches the app's own hash.
+        email = raw if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
+        org = prof.get('organization') or {}
+        kind = str(org.get('organization_type') or '').strip().lower()
+        kind = kind[len('claude_'):] if kind.startswith('claude_') else kind
+        plan = _CLAUDE_TIERS.get(str(org.get('rate_limit_tier') or '')) or _CLAUDE_SUBSCRIPTIONS.get(kind)
+    except Exception:
+        pass  # A missing label never breaks usage.
+    usage = {'fetchedAt': _iso(datetime.now(timezone.utc)), 'limits': rows, 'paid': None} if rows else None
+    return plan, usage, email
+
+
+def _quota(provider, row, fetch):
+    token = row.get('access_token') or ''
+    # Empty tokens must never fall through to the singleton/account selector.
+    if not token:
+        return None, None
+    key = (provider, hashlib.sha256(token.encode()).hexdigest())
+    with _LOCK:
+        cached = _CACHE.get(key)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    if provider == 'anthropic':
+        try:
+            plan, usage, email = _anthropic_quota(token)
+            value = (plan, usage)
+            with _LOCK:
+                _CACHE[('email',) + key[1:]] = email
+        except Exception:
+            value = (None, None)  # Do not leak provider exception bodies or tokens.
+        with _LOCK:
+            if len(_CACHE) > 256:
+                _CACHE.clear()
+            _CACHE[key] = (time.monotonic(), value)
+        return value
+    try:
+        # Fixed canonical endpoint: never send credentials to store-controlled URLs.
+        snap = fetch(provider, api_key=token, read_only=True,
+                     base_url='https://chatgpt.com/backend-api/codex' if provider == 'openai-codex' else None)
+        limits = []
+        for i, window in enumerate(getattr(snap, 'windows', ()) or ()):
+            used = window.used_percent
+            if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+                continue
+            used = min(100, max(0, used))
+            limits.append({'id': str(i), 'label': _text(window.label, 'Quota'),
+                           'usedPercent': used, 'remainingPercent': math.floor(100-used),
+                           'resetsAt': _iso(window.reset_at)})
+        value = (_text(getattr(snap, 'plan', None), '') or None,
+                 {'fetchedAt': _iso(snap.fetched_at), 'limits': limits, 'paid': None}
+                 if limits and not getattr(snap, 'unavailable_reason', None) else None)
+    except Exception:
+        value = (None, None)  # Do not leak provider exception bodies or tokens.
+    with _LOCK:
+        if len(_CACHE) > 256:
+            _CACHE.clear()
+        _CACHE[key] = (time.monotonic(), value)
+    return value
+
+
+def claude_model_cooldowns(read=None, inventory=None):
+    """Fresh secret-free raw grant projection; never fetch provider usage or cache."""
+    if inventory is None:
+        if read is None:
+            from hermes_cli.auth import read_credential_pool
+            read = read_credential_pool
+        inventory = read('anthropic')
+    if not isinstance(inventory, list):
+        return None
+    grants = []
+    for r in inventory:
+        if not isinstance(r, dict) or r.get('auth_type') != 'oauth' or not isinstance(r.get('id'), str) or not r['id']:
+            return None
+        values = r.get('model_cooldowns') or {}
+        if not isinstance(values, dict):
+            return None
+        safe = {model: until for model, until in values.items()
+                if isinstance(model, str) and re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model)
+                and isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)}
+        if len(safe) != len(values):
+            return None
+        grants.append({'id': hashlib.sha256(r['id'].encode()).hexdigest()[:24], 'models': safe})
+    return {'contract': 'wizard.model-cooldowns/1', 'observedAt': time.time(), 'grants': grants}
+
+
+def _rank(row):
+    value = row.get('priority')
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _manual(row):
+    return str(row.get('source', '')).startswith('manual:')
+
+
+def _can_lead(slug, own, pool):
+    # Stock Hermes keeps manually added anthropic grants ahead of seeded ones (the Claude Code mirror), so a
+    # seeded grant cannot be moved first while any manual grant exists; never offer an action that cannot work.
+    return slug != 'anthropic' or any(_manual(r) for r in own) or not any(_manual(r) for r in pool)
+
+
+def provider_accounts(provider, read=None, fetch=None, renew=None):
+    slug = PROVIDERS[provider]
+    renew = renew or _renew
+    if read is None:
+        from hermes_cli.auth import read_credential_pool
+        read = read_credential_pool
+    if fetch is None:
+        from agent.account_usage import fetch_account_usage
+        fetch = fetch_account_usage
+    rows = [r for r in read(slug) if isinstance(r, dict) and r.get('auth_type') == 'oauth']
+    grouped = {}
+    for row in rows:
+        claims = _claims(row.get('access_token') or '')
+        auth = claims.get('https://api.openai.com/auth') or {}
+        principal = (auth.get('chatgpt_account_id'), claims.get('sub'))
+        # Deduplicate only provider-attested identity; never by email or nickname.
+        identity = json.dumps(principal) if provider == 'chatgpt' and all(principal) else str(row.get('id') or '')
+        if not identity:
+            continue
+        key = hashlib.sha256((slug + ':' + identity).encode()).hexdigest()[:24]
+        grouped.setdefault(key, []).append((row, claims))
+
+    def project(item):
+        key, aliases = item
+        # Prefer an independent manual login over a singleton mirror.
+        row, claims = sorted(reversed(aliases), key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
+        renew_failed = False
+        # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI).
+        if _expired(row, claims) and str(row.get('source', '')) != 'claude_code':
+            fresh, renew_failed = renew(slug, row, read)
+            if fresh:
+                row, claims = fresh, _claims(fresh.get('access_token') or '')
+            elif renew_failed is None:
+                renew_failed = str(row.get('last_status') or '') not in ('', 'ok', 'ready')
+        plan, usage = _quota(slug, row, fetch)
+        auth = claims.get('https://api.openai.com/auth') or {}
+        profile = claims.get('https://api.openai.com/profile') or {}
+        raw = profile.get('email') or claims.get('email')
+        if not raw and slug == 'anthropic' and row.get('access_token'):
+            with _LOCK:
+                raw = _CACHE.get(('email', hashlib.sha256(row['access_token'].encode()).hexdigest()))
+        email = _masked(raw or row.get('label'))
+        extra = {}
+        # A short one-way hash of the exact email lets the connection app tell "the same account" apart from two
+        # accounts that only share a mask (h***@g***), e.g. its original Claude Code sign-in vs. an agent row.
+        # Only a provider-attested email (token claim or profile lookup) is hashed: a label is owner-typed text,
+        # and hashing it would fold an unrelated account into whichever real sign-in uses that address.
+        exact = str(raw or '').strip().lower()
+        if exact and re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', exact):
+            extra['emailHash'] = hashlib.sha256(exact.encode()).hexdigest()[:16]
+        state = str(row.get('last_status') or 'ready')
+        # Hermes calls a healthy OAuth grant "ok"; the connection apps use "ready".
+        if state == 'ok':
+            state = 'ready'
+        state = state if state in {'ready', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
+        if renew_failed or state == 'invalid':
+            # The grant can't be renewed: the owner must sign in again (the app offers Reconnect).
+            state = 'expired'
+            extra['error'] = {'code': 'expired', 'message': 'This sign-in expired. Reconnect it to keep using it.'}
+        if slug == 'anthropic' and all(str(r.get('source', '')) == 'claude_code' for r, _ in aliases):
+            # Hermes' mirror of the host Claude Code login: the Claude app already shows that login
+            # (with its usage) as its own row, so it folds this pool grant into that row.
+            extra['mirror'] = 'claude-code'
+        return {**extra, 'id': key, 'name': _text(row.get('label'), _NAMES[provider] + ' subscription'),
+                'email': email, 'plan': plan or _text(auth.get('chatgpt_plan_type'), '') or None,
+                'status': state, 'usage': usage, 'credentialCount': len(aliases),
+                'usageStatus': 'ok' if usage else 'unavailable',
+                'priority': min((v for v in (_rank(r) for r, _ in aliases) if v is not None), default=None),
+                'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
+                                 'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
+                                 'priority': _rank(r)}
+                                for r, _ in aliases if r.get('id')],
+                'actions': {'reconnect': True, 'remove': True, 'prefer': _can_lead(slug, [r for r, _ in aliases], rows)}}
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        accounts = list(executor.map(project, grouped.items()))
+    # Hermes tries the lowest priority first (fill_first); the projection keeps that order explicit.
+    first = min((a['priority'] for a in accounts if a['priority'] is not None), default=None)
+    for a in accounts:
+        a['preferred'] = first is not None and a['priority'] == first
+    # No full response cache: additions/removals are visible on every request.
+    # `identity` tells a connection app this listing reports `emailHash` wherever the provider attested an email,
+    # so a row without one is a different/unknown account (not a cue to fall back to comparing masked emails).
+    return {'provider': provider, 'name': _NAMES[provider], 'owner': 'hermes',
+            'identity': {'emailHash': 'sha256-16'},
+            'accounts': accounts, 'accountCount': len(accounts),
+            'actions': {'add': True},
+            'management': {'contract': 'wizard.account-management/1', 'status': 'available',
+                           'message': 'Reconnect signs in again and retains existing grants. Use a different '
+                                      + ('Claude' if provider == 'claude' else 'OpenAI')
+                                      + ' account to add quota; signing in to the same account can invalidate its older grants.',
+                           'order': 'priority',
+                           'addCommand': 'hermes auth add ' + slug + ' --type oauth'},
+            'error': None}

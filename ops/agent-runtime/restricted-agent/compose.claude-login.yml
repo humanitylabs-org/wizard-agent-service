@@ -1,0 +1,39 @@
+# Independent owner grant: restricted + standard privacy + anthropic provider.
+# The driver adds exactly one app-owned source at /claude-app, read-only, using
+# claude_source.py (legacy named volume or installed app's compiled share bind).
+services:
+  claude-init:
+    build: ./sidecars
+    image: ${SIDECAR_IMAGE:-restricted-agent-sidecars:local}
+    user: "0:0"
+    command: ["python3", "/srv/claude-init.py"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "from pathlib import Path; raise SystemExit(not Path('/run/claude-login/.initialized').is_file())"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 32
+    volumes:
+      - claude-session:/run/claude-login
+  agent:
+    depends_on:
+      claude-init: {condition: service_healthy}
+    environment:
+      CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR: /run/claude-login
+    volumes:
+      - claude-session:/run/claude-login:ro
+volumes:
+  claude-session:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,uid=10000,gid=10000,mode=0700,nosuid,nodev,noexec"

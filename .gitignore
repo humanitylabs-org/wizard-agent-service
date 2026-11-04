@@ -1,0 +1,9 @@
+*.pyc
+.env.local
+.ui-live/
+.ux-src/
+__pycache__/
+node_modules
+ux/
+.cache/
+qa/agent-parity/reports/

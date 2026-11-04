@@ -1,0 +1,19 @@
+# Non-production Linux staging only. Install as james's user service; do not
+# change the live Agent Service, SSH bridge, Hermes plugin or Mac dispatcher.
+[Unit]
+Description=Wizard heavy worker (isolated forum staging)
+
+[Service]
+Type=simple
+Environment=WIZARD_HEAVY_HOST=forum
+Environment=WIZARD_HEAVY_ROOT=/srv/work/heavy
+ExecStart=/usr/bin/python3 /srv/work/heavy/candidate/heavy-worker.py --root /srv/work/heavy/staging/spool --lock /srv/work/heavy/staging/worker.lock --serve
+Restart=on-failure
+RestartSec=5
+# Executors keep their leases/deadlines across supervisor restart. Never turn a
+# supervisor stop into an implicit cancellation or signal a persisted job PID.
+KillMode=process
+UMask=0077
+
+[Install]
+WantedBy=default.target

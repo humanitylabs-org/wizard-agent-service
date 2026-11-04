@@ -1,0 +1,92 @@
+name: Quality
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Fetch the archived main release for rollback/compatibility comparisons
+        run: git fetch --no-tags --depth=1 origin 859c548d43081a5e28a37680e796d07041971601
+      - name: Importer test dependency (isolated interpreter)
+        run: |
+          python3 -m venv .import-venv
+          .import-venv/bin/pip install 'PyYAML>=6.0.2,<7' 'python-dotenv>=1.0,<2'
+          printf 'WIZARD_IMPORT_PYTHON=%s/.import-venv/bin/python\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Supervisor Hermes adapter and restricted asset synchronization
+        run: |
+          "$WIZARD_IMPORT_PYTHON" tests/test_supervisor_plugin.py
+          python3 ops/agent-runtime/test_agent_runtime.py
+      - name: Retained triggering-user indexed range regressions
+        run: node --test tests/session-truth-triggering.node.mjs
+      - name: Triggering-user regression fails on frozen main, passes on this head
+        run: |
+          git fetch --no-tags --depth=1 origin aba3efa925a7ba1f11560b1732976e9ba57c0179
+          cp server/session-truth.mjs "$RUNNER_TEMP/regression-candidate.mjs"
+          trap 'cp "$RUNNER_TEMP/regression-candidate.mjs" server/session-truth.mjs' EXIT
+          git show aba3efa925a7ba1f11560b1732976e9ba57c0179:server/session-truth.mjs > server/session-truth.mjs
+          set +e
+          node --test tests/session-truth-triggering.node.mjs > "$RUNNER_TEMP/baseline-regression.log" 2>&1
+          baseline_status=$?
+          set -e
+          cp "$RUNNER_TEMP/regression-candidate.mjs" server/session-truth.mjs
+          python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - triggering-user lookup bounds every retained timestamp range", text), "expected main regression did not fail"; print("EXPECTED_MAIN_REGRESSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/baseline-regression.log" "$baseline_status"
+          node --test tests/session-truth-triggering.node.mjs
+      - name: Sign-in regression fails on frozen main, passes on this head
+        run: |
+          git fetch --no-tags --depth=1 origin aba3efa925a7ba1f11560b1732976e9ba57c0179
+          cp server/run-queue.mjs "$RUNNER_TEMP/regression-candidate.mjs"
+          trap 'cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs' EXIT
+          git show aba3efa925a7ba1f11560b1732976e9ba57c0179:server/run-queue.mjs > server/run-queue.mjs
+          set +e
+          node --test tests/diagnosed-signin.node.mjs > "$RUNNER_TEMP/baseline-regression.log" 2>&1
+          baseline_status=$?
+          set -e
+          cp "$RUNNER_TEMP/regression-candidate.mjs" server/run-queue.mjs
+          python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - sign-in polling excludes expired saved bodies", text), "expected main regression did not fail"; print("EXPECTED_MAIN_REGRESSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/baseline-regression.log" "$baseline_status"
+          node --test tests/diagnosed-signin.node.mjs
+      - name: Chats CPU and speed-meter regressions
+        run: node --test tests/chats-list-cpu.node.mjs tests/speed-meter.node.mjs tests/agent-service-cpu.node.mjs tests/chats-list-head.node.mjs tests/chats-head-runtime-parity.node.mjs tests/chats-list-truth.node.mjs tests/session-list-cache.node.mjs tests/session-list-cache-http.node.mjs tests/chats-list-poll.node.mjs
+      - name: Reject live model override and preserve main admission locks
+        run: |
+          cp server/locked-run-bridge.mjs "$RUNNER_TEMP/regression-candidate.mjs"
+          trap 'cp "$RUNNER_TEMP/regression-candidate.mjs" server/locked-run-bridge.mjs' EXIT
+          git fetch --no-tags --depth=1 origin 7a95698b23341b0cf864c2a6fba677d88067030a
+          git show 7a95698b23341b0cf864c2a6fba677d88067030a:server/locked-run-bridge.mjs > server/locked-run-bridge.mjs
+          set +e
+          node --test --test-name-pattern 'an explicit locked send retains its admission route' tests/locked-run-bridge.test.mjs > "$RUNNER_TEMP/admission-regression.log" 2>&1
+          admission_status=$?
+          set -e
+          cp "$RUNNER_TEMP/regression-candidate.mjs" server/locked-run-bridge.mjs
+          python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(text); assert int(sys.argv[2]) != 0 and re.search(r"not ok \d+ - an explicit locked send retains its admission route", text), "prior port did not reproduce admitted-route regression"; print("EXPECTED_PRIOR_PORT_ADMISSION_FAILURE_CONFIRMED")' "$RUNNER_TEMP/admission-regression.log" "$admission_status"
+          node --test tests/locked-run-bridge.test.mjs
+      # npm test includes the fail-closed per-agent parity/coverage gate.
+      - run: npm test
+        env:
+          REQUIRE_ROLLBACK_REHEARSAL: '1'
+      - name: Synthetic subscription broker and inventory contracts
+        run: |
+          python3 -m venv .fixture-venv
+          .fixture-venv/bin/pip install fastapi==0.133.1 httpx==0.28.1
+          .fixture-venv/bin/python tests/test_account_lifecycle.py
+          .fixture-venv/bin/python tests/test_provider_accounts.py
+          node --test tests/provider-accounts.node.mjs
+      - name: Fixture boots
+        run: |
+          (WIZARD_FIXTURE_PORT=8799 node scripts/run-fixture.mjs &) ; sleep 3
+          curl -fsS http://127.0.0.1:8799/wizard/health

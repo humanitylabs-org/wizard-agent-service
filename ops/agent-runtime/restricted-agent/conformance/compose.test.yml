@@ -1,0 +1,47 @@
+# Test-only overlay.
+#   fake-service  - stand-in Agent Service on two separate Unix sockets, no network. Plants
+#                   synthetic canaries in its own tmpfs; logs every request the edge forwards.
+#   host-listener - synthetic service on the Docker host's own network stack, all host addresses,
+#                   port CONF_HOST_PORT. Stands in for host-only services (sshd, Agent Service on
+#                   loopback/host IPs). The agent must not be able to connect to it.
+x-test-hardening: &test-hardening
+  image: restricted-agent-fake-service:local
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  command: ["python3", "-u", "/srv/fake_service.py"]
+
+services:
+  fake-service:
+    <<: *test-hardening
+    build: ./conformance
+    environment:
+      FAKE_CANARY: ${CONF_CANARY:?set CONF_CANARY}
+      FAKE_SOCKET: /gate-one/gateway.sock
+      FAKE_OTHER_SOCKET: /gate-two/gateway.sock
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m,uid=65534
+    network_mode: none
+    volumes:
+      - gateway-one:/gate-one
+      - gateway-two:/gate-two
+
+  host-listener:
+    <<: *test-hardening
+    network_mode: host
+    environment:
+      FAKE_MODE: host-listener
+      FAKE_PORT: ${CONF_HOST_PORT:-18923}
+      FAKE_CANARY: ${CONF_CANARY:?set CONF_CANARY}
+    depends_on: [fake-service]
+
+  edge:
+    environment:
+      EDGE_UPSTREAM_SOCKET: /run/agent-gateway/gateway.sock
+    volumes: !override
+      - gateway-one:/run/agent-gateway
+    depends_on: [fake-service, host-listener]
+
+volumes:
+  gateway-one: {}
+  gateway-two: {}
