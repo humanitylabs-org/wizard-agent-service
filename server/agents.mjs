@@ -1269,10 +1269,13 @@ export function createAgentRegistry(options = {}) {
   }
   function pin(sessionId, agentId, provenance = 'service_admission') {
     if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(provenance)) return
-    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || !readRaw(agentId)) return
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) return
     const current = pins()
     const key = threadKey(agentId, sessionId)
     if (['runtime_verified', 'service_admission', 'migrated_pin'].includes(current[key]?.provenance)) return
+    // A known authoritative pair is a no-op. In particular, observing a cached Chats
+    // list must not stat/clone the main-agent configuration again for every row.
+    if (!readRaw(agentId)) return
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
     const next = { ...current, [key]: { ...threadReference(sessionId, agentId), provenance } }
     writeJsonAtomic(threadsPath, { schema: 2, threads: next })

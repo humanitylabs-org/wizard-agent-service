@@ -15,9 +15,10 @@ export const newestFirst = (a,b) => {
   const x=time(cardTime(a)), y=time(cardTime(b));
   return Number.isFinite(x) !== Number.isFinite(y) ? Number.isFinite(x) ? -1 : 1 : (Number.isFinite(x) ? y-x : 0) || a.title.localeCompare(b.title);
 };
+const latestArchiveActivity = s => Math.max(...[s.restoredAt,s.assignedAt,s.previewAt,s.requestAt,s.activityAt,s.lastUserAt,s.updatedAt].map(time).filter(Number.isFinite));
 export function archiveCandidate(s, now=Date.now(), days=7) {
   if (s.hidden || priority.has(s.status) || (s.deferred && !s.archived)) return false;
-  const latest=Math.max(...[s.restoredAt,s.assignedAt,s.previewAt,s.requestAt,s.activityAt,s.lastUserAt,s.updatedAt].map(time).filter(Number.isFinite));
+  const latest=latestArchiveActivity(s);
   return s.archived || (days > 0 && Number.isFinite(latest) && latest <= now-days*DAY);
 }
 export function clientOverrides(raw) {
@@ -34,7 +35,7 @@ export function clientOverrides(raw) {
   }
   return out;
 }
-export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(), q='', archiveDays=7}={}) {
+export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(), q='', archiveDays=7, onAgeBoundary}={}) {
   const days=archiveDaysOf(archiveDays);
   const entries=rows.map(raw=>({raw,s:normalizeFull(raw)})).filter(x=>x.s && !x.s.hidden);
   for(const {s} of entries) {
@@ -47,6 +48,13 @@ export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(
       if(o.restoredAt && !s.archived && (!Number.isFinite(latest)||latest<time(o.restoredAt))) s.restoredAt=o.restoredAt;
       for(const k of ['archived','deferred']) if(typeof o[k]==='boolean') s[k]=o[k];
     }
+  }
+  // Stable projected rows can reuse their selection only until the next exact
+  // age transition. Owner dispositions/overrides are already applied above.
+  if (onAgeBoundary && days > 0) for (const {s} of entries) {
+    if (s.archived || priority.has(s.status) || s.deferred) continue;
+    const boundary=latestArchiveActivity(s)+days*DAY;
+    if (Number.isFinite(boundary) && boundary>now) onAgeBoundary(boundary);
   }
   entries.sort((a,b)=>newestFirst(a.s,b.s));
   const archived=entries.filter(x=>archiveCandidate(x.s,now,days));
@@ -66,8 +74,8 @@ export function slimRow(raw) {
   const s=normalizeFull(raw);
   return {id:s.id,agent:s.agent || s.agent_id || 'hermes',title:s.title,preview:s.preview.slice(0,160),status:s.status,...(s.queueReason?{queueReason:s.queueReason}:{}),cardTime:cardTime(s),archived:s.archived};
 }
-export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7 }={}) {
-  const snapshots=new Map();
+export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7, reuseSelections=false }={}) {
+  const snapshots=new Map(), selections=new Map();
   return async function page({params, scope, load, dispositions={}}) {
     const slim=params.get('fields')==='slim';
     const offset=Number(params.get('offset')||0), limit=Math.min(slim?500:100,Math.max(1,Number(params.get('limit')||100)));
@@ -79,10 +87,23 @@ export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7
     let snap=(offset>0 || cursor) && snapshots.get(id);
     if((offset>0 || cursor) && (!snap || snap.expiresAt<at || snap.signature!==signature)) throw Object.assign(new Error('session listing snapshot expired'),{status:409});
     if(!snap) {
-      const selected=selectWindow(await load(),{dispositions,overrides:clientOverrides(params.get('overrides')),now:at,q:params.get('q')||'',archiveDays:days});
-      const build=createHash('sha256').update(JSON.stringify(selected)).digest('hex').slice(0,24);
-      if(slim) { selected.rows=selected.rows.map(slimRow); selected.archiveRows=selected.archiveRows?.map(slimRow) }
-      snap={...selected,build,id:randomUUID(),signature,expiresAt:now()+ttl};
+      const source=await load(), key=JSON.stringify([signature,dispositions]);
+      let selection=reuseSelections && selections.get(key);
+      // Opt-in only for immutable list snapshots. The page/cursor itself remains
+      // fresh; skip re-normalizing/sorting/hashing every off-window row on a poll.
+      if (!selection || selection.source!==source || at<selection.at || at>=selection.until) {
+        let until=at+ttl;
+        const selected=selectWindow(source,{dispositions,overrides:clientOverrides(params.get('overrides')),now:at,q:params.get('q')||'',archiveDays:days,
+          onAgeBoundary: boundary => { until=Math.min(until,boundary) }});
+        const build=createHash('sha256').update(JSON.stringify(selected)).digest('hex').slice(0,24);
+        if(slim) { selected.rows=selected.rows.map(slimRow); selected.archiveRows=selected.archiveRows?.map(slimRow) }
+        selection={source,at,until,selected,build};
+        if (reuseSelections) {
+          selections.set(key,selection);
+          for (const [k,v] of selections) if (v.until<=at || selections.size>32) selections.delete(k);
+        }
+      }
+      snap={...selection.selected,build:selection.build,id:randomUUID(),signature,expiresAt:now()+ttl};
       snapshots.set(snap.id,snap);
       for(const [key,v] of snapshots) if(v.expiresAt<at || snapshots.size>32) snapshots.delete(key);
     }

@@ -18,7 +18,7 @@ import { captureContinuation, continuationCurrent } from './helper-continuation.
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
 export const FOLLOW_THROUGH_SESSION_PREFIXES = ['wizard_', 'wizard-assistant-']
-export const FOLLOW_THROUGH_INPUT = '[Wizard follow-through] The delegated results above have arrived. Finish the original request now, in one self-contained reply.'
+export const FOLLOW_THROUGH_INPUT = '[Wizard follow-through] The delegated results above have arrived. Finish the original request now.'
 
 // Newest active message per eligible thread, when it is a recent completion row. Grouping MAX(id)
 // over every message took ~250 ms of the shared loop every 5 s (3 M rows). Instead, walk the
