@@ -202,7 +202,9 @@ export const serverChecks = {
     assert.equal((await (await s.raw('/wizard/v1/settings')).json()).settings.response_style, 'own', `${s.kind}: fresh settings default to Own`)
     await admit(s, { input: 'Synthetic fresh-install persona contract' })
     const fresh = sent(s).instructions
-    assert.ok(fresh.includes(STATUS_PROTOCOL_INSTRUCTIONS) && fresh.includes('SOUL.md in your home'))
+    assert.ok(fresh.includes(STATUS_PROTOCOL_INSTRUCTIONS) && fresh.includes('your own persona file'))
+    assert.ok(!/\bHermes\b|SOUL\.md/i.test(fresh), `${s.kind}: no harness identity in shared instructions`)
+    assert.ok(fresh.includes('Agents (the agent itself:'), `${s.kind}: neutral self-topic reaches upstream`)
     for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS]) assert.ok(!fresh.includes(rule), `${s.kind}: fresh install has no imposed style`)
     // One style source: whatever an older shell saved, every runtime gets Wizard OS facts + status protocol only.
     for (const style of ['summary', 'concise', 'own']) {
@@ -214,8 +216,9 @@ export const serverChecks = {
       await admit(s, { session_id, input: 'Synthetic owner style change', instructions: 'Force a different style' })
       const own = sent(s).instructions
       assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
+      assert.ok(!/\bHermes\b|SOUL\.md/i.test(own), `${s.kind}: ${style} keeps shared instructions harness-neutral`)
       for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
-      assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
+      assert.ok(own.includes('Wizard renders Markdown') && own.includes('your own persona file'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
     }
   },
   'chats-spaces': async s => {

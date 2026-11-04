@@ -79,7 +79,7 @@ export async function scene(kind, serverOptions = {}) {
       if (hasSearchIndex) searchDb.exec("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
     })
   }
-  writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA'] }))
+  writeFileSync(join(root, 'subjects.json'), JSON.stringify({ subjects: ['Parity QA', { name: 'Hermes', about: 'the agent itself: models, memory and tools' }] }))
   writeFileSync(join(root, 'apps.json'), JSON.stringify({ apps: [{ id:'parity-qa',name:'Synthetic Parity App',view:'/parity/',agent_binding:true }] }))
   let sequence = 0
   const handler = async (req, res) => {
