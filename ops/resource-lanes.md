@@ -104,12 +104,18 @@ old top-level name. Original spec serialization/hashes are unchanged.
 
 The flat outside registry binds device/inode/uid/birthtime and the first exact
 job/spec. Each submission's durable admission is written BEFORE either lane's
-spool insertion. A global registry flock fences submission and final unlink.
+spool insertion. A short, bounded global registry flock fences submission and
+the final per-root seal. Slow probes/scans/unlinks happen OUTSIDE that lock.
 A second distinct job/spec or cross-lane use **succeeds normally** but permanently
 marks the root RETAINED. Exact duplicate IDs stay idempotent. Canonicalized aliases
 cannot create new authority but still pin existing ownership; argv references to
-already-registered absolute roots also pin them, even from another cwd. All run
+already-registered absolute/lexical relative roots also pin them, even from another cwd. All run
 references and leases survive outside the disposable run.
+
+While a root is sealing, a new referencing submission gets an explicit transient
+`run_finalizing` refusal BEFORE spool insertion; unrelated roots continue admission.
+A crash without a final report leaves that root conservatively sealed for manual
+review, never replayed. A two-second registry-lock bound prevents an unbounded RPC.
 
 Explicit preparation remains available (Forum Linux only):
 
@@ -124,11 +130,18 @@ NEW prepared runs default to `ephemeral` and broad classification, without slot
 flags. `--disposable build|cache|tmp|intermediates` remains compatible but is no
 longer the disposal boundary. `--run-purpose retained` and `weekly-launch` are
 sticky. All pre-v2 prepared records remain frozen/untrimmed. The in-run manifest
-is evidence, not authority. Never move historical trees into a new run.
+is evidence, not authority. Both prepared and automatic trim require the same
+valid enabled activation policy. Every candidate file AND each ancestor needs
+descriptor-bound statx birthtime after the activation cutoff, not older than the
+owned root: moved-in historical content and unknown birthtimes stay untouched.
 
 A source tree may already have been removed before a later post-completion reuse
 submission. Such submission is allowed, but cannot resurrect inputs: **restage in
 a fresh top-level root**. Use distinct new roots per run, not shared source caches.
+For split build/test/publish workflows, declare RETAIN before the first job or
+admit all phases before the first completion. Automatic source disposal applies
+only to copied trees: any `.git` marker preserves the ENTIRE repository worktree,
+including uncommitted files, without running owner hooks or parsing Git config.
 
 ### Broad disposal boundary — evidence ALWAYS wins
 
@@ -153,7 +166,11 @@ Preserve result/evidence/report/manifest/receipt/submission/admission/preflight/
 log/screenshot/weekly-launch paths and ALL `.json`, `.jsonl`, `.log`, `.png`,
 `.jpg`, `.jpeg`, `.webp`, `.md`, `.txt`, `.html`, `.xml`, `.csv`, including inside
 node_modules/source/profile/bulk trees. Protected directory components stay.
-Hardlinks and symlinks stay; linked textual evidence fails the pass closed.
+Packages, archives, installers and common media/report artifacts stay everywhere
+(`.apk`, `.aab`, `.ipa`, `.zip`, `.tar`, `.tgz`, `.gz`, `.bz2`, `.xz`, `.zst`,
+`.dmg`, `.iso`, `.pdf`, `.mp4`, `.mov`, `.mp3`, `.wav`, `.flac`, `.7z`, `.deb`,
+`.rpm`, `.exe`, `.msi`, `.dsym`). Hardlinks and symlinks stay; linked textual
+evidence fails the pass closed.
 
 `RETAIN`, `.retain`, a manifest `retain: true` or retained/weekly purpose retains
 the whole run. A weekly-launch argv/cwd vetoes trimming independently. `retain.json`
@@ -162,7 +179,12 @@ relative to the run root. Retained local text and the native stdout log preserve
 referenced files/subtrees (root-, document-, cwd-relative, absolute and file URLs).
 Generated identity/slot fields of our own manifest are not published links.
 Missing required/invalid/unreadable/oversized reference evidence retains the run.
-Scans cap at 250,000 file entries, 8 MiB/text file, 32 MiB total text, failing closed.
+Inventories cap at 250,000 file entries. Reference scans cap at 8 MiB/authoritative
+text and 32 MiB total, failing closed. Package metadata/documentation inside bulk
+trees is retained by suffix but is NOT scanned as published-reference authority.
+Retained evidence subtrees, explicit retain targets and source README links are
+scanned. Only path-shaped references to actual inventoried files/directories pin
+bulk; bare words/basenames and an ordinary printed cwd do not retain all inputs.
 
 **Before publishing external/opaque links to nonstandard bulk, declare targets in
 retain.json or retain the whole run.** External consumers and opaque URL aliases
@@ -187,8 +209,9 @@ parents are never traversed during fd-relative identity-checked unlink. This is
 cooperating same-user housekeeping, not isolation from privileged hostile writers.
 
 Before unlink, fsync an exclusive-created `<run>.<job>.trim-intent.json`. Separate
-immutable trim reports record measured before/after logical file bytes, removed
-paths/sizes, skips/errors and partial failures. Nominal unlinked bytes are NOT a
+immutable trim reports record measured before/after logical and allocated
+(`st_blocks * 512`) file bytes, removed paths/sizes, skips/errors and partial failures.
+Nominal unlinked bytes are NOT a
 claim of physically recovered disk space. Receipt/result/log hashes never change
 on trim failure. No replay/retry after an intent/report or crash, no sweeping old
 terminal receipts, no new scheduling.
@@ -200,7 +223,8 @@ Tiny local checks: `python3 tests/heavy-worker-trim.unit.py` and
 parent-admitted light job: `scripts/heavy-run-trim-canary.py --stage <new-stage>`.
 Its manifest includes the fixture helper, rollout coordinator, Android helper and
 all transitive tests. It runs existing regressions then real candidate RPC heavy/
-light success/exit-7 lifecycles with 40 MiB of every task bulk type per case,
+light success/exit-7 lifecycles with at least 40 MiB combined allocated bulk per case,
+plus retained package documentation above the old 32 MiB text budget,
 automatic future admission, default prepared trimming, weekly/explicit retention,
 active cross-lane sharing, unchanged evidence/receipts and real busy/idle probes.
 The stage itself and every old /srv/work folder remain ineligible. A NEW synthetic

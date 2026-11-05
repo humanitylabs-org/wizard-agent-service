@@ -5,10 +5,11 @@ from pathlib import Path
 
 BULK = ('source/main.py', 'src/main.rs', 'candidate/a.cpp', 'baseline/a.c', 'checkouts/tree/a.sh',
         'source-v2/a', 'candidate-v2/a', 'baseline-v2/a', 'node_modules/lib/index.js',
-        'nested/node_modules/lib/index.js', 'tmp/scratch', 'build/app.apk', 'cache/data',
+        'nested/node_modules/lib/index.js', 'tmp/scratch', 'build/temporary.bin', 'cache/data',
         'intermediates/data', 'profiles/chrome/Default/History', 'guests/vm/disk.qcow2',
         'vms/disk.vmdk', 'disposable-vms/disk.raw', 'vms/disk.img', 'disposable-guest.img')
-EVIDENCE = ('source/results/keep.bin', 'candidate/evidence/keep.bin', 'baseline/reports/keep.bin',
+EVIDENCE = ('build/app.apk', 'checkouts/retained-repo/.git/objects/pack/keep.pack',
+            'checkouts/retained-repo/uncommitted.py', 'source/results/keep.bin', 'candidate/evidence/keep.bin', 'baseline/reports/keep.bin',
             'node_modules/pkg/package.json', 'node_modules/pkg/license.txt', 'tmp/preflight.json',
             'build/result.jsonl', 'build/receipt.bin', 'build/submission.bin', 'build/admission.bin',
             'build/log.bin', 'build/screenshot.png', 'source/report.md', 'source/report.html',

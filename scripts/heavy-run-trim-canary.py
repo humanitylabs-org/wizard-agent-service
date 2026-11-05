@@ -15,6 +15,21 @@ import sys
 import time
 import uuid
 
+DEADLINE = time.monotonic() + 780
+
+
+def budget(cap):
+    remaining = DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('canary total 780s budget exhausted')
+    return min(cap, remaining)
+
+
+def checkpoint(evidence, value):
+    with (evidence / 'checkpoints.jsonl').open('a') as stream:
+        stream.write(json.dumps({'monotonic': time.monotonic(), **value}) + '\n')
+        stream.flush(); os.fsync(stream.fileno())
+
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -41,9 +56,12 @@ def main():
     suites = ('tests/heavy-worker-trim.unit.py', 'tests/heavy-run-rollout.unit.py',
               'tests/test_heavy_worker_sandbox.py', 'tests/heavy-worker.remote.py')
     for name in suites:
+        checkpoint(evidence, {'phase': 'suite-start', 'name': name})
         with (evidence / (Path(name).name + '.log')).open('xb') as stream:
             result = subprocess.run([sys.executable, str(source / name)], env=env,
-                                    stdout=stream, stderr=subprocess.STDOUT, timeout=300)
+                                    stdout=stream, stderr=subprocess.STDOUT,
+                                    timeout=budget(240 if name.endswith('heavy-worker.remote.py') else 60))
+        checkpoint(evidence, {'phase': 'suite-terminal', 'name': name, 'exit_code': result.returncode})
         assert result.returncode == 0, name
     trim = load('trim_canary', source / 'scripts/heavy-run-trim.py')
     fixture = load('trim_fixture', source / 'scripts/heavy-run-trim-fixture.py')
@@ -61,12 +79,12 @@ def main():
     def rpc(action, job, spec=None):
         value = {'action': action, 'job_id': job}
         if spec is not None: value['spec'] = spec
-        result = subprocess.run(command, input=json.dumps(value), env=env, capture_output=True, text=True, timeout=90)
+        result = subprocess.run(command, input=json.dumps(value), env=env, capture_output=True, text=True, timeout=budget(15))
         assert result.returncode == 0, result.stdout + result.stderr
         return json.loads(result.stdout)
 
     def wait(job, predicate):
-        deadline = time.monotonic() + 90; row = None
+        deadline = time.monotonic() + budget(90); row = None
         while time.monotonic() < deadline:
             row = rpc('status', job)
             if predicate(row): return row
@@ -75,7 +93,7 @@ def main():
 
     def report_for(record, job):
         path = trim.roots(runtime)[1] / (record['run_id'] + '.' + job + '.trim.json')
-        deadline = time.monotonic() + 80
+        deadline = time.monotonic() + budget(80)
         while not path.exists() and time.monotonic() < deadline: time.sleep(0.1)
         return json.loads(path.read_text())
 
@@ -87,12 +105,18 @@ def main():
     for lane, purpose, code in [('light', 'automatic', 0), ('heavy', 'automatic', 7),
                                  ('light', 'ephemeral', 0), ('light', 'weekly-launch', 0),
                                  ('light', 'retained', 0)]:
+        checkpoint(evidence, {'phase': 'lifecycle-start', 'lane': lane, 'purpose': purpose, 'exit_code': code})
         if purpose == 'automatic':
             run = runtime / ('fresh-' + uuid.uuid4().hex); run.mkdir()
             record = None
         else:
             record = trim.prepare(runtime, purpose); run = Path(record['path'])
         seeded = fixture.seed(run, bytes_per_file=2 * 1024 * 1024)  # 40 MiB real bulk per case
+        # Keep real non-sparse package documentation above the old whole-tree
+        # reference budget. It must not prevent disposal of actual JS/source bulk.
+        metadata = run / 'node_modules/pkg/big-package-documentation.txt'
+        metadata.write_bytes(b'package documentation\n' * (2 * 1024 * 1024))
+        seeded['retained_sha256'][str(metadata.relative_to(run))] = hashlib.sha256(metadata.read_bytes()).hexdigest()
         job = 'heavy_' + uuid.uuid4().hex
         spec = {'cwd': str(run), 'argv': [sys.executable, '-c', f"print('published source/published.bin'); raise SystemExit({code})"],
                 'timeout_seconds': 30, 'host': 'forum', 'lane': lane}
@@ -110,8 +134,11 @@ def main():
         assert row['receipt']['exit_code'] == code and row['receipt']['spec_sha256'] == raw_spec_hash, row
         assert report['before_logical_bytes'] > 40 * 1024 * 1024
         assert report['before_logical_bytes'] - report['after_logical_bytes'] == report['bytes_unlinked']
+        assert report['before_allocated_bytes'] - report['after_allocated_bytes'] == report['allocated_bytes_unlinked']
         assert all((run / p).exists() == (expected != 'trimmed') for p in seeded['bulk']), report
-        if expected == 'trimmed': assert report['bytes_unlinked'] >= 40 * 1024 * 1024, report
+        if expected == 'trimmed':
+            assert report['bytes_unlinked'] >= 40 * 1024 * 1024, report
+            assert report['allocated_bytes_unlinked'] >= 40 * 1024 * 1024, report
         check_evidence(run, seeded)
         assert hashlib.sha256(Path(row['receipt']['log_path']).read_bytes()).hexdigest() == row['receipt']['log_sha256']
         assert rpc('submit', job, spec) == row  # duplicate never executes/rewrites result
@@ -119,6 +146,7 @@ def main():
         (evidence / (job + '.receipt.json')).write_text(json.dumps(row, indent=2, sort_keys=True))
         lifecycle.append({'job_id': job, 'lane': lane, 'purpose': purpose, 'receipt': row,
                           'report': report, 'seed': seeded})
+        checkpoint(evidence, {'phase': 'lifecycle-terminal', 'lane': lane, 'purpose': purpose, 'job_id': job})
 
     # Cross-lane reuse while the first job is RUNNING must succeed and retain.
     shared = runtime / 'fresh-shared'; shared.mkdir(); seeded = fixture.seed(shared, bytes_per_file=128)
@@ -179,4 +207,15 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except BaseException as error:
+        # Preserve a nonpassing terminal marker even if a phase's own assertion
+        # fails. No fabricated suite result or native acceptance.
+        if '--stage' in sys.argv:
+            stage = Path(sys.argv[sys.argv.index('--stage') + 1])
+            evidence = stage / 'evidence'
+            if evidence.is_dir():
+                checkpoint(evidence, {'phase': 'canary-failed', 'error_class': type(error).__name__})
+                (evidence / 'failure.json').write_text(json.dumps({'passed': False, 'error_class': type(error).__name__}))
+        raise

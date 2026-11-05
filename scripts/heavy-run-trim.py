@@ -21,11 +21,12 @@ import uuid
 
 VERSION = 2
 SLOTS = ('build', 'cache', 'tmp', 'intermediates')
-PROTECTED = re.compile(r'result|evidence|report|manifest|receipt|submission|admission|preflight|log|screenshot|weekly[-_ ]?launch', re.I)
+PROTECTED = re.compile(r'(^|[/_.-])(results?|evidence|reports?|manifests?|receipts?|submissions?|admissions?|preflight|logs?|screenshots?|weekly[-_ ]?launch)(?=$|[/_.-])', re.I)
 FORBIDDEN = {'wizard-local', '.wizard-secure', 'AndroidBuilds', 'android-sdk'}
 RESERVED = FORBIDDEN | {'heavy', 'agents', 'lost+found'}
 EVIDENCE_SUFFIXES = {'.json', '.jsonl', '.log', '.png', '.jpg', '.jpeg', '.webp', '.md', '.txt', '.html', '.xml', '.csv'}
 TEXT_SUFFIXES = EVIDENCE_SUFFIXES - {'.png', '.jpg', '.jpeg', '.webp'}
+ARTIFACT_SUFFIXES = {'.apk', '.aab', '.ipa', '.zip', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.zst', '.dmg', '.iso', '.pdf', '.mp4', '.mov', '.mp3', '.wav', '.flac', '.7z', '.deb', '.rpm', '.exe', '.msi', '.dsym'}
 PROFILE_NAMES = {'browser-profile', 'chrome-profile', 'chromium-profile', 'firefox-profile', 'playwright-profile', '.playwright-profile', 'user-data-dir'}
 DISKS = {'.qcow2', '.vmdk', '.raw', '.img'}
 NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
@@ -94,13 +95,21 @@ def registry_lock(base):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
             raise ValueError('unsafe registry lock')
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise BlockingIOError('trim_registry_busy; retry submission') from None
+                time.sleep(.01)
         yield registry
     finally:
         os.close(fd)
 
 
-def birthtime_ns(path):
+def birthtime_ns(path, dir_fd=-100):
     """Linux statx ABI: no ctime/mtime substitute, including on unsupported FS."""
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -108,7 +117,8 @@ def birthtime_ns(path):
         call = libc.statx
         call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p]
         call.restype = ctypes.c_int
-        if call(-100, os.fsencode(path), 0x100, 0xFFF, buf) != 0:
+        flags = 0x100 | (0x1000 if path == '' else 0)
+        if call(dir_fd, os.fsencode(path), flags, 0xFFF, buf) != 0:
             return None
         if not struct.unpack_from('=I', buf.raw, 0)[0] & 0x800:
             return None
@@ -184,7 +194,8 @@ def prepare(base, purpose='ephemeral', disposable=()):
         record = {'version': VERSION, 'run_id': run_id, 'path': str(run), 'mode': 'prepared',
                   'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
                   'birthtime_ns': birthtime_ns(run),
-                  'created_at': time.time(), 'purpose': purpose, 'disposable': list(SLOTS)}
+                  'created_at': time.time(), 'purpose': purpose, 'disposable': list(disposable),
+                  'classification': 'broad-future-v2'}
         # Flags remain API-compatible; all NEW v2 runs get broad classification.
         for name in set(disposable):
             (run / name).mkdir(mode=0o700)
@@ -229,10 +240,14 @@ def ownership(base, cwd):
     info = run.stat()
     if (record.get('path') != str(run) or (record.get('device'), record.get('inode'), record.get('uid'))
             != (info.st_dev, info.st_ino, info.st_uid)):
-        raise ValueError('ownership identity mismatch')
+        return None  # A reused path is forever unowned; housekeeping must not break execution.
     if record.get('mode') == 'prepared' and record.get('birthtime_ns') is not None:
         if birthtime_ns(run) != record['birthtime_ns']:
-            raise ValueError('ownership birthtime mismatch')
+            return None
+    policy = active_policy(base)
+    if (policy is None or record.get('birthtime_ns') is None
+            or record['birthtime_ns'] <= policy['cutoff_ns']):
+        return None  # The same activation kill switch covers prepared and automatic runs.
     if record.get('mode') == 'automatic':
         policy = active_policy(base)
         if (policy is None or run.name in policy['baseline_names']
@@ -261,12 +276,28 @@ def pin_registered_references(registry, spec, job_id):
         referenced = (spec['cwd'] == run or spec['cwd'].startswith(run + '/') or
                       any(re.search(re.escape(run) + r'(?=/|[\s\"\'\),;]|$)', arg) for arg in spec['argv']))
         if not referenced:
+            # Lexical only: sibling argv must pin the registered root without
+            # traversing arbitrary host paths or following symlinks.
+            for arg in spec['argv']:
+                for token in re.findall(r'[^\s\x00\"\'<>\[\]{},;()=]+', arg):
+                    if '/' not in token or '://' in token:
+                        continue
+                    candidate = Path(os.path.normpath(os.path.join(spec['cwd'], token)))
+                    if candidate == Path(run) or candidate.is_relative_to(Path(run)):
+                        referenced = True
+        if not referenced:
             continue
         first = registry / (record['run_id'] + '.admission.json')
         if not first.exists():
             continue
         admission = read_record(first)
         if admission['job_id'] != job_id or admission['spec_sha256'] != spec_hash(spec):
+            sealing = registry / (record['run_id'] + '.sealing.json')
+            if sealing.exists():
+                sealed = read_record(sealing)
+                completed = registry / (record['run_id'] + '.' + sealed['job_id'] + '.trim.json')
+                if not completed.exists():
+                    raise BlockingIOError('run_finalizing; retry submission after its trim report')
             retained = registry / (record['run_id'] + '.shared.json')
             if not retained.exists():
                 write_new(retained, {'reason': 'multiple_submissions_permanent_retention',
@@ -454,7 +485,37 @@ def unlink_same(fd, relative, expected):
 def evidence_name(relative):
     path = Path(relative)
     return (bool(PROTECTED.search(relative)) or path.suffix.lower() in EVIDENCE_SUFFIXES
+            or path.suffix.lower() in ARTIFACT_SUFFIXES or '.git' in path.parts
             or bool(FORBIDDEN.intersection(path.parts)))
+
+
+def fresh_member(fd, relative, record, cutoff_ns):
+    """Old moved-in directories/files never become disposable via a new parent.
+
+    Every path component is checked through a no-follow descriptor. Unknown
+    birthtime fails closed; mtime/ctime are not creation provenance.
+    """
+    parent = os.dup(fd)
+    try:
+        parts = Path(relative).parts
+        for index, name in enumerate(parts):
+            try:
+                os.stat('.git', dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                return False  # Even an empty/linked .git signals a worktree to preserve.
+            flags = os.O_RDONLY | NOFOLLOW
+            if index < len(parts) - 1:
+                flags |= os.O_DIRECTORY
+            child = os.open(name, flags, dir_fd=parent)
+            os.close(parent); parent = child
+            born = birthtime_ns('', dir_fd=parent)
+            if born is None or born <= cutoff_ns or born < record['birthtime_ns']:
+                return False
+        return True
+    finally:
+        os.close(parent)
 
 
 def classified(relative, profiles):
@@ -476,6 +537,12 @@ def classified(relative, profiles):
 
 def retained_paths(fd, items, record):
     retained = []; retain_all = False; references = []; scanned = 0
+    profiles = profile_roots(items)
+    def authoritative(relative):
+        path = Path(relative)
+        return (bool(PROTECTED.search(relative)) or path.name in ('retain.json', 'run-manifest.json')
+                or (path.name.lower() == 'readme.md' and 'node_modules' not in path.parts)
+                or not classified(relative, profiles))
     for relative, info in items:
         path = Path(relative)
         if path.name in ('RETAIN', '.retain'):
@@ -485,7 +552,7 @@ def retained_paths(fd, items, record):
             if evidence_name(relative):
                 raise ValueError('linked reference evidence')
             continue
-        if path.suffix.lower() in TEXT_SUFFIXES:
+        if path.suffix.lower() in TEXT_SUFFIXES and authoritative(relative):
             scanned += info.st_size
             if info.st_size > 8 * 1024 * 1024 or scanned > 32 * 1024 * 1024:
                 raise ValueError('reference scan limit')
@@ -495,7 +562,7 @@ def retained_paths(fd, items, record):
                 identity = json.loads(text)
                 if isinstance(identity, dict) and all(identity.get(key) == value for key, value in record.items()):
                     for key in ('version', 'run_id', 'path', 'mode', 'device', 'inode', 'uid',
-                                'created_at', 'purpose', 'disposable', 'birthtime_ns'):
+                                'created_at', 'purpose', 'disposable', 'birthtime_ns', 'classification'):
                         identity.pop(key, None)
                     references.append((json.dumps(identity), path.parent))
                 else:
@@ -515,16 +582,19 @@ def retained_paths(fd, items, record):
                     retain_all = True
     # Retained textual evidence can have a nonstandard extension. Mandatory text
     # suffixes above must decode; positively binary types below are never parsed.
-    binary_suffixes = (EVIDENCE_SUFFIXES - TEXT_SUFFIXES) | DISKS | {
+    binary_suffixes = (EVIDENCE_SUFFIXES - TEXT_SUFFIXES) | DISKS | ARTIFACT_SUFFIXES | {
         '.zip', '.gz', '.tar', '.iso', '.apk', '.aab', '.pdf', '.mp4', '.mp3', '.woff', '.woff2'}
     explicit = {Path(p).as_posix() for p in retained}
     for relative, info in items:
         path = Path(relative)
+        if '.git' in path.parts:
+            continue  # Preserve repositories verbatim, never parse packfiles as references.
         declared = any(p.as_posix() in explicit for p in (path, *path.parents))
         if declared and stat.S_ISLNK(info.st_mode):
             raise ValueError('linked retained reference')
-        if (not stat.S_ISREG(info.st_mode) or path.suffix.lower() in TEXT_SUFFIXES | binary_suffixes
-                or not (evidence_name(relative) or declared)):
+        if (not stat.S_ISREG(info.st_mode) or path.suffix.lower() in binary_suffixes
+                or (path.suffix.lower() in TEXT_SUFFIXES and authoritative(relative))
+                or not ((evidence_name(relative) and authoritative(relative)) or declared)):
             continue
         scanned += info.st_size
         if info.st_size > 8 * 1024 * 1024 or scanned > 32 * 1024 * 1024:
@@ -542,6 +612,13 @@ def retained_paths(fd, items, record):
                     value = None
                 if isinstance(value, dict) and value.get('retain') is True:
                     retain_all = True
+    # A repository is not merely a copied source tree: preserving .git alone
+    # would lose uncommitted work. Keep its ENTIRE worktree without running git,
+    # parsing its config or invoking owner-controlled filters/hooks.
+    for relative, _ in items:
+        parts = Path(relative).parts
+        if '.git' in parts:
+            retained.append(Path(*parts[:parts.index('.git')]).as_posix())
     return retained, retain_all, references, scanned
 
 
@@ -562,8 +639,8 @@ def profile_roots(items):
 def trim(base, spec, job_id, evidence_paths=()):
     if not supported(spec):
         return None
-    # This SAME global lock is held through final unlink. Durable admissions
-    # precede both spool inserts; even a queued cross-lane job prevents deletion.
+    # Seal only this root while holding the admission lock. Other roots can
+    # submit during expensive scans/probes; references to this root retry.
     with registry_lock(base) as registry:
         found = ownership(base, spec['cwd'])
         if found is None:
@@ -580,91 +657,107 @@ def trim(base, spec, job_id, evidence_paths=()):
         intent = registry / (run_id + '.' + job_id + '.trim-intent.json')
         if report_path.exists() or intent.exists():
             raise ValueError('trim already finalized; no retry')
-        report = {'version': VERSION, 'job_id': job_id, 'run_id': run_id, 'policy': 'future-only-broad-bulk',
-                  'at': time.time(), 'removed': [], 'bytes_unlinked': 0, 'status': 'retained',
-                  'before_logical_bytes': None, 'after_logical_bytes': None}
-        fd = os.open(run, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW); lease = None
-        try:
-            if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (record['device'], record['inode']):
-                raise ValueError('run replaced')
-            lease = lease_fd(base, record); fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            items = inventory(fd, record['device'])
-            report['before_logical_bytes'] = sum(i.st_size for _, i in items if stat.S_ISREG(i.st_mode))
-            retained, retain_all, references, scanned = retained_paths(fd, items, record)
-            if shared:
-                report['reason'] = 'multiple_submissions_permanent_retention'
-            elif (record['purpose'] != 'ephemeral' or re.search(r'weekly[-_ /]*launch', ' '.join([spec['cwd'], *spec['argv']]), re.I)):
-                report['reason'] = 'retained_purpose_or_weekly_launch'
-            elif retain_all or any((run / marker).exists() or (run / marker).is_symlink() for marker in ('RETAIN', '.retain')):
-                report['reason'] = 'retain_marker_or_manifest'
-            elif any(p == run or p.is_relative_to(run) for p in mountpoints()):
-                report['reason'] = 'mounted_tree'
-            elif process_busy(run):
-                report['reason'] = 'process_busy_or_unknown'
-            elif loop_busy(run):
-                report['reason'] = 'loop_busy_or_unknown'
-            else:
-                for evidence in evidence_paths:
-                    if evidence.exists():
-                        info = evidence.lstat()
-                        if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
-                            raise ValueError('unsafe external evidence')
-                        scanned += info.st_size
-                        if scanned > 32 * 1024 * 1024:
-                            raise ValueError('reference scan limit')
-                        references.append((evidence.read_text(), Path(spec['cwd']).relative_to(run)))
-                # Directory references retain descendants, including in native log.
-                tokens = set(); linked = set()
-                for text, origin in references:
-                    local_tokens = set(re.findall(r'[^\s\x00\"\'<>\[\]{},;()=]+', text))
-                    tokens.update(local_tokens)
-                    for token in local_tokens:
-                        token = token.rstrip('.:').removeprefix('file://')
-                        if token in ('', '.', '..', '/'):
-                            continue
-                        path = Path(token)
-                        if path.is_absolute():
-                            if path.is_relative_to(run):
-                                linked.add(path.relative_to(run).as_posix())
-                        else:
-                            # Both root-relative and document/cwd-relative links.
-                            # Lexical normalization only; never follow a link.
-                            for parent in (Path('.'), origin):
-                                normalized = Path(os.path.normpath(str(parent / path)))
-                                if '..' not in normalized.parts and normalized != Path('.'):
-                                    linked.add(normalized.as_posix())
-                profiles = profile_roots(items); candidates = []
-                keep_paths = linked | {Path(p).as_posix() for p in retained}
-                for relative, info in items:
-                    path = Path(relative)
-                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or evidence_name(relative)
-                            or not classified(relative, profiles)
-                            or any(p.as_posix() in keep_paths for p in (path, *path.parents))
-                            or path.name in tokens):
+        sealing = registry / (run_id + '.sealing.json')
+        if not shared and sealing.exists():
+            raise ValueError('trim already sealed; no retry')
+        if not shared:
+            write_new(sealing, {'job_id': job_id, 'spec_sha256': spec_hash(spec), 'at': time.time()})
+    report = {'version': VERSION, 'job_id': job_id, 'run_id': run_id, 'policy': 'future-only-broad-bulk',
+              'at': time.time(), 'removed': [], 'bytes_unlinked': 0, 'status': 'retained',
+              'before_logical_bytes': None, 'after_logical_bytes': None,
+              'before_allocated_bytes': None, 'after_allocated_bytes': None, 'allocated_bytes_unlinked': 0}
+    fd = os.open(run, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW); lease = None
+    try:
+        if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (record['device'], record['inode']):
+            raise ValueError('run replaced')
+        lease = lease_fd(base, record); fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        items = inventory(fd, record['device'])
+        report['before_logical_bytes'] = sum(i.st_size for _, i in items if stat.S_ISREG(i.st_mode))
+        report['before_allocated_bytes'] = sum(i.st_blocks * 512 for _, i in items if stat.S_ISREG(i.st_mode))
+        retained, retain_all, references, scanned = retained_paths(fd, items, record)
+        if shared:
+            report['reason'] = 'multiple_submissions_permanent_retention'
+        elif (record['purpose'] != 'ephemeral' or re.search(r'weekly[-_ /]*launch', ' '.join([spec['cwd'], *spec['argv']]), re.I)):
+            report['reason'] = 'retained_purpose_or_weekly_launch'
+        elif retain_all or any((run / marker).exists() or (run / marker).is_symlink() for marker in ('RETAIN', '.retain')):
+            report['reason'] = 'retain_marker_or_manifest'
+        elif any(p == run or p.is_relative_to(run) for p in mountpoints()):
+            report['reason'] = 'mounted_tree'
+        elif process_busy(run):
+            report['reason'] = 'process_busy_or_unknown'
+        elif loop_busy(run):
+            report['reason'] = 'loop_busy_or_unknown'
+        else:
+            for evidence in evidence_paths:
+                if evidence.exists():
+                    info = evidence.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+                        raise ValueError('unsafe external evidence')
+                    scanned += info.st_size
+                    if scanned > 32 * 1024 * 1024:
+                        raise ValueError('reference scan limit')
+                    references.append((evidence.read_text(), Path(spec['cwd']).relative_to(run)))
+            # Directory references retain descendants, including in native log.
+            linked = set()
+            for text, origin in references:
+                local_tokens = set(re.findall(r'[^\s\x00\"\'<>\[\]{},;()=]+', text))
+                for token in local_tokens:
+                    token = token.rstrip('.:').removeprefix('file://')
+                    if token in ('', '.', '..', '/') or '/' not in token:
                         continue
-                    candidates.append((relative, info))
-                if candidates:
-                    write_new(intent, {'run_id': run_id, 'job_id': job_id, 'at': time.time(),
-                              'files': [{'path': r, 'device': i.st_dev, 'inode': i.st_ino, 'bytes': i.st_size,
-                                         'mtime_ns': i.st_mtime_ns} for r, i in candidates]})
-                for relative, info in candidates:
-                    unlink_same(fd, relative, info)
-                    report['removed'].append({'path': relative, 'bytes': info.st_size})
-                    report['bytes_unlinked'] += info.st_size
-                report['status'] = 'trimmed' if report['removed'] else 'retained'
-                report['reason'] = 'classified_bulk_only'
-        except Exception as error:
-            report['status'] = 'partial' if report['removed'] else 'skipped'
-            report['reason'] = type(error).__name__ + ': ' + str(error)
-        finally:
-            if report['before_logical_bytes'] is not None:
-                try:
-                    after_items = inventory(fd, record['device'])
-                    report['after_logical_bytes'] = sum(i.st_size for _, i in after_items if stat.S_ISREG(i.st_mode))
-                except Exception as error:
-                    report['after_observation_error'] = str(error)
-            if lease is not None:
-                os.close(lease)
-            os.close(fd)
-        write_new(report_path, report)
-        return report
+                    path = Path(token)
+                    if path.is_absolute():
+                        if path.is_relative_to(run):
+                            relative_target = path.relative_to(run).as_posix()
+                            if relative_target != '.':
+                                linked.add(relative_target)
+                    else:
+                        # Both root-relative and document/cwd-relative links.
+                        # Lexical normalization only; never follow a link.
+                        for parent in (Path('.'), origin):
+                            normalized = Path(os.path.normpath(str(parent / path)))
+                            if '..' not in normalized.parts and normalized != Path('.'):
+                                linked.add(normalized.as_posix())
+            profiles = profile_roots(items); candidates = []
+            actual_paths = {Path(r).as_posix() for r, _ in items}
+            actual_paths.update(parent.as_posix() for r, _ in items for parent in Path(r).parents if parent != Path('.'))
+            keep_paths = (linked & actual_paths) | {Path(p).as_posix() for p in retained}
+            policy = active_policy(base)
+            if policy is None:
+                raise ValueError('policy disabled during finalization')
+            cutoff_ns = policy['cutoff_ns']
+            for relative, info in items:
+                path = Path(relative)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or evidence_name(relative)
+                        or not classified(relative, profiles)
+                        or any(p.as_posix() in keep_paths for p in (path, *path.parents))
+                        or not fresh_member(fd, relative, record, cutoff_ns)):
+                    continue
+                candidates.append((relative, info))
+            if candidates:
+                write_new(intent, {'run_id': run_id, 'job_id': job_id, 'at': time.time(),
+                          'files': [{'path': r, 'device': i.st_dev, 'inode': i.st_ino, 'bytes': i.st_size,
+                                     'mtime_ns': i.st_mtime_ns} for r, i in candidates]})
+            for relative, info in candidates:
+                unlink_same(fd, relative, info)
+                report['removed'].append({'path': relative, 'bytes': info.st_size})
+                report['bytes_unlinked'] += info.st_size
+                report['allocated_bytes_unlinked'] += info.st_blocks * 512
+            report['status'] = 'trimmed' if report['removed'] else 'retained'
+            report['reason'] = 'classified_bulk_only'
+    except Exception as error:
+        report['status'] = 'partial' if report['removed'] else 'skipped'
+        report['reason'] = type(error).__name__ + ': ' + str(error)
+    finally:
+        if report['before_logical_bytes'] is not None:
+            try:
+                after_items = inventory(fd, record['device'])
+                report['after_logical_bytes'] = sum(i.st_size for _, i in after_items if stat.S_ISREG(i.st_mode))
+                report['after_allocated_bytes'] = sum(i.st_blocks * 512 for _, i in after_items if stat.S_ISREG(i.st_mode))
+            except Exception as error:
+                report['after_observation_error'] = str(error)
+        if lease is not None:
+            os.close(lease)
+        os.close(fd)
+    write_new(report_path, report)
+    return report

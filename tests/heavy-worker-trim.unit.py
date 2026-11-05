@@ -44,6 +44,8 @@ class TrimTests(unittest.TestCase):
         self.make_run()
 
     def make_run(self, purpose='ephemeral'):
+        if trim.active_policy(self.base) is None:
+            self.activate()
         self.record = trim.prepare(self.base, purpose)
         self.run_dir = Path(self.record['path']); self.job = job_id()
         self.spec = {'cwd': str(self.run_dir), 'argv': ['/usr/bin/true'], 'timeout_seconds': 20, 'host': 'forum'}
@@ -57,7 +59,13 @@ class TrimTests(unittest.TestCase):
     def sweep(self, **kwargs):
         return trim.trim(self.base, self.spec, self.job, **kwargs)
 
+    def deactivate(self):
+        registry = trim.roots(self.base)[1]
+        for name in ('enabled.json', 'activation.json'):
+            (registry / name).unlink(missing_ok=True)  # this test's private namespace only
+
     def activate(self):
+        self.deactivate()
         policy = trim.stage_policy(self.base)
         trim.enable_policy(self.base)
         return policy
@@ -71,12 +79,14 @@ class TrimTests(unittest.TestCase):
     def test_all_requested_bulk_classes_and_evidence_precedence(self):
         bulk = ['source/main.py', 'src/a.rs', 'candidate/a.cpp', 'baseline/a.c', 'checkouts/x/a.sh',
                 'source-v2/a', 'candidate-abc/a', 'baseline-42/a', 'node_modules/lib/a.js',
-                'other/x/node_modules/lib/a.js', 'tmp/arbitrary', 'build/final.apk', 'cache/item',
+                'other/x/node_modules/lib/a.js', 'tmp/arbitrary', 'build/final.bin', 'cache/item',
                 'intermediates/data', 'profiles/chrome/Local State', 'profiles/chrome/Default/Preferences',
                 'profiles/chrome/Default/History', 'browser-profile/Local State', 'browser-profile/Default/Cookies',
                 'guests/linux/disk.qcow2', 'vms/disk.vmdk', 'disposable-vms/disk.raw', 'vms/disk.img',
                 'misc/disposable-linux.img']
-        keep = ['source/results/a.bin', 'candidate/evidence/unknown.bin', 'baseline/reports/a.bin',
+        keep = ['build/app.apk', 'candidate/out.aab', 'checkouts/repository/.git/objects/pack/unpushed.pack',
+                'checkouts/repository/.git/refs/heads/topic', 'checkouts/repository/uncommitted.py',
+                'build/package.zip', 'source/results/a.bin', 'candidate/evidence/unknown.bin', 'baseline/reports/a.bin',
                 'node_modules/pkg/evidence/a.js', 'node_modules/pkg/package.json', 'tmp/a.jsonl',
                 'build/image.png', 'source/photo.jpg', 'source/photo.webp', 'source/readme.md',
                 'node_modules/license.txt', 'tmp/page.html', 'tmp/results.xml', 'build/receipt.bin',
@@ -132,6 +142,7 @@ class TrimTests(unittest.TestCase):
         self.assertTrue(self.bulk.exists())
 
     def test_no_activation_unknown_birthtime_and_pre_cutoff_retain(self):
+        self.deactivate()
         self.assertIsNone(self.new_auto('disabled')); self.assertTrue(self.bulk.exists())
         self.activate()
         for name, btime in [('unsupported', None), ('equal-cutoff', trim.active_policy(self.base)['cutoff_ns']), ('old-btime', 1)]:
@@ -140,6 +151,7 @@ class TrimTests(unittest.TestCase):
                 self.assertTrue(self.bulk.exists())
 
     def test_policy_disabled_until_enabled_immutable_and_release_bound(self):
+        self.deactivate()
         trim.stage_policy(self.base)
         self.assertIsNone(self.new_auto('before-enable'))
         trim.enable_policy(self.base)
@@ -172,8 +184,9 @@ class TrimTests(unittest.TestCase):
         with patch.object(trim, 'birthtime_ns', return_value=self.record['birthtime_ns'] + 1):
             self.assertIsNone(self.sweep()); self.assertTrue(self.bulk.exists())
         old = self.run_dir.with_name('renamed'); self.run_dir.rename(old); self.run_dir.mkdir()
-        with self.assertRaisesRegex(ValueError, 'ownership identity mismatch'):
-            self.sweep()
+        self.assertIsNone(self.sweep())
+        self.assertIsNone(trim.admit(self.base, self.spec, job_id()))
+        self.assertIsNone(trim.run_lease(self.base, self.spec))
         self.assertTrue((old / 'source/main.py').exists())
 
     def test_old_unregistered_and_v1_prepared_records_are_frozen(self):
@@ -226,7 +239,7 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(self.sweep()['status'], 'retained'); self.assertTrue(self.bulk.exists())
 
     def test_malformed_retention_oversized_or_unreadable_text_fails_closed(self):
-        for name, value in [('retain.json', b'{"paths":["../out"]}'), ('source/a.json', b'\xff'),
+        for name, value in [('retain.json', b'{"paths":["../out"]}'), ('evidence/a.json', b'\xff'),
                             ('manifest.json', b'{"retain":'), ('retain.json', b'{"paths":"wrong"}')]:
             self.make_run(); self.put(name, value)
             self.assertEqual(self.sweep()['status'], 'skipped'); self.assertTrue(self.bulk.exists())
@@ -305,7 +318,7 @@ class TrimTests(unittest.TestCase):
         self.make_run()
         foreign = self.base / 'legacy-cwd'; foreign.mkdir()
         spec = {**self.spec, 'cwd': str(foreign), 'argv': ['/usr/bin/python3', str(self.run_dir / 'source/main.py')]}
-        self.assertIsNone(trim.admit(self.base, spec, job_id()))
+        trim.admit(self.base, spec, job_id())
         self.assertEqual(self.sweep()['reason'], 'multiple_submissions_permanent_retention')
         self.assertTrue(self.bulk.exists())
 
@@ -322,23 +335,78 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(self.sweep(evidence_paths=(log,))['status'], 'trimmed')
         self.assertTrue(keep.exists() and native.exists()); self.assertFalse(self.bulk.exists())
 
-    def test_global_registry_lock_serializes_new_admission_against_final_unlink(self):
-        entered = threading.Event(); release = threading.Event(); admitted = threading.Event(); errors = []
+    def test_sealed_root_retries_but_other_roots_admit_during_probe(self):
+        entered = threading.Event(); release = threading.Event(); errors = []
         def probe(_):
             entered.set(); self.assertTrue(release.wait(3)); return False
         def sweep():
             try: self.sweep()
             except Exception as error: errors.append(error)
-        def submit():
-            try: trim.admit(self.base, {**self.spec, 'lane': 'light'}, job_id()); admitted.set()
-            except Exception as error: errors.append(error)
         with patch.object(trim, 'process_busy', side_effect=probe):
-            first = threading.Thread(target=sweep); first.start(); self.assertTrue(entered.wait(3))
-            second = threading.Thread(target=submit); second.start()
-            self.assertFalse(admitted.wait(0.05))
-            release.set(); first.join(3); second.join(3)
-        self.assertFalse(first.is_alive() or second.is_alive()); self.assertEqual(errors, [])
-        self.assertTrue(admitted.is_set())  # later reuse permitted, prior source may be gone (documented)
+            thread = threading.Thread(target=sweep); thread.start(); self.assertTrue(entered.wait(3))
+            try:
+                with self.assertRaisesRegex(BlockingIOError, 'run_finalizing'):
+                    trim.admit(self.base, {**self.spec, 'lane': 'light'}, job_id())
+                other = trim.prepare(self.base)
+                self.assertIsNotNone(trim.admit(self.base, {**self.spec, 'cwd': other['path']}, job_id()))
+            finally:
+                release.set(); thread.join(3)
+        self.assertFalse(thread.is_alive()); self.assertEqual(errors, [])
+        # Explicitly single-use input: later sequential reuse is permitted but
+        # must restage or have declared RETAIN before the first completion.
+        trim.admit(self.base, {**self.spec, 'lane': 'light'}, job_id())
+
+    def test_activation_switch_covers_prepared_and_requested_flags_are_not_lost(self):
+        record = trim.prepare(self.base, disposable=('tmp',))
+        self.assertEqual(record['disposable'], ['tmp'])
+        self.assertEqual(record['classification'], 'broad-future-v2')
+        self.deactivate()
+        self.assertIsNone(self.sweep()); self.assertIsNone(trim.run_lease(self.base, self.spec))
+        self.assertTrue(self.bulk.exists())
+
+    def test_moved_historical_files_and_directories_are_preserved(self):
+        self.deactivate()
+        old = self.base / 'historical'; old.mkdir()
+        old_file = old / 'old.py'; old_file.write_bytes(b'historical')
+        old_dir = old / 'source'; old_dir.mkdir()
+        (old_dir / 'old-child.py').write_bytes(b'historical child')
+        time.sleep(.01)
+        self.activate(); self.record = self.new_auto('moved-case')
+        old_file.rename(self.run_dir / 'source/old.py')
+        old_dir.rename(self.run_dir / 'candidate')
+        # A NEW file within an OLD moved directory must be preserved too.
+        self.put('candidate/new-child.py', b'new but old parent')
+        self.assertEqual(self.sweep()['status'], 'trimmed')
+        self.assertFalse(self.bulk.exists())
+        for name in ('source/old.py', 'candidate/old-child.py', 'candidate/new-child.py'):
+            self.assertTrue((self.run_dir / name).exists(), name)
+
+    def test_bulk_package_metadata_is_retained_without_reference_scan_budget_or_word_pins(self):
+        self.put('node_modules/pkg/package.json', b'{"directories":{"build":"build","src":"src"}}')
+        metadata = self.put('node_modules/pkg/huge.txt', b'')
+        with metadata.open('wb') as stream:
+            stream.truncate(33 * 1024 * 1024)  # tiny sparse budget regression; native canary uses allocated bulk
+        self.put('source/catalog.py', b'ordinary copied source')
+        self.put('source/dialog.py', b'ordinary copied source')
+        self.put('source/logo.bin', b'ordinary copied source')
+        self.put('source/package.json', b'{"src":"src","build":"build","entry":"index.js"}')
+        self.put('node_modules/pkg/index.js', b'ordinary package')
+        log = self.base / 'native.log'; log.write_text('cwd=' + str(self.run_dir) + '\nwords build src tmp index.js\n')
+        report = self.sweep(evidence_paths=(log,))
+        self.assertEqual(report['status'], 'trimmed', report)
+        self.assertTrue(metadata.exists())
+        self.assertFalse(self.bulk.exists())
+        for name in ('source/catalog.py', 'source/dialog.py', 'source/logo.bin', 'node_modules/pkg/index.js'):
+            self.assertFalse((self.run_dir / name).exists(), name)
+        self.assertEqual(report['before_allocated_bytes'] - report['after_allocated_bytes'], report['allocated_bytes_unlinked'])
+
+    def test_foreign_relative_argv_reference_permanently_pins_registered_run(self):
+        foreign = self.base / 'foreign'; foreign.mkdir()
+        relative = os.path.relpath(self.run_dir / 'source/main.py', foreign)
+        spec = {**self.spec, 'cwd': str(foreign), 'argv': ['/usr/bin/python3', relative]}
+        trim.admit(self.base, spec, job_id())
+        self.assertEqual(self.sweep()['reason'], 'multiple_submissions_permanent_retention')
+        self.assertTrue(self.bulk.exists())
 
     def test_identity_or_symlink_parent_race_never_unlinks_outside(self):
         outside = self.base / 'outside'; outside.mkdir(); sentinel = outside / 'a.o'; sentinel.write_bytes(b'keep')
