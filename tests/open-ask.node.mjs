@@ -80,7 +80,7 @@ for (const [name, replies, background, lastUserAt, section, attention] of cases)
 test('admitted owner runs stay Working ahead of a transcript ask and helper background', () => {
   const replies = [reply(qr, 20)]
   for (const status of ['queued', 'accepted', 'running', 'unknown']) {
-    const row = { id: 'wizard_active', status, wizard_run_id: 'wizardq_owner',
+    const row = { id: 'wizard_active', status, wizard_run_id: 'wizardq_owner', wizard_assigned_at: 30,
       wizard_attention: qr, wizard_background: 'helper', wizard_waiting_on: 'helper' }
     const projected = projectOpenAskSession(row, { replies, lastUserAt: 10, background: 'helper' })
     assert.equal(projected.status, status)
@@ -91,6 +91,15 @@ test('admitted owner runs stay Working ahead of a transcript ask and helper back
     assert.equal(row.wizard_attention.state, 'needs_you', 'input remains unchanged')
   }
   assert.equal(projectOpenAskSession({ status: 'queued' }, { replies, lastUserAt: 10, background: 'helper' }).status, 'queued')
+  // A running continuation's own reply (after admission) keeps its status line.
+  const fyi = { state: 'fyi', ask: 'Checks finished' }
+  const own = projectOpenAskSession({ status: 'running', wizard_run_id: 'wizardq_cont', wizard_assigned_at: 30 },
+    { replies: [reply(qr, 20), reply(fyi, 40)], lastUserAt: 10, background: 'helper' })
+  assert.equal(own.status, 'running')
+  assert.deepEqual(own.wizard_attention, fyi)
+  // Queued input supersedes even a reply written after an earlier admission.
+  assert.equal(projectOpenAskSession({ status: 'queued', wizard_run_id: 'wizardq_next', wizard_assigned_at: 30 },
+    { replies: [reply(fyi, 40)], lastUserAt: 10 }).wizard_attention, undefined)
   const helperOnly = projectOpenAskSession({ status: 'running', wizard_waiting_on: 'helper' }, { replies, lastUserAt: 10, background: 'helper' })
   assert.equal(helperOnly.status, 'completed', 'synthetic helper activity still releases to the owner gate')
   assert.equal(helperOnly.wizard_attention.state, 'needs_you')

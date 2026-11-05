@@ -45,8 +45,13 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   // Admitted owner input can still be in the queue, absent from lastUserAt.
   // A transcript ask cannot finish a real run. Helper-only synthetic running
   // rows have no run id and must still yield to an owner gate below.
+  // Queued input supersedes every transcript ask. A started run keeps only asks
+  // its own replies wrote (at or after admission); older asks are stale.
   if (row.status === 'queued' || row.wizard_run_id && ['accepted', 'running', 'unknown'].includes(row.status)) {
-    delete row.wizard_attention
+    const since = row.status === 'queued' ? Infinity : replyEpoch(row.wizard_assigned_at)
+    const own = resolveThreadSection({ replies: (replies ?? []).filter((reply) => replyEpoch(reply.timestamp) >= since), lastUserAt })
+    if (own.attention) row.wizard_attention = own.attention
+    else delete row.wizard_attention
     if (row.wizard_waiting_on === 'helper') delete row.wizard_waiting_on
     return row
   }
