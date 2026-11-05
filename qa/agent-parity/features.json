@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "coalesced-owner-history",
+      "description": "Owner text, recording chips and inline multipart media survive history projection when Hermes coalesces them after a helper completion, before the matching reply; helper material stays hidden.",
+      "layer": "server",
+      "fixture": "coalesced-owner-history",
+      "how_to_test": "Read synthetic coalesced history through each runtime's actual Service HTTP route (main, host-profile, container and restricted Unix ingress); require original row/client identity, time, text, recording and inline media, unchanged upstream rows, and no admitted run. Synthetic routed HTTP evidence, not live/provider/browser or physical phone proof.",
+      "source_refs": ["server/service.mjs"],
+      "reference_tests": ["tests/coalesced-voice-history.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "hosted-thread-draft-custody",
       "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
       "layer": "ux",

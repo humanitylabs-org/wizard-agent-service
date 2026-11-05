@@ -1488,7 +1488,22 @@ function ownerTailAfterDelegation(message) {
   const tail = text.slice(footer.index + footer[0].length).trim()
   if (!tail || legacyInternalHistoryMessage({ role: 'user', content: tail }) || /^--- [✓✗] TASK /m.test(tail)) return message
   // Display-only: stored content and provider input remain byte-for-byte intact.
-  return { ...message, content: tail, display_content: tail, display_kind: null }
+  // Slice text at the boundary without flattening away the owner's inline media.
+  let content = tail
+  if (Array.isArray(message.content)) {
+    const boundary = footer.index + footer[0].length
+    let offset = 0, texts = 0
+    content = []
+    for (const part of message.content) {
+      if (part && ['text', 'input_text'].includes(part.type) && typeof part.text === 'string') {
+        if (texts++) offset++ // runContextText joins text parts with one newline
+        const end = offset + part.text.length
+        if (end > boundary) content.push({ ...part, text: part.text.slice(Math.max(0, boundary - offset)) })
+        offset = end
+      } else if (offset >= boundary) content.push(part)
+    }
+  }
+  return { ...message, content, display_content: content, display_kind: null }
 }
 
 export function projectWizardMessageHistory(result, sourceResult = result) {
