@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "in-flight-notice",
+      "description": "Controller and live-lease execution outrank out-of-band notice attention while queued or steered owner messages arrive; notices can classify Ready only after the run ends.",
+      "layer": "server",
+      "fixture": "in-flight-notice",
+      "how_to_test": "Exercise full and slim HTTP lists for main, host-profile, container and restricted Unix ingress, with an admitted synthetic run, heavy background work, needs_you notice, owner message queued outside history then persisted steer, another notice and a real terminal receipt. No live owner writes, provider or browser proof.",
+      "source_refs": ["server/service.mjs", "server/open-ask.mjs"],
+      "reference_tests": ["tests/in-flight-notice.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "coalesced-owner-history",
       "description": "Owner text, recording chips and inline multipart media survive history projection when Hermes coalesces them after a helper completion, before the matching reply; helper material stays hidden.",
       "layer": "server",

@@ -558,13 +558,6 @@ function newestRun(runs, sessionId) {
     .sort((left, right) => Number(right.createdAt ?? right.updatedAt ?? 0) - Number(left.createdAt ?? left.updatedAt ?? 0))[0]
 }
 
-function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
-  if (run?.status === 'unknown') return false
-  const startedAt = Number(run?.createdAt ?? 0)
-  const terminalAt = Number(truth?.lastAssistantAt ?? 0)
-  const latestRequestAt = Number(truth?.lastUserAt ?? 0)
-  return Boolean(trustActiveTruth && truth && !truth.active && startedAt > 0 && terminalAt >= startedAt && terminalAt > latestRequestAt)
-}
 
 function filterSessionList(result, operator, records = [], directRuns = [], externalRuns = [], sessionTruth = new Map(), helmActivities = [], trustActiveTruth = false, dismissedFailures = null) {
   try {
@@ -592,15 +585,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           if (!operator) {
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const latestDirect = newestRun(directRuns, session.id)
-            const directCandidate = newestActiveRun(directRuns, session.id)
-            const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
+            const direct = newestActiveRun(directRuns, session.id)
             // /v1/runs owns execution lifecycle truth. Turn leases fence transcript
             // writes; they are not guaranteed to remain present for every live API run.
-            const externalCandidate = externalRuns.find((run) =>
+            const external = externalRuns.find((run) =>
               run.sessionId === session.id && PROJECTED_RUN_STATUSES.has(run.status))
-            const external = staleAgainstCanonicalReply(externalCandidate, truth, trustActiveTruth)
-              ? undefined
-              : externalCandidate
             const helm = helmActivities
               .filter((activity) => activity.sessionId === session.id)
               .sort((left, right) => right.createdAt - left.createdAt)[0]
@@ -2827,7 +2816,7 @@ function buildWizardServer(options, lifetime) {
       truth.helperStatus = evidence?.helperStatus
       truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
       truth.supervisorPending = !!evidence?.supervisorPending
-      return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
+      return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies, inFlight: !!truth.active,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
     },
@@ -4241,7 +4230,7 @@ function buildWizardServer(options, lifetime) {
                 replies = [...replies.slice(0, -1), { ...replies.at(-1), status: session.wizard_attention }]
               }
               if (!replies) return session
-              return projectOpenAskSession(session, { replies,
+              return projectOpenAskSession(session, { replies, inFlight: !!truth.active,
                 lastUserAt: Math.max(replyEpoch(truth?.lastUserAt), replyEpoch(messages?.lastUser?.created_at)),
                 background: threadBackground(truth), heavyPending: !!truth?.heavyPending })
             })

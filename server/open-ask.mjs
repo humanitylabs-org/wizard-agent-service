@@ -37,11 +37,15 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
 
 // Shared by main and routed runtimes, including slim list windows. Do not turn
 // errors, stop requests or native approval gates into an ordinary Ready row.
-export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy' } = {}) {
+export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy', inFlight = false } = {}) {
   const decision = resolveThreadSection({ replies, lastUserAt, background, heavyPending })
   const row = { ...session }
   delete row.wizard_background
   if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
+  // A queued/running controller or a live turn lease owns execution. A notice's
+  // status line (or an earlier unanswered ask) may classify the thread only once
+  // that turn ends. Helper-only work keeps its existing Ready-with-an-ask policy.
+  if (inFlight || row.wizard_run_id && ['submitting', 'accepted', 'queued', 'started', 'running', 'unknown'].includes(row.status)) return row
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {

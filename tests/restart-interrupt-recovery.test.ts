@@ -310,11 +310,14 @@ describe('Agent Service restart during a live run (HTTP)', () => {
     expect(rows.find((row: { id: string }) => row.id === 'wizard_cut')).toMatchObject({ status: 'running' })
     expect(rows.find((row: { id: string }) => row.id === 'wizard_stopped')?.status).toBeUndefined()
 
-    // The resumed run answers: the thread ends with the reply, not a blank receipt.
+    const resumedRunId = rows.find((row: { id: string }) => row.id === 'wizard_cut')!.wizard_run_id
+    // The resumed run answers: settle the controller receipt as production's
+    // queue poll does. A transcript row alone must not retire a running receipt.
     h.runs.get('actual_3')!.status = 'completed'
     const db = new DatabaseSync(h.statePath)
     db.prepare("INSERT INTO messages VALUES ('wizard_cut', 'assistant', 'stop', 'Fixed: the drop cap is selectable.', 'final', ?, 1)").run(Date.now() / 1000 + 5)
     db.close()
+    expect(await h.settle(second.origin, resumedRunId, (s) => s === 'completed')).toBe('completed')
     rows = await h.list(second.origin)
     for (let attempt = 0; attempt < 20 && rows.find((row: { id: string }) => row.id === 'wizard_cut')?.status; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25))
