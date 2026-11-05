@@ -59,6 +59,14 @@ describe('the ledger', () => {
     store.ingest('hermes', 't2', { items: [item('x', 'done')], at: 10, messageId: '7' })
     expect(store.list('hermes', 't2')[0].message_id).toBe('7')
   })
+  it('"Looks good" on a try-it ask acknowledges it; a plain needs-you ask stays', () => {
+    const store = new ThreadItemStore('', { now: () => 1_700_000_500_000 })
+    store.ingest('hermes', 'try', { items: [item('a', 'needs_you'), item('b', 'needs_you')], at: 1_700_000_100, tryIt: true })
+    store.ingest('hermes', 'try', { items: [item('c', 'needs_you')], at: 1_700_000_101 })
+    expect(store.counts('hermes', 'try')).toMatchObject({ needs_you: 3, acknowledged: 0 })
+    store.markSeen('hermes', 'try', ['a', 'c'])
+    expect(store.counts('hermes', 'try')).toMatchObject({ needs_you: 2, acknowledged: 1 })
+  })
   it('counts needs-you, running, finished-unseen and acknowledged, per thread and for every thread', () => {
     let clock = 1_700_000_150_000
     const store = new ThreadItemStore('', { now: () => clock })

@@ -67,7 +67,7 @@ export const countItems = (items, seenFor = item => item.seen_at >= item.updated
     out.total++
     if (item.state === 'done') seenFor(item) ? out.acknowledged++ : out.done_unseen++
     else if (item.state === 'blocked') out.blocked++
-    else if (item.state === 'needs_you') out.needs_you++
+    else if (item.state === 'needs_you') item.try && seenFor(item) ? out.acknowledged++ : out.needs_you++ // "Looks good" on a try-it ask
     else out.running++
   }
   return out
