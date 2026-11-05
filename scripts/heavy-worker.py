@@ -179,9 +179,10 @@ def kill_agent_container(job_id):
 
 
 def managed_spec(spec):
+    # Candidate module decides ownership; legacy roots remain unowned. Specs and
+    # hashes stay unchanged, and unsupported adoption never refuses execution.
     return (sys.platform == 'linux' and os.environ.get('WIZARD_HEAVY_HOST') == 'forum'
-            and 'agent_id' not in spec
-            and Path(spec['cwd']).is_relative_to(heavy_root() / 'heavy/managed-runs-v1'))
+            and 'agent_id' not in spec)
 
 
 def run_trim_module():
@@ -456,7 +457,7 @@ def rpc(root, lock_path, value):
     if action == 'submit':
         validated = validate(value['spec'])
         if managed_spec(validated):
-            run_trim_module().admit(heavy_root(), validated, job_id)
+            run_trim_module().admit(heavy_root(), validated, job_id, raw_cwd=value['spec']['cwd'])
         base = agent_spool(root) if 'agent_id' in validated else root
         wanted = light_root(base) if validated.get('lane') == 'light' else base
         if target is not None and target != wanted:
@@ -504,8 +505,8 @@ if __name__ == '__main__':
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
     parser.add_argument('--prepare-run', action='store_true', help='create NEW Forum run; never adopt a directory')
-    parser.add_argument('--run-purpose', choices=('retained', 'ephemeral', 'weekly-launch'), default='retained')
-    parser.add_argument('--disposable', action='append', choices=('build', 'cache', 'tmp'), default=[])
+    parser.add_argument('--run-purpose', choices=('retained', 'ephemeral', 'weekly-launch'), default='ephemeral')
+    parser.add_argument('--disposable', action='append', choices=('build', 'cache', 'tmp', 'intermediates'), default=[])
     args = parser.parse_args()
     try:
         allowed_root = heavy_root()
