@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scene, post, owner } from '../qa/agent-parity/fixture.mjs'
 import { parseStatus, projectStatusMarkers } from '../server/thread-status.mjs'
-import { ThreadItemStore, normalizeItems, trackerEnabled, parseReplyTo, expandReplyTo, expandReplyToInput, ITEMS_INSTRUCTIONS, TRACKER_TWEAK } from '../server/thread-items.mjs'
+import { ThreadItemStore, countItems, normalizeItems, trackerEnabled, parseReplyTo, expandReplyTo, expandReplyToInput, ITEMS_INSTRUCTIONS, TRACKER_TWEAK } from '../server/thread-items.mjs'
 
 const dirs: string[] = []
 const api = (s: any, path: string, init: any = {}) => fetch(`${s.origin()}${path}`, { ...init, headers: { ...owner, ...init.headers } })
@@ -41,6 +41,33 @@ describe('items in the status line', () => {
 })
 
 describe('the ledger', () => {
+  it('counts current reply anchors, keeps per-ask custody, and moves changed asks into their new reply', () => {
+    let clock = 1_700_000_500_000
+    const store: any = new ThreadItemStore('', { now: () => clock })
+    store.ingest('hermes', 'group', { items: [item('a', 'done'), item('b', 'needs_you'), item('c', 'blocked')], at: 1_700_000_100, messageId: 'reply-1' })
+    expect(store.list('hermes', 'group')).toHaveLength(3)
+    expect(store.counts('hermes', 'group')).toEqual({ total: 1, blocked: 1, needs_you: 0, running: 0, done_unseen: 0, acknowledged: 0 })
+    expect(store.allCounts()['hermes/group']).toEqual(store.counts('hermes', 'group'))
+    store.markSeen('hermes', 'group', ['a', 'b'])
+    expect(store.counts('hermes', 'group')).toMatchObject({ total: 1, blocked: 1, acknowledged: 0 })
+    store.markSeen('hermes', 'group', ['a', 'b', 'c'])
+    expect(store.counts('hermes', 'group')).toMatchObject({ total: 1, acknowledged: 1, blocked: 0 })
+    clock += 1_000_000
+    store.ingest('hermes', 'group', { items: [item('c', 'needs_you')], at: 1_700_001_000, messageId: 'reply-2' })
+    expect(store.counts('hermes', 'group')).toMatchObject({ total: 2, needs_you: 1, acknowledged: 1 })
+    expect(store.list('hermes', 'group').find((i: any) => i.id === 'c')).toMatchObject({ message_id: 'reply-2', seen: false })
+  })
+  it('uses blocked > needs-you > running > finished-unseen > acknowledged and never groups unknown anchors', () => {
+    const base = { seen_at: 0, updated_at: 10, message_id: 'm' }
+    for (const [states, kind] of [
+      [['done', 'running', 'needs_you', 'blocked'], 'blocked'],
+      [['done', 'running', 'needs_you'], 'needs_you'],
+      [['done', 'running'], 'running'], [['done', 'done'], 'done_unseen'],
+    ] as const) expect(countItems(states.map((state, n) => ({ ...base, id: `a${n}`, state })))).toMatchObject({ total: 1, [kind]: 1 })
+    const bad = [null, undefined, '', ' ', {}, [], true]
+    expect(countItems(bad.map((message_id, n) => ({ ...base, id: `b${n}`, state: 'done', message_id })))).toMatchObject({ total: bad.length, done_unseen: bad.length })
+    expect(countItems([{ ...base, state: 'done', message_id: 42 }, { ...base, state: 'running', message_id: '42' }])).toMatchObject({ total: 1, running: 1 })
+  })
   it('keeps the latest state per id, anchors on the latest reply, ignores older or repeated replies', () => {
     const store = new ThreadItemStore('', { now: () => 5_000_000 })
     expect(store.ingest('hermes', 't1', { items: [item('a', 'running', 'Fix voice'), item('b', 'needs_you', 'Pick colour')], at: 100, messageId: '11' })).toBe(true)
