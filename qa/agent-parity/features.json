@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "reply-summary-preferences",
+      "description": "Reopening the shell short-answer view accepts and persists its existing box-wide choice while main, host-profile, container and restricted chats retain their own unchanged transcripts and admit no reply.",
+      "layer": "server",
+      "fixture": "reply-summary-preferences",
+      "how_to_test": "For each runtime kind, read its real routed transcript (host-profile via its profile API, restricted via mode-0600 Unix ingress), then GET/PUT the shell's owner-level /wizard/v1/ui-preferences route. Require absent-stays-absent, successful existing reopen payload, exact preservation of unrelated/future stored fields, restart readback, atomic invalid-field rejection, unchanged transcript and zero admitted replies. Synthetic HTTP fixture evidence only, not live runtime, browser or physical-phone proof.",
+      "source_refs": ["server/ui-preferences.mjs", "server/service.mjs"],
+      "reference_tests": ["qa/agent-parity/server-checks.mjs", "tests/ui-preferences.test.ts"],
+      "policy_exemptions": []
+    },
+    {
       "id": "hosted-thread-draft-custody",
       "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
       "layer": "ux",
