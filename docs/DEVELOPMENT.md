@@ -5,7 +5,7 @@ Entry point is [AGENTS.md](../AGENTS.md); this page holds the commands. Checked 
 ## What this repo is, and its neighbours
 
 The back end Wizard front ends call at `/wizard/...`. It sits in front of a **stock Hermes** (reached only through Hermes's API server and a read-only `state.db`) and owns threads, durable runs and steers, files, read state, voice recovery and usage.
-- **wizard-ux** is the only front end; it holds no agent state. Contract changes: service first, UX second, each step backward compatible; keep old fields working until the UX stops reading them.
+- **wizard-ux** is the active front end; it holds no agent state. The [README](../README.md#where-it-sits-in-wizard-os) also lists legacy Wizard Mobile, and its [open split items](../README.md#open-items-for-the-split) still describe a static-front-end deployment and unfinished cutover; this guide does not verify live deployment. Contract changes: service first, consumers second, each step backward compatible; keep old routes and fields working for all supported consumers, including legacy Mobile while supported, until none still depends on them.
 - **wizard-app-manager** installs apps and cuts OS releases; this service exposes per-agent app grants it calls over loopback. **wizard-troubleshooter** is an independent repair page that must work when this service is down.
 - Wizard behaviour goes here, in a Hermes plugin under `hermes-plugin/`, or in an app. Never patch Hermes.
 
