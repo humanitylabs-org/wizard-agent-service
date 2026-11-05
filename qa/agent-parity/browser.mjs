@@ -15,11 +15,12 @@ if((process.platform!=='darwin'&&!forumMedia)||!externalRoot||!ux.startsWith(ext
 mkdirSync(out,{recursive:true})
 const selectedGroup=process.env.QA_GROUP||'';assert.ok(['','static','compose','working','media'].includes(selectedGroup))
 const selectedKinds=process.env.QA_KINDS?process.env.QA_KINDS.split(','):kinds;assert.ok(selectedKinds.every(k=>kinds.includes(k)))
+const mediaShells=process.env.QA_MEDIA_SHELLS?process.env.QA_MEDIA_SHELLS.split(','):['phone','desktop'];assert.ok(mediaShells.length&&new Set(mediaShells).size===mediaShells.length&&mediaShells.every(s=>['phone','desktop'].includes(s)));assert.ok(!process.env.QA_MEDIA_SHELLS||selectedGroup==='media')
 const features=JSON.parse(readFileSync(new URL('./features.json',import.meta.url))).features.filter(f=>f.layer==='ux').map(f=>f.id)
 const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex')
 const source={service:Object.fromEntries(['server/service.mjs','server/agents-http.mjs','server/routed-run-queue.mjs','server/run-queue.mjs','server/routed-presentation.mjs','server/agent-chat-inputs.mjs','server/chat-presentation.mjs'].map(f=>[f,hash(new URL('../../'+f,import.meta.url))])),ux:Object.fromEntries(['core/chats.js','core/chat-kit.js','core/chat-power.js','core/chat-models.js','core/chat-work.js','app.js','styles.css','outbox.js','live.js'].map(f=>[f,hash(join(ux,'web',f))]))}
 const cells=[],errors=[],requests=[],network=[],mediaEvidence=[]
-const persist=completed=>writeFileSync(join(out,'browser.json'),JSON.stringify({schema_version:1,mode:'browser-synthetic',selectedGroup,selectedKinds,completed:completed&&!selectedGroup&&selectedKinds.length===kinds.length,source,cells,errors,requests,mediaEvidence,cleanup:{existing_agents_opened:false,all_fixtures_closed:completed},summary:Object.fromEntries(['pass','fail'].map(s=>[s,cells.filter(c=>c.status===s).length]))},null,2)+'\n')
+const persist=completed=>writeFileSync(join(out,'browser.json'),JSON.stringify({schema_version:1,mode:'browser-synthetic',selectedGroup,selectedKinds,mediaShells,completed:completed&&!selectedGroup&&selectedKinds.length===kinds.length,source,cells,errors,requests,mediaEvidence,cleanup:{existing_agents_opened:false,all_fixtures_closed:completed},summary:Object.fromEntries(['pass','fail'].map(s=>[s,cells.filter(c=>c.status===s).length]))},null,2)+'\n')
 const browser=await chromium.launch({headless:true,executablePath:forumMedia?process.env.QA_CHROMIUM:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream','--disable-background-networking']})
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 async function until(f,reason,ms=20000){const end=Date.now()+ms;while(Date.now()<end){if(await f())return;await sleep(100)}throw Error('Timeout: '+reason)}
@@ -65,7 +66,7 @@ async function mediaChecks({s,context,page,record}){
  const before=s.seen.length
  const boot=async(p,phone,cold=false)=>{
   if(cold)await p.reload({waitUntil:'domcontentloaded'});else await p.goto(s.origin()+'/wizard-os-home/'+(phone?'':'desktop.html'),{waitUntil:'domcontentloaded'})
-  await p.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:30000});await p.evaluate(()=>WosAgents.load(true))
+  await p.waitForFunction(phone=>window[phone?'__wos':'__wux']?.live?.ok,phone,{timeout:30000});await p.evaluate(()=>WosAgents.load(true))
   assert.equal(await p.evaluate(()=>document.documentElement.dataset.shell),phone?'phone':'desktop')
   // This disposable runtime has no connected provider: Welcome legitimately opens.
   // Wait for its real async boot decision before trusted setup-only Back input;
@@ -77,7 +78,7 @@ async function mediaChecks({s,context,page,record}){
   assert.equal(await p.evaluate(()=>WosWelcome.active),false,'Welcome setup complete before any thread/viewer action')
   setup.closed=true;setup.log=await p.evaluate(()=>WosWelcome.log.slice());(evidence.bootstrap??=[]).push(setup)
  }
- const selected=async p=>p.evaluate(id=>{const w=Object.values(__wos.wins).find(w=>w.app==='chats'&&w.focus?.kind==='agent'&&w.focus.key===id);return w?{id:w.id,agent:w.focus.key,thread:w.thread}:null},s.id)
+ const selected=async p=>p.evaluate(id=>{const shell=document.documentElement.dataset.shell;const api=window[shell==='phone'?'__wos':'__wux'];const w=Object.values(api.wins).find(w=>w.app==='chats'&&w.focus?.kind==='agent'&&w.focus.key===id);return w?{id:w.id,agent:w.focus.key,thread:w.thread}:null},s.id)
  const thread=async(p,select=true)=>{if(select)await p.evaluate(id=>WizOpenAgentChats(id),s.id);await until(async()=>!!await selected(p),'actual selected agent window');const w=await selected(p);const chat=p.locator(`[data-chats="${w.id}"]`);if(w.thread!=='wizard_parity'){const button=chat.locator('[data-chopen="wizard_parity"]').first();await button.waitFor();await button.click()}await chat.locator('.ch-thread').waitFor();assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id);assert.equal((await selected(p)).thread,'wizard_parity');return chat}
  const ready=async p=>p.waitForFunction(()=>{const i=document.querySelector('.mviewer img');return i&&i.complete&&i.naturalWidth>0})
  const geometry=async p=>p.evaluate(()=>{const v=document.querySelector('.mviewer'),i=v.querySelector('.mv-stage img'),s=v.querySelector('.mv-stage').getBoundingClientRect(),r=i.getBoundingClientRect(),k=Math.min(r.width/i.naturalWidth,r.height/i.naturalHeight),w=i.naturalWidth*k,h=i.naturalHeight*k;return{stage:s.toJSON(),image:{left:r.left+(r.width-w)/2,right:r.left+(r.width+w)/2,top:r.top+(r.height-h)/2,bottom:r.top+(r.height+h)/2},state:WosChat.viewer.state,viewport:{w:innerWidth,h:innerHeight}}})
@@ -100,18 +101,18 @@ async function mediaChecks({s,context,page,record}){
   await p.screenshot({path:join(out,`${s.kind}-media-${screen.shell}.png`)});screen.restoredDraft=await chat.locator('.ch-compose textarea').inputValue();assert.equal(screen.restoredDraft,'Synthetic retained media draft')
  }
  // The stage's ordinary context is a real phone UA/touch context.
- await runScreen(page,true)
- const desktop=await browser.newContext({viewport:{width:1440,height:900},serviceWorkers:'block',extraHTTPHeaders:s.ownerHeaders});try{
+ if(mediaShells.includes('phone'))await runScreen(page,true)
+ if(mediaShells.includes('desktop')){const desktop=await browser.newContext({viewport:{width:1440,height:900},serviceWorkers:'block',extraHTTPHeaders:s.ownerHeaders});try{
   await desktop.addInitScript(()=>{localStorage.setItem('wos.coached','true');localStorage.setItem('wos.tour.done','1');localStorage.setItem('wos.desktop-view.v1','classic')})
   await desktop.routeWebSocket('**',ws=>ws.close())
   await desktop.route('**/*',r=>{const q=r.request(),u=q.url();if(!['GET','HEAD'].includes(q.method())||(!u.startsWith(s.origin()+'/')&&!/^(data:|blob:)/.test(u))){evidence.blocked.push({method:q.method(),url:u});return r.fulfill({status:403,body:''})}return r.continue()})
   const p=await desktop.newPage();p.setDefaultTimeout(10000);p.on('pageerror',e=>errors.push({kind:s.kind,group:'media',error:String(e)}));await runScreen(p,false)
- }finally{await desktop.close()}
+ }finally{await desktop.close()}}
  evidence.upstream=s.seen.slice(before).filter(x=>x.method==='GET'&&/\/api\/sessions/.test(x.path)).map(x=>({method:x.method,path:x.path,localPort:x.localPort}));assert.ok(evidence.upstream.some(x=>x.path.endsWith('/api/sessions/wizard_parity/messages')),'scoped HTTP history really read')
  if(s.kind==='host-profile')assert.ok(evidence.upstream.every(x=>x.path.startsWith('/p/parity-profile/')),'profile really traverses /p/<profile>')
  const scoped=evidence.upstream.filter(x=>x.path.endsWith('/api/sessions/wizard_parity/messages'));if(s.kind==='restricted')assert.ok(scoped.every(x=>x.localPort===null),'restricted history really arrived on Unix ingress');else assert.ok(scoped.every(x=>x.localPort===s.runtimePorts[s.kind==='container'?'container':'main']));if(s.kind==='container')assert.notEqual(s.runtimePorts.container,s.runtimePorts.main)
  assert.equal(s.runs.size,0);assert.equal(s.seen.filter(x=>x.method==='POST'&&/\/v1\/runs|\/chat\/stream/.test(x.path)).length,0)
- evidence.noRuntimeAdmissions=true;record('viewer-desktop-fit-keys','Scoped rendered MEDIA buttons open shared viewer; desktop contain/Left/Right/focus/Escape/outside and phone open/Back/outside retain cold-selected agent, exact thread and draft. Real Service HTTP, synthetic runtime; no real containers/providers or physical device proof.')
+ evidence.noRuntimeAdmissions=true;record('viewer-desktop-fit-keys','Scoped rendered MEDIA buttons open shared viewer; requested shells '+mediaShells.join(',')+' retain cold-selected agent, exact thread and draft; desktop contain/Left/Right/focus/Escape/outside or phone open/Back/outside as selected. Real Service HTTP, synthetic runtime; no real containers/providers or physical device proof.')
 }
 async function staticChecks({s,context,page,record,load,reload,root,open,refresh,settle,sends}){
  await checks['native-images'](s);await settle();await checks['nonimage-files'](s)
