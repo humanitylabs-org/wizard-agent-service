@@ -27,7 +27,7 @@ Historical evidence/receipt paths are explicitly exempt, not executable examples
 
 ## Team workflow
 
-Agreed 5 Nov 2026 and being rolled out by Miguel; tracking issue: [wizard-ux#887](https://github.com/humanitylabs-org/wizard-ux/issues/887). This is agreed policy, not a claim that every label, switch or release job already enforces it. Where it disagrees with the older "Wizard OS team rules" block below (self-merging fixes, `needs: ... review` gating, `preview only`, developer-mode branches on a box), **this section wins**. The rest of that block (branch naming, PR body, cross-repo order, safety) still applies.
+Agreed 5 Nov 2026 and being rolled out by Miguel; tracking issue: [wizard-ux#887](https://github.com/humanitylabs-org/wizard-ux/issues/887). This is agreed policy, not a claim that every label, switch or release job already enforces it. Where it disagrees with the older "Wizard OS team rules" block below, **this section wins**. Void from that block: an author merging their own PR (including "fix" tier PRs), `needs: ... review` gating, `preview only` and developer-mode branches on a box. Tier labels and title prefixes may still describe a change but give no merge rights. Branch naming, PR body, cross-repo order and safety from that block still apply.
 
 - **Humans file issues, agents write PRs.** Every PR links an issue. If none exists, the agent files one from the human's request.
 - **Two issue kinds.** *Goals* are big and closable with a done-list; only humans open and close them; there is no permanent catch-all Goal. *Bugs* are small: a core-team human's bug is accepted; outside reports and agent-drafted issues wait for a human yes. Bugs need no parent Goal.
