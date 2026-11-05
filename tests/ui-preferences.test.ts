@@ -23,6 +23,44 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect(readFileSync(join(d, 'settings.json'), 'utf8')).toBe(original)
     expect((await fetch(u2)).headers.get('cache-control')).toBe('no-store')
   })
+  it('accepts the reopening reply-summary payload and preserves stored choices across restart', async () => {
+    const d = home(), file = join(d, 'ui-preferences.json')
+    const stored = { compact: true, readyOrder: 'subject', pinnedChats: ['wizard_existing'],
+      launcher: { recents: ['calendar'] }, migrations: { 'existing.seed': '2026-11-01T00:00:00Z' }, futureShellKey: { keep: true } }
+    writeFileSync(file, JSON.stringify(stored) + '\n')
+    const settings = '{"futureSetting":true}\n'; writeFileSync(join(d, 'settings.json'), settings)
+    const u = await start(d)
+    // skin-host's api.replies.use() reads GET, then emits this when the view reopens
+    // and the box has no replySummary yet. Do not add a default that overwrites its cache.
+    expect(await (await fetch(u)).json()).not.toHaveProperty('replySummary')
+    const replySummary = { on: true, start: 'expanded', length: 'paragraph' }
+    expect((await put(u, { replySummary })).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ ...stored, replySummary })
+    expect((await (await fetch(await start(d))).json()).replySummary).toEqual(replySummary)
+    expect((await put(u, { readyOrder: 'oldest' })).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ ...stored, readyOrder: 'oldest', replySummary })
+    expect(readFileSync(join(d, 'settings.json'), 'utf8')).toBe(settings)
+    for (const on of [false, true]) for (const start of ['collapsed', 'expanded']) for (const length of ['line', 'sentences', 'paragraph']) {
+      const next = { on, start, length }
+      expect((await put(u, { replySummary: next })).status).toBe(200)
+      expect((await (await fetch(u)).json()).replySummary).toEqual(next)
+    }
+    expect((await put(u, { replySummary: { on: false } })).status).toBe(200)
+    expect((await (await fetch(u)).json()).replySummary).toEqual({ on: false })
+  })
+  it('rejects malformed reply-summary fields atomically, without relaxing unknown-key validation', async () => {
+    const d = home(), file = join(d, 'ui-preferences.json'), u = await start(d)
+    expect((await put(u, { replySummary: { on: true, start: 'collapsed', length: 'sentences' }, compact: true })).status).toBe(200)
+    const before = readFileSync(file, 'utf8')
+    for (const replySummary of [null, [], true, {}, { on: 1 }, { on: 'true' }, { on: false, start: 'bad' },
+      { on: true, length: 'bad' }, { on: true, start: null }, { on: true, length: 140 },
+      { on: true, extra: true }, JSON.parse('{"on":true,"__proto__":{}}')]) {
+      expect((await put(u, { replySummary, compact: false })).status).toBe(400)
+      expect(readFileSync(file, 'utf8')).toBe(before)
+    }
+    expect((await put(u, { replySummary: { on: true }, unknown: true })).status).toBe(400)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  })
   it('validates strictly and never mutates on invalid payload', async () => {
     const u = await start(home())
     for (const value of [null, [], { extra: true }, { compact: 1 }, { archiveAfterDays: -1 }, { archiveAfterDays: '7' }, { readyOrder: 'bad' }, { chatLayout: 'bad' }, { chatLayout: true }, { subjectOrder: [1] }, { subjectOrder: ['a', 'a'] }, { pinnedChats: ['a', 'a'] }, { pinnedChats: ['<x>'] }, { pinnedChats: 'wizard_a' }, JSON.parse('{"__proto__":{}}')]) expect((await put(u, value)).status).toBe(400)
