@@ -78,6 +78,127 @@ Run the normal helper command with `--prepare-only` and its usual output directo
 6. Read back live release SHA, service health (legacy fields intact, max cap unchanged), plugin doctor and a **model-driven** `wizard_heavy_submit`. With one real remote job running and another queued, get a useful ordinary model answer; then verify originating continuation model locks, one logical receipt per job, steering/stop fencing and cancellation. Preserve evidence.
 7. Rollback only in a safe idle window. Disable new tool submissions first; retain all new durable tables/spools. Never delete or recycle job IDs. Rolling the service back removes automatic completion consumption, so the parent must explicitly own draining/recovery; it is not safe to erase evidence and rerun jobs.
 
+## Forum future-only per-run trimming (explicit opt-in)
+
+This is **not** a `/srv/work` cleaner. There is no directory discovery, age cutoff,
+weekly sweeper, adoption command, historical reconciliation, or startup cleanup.
+Every existing directory/job is outside its authority, including completed ones.
+A new worker alone reclaims **zero** old bytes. No changes to `~/wizard-local`,
+`~/.wizard-secure`, `AndroidBuilds` or `android-sdk` are authorized.
+
+### Preparation, ownership and retention
+
+Only on Linux with `WIZARD_HEAVY_HOST=forum`, an operator/producer can prepare a
+brand-new, single-submission run before staging input:
+
+```sh
+WIZARD_HEAVY_HOST=forum WIZARD_HEAVY_ROOT=/srv/work \
+  /usr/bin/python3 <candidate>/scripts/heavy-worker.py \
+  --root /srv/work/heavy/production/spool \
+  --lock /srv/work/heavy/production/worker.lock \
+  --prepare-run --run-purpose ephemeral --disposable build --disposable cache
+```
+
+Use the returned `path` as the native job's `cwd`. It is a new exclusive-created
+`/srv/work/heavy/managed-runs-v1/<random-id>` directory. Stage inputs only after
+preparation; never move an old directory into this namespace. The external
+`/srv/work/heavy/run-ownership-v1/<id>.json` binds device/inode/uid, the original
+lease inode, purpose, and selected slots. The in-run `run-manifest.json` is
+preserved evidence, **not** deletion authority. Native RPC admission binds the
+run to one exact job ID/spec; duplicate submission remains idempotent, but
+cross-job reuse, changed commands and cross-lane reuse are refused. This does not
+add fields to specs or alter existing receipt/spec hashes.
+
+- Preparation defaults to `--run-purpose retained`, with no disposable slots.
+  Nothing opts into disposal implicitly. Existing producers continue unchanged.
+- Weekly launches **must** use `--run-purpose weekly-launch` (always retained).
+  A `weekly-launch`, `weekly_launch` or `weekly/launch` argv token independently
+  vetoes trimming even if incorrectly declared ephemeral. There is no weekly
+  deletion timer. Launches cannot lose retention via a mutable in-run manifest.
+- To preserve the entire run, create `RETAIN` before completion. To preserve
+  specific outputs/subtrees, add relative paths to `retain.json`, e.g.
+  `{"paths":["build/published.o","cache/shared-output"]}`. Missing, invalid,
+  oversized or unreadable retention/reference evidence fails closed.
+- Treat ephemeral runs as private single-job storage. Before publishing links to
+  another job/external consumer, add their targets to `retain.json` (or use
+  `RETAIN`). Do not use an ephemeral run as a shared source/cache directory.
+
+### Exact deletion boundary
+
+Only regular single-link files **inside explicitly selected** `build`, `cache`
+or `tmp` slots, with suffix `.o`, `.obj`, `.class`, `.pyc`, `.pyo` or `.bc`, are
+candidates. This deliberately conservative initial allowlist does **not** remove
+source trees, arbitrary temp files, node modules, archives, packages, ISO/VM disks,
+unknown files or directories. Widening it requires a separate reviewed policy
+change, not an operator-supplied glob.
+
+Names containing result/evidence/manifest/receipt/submission/admission/preflight/
+log/screenshot/output/artifact/weekly-launch are excluded even with a bulk suffix.
+All JSON, logs, screenshots and other result/evidence files remain in place. Paths
+referenced by retained text/JSON/log evidence or the native worker stdout log are
+also excluded. Scans are bounded (100,000 regular files; 8 MiB per retained text
+file and 16 MiB total textual references); exceeding limits retains the run.
+
+Both heavy and light executors inherit a per-run shared lease in addition to the
+existing resource/execution locks. Trimming takes its exclusive nonblocking lease
+only after process-group lease release and durable terminal receipt creation.
+Any symlink, hardlink, special file, device crossing or mount (including same-device
+bind mounts) anywhere under the run blocks the whole pass. All unlink operations
+are rooted at the registered directory fd, use no-follow traversal, and recheck
+file identity/size/mtime. No recursive `rm`, directory removal or link following.
+
+A read-only root-aware probe uses exactly
+`/usr/bin/sudo -n -- /usr/bin/lsof -nP -F p +D <new-run>` to detect active cwd/fds/
+mapped executables, including root/container descendants. Only the trimming PID's
+own pinned descriptors are excluded. Missing sudo/lsof, diagnostics, timeout,
+unknown probe state or another process retains the run. **No sudoers or process
+permissions are changed by this feature.** Existing Forum noninteractive sudo
+availability must be independently reviewed; without it this safely retains.
+No discovered process is signalled. Cooperating queue users are fenced by the
+lease/single-job admission; arbitrary privileged processes that ignore leases
+remain outside this same-user housekeeping contract.
+
+A durable exclusive-created `<id>.<job-id>.trim-intent.json` records candidate
+identities before the first unlink; inability to persist it vetoes deletion.
+A separate exclusive-created `<id>.<job-id>.trim.json` records removed names,
+unlinked byte counts, skips and errors in the ownership registry. Those bytes
+are nominal unlinked file sizes, not claimed physical free-space recovery.
+The job result, exit code, receipt, log hashes and continuation semantics never
+change on cleanup failure. No retry after crash/skip; queued cancellations,
+ambiguous interrupted claims and historical terminal receipts are not swept.
+
+### Candidate verification and parent-owned rollout
+
+Run `python3 tests/heavy-worker-trim.unit.py` for tiny source-only safety fixtures.
+Full real-process regression and lifecycle proof is deliberately a **native light
+job**, not an SSH loop: `scripts/heavy-run-trim-canary.py --stage <new-stage>`.
+It verifies its staged source hashes, runs the unit, sandbox and existing worker
+regression suites, then exercises candidate heavy/light RPC lifecycles using
+isolated spools/locks under its own NEW `runtime/`. It checks success, exit-7
+failure, default/weekly retention, duplicate submission, linked evidence hashes,
+real escaped-process retention and post-exit idle certification. Logs, receipts,
+trim reports, manifests and `evidence/summary.json` all remain in that new stage.
+Nested heavy-labelled fixtures are tiny printing processes, not builds, and do
+not acquire/release the production shared lock. Parent must submit the sealed
+spec through `wizard_heavy_submit(host='forum', lane='light')`; staging alone is
+**not** queue/admission acceptance or production activation.
+
+1. Review candidate/manifest and independently read back every staged file hash.
+   Admit the returned real light canary; inspect all suite logs and summary.
+2. Stage **both** `heavy-worker.py` and its sibling `heavy-run-trim.py` in one
+   immutable release. Stage helper/canary sources as needed for evidence only.
+3. Parent, in an approved idle window, points the Forum RPC script setting and
+   Forum supervisor ExecStart to that exact same release. Preserve all spools,
+   locks, receipts and old immutable releases. Back up any changed local env/unit
+   files first. No Thales/plugin/core changes are needed. No activation is part
+   of this source PR. Existing detached jobs may finish with their old release.
+4. Read back both settings, live worker hash and service health. Only then allow
+   producers to call `--prepare-run`. Native production light-lane acceptance is
+   still required; an isolated candidate canary is not a production cutover.
+5. Rollback: stop preparing new ephemeral runs; revert only worker/RPC release
+   pointers in a safe window. Keep all ownership records, run data and spools.
+   Never delete old/new runs, replay IDs or sweep retained/skipped work.
+
 ## Verification commands
 
 The lightweight worker regression fixtures run on macOS or Linux with temporary roots (no builds). For sustained suites, use the configured build host with external-storage `TMPDIR` and the worker toolchain on `PATH`:
