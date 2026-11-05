@@ -42,10 +42,19 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   const row = { ...session }
   delete row.wizard_background
   if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
-  // A queued/running controller or a live turn lease owns execution. A notice's
-  // status line (or an earlier unanswered ask) may classify the thread only once
-  // that turn ends. Helper-only work keeps its existing Ready-with-an-ask policy.
-  if (inFlight || row.wizard_run_id && ['submitting', 'accepted', 'queued', 'started', 'running', 'unknown'].includes(row.status)) return row
+  // A live lease also owns execution when no API run has been admitted.
+  if (inFlight && !row.wizard_run_id && row.status !== 'queued') return row
+  // Admitted owner input can still be outside history. Keep the live release's
+  // own-reply attention policy, while every controller ingress/status wins over
+  // notice/helper classification until its real terminal receipt.
+  if (row.status === 'queued' || row.wizard_run_id && ['submitting', 'accepted', 'started', 'running', 'unknown'].includes(row.status)) {
+    const since = row.status === 'queued' ? Infinity : replyEpoch(row.wizard_assigned_at)
+    const own = resolveThreadSection({ replies: (replies ?? []).filter((reply) => replyEpoch(reply.timestamp) >= since), lastUserAt })
+    if (own.attention) row.wizard_attention = own.attention
+    else delete row.wizard_attention
+    if (row.wizard_waiting_on === 'helper') delete row.wizard_waiting_on
+    return row
+  }
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {
