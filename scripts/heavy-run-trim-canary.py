@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -39,15 +40,27 @@ def load(name, path):
 
 
 def main():
+    sys.dont_write_bytecode = True
     parser = argparse.ArgumentParser(); parser.add_argument('--stage', required=True, type=Path)
-    stage = parser.parse_args().stage.resolve(strict=True)
+    parser.add_argument('--manifest-sha256', required=True)
+    args = parser.parse_args()
+    stage = args.stage.resolve(strict=True)
     source = Path(__file__).resolve().parents[1]
     if os.environ.get('WIZARD_WORKER_LANE') != 'light':
         raise SystemExit('native light-lane admission required')
     os.fstat(int(os.environ['WIZARD_HEAVY_LOCK_FD']))
-    manifest = json.loads((stage / 'staged-hashes.json').read_text())
-    for name, digest in manifest['files'].items():
-        assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, name
+    manifest_path = stage / 'staged-hashes.json'
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == args.manifest_sha256
+    manifest = json.loads(manifest_path.read_text())
+    def source_guard():
+        actual = {str(p.relative_to(source)) for p in source.rglob('*') if p.is_file() or p.is_symlink()}
+        assert actual == set(manifest['files']), 'complete staged source membership'
+        for name, wanted in manifest['files'].items():
+            path = source / name
+            assert not path.is_symlink() and path.is_file(), name
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == wanted, name
+            assert stat.S_IMODE(path.stat().st_mode) == manifest['modes'][name], name
+    source_guard()
     runtime = stage / 'runtime'; runtime.mkdir(mode=0o700, exist_ok=False)
     evidence = stage / 'evidence'; evidence.mkdir(mode=0o700, exist_ok=False)
     scratch = runtime / 'test-tmp'; scratch.mkdir()
@@ -202,6 +215,8 @@ def main():
                'shared_reports': shared_reports, 'busy_report': busy_report,
                'synthetic_legacy_sha256': legacy_before, 'production_activation': False,
                'existing_stage_trimmed': False, 'native_admission': 'light', 'passed': True}
+    source_guard()
+    summary['source_integrity_before_after'] = True
     (evidence / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, sort_keys=True), flush=True)
 
