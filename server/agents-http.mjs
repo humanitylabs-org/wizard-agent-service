@@ -678,6 +678,11 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     delete value.delegation_delivery
     delete value.response_rendering
   }
+  // Quote reply: the agent reads, in plain words, which message and ask the owner is answering.
+  if (method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) && ctx.expandReplyTo && JSON.stringify(value.input ?? '').includes('WIZARD_REPLY_TO_V1')) {
+    const thread = typeof value.session_id === 'string' ? value.session_id : (registry.runThread?.(agent.id, upstreamPath.split('/')[3])?.session_id || '')
+    value = { ...value, input: ctx.expandReplyTo(agent.id, thread, value.input) }
+  }
   if (method === 'POST' && upstreamPath === '/api/sessions') {
     const sessionId = typeof (value.id ?? value.session_id) === 'string' ? (value.id ?? value.session_id) : ''
     if (sessionId) claim(sessionId)
@@ -834,6 +839,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
+    if (messageHistory) ctx.ingestThreadItems?.(agent.id, sessionIdFromPath(upstreamPath), result)
     // The scheduler's own internal read of a notification run keeps [SILENT]-ending output intact, as on main.
     if (messageHistory || (!rawRunRead && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath))) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)

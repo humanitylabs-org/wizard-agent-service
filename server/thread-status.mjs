@@ -16,6 +16,7 @@ import { TITLE_INSTRUCTIONS, normalizeTitle } from './thread-titles.mjs'
 import { SUBJECT_RULE } from './thread-subjects.mjs'
 import { normalizeAppId, metadataAppId } from './thread-app-provenance.mjs'
 import { normalizeSpaceId, SPACE_INSTRUCTIONS } from './thread-spaces.mjs'
+import { normalizeItems } from './thread-items.mjs'
 
 export const STATUS_STATES = new Set(['needs_you', 'check', 'done', 'fyi'])
 const MARKER = /\[WIZARD_STATUS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_STATUS_V1\]/giu
@@ -63,7 +64,8 @@ export function normalizeStatus(value) {
   const subject = clip(value.subject ?? value.project, 40)
   const title = normalizeTitle(value.title)
   const appId = normalizeAppId(value.app_id)
-  return { state: mapped, ask, ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}) }
+  const items = normalizeItems(value.items)
+  return { state: mapped, ask, ...(items.length ? { items } : {}), ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}) }
 }
 
 // The last status marker in a reply, or null.
