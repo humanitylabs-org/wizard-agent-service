@@ -42,9 +42,29 @@ class SourceTest(unittest.TestCase):
             self.assertIsNone(source.resolve([c]))
 
     def test_unsafe_bind_source_refused(self):
-        for path in ('/', '/claude', '/srv/../claude', 'relative/claude', '/srv/data/claude/.credentials.json'):
+        for path in ('/', '/claude', '/srv/../claude', 'relative/claude', '/srv/data/claude/.credentials.json',
+                     '/.claude', '/home/.claude', '/srv/user/.claude/../x', '/srv/user/claude.d', '/srv/user/.claude2'):
             c = engine('bind'); c['Mounts'][0]['Source'] = path
             self.assertIsNone(source.resolve([c]))
+
+    def test_host_user_claude_dir_bind_accepted(self):
+        c = engine('bind'); c['Mounts'][0]['Source'] = '/srv/fixture-user/.claude'
+        before = copy.deepcopy(c)
+        resolved = source.resolve([c])
+        self.assertEqual(resolved, {'type': 'bind', 'source': '/srv/fixture-user/.claude'})
+        mount = source.compose_override(resolved)['services']['claude-init']['volumes'][0]
+        self.assertTrue(mount['read_only']); self.assertFalse(mount['bind']['create_host_path'])
+        self.assertEqual(c, before)
+
+    def test_host_login_requires_the_same_running_engine_and_exact_mount(self):
+        for change in ('stopped', 'label', 'dest', 'extra', 'ambiguous'):
+            c = engine('bind'); c['Mounts'][0]['Source'] = '/srv/fixture-user/.claude'
+            if change == 'stopped': c['State']['Running'] = False
+            if change == 'label': c['Config']['Labels']['com.docker.compose.service'] = 'other-app'
+            if change == 'dest': c['Mounts'][0]['Destination'] = '/elsewhere'
+            if change == 'extra': c['Mounts'] *= 2
+            with self.subTest(change=change):
+                self.assertIsNone(source.resolve([c, copy.deepcopy(c)] if change == 'ambiguous' else [c]))
 
 
 if __name__ == '__main__': unittest.main()
