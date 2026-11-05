@@ -17,7 +17,7 @@ spec.loader.exec_module(m)
 r = m.r
 
 
-def run(root, planpath, controller):
+def run(root, planpath, controller, lease_wait_seconds=0):
     r.protect()
     state = json.loads((root / 'filter-activation.json').read_bytes())
     state.update(status='rotation_in_progress', rotation_plan=str(planpath), rotation_controller=str(controller),
@@ -34,6 +34,33 @@ def run(root, planpath, controller):
         current = r.snapshot()
         r.require(current['release'] == plan['before']['release'] and current['revision'] == plan['before']['revision'], 'artifact_drift')
         r.require(r.hashfile(r.PROOF) == plan['old_sha256'], 'producer_drift')
+        if lease_wait_seconds:
+            r.require(0 < lease_wait_seconds <= 600, 'invalid_lease_wait_budget')
+            ownerpath = r.HOME / '.hermes/state/locks/state-db-maintenance-owner.json'
+            owner = json.loads(ownerpath.read_bytes()) if ownerpath.exists() else {}
+            state.update(status='waiting_for_host_lease', lease_wait_seconds=lease_wait_seconds,
+                         blocking_maintenance={k: owner.get(k) for k in ['operation', 'pid', 'ppid', 'started_at_utc']})
+            r.write_json(root / 'result.json', state)
+            # The canonical helper bounds the wait and briefly acquires/releases
+            # the actual OS lock. Never bypass or recursively hold the lease.
+            r.cmd([sys.executable, r.SCRIPTS / 'hermes_state_maintenance_lock.py', 'probe',
+                   '--timeout-seconds', str(lease_wait_seconds)], timeout=lease_wait_seconds + 10)
+            now = r.snapshot()
+            for key in ['release', 'revision', 'service', 'source_hashes', 'apps_count',
+                        'apps_rows_sha256', 'settings_sha256', 'base_url', 'units']:
+                r.require(now[key] == plan['before'][key], 'post_lease_scope_drift_' + key)
+            r.require(now['keeper']['pid'] == plan['before']['keeper']['pid'], 'post_lease_keeper_drift')
+            r.require(now['containers']['wizard-agent-service'] == plan['before']['containers']['wizard-agent-service'],
+                      'post_lease_service_container_drift')
+            state['sibling_container_changes_during_wait'] = [k for k in
+                now['containers'].keys() | plan['before']['containers'].keys()
+                if now['containers'].get(k) != plan['before']['containers'].get(k)]
+            r.cmd([sys.executable, controller, 'prepare', '--plan', planpath])
+            r.cmd([sys.executable, controller, 'check', '--plan', planpath], timeout=60)
+            plan = json.loads(planpath.read_bytes())
+            state.update(status='rotation_in_progress', rotation_started_unix=time.time(),
+                         fresh_plan_sha256=r.hashfile(planpath))
+            r.write_json(root / 'result.json', state)
         result = subprocess.run([sys.executable, str(controller), 'apply', '--plan', str(planpath)], capture_output=True, timeout=550)
         state['controller_returncode'] = result.returncode
         state['controller_stdout_sha256'] = r.sha(result.stdout)
@@ -111,8 +138,9 @@ def main():
     p.add_argument('--plan', type=Path, required=True)
     p.add_argument('--controller', type=Path, required=True)
     p.add_argument('--audited-scoped-apply', action='store_true', required=True)
+    p.add_argument('--lease-wait-seconds', type=int, default=0)
     a = p.parse_args()
-    return run(a.root, a.plan, a.controller)
+    return run(a.root, a.plan, a.controller, a.lease_wait_seconds)
 
 
 if __name__ == '__main__':
