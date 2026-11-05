@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "in-flight-notice",
+      "description": "Controller and live-lease execution outrank out-of-band notice attention while queued or steered owner messages arrive; notices can classify Ready only after the run ends.",
+      "layer": "server",
+      "fixture": "in-flight-notice",
+      "how_to_test": "Exercise full and slim HTTP lists for main, host-profile, container and restricted Unix ingress, with an admitted synthetic run, heavy background work, needs_you notice, owner message queued outside history then persisted steer, another notice and a real terminal receipt. No live owner writes, provider or browser proof.",
+      "source_refs": ["server/service.mjs", "server/open-ask.mjs"],
+      "reference_tests": ["tests/in-flight-notice.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "coalesced-owner-history",
       "description": "Owner text, recording chips and inline multipart media survive history projection when Hermes coalesces them after a helper completion, before the matching reply; helper material stays hidden.",
       "layer": "server",
@@ -1452,6 +1462,23 @@
       ],
       "fixture": "bring-my-data",
       "policy_exemptions": []
+    },
+    {
+        "id": "thread-tracker",
+        "description": "With the owner's Thread tracker tweak on, a reply's separate asks are recorded per thread (status line only, never shown in the transcript) and counted for the Chats dots, Seen marks persist, and a quote reply tells the agent which message and ask it answers. With the tweak off the ledger answers empty, nothing is recorded and the quote reaches the agent unchanged. Routed runs that finish while the thread is closed are ingested from their run read.",
+        "layer": "server",
+        "fixture": "thread-tracker",
+        "how_to_test": "For each runtime kind, read a transcript whose assistant reply carries an items status line with the tweak on: assert no items text in history, counts, item list anchored to the reply row, Seen persists, and the run body the runtime receives carries the plain reply-to sentence. Then in a second scene with the tweak off: empty counts and items, Seen is a no-op, and the quote is forwarded unchanged. Synthetic HTTP fixture evidence only, not live runtime, browser or physical-phone proof.",
+        "source_refs": [
+            "server/thread-items.mjs",
+            "server/service.mjs",
+            "server/agents-http.mjs"
+        ],
+        "reference_tests": [
+            "qa/agent-parity/tracker-checks.mjs",
+            "tests/thread-items.test.ts"
+        ],
+        "policy_exemptions": []
     }
   ]
 }

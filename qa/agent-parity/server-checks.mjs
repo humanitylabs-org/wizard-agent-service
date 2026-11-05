@@ -48,6 +48,38 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'in-flight-notice': async outer => {
+    const path = join(outer.root, 'in-flight-heavy.db')
+    const s = await scene(outer.kind, { heavyStatePath: path, heavyToken: 'synthetic-in-flight-notice-token', heavyPollIntervalMs: 3_600_000,
+      heavyTransport: async () => { throw Error('synthetic fixture never contacts workers') } })
+    const db = new DatabaseSync(path), sid = 'wizard_parity', now = Date.now() / 1000
+    try {
+      s.sessions.set(sid, { id: sid, source: 'wizard-mobile', title: 'Synthetic · Notice', created_at: now - 3000, messages: [] })
+      const admitted = await s.request('/v1/runs', post({ session_id: sid, input: 'Synthetic long tool request' }))
+      assert.equal(admitted.status, 202)
+      const id = (await admitted.json()).run_id
+      db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run('notice_work', sid, 'synthetic', 'notice_key', 'hash', JSON.stringify({ job_id: 'notice_work', sessionId: sid, agent_id: s.id, state: 'running', created_at: Date.now() }), s.id)
+      const row = s.sessions.get(sid)
+      const notice = at => ({ role: 'assistant', timestamp: at, content: 'Synthetic update notice\n[WIZARD_STATUS_V1]{"state":"needs_you","ask":"Restart the update in Console","subject":"Parity QA"}[/WIZARD_STATUS_V1]' })
+      row.messages.push(notice(now + 10))
+      const check = async active => {
+        for (const query of ['?limit=100', '?view=list&window=archive-50']) {
+          const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+          const listed = (await r.json()).data.find(x => x.id === sid)
+          assert.equal(ACTIVE.has(listed.status), active, JSON.stringify(listed))
+          if (active) { assert.ok(listed.runId || listed.wizard_run_id); assert.equal(listed.background ?? listed.wizard_background, undefined) }
+        }
+      }
+      await check(true) // queued owner message has not landed in transcript yet
+      row.messages.push({ role: 'user', content: 'Synthetic message during the live tool', display_kind: 'steer', timestamp: now + 20 })
+      await check(true)
+      row.messages.push(notice(now + 30)); await check(true)
+      const run = [...s.runs.values()].at(-1)
+      Object.assign(run, { status: 'completed', output: 'Synthetic finished reply', updated_at: now + 40 })
+      const ended = await s.request('/v1/runs/' + id); assert.equal((await ended.json()).status, 'completed')
+      await check(false)
+    } finally { db.close(); await s.close() }
+  },
   'coalesced-owner-history': async s => {
     const row = s.sessions.get('wizard_parity')
     const human = 'Synthetic voice report: focus moved but the dialog stayed closed.'
