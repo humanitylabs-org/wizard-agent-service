@@ -204,8 +204,10 @@ describe('Wizard proxy capacity queue', () => {
       .run('wizard_two', 'The exact latest turn is complete.', secondStartedAt + 30)
     completedState.close()
     const staleProjection = await request(origin, '/wizard/hermes/api/sessions?limit=20&offset=0&include_children=false')
-    expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.status).toBeUndefined()
-    expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.wizard_run_id).toBeUndefined()
+    // A final-looking transcript row is not the controller's terminal receipt.
+    // Notices and streamed replies can arrive before the API run has ended.
+    expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.status).toBe('running')
+    expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_two')?.wizard_run_id).toBe(second.json.run_id)
     expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_one')?.status).toBe('running')
     expect(staleProjection.json.data.find((item: { id: string }) => item.id === 'wizard_three')?.status).toBe('queued')
 
