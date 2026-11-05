@@ -1472,6 +1472,25 @@ export function historyQuestion(args, content) {
   return text ? { text, choices: historyQuestionChoices(first.choices), state: 'waiting' } : null
 }
 
+// Hermes can coalesce a completed helper notification and the next owner send into
+// one user row. The helper's final transcript footer is its structural boundary;
+// never discard the owner tail merely because the row starts with an internal marker.
+function ownerTailAfterDelegation(message) {
+  if ((message?.role ?? message?.author) !== 'user') return message
+  const text = runContextText(message.content ?? '')
+  if (!text.trimStart().startsWith('[ASYNC DELEGATION BATCH COMPLETE')) return message
+  const headers = [...text.matchAll(/^--- [✓✗] TASK (\d+)\/(\d+):[^\n]*\(status=[^\n]+\) ---$/gm)]
+  const last = headers.at(-1)
+  if (!last || last[1] !== last[2]) return message
+  const footers = [...text.matchAll(/^Full live transcript \(complete tool\/assistant trace\): [^\r\n]+\r?\n\r?\n/gm)]
+  const footer = footers.at(-1)
+  if (!footer || footer.index < last.index + last[0].length) return message
+  const tail = text.slice(footer.index + footer[0].length).trim()
+  if (!tail || legacyInternalHistoryMessage({ role: 'user', content: tail }) || /^--- [✓✗] TASK /m.test(tail)) return message
+  // Display-only: stored content and provider input remain byte-for-byte intact.
+  return { ...message, content: tail, display_content: tail, display_kind: null }
+}
+
 export function projectWizardMessageHistory(result, sourceResult = result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
@@ -1491,7 +1510,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     const role = message.role ?? message.author
     if (typeof role !== 'string') return message
     const projected = {}
-    for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id']) {
+    for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id', 'client_message_id', 'wizard_client_message_id']) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
     }
     const runContext = historyRunContext(sourceMessage)
@@ -1564,7 +1583,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
       const seen = new Set()
-      const sourceOf = (item, index) => source?.[index] ?? item
+      const sourceOf = (item, index) => ownerTailAfterDelegation(source?.[index] ?? item)
       const firstByKey = new Map()
       value.forEach((item, index) => {
         const key = replayKey(sourceOf(item, index))
@@ -1579,6 +1598,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
+        item = ownerTailAfterDelegation(item)
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
@@ -1604,6 +1624,8 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       })
     }
     if (!value || typeof value !== 'object') return value
+    value = ownerTailAfterDelegation(value)
+    source = ownerTailAfterDelegation(source)
     if (legacyInternalHistoryMessage(value) && !historyRunContext(source)) return null
     if (typeof (value.role ?? value.author) === 'string') return slimMessage(value, source)
     const projected = { ...value }
