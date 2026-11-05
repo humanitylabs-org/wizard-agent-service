@@ -42,6 +42,14 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   const row = { ...session }
   delete row.wizard_background
   if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
+  // Admitted owner input can still be in the queue, absent from lastUserAt.
+  // A transcript ask cannot finish a real run. Helper-only synthetic running
+  // rows have no run id and must still yield to an owner gate below.
+  if (row.status === 'queued' || row.wizard_run_id && ['accepted', 'running', 'unknown'].includes(row.status)) {
+    delete row.wizard_attention
+    if (row.wizard_waiting_on === 'helper') delete row.wizard_waiting_on
+    return row
+  }
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {
