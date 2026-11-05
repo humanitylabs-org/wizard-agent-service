@@ -68,6 +68,36 @@ claiming containment. `plan.json`/`preflight.json`/`readback.json` are hash/stat
 artifacts only. The encrypted recovery file is outside the source checkout under
 `~/.hermes/secure/owner-proof-rotation/`; never commit a live recovery artifact.
 
+## Single passive continuation behind a real encrypted backup
+
+REUSE the restart reporter and unchanged `run_security_rotation.py` wrapper. When
+an encrypted backup owns the canonical maintenance lease, use
+`wait_security_rotation.py` once through the reporter with a 3600-second passive
+wait and a 5400-second reporter command budget. Pin the actual `/proc/locks`
+non-waiting holder PID, `/proc/<pid>/stat` start ticks and boot ID. Owner JSON is
+only diagnostic. A free canonical probe skips irrelevant/stale process metadata.
+The waiter opens a Linux pidfd, validates that identity, and makes one bounded
+kernel poll; no repeated timer restart attempts, backup signal, lease bypass or
+recursive lease ownership is allowed. Its singleton result is
+`security-activation/lease-release-continuation.json`; an existing result refuses
+a duplicate continuation.
+
+On the exact process exit it uses the supported maintenance probe (600 seconds
+maximum), releases that probe's lease, freshly prepares/checks the live plan, and
+calls the existing protected wrapper once with no nested lease wait. Current
+Service artifacts, app rows, containers, devices boundary and source/config
+hashes remain guarded by the existing controller. PID reuse, wrong holder,
+timeout, moved scripts or any live CAS drift fails closed. The waiter does not
+edit gateway/app metadata or restore an earlier world.
+
+The reporter posts a terminal message but does not resume an agent. Install one
+native `wizard_schedule` run in the original owning thread after the reporter's
+command + verification deadline; read back that exact schedule to confirm its
+thread and next run. Its only initial work is consuming the exact continuation,
+rotation and reporter receipts through allowlisted fields. Never treat a healthy
+reporter or timeout as completed containment, and never create an unchanged retry
+loop. The old-proof 403 and coordinated new-owner 200 remain mandatory.
+
 Tests:
 
 ```sh
