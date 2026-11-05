@@ -409,7 +409,7 @@ export function createAgentBridge({
   const shared = sharedAgentTools(agents, log)
   let mtime = null
   let apps = []
-  const toolCache = new Map() // app id -> { tools, at }
+  const toolCache = new Map() // app id + agent id -> { tools, at }
   const clients = new Map()
   const sessions = new Map() // session id -> { streams: Set<response> }
 
@@ -455,21 +455,27 @@ export function createAgentBridge({
     return c
   }
 
-  async function appTools(app) {
-    const cached = toolCache.get(app.id)
+  // One list per app and agent: an app holding the gateway's key is told which agent is asking (the same agent
+  // headers as tools/call), so it can list only the tools that agent's level allows (Mail/Google/Microsoft per-agent
+  // mail levels). Apps without a key get no agent headers and answer once for everyone, as before.
+  async function appTools(app, agentId = GATEWAY_MAIN_AGENT) {
+    const keyed = Boolean(gatewayGrants.key(app.id))
+    const slot = keyed ? `${app.id}\n${agentId}` : app.id
+    const cached = toolCache.get(slot)
     if (cached && Date.now() - cached.at < 60_000) return cached.tools
     if (app.status !== 'running') return cached?.tools ?? []
     try {
-      const result = await client(app).request('tools/list', {})
+      const result = await client(app).request('tools/list', {}, keyed ? agentHeaders(agentId) : {})
       const tools = (Array.isArray(result?.tools) ? result.tools : []).filter((t) => typeof t?.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(t.name))
-      toolCache.set(app.id, { tools, at: Date.now() })
+      toolCache.set(slot, { tools, at: Date.now() })
       return tools
     } catch (error) {
       log(`tools/list ${app.id} failed: ${clean(error?.message, 120)}`)
-      toolCache.set(app.id, { tools: cached?.tools ?? [], at: Date.now() - 50_000 }) // retry in ~10 s
+      toolCache.set(slot, { tools: cached?.tools ?? [], at: Date.now() - 50_000 }) // retry in ~10 s
       return cached?.tools ?? []
     }
   }
+  const agentHeaders = (agentId) => ({ 'X-Wizard-Agent': agentId, 'X-Wizard-Agent-Label': encodeURIComponent(agentLabel(agentId)) })
 
   /** The apps one agent may use (#58). */
   const visible = (agentId = GATEWAY_MAIN_AGENT) => {
@@ -485,9 +491,9 @@ export function createAgentBridge({
     return clean(label, 60) || 'This agent'
   }
 
-  async function collectNames(list = apps) {
+  async function collectNames(list = apps, agentId = GATEWAY_MAIN_AGENT) {
     const out = {}
-    await Promise.all(list.map(async (app) => { out[app.id] = (await appTools(app)).map((t) => t.name) }))
+    await Promise.all(list.map(async (app) => { out[app.id] = (await appTools(app, agentId)).map((t) => t.name) }))
     return out
   }
 
@@ -500,7 +506,7 @@ export function createAgentBridge({
 
   async function toolNames(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
-    return collectNames(visible(agentId))
+    return collectNames(visible(agentId), agentId)
   }
 
   function metaTool() {
@@ -514,7 +520,7 @@ export function createAgentBridge({
   async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     refresh()
     const out = [metaTool(), ...(builtins?.list?.(agentId) || []), ...shared.list()]
-    const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app)]))
+    const lists = await Promise.all(visible(agentId).map(async (app) => [app, await appTools(app, agentId)]))
     for (const [app, tools] of lists) {
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
       for (const t of tools) {
@@ -572,7 +578,7 @@ export function createAgentBridge({
       c.timeoutMs = callTimeoutMs
       try {
         result = await c.request('tools/call', { name: tool, arguments: args && typeof args === 'object' ? args : {} },
-          { 'X-Wizard-Agent': agentId, 'X-Wizard-Agent-Label': encodeURIComponent(agentLabel(agentId)) })
+          agentHeaders(agentId))
         ok = !result?.isError
       } catch (error) {
         const reason = error?.rpc ? clean(error.message, 200) : error?.name === 'AbortError' ? 'it did not answer in time' : 'it is not reachable'
