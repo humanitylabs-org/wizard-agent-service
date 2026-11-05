@@ -7,12 +7,18 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { scene, kinds } from '../qa/agent-parity/fixture.mjs'
+import { serverChecks } from '../qa/agent-parity/server-checks.mjs'
 const source = process.env.WIZARD_SERVICE_ROOT || new URL('../', import.meta.url).pathname
 const { projectOpenAskSession } = await import(pathToFileURL(join(source, 'server/open-ask.mjs')))
 const { createWizardServer, listen } = await import(pathToFileURL(join(source, 'server/service.mjs')))
 const ask = { state: 'needs_you', ask: 'An update is waiting. Restart it in Console' }
 const replies = [{ timestamp: 20, status: ask }]
-for (const status of ['submitting', 'queued', 'running']) test(`${status} controller beats an injected ask, but helper-only ask returns after terminal`, () => {
+for (const kind of kinds) test(`${kind}: in-flight notice precedence through real synthetic HTTP routes`, async () => {
+  const s = await scene(kind)
+  try { await serverChecks['in-flight-notice'](s) } finally { await s.close() }
+})
+for (const status of ['submitting', 'accepted', 'queued', 'started', 'running', 'unknown']) test(`${status} controller beats an injected ask, but helper-only ask returns after terminal`, () => {
   const row = projectOpenAskSession({ id: 'synthetic', status, wizard_run_id: 'run_fixture' }, { replies, lastUserAt: 10, background: 'helper' })
   assert.equal(row.status, status)
   assert.equal(row.wizard_background, undefined)

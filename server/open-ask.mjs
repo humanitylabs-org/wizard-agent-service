@@ -45,7 +45,7 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   // A queued/running controller or a live turn lease owns execution. A notice's
   // status line (or an earlier unanswered ask) may classify the thread only once
   // that turn ends. Helper-only work keeps its existing Ready-with-an-ask policy.
-  if (inFlight || row.wizard_run_id && ['submitting', 'queued', 'running'].includes(row.status)) return row
+  if (inFlight || row.wizard_run_id && ['submitting', 'accepted', 'queued', 'started', 'running', 'unknown'].includes(row.status)) return row
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {
