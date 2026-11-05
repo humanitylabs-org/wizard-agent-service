@@ -680,7 +680,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   }
   // Quote reply: the agent reads, in plain words, which message and ask the owner is answering.
   if (method === 'POST' && (upstreamPath === '/v1/runs' || /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) && ctx.expandReplyTo && JSON.stringify(value.input ?? '').includes('WIZARD_REPLY_TO_V1')) {
-    const thread = typeof value.session_id === 'string' ? value.session_id : (registry.runThread?.(agent.id, upstreamPath.split('/')[3])?.session_id || '')
+    const thread = typeof value.session_id === 'string' ? value.session_id : ''
     value = { ...value, input: ctx.expandReplyTo(agent.id, thread, value.input) }
   }
   if (method === 'POST' && upstreamPath === '/api/sessions') {
