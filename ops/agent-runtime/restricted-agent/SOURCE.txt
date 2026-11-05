@@ -7,7 +7,7 @@ Unix-socket adaptation was moved upstream first (39ff02c); no local adaptation.
 Claude login source is the installed app metadata, never a per-agent token.
 
 d729485b96907164e572c124175b967166343ca3ba4f2526951bee0a472b5bca  ./README.md
-1702402aeffded2eed608333f9fbf98efdf90d8dcd6ec80fa72e562fbca5d149  ./claude_source.py
+b6696dd078781543e3e4e3f51f0d9a005684db6b088ff806082d3bfee2666b11  ./claude_source.py
 b52f7f19a17f9f09c5dc3575d163af2abb34147360f57f1bfe3fe3b9bc97b79a  ./compose.claude-login.yml
 989e0dd27b2a1b238e95d14b226e2997a188630e4ccc67899eb32e6b7d736fe9  ./compose.yml
 d616a06277c6f939581659bb8653c2a9c76136d2a1ed89a75adaf8e940081f57  ./conformance/Dockerfile
@@ -29,7 +29,7 @@ d3c85c842f2399f773c246996bb8dc1de7132207fdb494426a76bfd36e5dda74  ./conformance/
 3646dd271d93fd5f4c7a27c5c5b8b420c6fbb49d405ed2a9bde4c3d82b586c3d  ./conformance/summarize.py
 34a5df44c9366268e902ad4a4836c01ae5b1a14864d79631c759a3ebaaf8efb2  ./conformance/test_claude_login.py
 0830c3eb81b014964b616fa96c559832bf44cb2ba98786a853331a7e02faa07a  ./conformance/test_claude_seed.py
-b1ea4c5ecd1a72cbb83a7a310d2c4be01784c7c61058c66b0271d75c7ce89208  ./conformance/test_claude_source.py
+922d95cd33b9972c28974a39a53deada87d0e11678720e325f68e1edb7357601  ./conformance/test_claude_source.py
 ef85810cc21cf47dd5689e16c53b5801651f385aec5c98b2374f3b68a94b96ff  ./conformance/test_edge_heavy.py
 edc731730daffd878838d9f33b23fdb4a9547134680ba35a3970f7e8f979ba26  ./conformance/test_passthrough.py
 67a67ddd0243ad8fe5944ffb9e55a182f7ef11ba70aceb5acd919e67110303ff  ./passthrough.py

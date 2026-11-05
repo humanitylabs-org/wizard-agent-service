@@ -42,9 +42,18 @@ class SourceTest(unittest.TestCase):
             self.assertIsNone(source.resolve([c]))
 
     def test_unsafe_bind_source_refused(self):
-        for path in ('/', '/claude', '/srv/../claude', 'relative/claude', '/srv/data/claude/.credentials.json'):
+        for path in ('/', '/claude', '/srv/../claude', 'relative/claude', '/srv/data/claude/.credentials.json',
+                     '/.claude', '/home/.claude', '/home/u/.claude/../x', '/home/u/claude.d', '/home/u/.claude2'):
             c = engine('bind'); c['Mounts'][0]['Source'] = path
             self.assertIsNone(source.resolve([c]))
+
+    def test_host_user_claude_dir_bind_accepted(self):
+        # The Claude app on a host install binds the owner's own Claude Code login dir (/home/<user>/.claude).
+        c = engine('bind'); c['Mounts'][0]['Source'] = '/home/oscar/.claude'
+        resolved = source.resolve([c])
+        self.assertEqual(resolved, {'type': 'bind', 'source': '/home/oscar/.claude'})
+        mount = source.compose_override(resolved)['services']['claude-init']['volumes'][0]
+        self.assertTrue(mount['read_only']); self.assertFalse(mount['bind']['create_host_path'])
 
 
 if __name__ == '__main__': unittest.main()
