@@ -50,7 +50,7 @@ export const trackerChecks = {
     assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
     let doneCounts
     for (let i = 0; i < 40; i++) { doneCounts = (await counts(s))[`${s.id || 'hermes'}/wizard_done`]; if (doneCounts) break; await new Promise(r => setTimeout(r, 25)) }
-    assert.equal(doneCounts?.total, 2, 'a completed run is counted without opening its thread')
+    assert.equal(doneCounts?.total, 1, 'a completed reply counts once without opening its thread')
     const off = await scene(s.kind, { threadTracker: false })
     try {
       await prime(off)
