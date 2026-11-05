@@ -1,6 +1,6 @@
 # Agents working on wizard-agent-service
 
-The Wizard Agent Service is the back end that every Wizard front end talks to. It sits in front of a stock Hermes Agent and owns threads, runs and steers, files, read state, voice recovery and AI usage. It reaches Hermes only through Hermes's API server and a read-only `state.db`. Read the team rules below before you start.
+The Wizard Agent Service is the back end that every Wizard front end talks to. It sits in front of a stock Hermes Agent and owns threads, runs and steers, files, read state, voice recovery and AI usage. It reaches Hermes only through Hermes's API server and a read-only `state.db`. **Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) first** (layout, tests, required CI checks and how to reproduce them, the `Reuse:` PR block, chat-parity rules, how a change reaches users), then the [Team workflow](#team-workflow) and the team rules below.
 
 ## Machine-specific configuration
 
@@ -24,6 +24,19 @@ Historical evidence/receipt paths are explicitly exempt, not executable examples
 - **Hermes stays stock.** If a feature seems to need a Hermes change, build it here or as a Hermes plugin under `hermes-plugin/`.
 - **Publishing:** merging to `main` triggers the **publish-image** workflow, which publishes the public image. Confirm the run succeeded. Live boxes run `main`.
 - **Real conversation content** never goes into fixtures, tests or PR text. Use synthetic threads.
+
+## Team workflow
+
+Agreed 5 Nov 2026 and being rolled out by Miguel; tracking issue: [wizard-ux#887](https://github.com/humanitylabs-org/wizard-ux/issues/887). This is agreed policy, not a claim that every label, switch or release job already enforces it. Where it disagrees with the older "Wizard OS team rules" block below (self-merging fixes, `needs: ... review` gating, `preview only`, developer-mode branches on a box), **this section wins**. The rest of that block (branch naming, PR body, cross-repo order, safety) still applies.
+
+- **Humans file issues, agents write PRs.** Every PR links an issue. If none exists, the agent files one from the human's request.
+- **Two issue kinds.** *Goals* are big and closable with a done-list; only humans open and close them; there is no permanent catch-all Goal. *Bugs* are small: a core-team human's bug is accepted; outside reports and agent-drafted issues wait for a human yes. Bugs need no parent Goal.
+- **Priority:** labels P1–P3 (older `priority: 1/2/3` labels are the same levels). Agents take P1 first. Triage is weekly and async.
+- **`main` is the only truth.** Everyone's box runs plain `main` (**Latest**). Users get a **Stable** release cut from approved work after a soak. A breaking or data-loss fix is labelled `hotfix` and skips the soak once tests pass.
+- **New features ship behind off-by-default switches** (the existing Look switches). A "works" from a human who did not build the feature makes it the default and removes the switch. A big redesign that cannot be switched gets a temporary preview link, never a device branch.
+- **Review:** a non-author agent reviews "is it safe and sound" and merges the same day. **Authors never merge their own PRs.** Never change branch protection, settings, boxes or deployments as part of a change.
+- A single company implementer agent is being trialled; until then the existing team agents implement under these rules. Put knowledge in the repo, not in an agent's memory.
+
 
 <!-- wizard-os-team-rules v4 (24 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
 ## Wizard OS team rules (identical in every repo)
