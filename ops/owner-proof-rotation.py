@@ -134,9 +134,9 @@ def local(path, token=None, port=8923, spoof=False):
         c.close()
 
 
-def peer(base):
+def peer(base, path='/wizard/v1/devices'):
     # Actual peer's ordinary trusted-TLS request; no identity or proof injection.
-    url = base + '/wizard/v1/devices'
+    url = base + path
     import shlex
     argv = ['ssh', '-oBatchMode=yes', '-oConnectTimeout=8', 'thales',
             'curl --silent --max-time 15 --output /dev/null --write-out %{http_code} ' + shlex.quote(url)]
@@ -243,8 +243,18 @@ def runtime_filter():
 def containers():
     values = json.loads(cmd(['docker', 'inspect', *cmd(['docker', 'ps', '-q']).decode().split()]))
     # Project before any persistence; never dump inspect.Env or mount contents.
-    return {x['Name'].lstrip('/'): {'id': x['Id'], 'image': x['Image'],
-             'started': x['State']['StartedAt']} for x in values}
+    projected = {}
+    for x in values:
+        name = x['Name'].lstrip('/')
+        cfg = x.get('Config', {})
+        value = {'id': x['Id'], 'image': x['Image'], 'started': x['State']['StartedAt'],
+                 'revision': (cfg.get('Labels') or {}).get('org.opencontainers.image.revision', '')}
+        if name == 'wizard-agent-service':
+            env = dict(v.split('=', 1) for v in cfg.get('Env', []) if '=' in v)
+            value['proof_file_bound'] = env.get('WIZARD_OWNER_PROOF_FILE') == str(PROOF)
+            value['entry_sha256'] = sha(json.dumps([cfg.get('Entrypoint'), cfg.get('Cmd')]).encode())
+        projected[name] = value
+    return projected
 
 
 def runs():
@@ -256,9 +266,15 @@ def source_hashes():
     root = CURRENT.resolve(strict=True)
     paths = [root / 'server' / x for x in ('index.mjs', 'principals.mjs', 'run-stream-keeper.mjs',
              'locked-run-bridge.mjs', 'service-lifetime.mjs', 'service.mjs')]
-    paths += [GATEWAY, HOME / '.config/private-gateway/wizard-scroll-diagnostics.Caddyfile',
+    paths += [root / 'SERVER_TREE', root / 'RELEASE_SHA',
+              HOME / '.config/systemd/user/wizard-mobile.service',
+              HOME / '.config/wizard-mobile/runtime.env',
+              GATEWAY, HOME / '.config/private-gateway/wizard-scroll-diagnostics.Caddyfile',
               SCRIPTS / 'wizard_drain_restart.py', SCRIPTS / 'wizard_restart_report.py',
               HOME / '.local/bin/wizard-agent-service-container']
+    dropins = HOME / '.config/systemd/user/wizard-mobile.service.d'
+    if dropins.is_dir():
+        paths += sorted(dropins.glob('*.conf'))
     return {str(p): hashfile(p) for p in paths}
 
 
@@ -275,6 +291,13 @@ def snapshot():
             'runtime_log_filter': runtime_filter()}
 
 
+def store_path(before):
+    import re
+    revision = before['containers']['wizard-interface-candidate']['revision']
+    require(re.fullmatch(r'[0-9a-f]{40}', revision) is not None, 'shell_revision_unavailable')
+    return '/wizard-os-home/store-install/_main-compare?commit=' + revision
+
+
 def preflight(plan):
     require(hashfile(PROOF) == plan['old_sha256'], 'old_proof_drift')
     before = plan['before']
@@ -288,7 +311,18 @@ def preflight(plan):
     require(live['units'][KEEPER]['state'] == 'active', 'keeper_not_active')
     require(live['runtime_log_filter']['loaded']
             and live['runtime_log_filter']['matches_current_config'], 'runtime_proof_header_redaction_not_loaded')
+    require(live['containers']['wizard-agent-service']['proof_file_bound'], 'consumer_file_binding_mismatch')
     require(peer(before['base_url']) == 200, 'preflight_owner_peer')
+    require(local('/_main-compare', port=7791)[0] == 403, 'preflight_store_root_peer_boundary')
+    require(peer(before['base_url'], store_path(before)) == 200, 'preflight_store_owner_peer')
+    token = read_secret()
+    try:
+        require(local('/wizard/v1/devices', token)[0] == 200, 'preflight_captured_verifier')
+        require(local('/wizard/v1/devices')[0] == 403
+                and local('/wizard/v1/devices', b'rotation-negative-forged-not-a-credential', spoof=True)[0] == 403,
+                'preflight_private_boundary')
+    finally:
+        wipe(token)
     return live
 
 
@@ -317,18 +351,25 @@ def verify(plan, old, new):
     forged, _ = local('/wizard/v1/devices', b'rotation-negative-forged-not-a-credential', spoof=True)
     shell, _ = local('/wizard/hermes/v1/agents', b'rotation-negative-forged-not-a-credential', port=8928, spoof=True)
     realpeer = peer(before['base_url'])
+    store_denied, _ = local('/_main-compare', port=7791)
+    store_owner = peer(before['base_url'], store_path(before))
     after = snapshot()
     others_before = {k: v for k, v in before['containers'].items() if k != 'wizard-agent-service'}
     others_after = {k: v for k, v in after['containers'].items() if k != 'wizard-agent-service'}
     results = {'new_proof_loopback': newcode, 'old_proof_loopback': oldcode,
                'anonymous_loopback': anonymous, 'forged_loopback': forged,
                'forged_shell': shell, 'real_peer_owner': realpeer,
+               'store_direct_root_peer_only_boundary': store_denied, 'store_real_peer_owner': store_owner,
                'same_revision': after['revision'] == before['revision'],
                'same_release': after['release'] == before['release'],
+               'same_service_image': after['containers']['wizard-agent-service']['image'] == before['containers']['wizard-agent-service']['image'],
+               'same_service_entry': after['containers']['wizard-agent-service']['entry_sha256'] == before['containers']['wizard-agent-service']['entry_sha256'],
+               'consumer_file_binding_correct': after['containers']['wizard-agent-service']['proof_file_bound'],
                'source_hashes_unchanged': after['source_hashes'] == before['source_hashes'],
                'service_restarted': after['service']['pid'] != before['service']['pid'],
                'keeper_same_pid': after['keeper']['pid'] == before['keeper']['pid'],
                'neighbor_units_unchanged': after['units'] == before['units'],
+               'gateway_loaded_config_unchanged': after['runtime_log_filter']['autosave_sha256'] == before['runtime_log_filter']['autosave_sha256'],
                'other_containers_unchanged': others_after == others_before,
                'apps_count': after['apps_count'],
                'apps_rows_unchanged': after['apps_rows_sha256'] == before['apps_rows_sha256'],
@@ -346,7 +387,8 @@ def verify(plan, old, new):
     results['runs_preserved'] = all(x.get('retained_in_queue', x.get('http') == 200 and x.get('now') in
                                              {'running', 'completed', 'waiting_for_approval', 'queued', 'stopping'}) for x in statuses)
     assertions = [newcode == 200, oldcode == 403, anonymous == 403, forged == 403,
-                  shell == plan.get('shell_negative_expected', 404), realpeer == 200, results['apps_count'] == 29]
+                  shell == plan.get('shell_negative_expected', 404), realpeer == 200,
+                  store_denied == 403, store_owner == 200, results['apps_count'] == 29]
     assertions += [v for k, v in results.items() if isinstance(v, bool)]
     results['ok'] = all(assertions)
     return results, after
