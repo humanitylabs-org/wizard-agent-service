@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "viewer-desktop-fit-keys",
+      "description": "Scoped chat media opens the shared viewer: desktop images fit the viewport, Left/Right navigate in order, close restores the exact thread and draft, and phone open/Back remains scoped after cold selected-agent restore.",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Run QA_GROUP=media QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs on the admitted browser worker. Linux additionally requires QA_FORUM_MEDIA=1 QA_CHROMIUM=<pinned-chrome> QA_PLAYWRIGHT=<pinned-playwright>. This narrow cell clicks actual rendered MEDIA buttons from synthetic transcripts through the real Service; host-profile really traverses /p/<profile>, container uses a distinct TCP origin, restricted uses mode-0600 Unix ingress. Browser and disposable runtime reject mutations after seed; no real agents/providers/private history are opened. Desktop fit at two widths, ordered trusted Left/Right, focus, Escape/outside and phone open/Back/outside preserve cold-selected agent/thread/draft. Native video/audio UA seeking is separately covered by wizard-ux/qa-viewer-desktop-fit.cjs with mandatory provisioned QA_MEDIA_DIR. Synthetic-runtime browser evidence is not real-container/provider/physical-device acceptance. Companion UX PRs #1039/#1038.",
+      "source_refs": ["wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats.css", "wizard-ux/web/core/chats.js"],
+      "reference_tests": ["qa/agent-parity/browser.mjs", "wizard-ux/qa-viewer-desktop-fit.cjs", "wizard-ux/tests/viewer-desktop-fit.test.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "in-flight-notice",
       "description": "Controller and live-lease execution outrank out-of-band notice attention while queued or steered owner messages arrive; notices can classify Ready only after the run ends.",
       "layer": "server",
