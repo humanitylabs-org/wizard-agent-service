@@ -47,7 +47,7 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   // rows have no run id and must still yield to an owner gate below.
   // Queued input supersedes every transcript ask. A started run keeps only asks
   // its own replies wrote (at or after admission); older asks are stale.
-  if (row.status === 'queued' || row.wizard_run_id && ['accepted', 'running', 'unknown'].includes(row.status)) {
+  if (row.status === 'queued' || row.wizard_run_id && ['started', 'accepted', 'running', 'unknown'].includes(row.status)) {
     const since = row.status === 'queued' ? Infinity : replyEpoch(row.wizard_assigned_at)
     const own = resolveThreadSection({ replies: (replies ?? []).filter((reply) => replyEpoch(reply.timestamp) >= since), lastUserAt })
     if (own.attention) row.wizard_attention = own.attention
