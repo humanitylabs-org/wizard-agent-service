@@ -839,6 +839,18 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
     }
     const historySource = result
+    // A routed run that finishes while no one has its thread open still lists its asks: read its reply back once.
+    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.trackerOn?.() && ctx.ingestThreadItems) {
+      try {
+        const run = JSON.parse(result.toString('utf8')), sid = run?.session_id
+        const mark = `${agent.id}/${upstreamPath}`
+        if (run?.status === 'completed' && typeof sid === 'string' && sid && typeof run.output === 'string' && run.output.includes('"items"') && !ingestedRuns.has(mark)) {
+          ingestedRuns.add(mark); if (ingestedRuns.size > 500) ingestedRuns.delete(ingestedRuns.values().next().value)
+          registry.fetchAgent(agent, `/api/sessions/${encodeURIComponent(sid)}/messages?order=latest&limit=12`, { headers, redirect: 'manual' })
+            .then(async page => { if (page.ok) ctx.ingestThreadItems(agent.id, sid, Buffer.from(await page.arrayBuffer())) }).catch(() => ingestedRuns.delete(mark))
+        }
+      } catch { /* not a run body */ }
+    }
     if (messageHistory) ctx.ingestThreadItems?.(agent.id, sessionIdFromPath(upstreamPath), result)
     // The scheduler's own internal read of a notification run keeps [SILENT]-ending output intact, as on main.
     if (messageHistory || (!rawRunRead && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath))) result = ctx.projectStatusMarkers(result)
@@ -850,6 +862,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
   response.end(result)
 }
+
+const ingestedRuns = new Set()
 
 /** Same visibility rule as the main list (chats the owner had, not internal sessions such as cron or titles). */
 function filterThreads(result, visible) {

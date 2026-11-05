@@ -45,7 +45,7 @@ import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResp
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
-import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
+import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -2841,8 +2841,9 @@ function buildWizardServer(options, lifetime) {
       if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
-    ingestThreadItems: (agentId, sessionId, result) => ingestHistory(threadItems, agentId, sessionId, result, parseStatus),
-    expandReplyTo: (agentId, sessionId, input) => expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)),
+    ingestThreadItems: (agentId, sessionId, result) => trackerOn() ? ingestHistory(threadItems, agentId, sessionId, result, parseStatus) : 0,
+    expandReplyTo: (agentId, sessionId, input) => trackerOn() ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
+    trackerOn: () => trackerOn(),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
@@ -3147,6 +3148,7 @@ function buildWizardServer(options, lifetime) {
   // A finished run that listed asks: read its real reply row back so the ledger anchors on the message id.
   const itemsInFlight = new Set()
   const noteRunItems = (sessionId, output) => {
+    if (!trackerOn()) return
     if (typeof sessionId !== 'string' || !sessionId || itemsInFlight.has(sessionId) || typeof output !== 'string' || !output.includes('"items"')) return
     if (!parseStatus(output)?.items) return
     itemsInFlight.add(sessionId)
@@ -5464,6 +5466,13 @@ function buildWizardServer(options, lifetime) {
         const seen = url.pathname.endsWith('/seen'), counts = url.pathname.endsWith('/counts')
         if (request.method !== (seen ? 'POST' : 'GET')) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seen ? 'POST' : 'GET' }); return }
         if (seen && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        // Tweak off (or never on): the stored ledger is invisible and untouched. Opting out hides it at once.
+        if (!trackerOn()) {
+          if (counts) { sendJson(response, 200, { threads: {} }, { 'Cache-Control': 'no-store' }); return }
+          if (seen) { try { await readBoundedBody(request, 16 * 1024) } catch {} }
+          const t = url.searchParams.get('thread') || ''
+          sendJson(response, 200, { thread: t, agent: url.searchParams.get('agent') || 'hermes', items: [], counts: countItems([]) }, { 'Cache-Control': 'no-store' }); return
+        }
         if (counts) { sendJson(response, 200, { threads: threadItems.allCounts() }, { 'Cache-Control': 'no-store' }); return }
         let thread = url.searchParams.get('thread') || '', agent = url.searchParams.get('agent') || ''
         let ids = []
@@ -6509,7 +6518,7 @@ function buildWizardServer(options, lifetime) {
         }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
-          const guidance = expandReplyToInput(parseJsonBody(prepared.body).input, id => threadItems.titleOf('hermes', queuedProxyRecord.sessionId, id))
+          const guidance = trackerOn() ? expandReplyToInput(parseJsonBody(prepared.body).input, id => threadItems.titleOf('hermes', queuedProxyRecord.sessionId, id)) : parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
             queuedProxyRecord.publicRunId, guidance, prepared.trustedPaths)
           sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
@@ -6570,7 +6579,7 @@ function buildWizardServer(options, lifetime) {
           body = prepared.body
           trustedPaths = prepared.trustedPaths
           audioPaths = prepared.audioPaths ?? []
-          if (body.includes('WIZARD_REPLY_TO_V1')) {
+          if (trackerOn() && body.includes('WIZARD_REPLY_TO_V1')) {
             // Quote reply: tell the agent, in plain words, which message and ask the owner is answering.
             const value = parseJsonBody(body)
             const thread = typeof value.session_id === 'string' ? value.session_id : (queuedProxyRecord?.sessionId || '')
@@ -6856,7 +6865,7 @@ function buildWizardServer(options, lifetime) {
           // only for startup excerpts, so omissions are flagged without changing
           // the existing marker/media/shareability projection order.
           const historySource = result
-          if (messageHistory && !operator) ingestHistory(threadItems, 'hermes', decodeURIComponent(upstreamPath.split('/')[3]), result, parseStatus)
+          if (messageHistory && !operator && trackerOn()) ingestHistory(threadItems, 'hermes', decodeURIComponent(upstreamPath.split('/')[3]), result, parseStatus)
           result = projectWizardFileMarkers(result, messageHistory)
           const scheduleRaw = !messageHistory && scheduleRawRead(request)
           if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)

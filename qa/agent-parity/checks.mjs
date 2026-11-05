@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
+import { trackerChecks } from './tracker-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
 import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
 
 const featureScenes = {
+  'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'locked-selector-boundary': kind => scene(kind, { fixtureSelectorLock: true, fixtureHoldEvents: true }), 'scheduler-notifications': kind => notificationScene(kind, true),
   'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
   // Main's cached Hermes listing with the stock running status; main admits direct here (the
@@ -16,6 +18,7 @@ const featureScenes = {
 export const checks = {
   ...serverChecks,
   ...queueChecks,
+  ...trackerChecks,
   'private-incognito-policy': async s => {
     const init = post({})
     const response = await fetch(`${s.origin()}/wizard/v1/agents/${s.id || 'main'}/incognito`, { ...init, headers: { ...init.headers, ...s.ownerHeaders } })
