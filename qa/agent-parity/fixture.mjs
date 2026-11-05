@@ -88,8 +88,11 @@ export async function scene(kind, serverOptions = {}) {
     const path = url.pathname.replace(/^\/p\/parity-profile/, '')
     let raw = ''; for await (const chunk of req) raw += chunk
     const body = raw && !path.startsWith('/v1/audio/') ? JSON.parse(raw) : null
-    seen.push({ path: url.pathname, method: req.method, body, headers: req.headers })
+    seen.push({ path: url.pathname, method: req.method, body, headers: req.headers, localPort: req.socket.localPort ?? null })
     const json = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)) }
+    // Media-only acceptance seals the disposable runtime after session seeding,
+    // including restricted Unix ingress, not just the browser's write fence.
+    if (serverOptions.fixtureReadOnly?.() && !['GET', 'HEAD'].includes(req.method)) return json(403, { error: 'fixture_read_only' })
     const streamRun = run => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
         if (!serverOptions.fixtureHoldEvents) return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n')
@@ -208,7 +211,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
+  return { runtimePorts: { main: Number(new URL(upstreamOrigin).port), container: containerPort }, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {
