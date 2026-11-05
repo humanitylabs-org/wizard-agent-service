@@ -335,5 +335,34 @@ class RestrictedDriverTest(unittest.TestCase):
             ar.verify_vendored(copy)
 
 
+class RootlessDockerTest(unittest.TestCase):
+    """Rootless Docker (DOCKER_HOST=unix:///run/user/<uid>/docker.sock, no /var/run/docker.sock): plain docker,
+    and the edge runs as container uid 0, which is the daemon's own user there, never host root."""
+
+    def setUp(self):
+        ar._ROOTLESS.clear()
+        self.addCleanup(ar._ROOTLESS.clear)
+
+    def test_docker_host_uses_plain_docker_not_sg(self):
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.dict(ar.os.environ, {"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}), \
+                mock.patch.object(ar.subprocess, "run", return_value=done) as run:
+            ar.docker(["ps"])
+        self.assertEqual(run.call_args[0][0][:2], ["docker", "ps"])
+
+    def test_rootless_detected_from_security_options_once(self):
+        out = subprocess.CompletedProcess([], 0, '["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]', "")
+        with mock.patch.object(ar, "docker", return_value=out) as docker:
+            self.assertTrue(ar.rootless_docker()); self.assertTrue(ar.rootless_docker())
+        self.assertEqual(docker.call_count, 1)
+
+    def test_rootful_or_failed_info_is_not_rootless(self):
+        for out in (subprocess.CompletedProcess([], 0, '["name=seccomp,profile=builtin"]', ""),
+                    subprocess.CompletedProcess([], 1, "", "error")):
+            ar._ROOTLESS.clear()
+            with mock.patch.object(ar, "docker", return_value=out):
+                self.assertFalse(ar.rootless_docker())
+
+
 if __name__ == "__main__":
     unittest.main()
