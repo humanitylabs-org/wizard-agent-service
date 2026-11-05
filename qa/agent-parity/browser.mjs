@@ -47,7 +47,7 @@ async function stage(kind,group,featureIds,run){
   const sends=()=>s.seen.filter(x=>x.method==='POST'&&(x.path.endsWith('/v1/runs')||x.path.endsWith('/chat/stream'))).map(x=>({...x,body:x.path.endsWith('/chat/stream')?{...x.body,input:x.body.message,session_id:x.path.match(/sessions\/([^/]+)/)[1]}:x.body}))
   await run({s,context,page,record,load,reload,root,open,refresh,settle,sends})
   await page.screenshot({path:join(out,`${kind}-${group}.png`)})
- }catch(error){if(page&&s)writeFileSync(join(out,`${kind}-${group}-diagnostic.json`),JSON.stringify({upstreamFailures,network:network.filter(x=>x.kind===kind&&x.group===group),seen:s.seen.filter(x=>x.method==='POST').map(x=>({method:x.method,path:x.path,body:x.path.endsWith('/v1/runs')||x.path.endsWith('/steer')?x.body:undefined})),live:await page.evaluate(()=>({voiceError:window.__qaVoiceError,voiceEndpoint:WizConfig.endpoint('transcribe'),session:WizLive.session('wizard_parity'),outbox:WosOutbox.unsent().map(x=>({state:x.state,error:x.error,text:x.text,model:x.model,agent:x.agent,how:x.how}))})).catch(()=>null),history:await (await s.request('/api/sessions/wizard_parity/messages?view=wizard')).json(),dom:await page.locator('[data-chats]').allInnerTexts(),responses:requests.filter(x=>x.kind===kind&&x.group===group&&x.status>=400)},null,2));if(page)await page.screenshot({path:join(out,`${kind}-${group}-failure.png`)}).catch(()=>{});for(const feature of featureIds)if(!cells.some(c=>c.feature===feature&&c.kind===kind))cells.push({feature,kind,status:'fail',reason:String(error.stack||error),evidence:'real-thales-browser',screenshots:[`${kind}-${group}-failure.png`]});persist(false)}
+ }catch(error){if(page&&s)writeFileSync(join(out,`${kind}-${group}-diagnostic.json`),JSON.stringify({upstreamFailures,network:network.filter(x=>x.kind===kind&&x.group===group),seen:s.seen.filter(x=>x.method==='POST').map(x=>({method:x.method,path:x.path,body:x.path.endsWith('/v1/runs')||x.path.endsWith('/steer')?x.body:undefined})),live:await page.evaluate(()=>({voiceError:window.__qaVoiceError,voiceEndpoint:WizConfig.endpoint('transcribe'),session:WizLive.session('wizard_parity'),outbox:WosOutbox.unsent().map(x=>({state:x.state,error:x.error,text:x.text,model:x.model,agent:x.agent,how:x.how}))})).catch(()=>null),history:await (await s.request('/api/sessions/wizard_parity/messages?view=wizard')).json(),dom:await page.locator('[data-chats]').allInnerTexts(),responses:requests.filter(x=>x.kind===kind&&x.group===group&&x.status>=400)},null,2));if(page)await page.screenshot({path:join(out,`${kind}-${group}-failure.png`)}).catch(()=>{});for(const feature of featureIds)if(!cells.some(c=>c.feature===feature&&c.kind===kind))cells.push({feature,kind,status:'fail',reason:String(error.stack||error),evidence:forumMedia?'forum-browser-real-service-synthetic-runtime':'real-thales-browser',screenshots:[`${kind}-${group}-failure.png`]});persist(false)}
  finally{if(context)await context.close();if(s)await s.close()}
 }
 // One feature boundary, four genuinely different Service routes. Media comes from
@@ -63,7 +63,20 @@ async function mediaChecks({s,context,page,record}){
  assert.equal((await s.request('/api/sessions?view=list')).status,200)
  if(s.kind==='restricted'){const socket=join(s.root,'os','agents',s.id,'gateway','ingress.sock');assert.equal(statSync(socket).mode&0o777,0o600);evidence.ingress={transport:'unix',mode:'0600'}}
  const before=s.seen.length
- const boot=async(p,phone,cold=false)=>{if(cold)await p.reload({waitUntil:'domcontentloaded'});else await p.goto(s.origin()+'/wizard-os-home/'+(phone?'':'desktop.html'),{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:30000});await p.evaluate(()=>WosAgents.load(true));assert.equal(await p.evaluate(()=>document.documentElement.dataset.shell),phone?'phone':'desktop')}
+ const boot=async(p,phone,cold=false)=>{
+  if(cold)await p.reload({waitUntil:'domcontentloaded'});else await p.goto(s.origin()+'/wizard-os-home/'+(phone?'':'desktop.html'),{waitUntil:'domcontentloaded'})
+  await p.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:30000});await p.evaluate(()=>WosAgents.load(true))
+  assert.equal(await p.evaluate(()=>document.documentElement.dataset.shell),phone?'phone':'desktop')
+  // This disposable runtime has no connected provider: Welcome legitimately opens.
+  // Wait for its real async boot decision before trusted setup-only Back input;
+  // an early Escape would instead suppress boot through the owner's acted flag.
+  await p.waitForFunction(()=>window.WosWelcome?.log.some(x=>x.startsWith('boot:')),null,{timeout:10000})
+  const setup={shell:phone?'phone':'desktop',cold,boot:await p.evaluate(()=>WosWelcome.log.slice()),escapes:0}
+  for(let i=0;i<2&&await p.locator('#wosWelcome.wl-overlay').isVisible();i++){await p.keyboard.press('Escape');setup.escapes++}
+  await p.locator('#wosWelcome.wl-overlay').waitFor({state:'hidden',timeout:2000})
+  assert.equal(await p.evaluate(()=>WosWelcome.active),false,'Welcome setup complete before any thread/viewer action')
+  setup.closed=true;setup.log=await p.evaluate(()=>WosWelcome.log.slice());(evidence.bootstrap??=[]).push(setup)
+ }
  const selected=async p=>p.evaluate(id=>{const w=Object.values(__wos.wins).find(w=>w.app==='chats'&&w.focus?.kind==='agent'&&w.focus.key===id);return w?{id:w.id,agent:w.focus.key,thread:w.thread}:null},s.id)
  const thread=async(p,select=true)=>{if(select)await p.evaluate(id=>WizOpenAgentChats(id),s.id);await until(async()=>!!await selected(p),'actual selected agent window');const w=await selected(p);const chat=p.locator(`[data-chats="${w.id}"]`);if(w.thread!=='wizard_parity'){const button=chat.locator('[data-chopen="wizard_parity"]').first();await button.waitFor();await button.click()}await chat.locator('.ch-thread').waitFor();assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id);assert.equal((await selected(p)).thread,'wizard_parity');return chat}
  const ready=async p=>p.waitForFunction(()=>{const i=document.querySelector('.mviewer img');return i&&i.complete&&i.naturalWidth>0})
