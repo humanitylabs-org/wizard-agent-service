@@ -27,7 +27,7 @@ export const trackerChecks = {
     await prime(s)
     const history = await read(s)
     assert.ok(!JSON.stringify(history).includes('"items"'), 'the asks never show in the transcript')
-    assert.deepEqual((await counts(s))[key(s)], { needs_you: 1, running: 1, done_unseen: 0, blocked: 0, acknowledged: 0, total: 2 })
+    assert.deepEqual((await counts(s))[key(s)], { needs_you: 1, running: 0, done_unseen: 0, blocked: 0, acknowledged: 0, total: 1 })
     const listed = await items(s)
     assert.deepEqual(listed.items.map(i => i.id).sort(), ['copy', 'logo'])
     const logo = listed.items.find(i => i.id === 'logo')
@@ -35,6 +35,10 @@ export const trackerChecks = {
     const marked = await s.raw('/wizard/v1/thread-items/seen', { ...post({ thread: 'wizard_parity', agent: s.id || 'hermes', ids: ['logo'] }) })
     assert.equal(marked.status, 200)
     assert.equal((await items(s)).items.find(i => i.id === 'logo').seen, true)
+    assert.equal((await counts(s))[key(s)].acknowledged, 0, 'a partially seen reply stays actionable')
+    const groupSeen = await s.raw('/wizard/v1/thread-items/seen', post({ thread: 'wizard_parity', agent: s.id || 'hermes', ids: ['logo', 'copy'] }))
+    assert.equal(groupSeen.status, 200)
+    assert.deepEqual((await counts(s))[key(s)], { needs_you: 0, running: 0, done_unseen: 0, blocked: 0, acknowledged: 1, total: 1 })
     const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote(logo.message_id) })); assert.equal(sent.status, 202)
     assert.match(sentInput(s), /Replying to an earlier message about “Pick a logo”: \\"Which logo\?\\"/)
     // A run that finishes while its thread is closed still lists its asks (no history read opens the thread)
@@ -46,7 +50,7 @@ export const trackerChecks = {
     assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
     let doneCounts
     for (let i = 0; i < 40; i++) { doneCounts = (await counts(s))[`${s.id || 'hermes'}/wizard_done`]; if (doneCounts) break; await new Promise(r => setTimeout(r, 25)) }
-    assert.equal(doneCounts?.total, 2, 'a completed run is counted without opening its thread')
+    assert.equal(doneCounts?.total, 1, 'a completed reply counts once without opening its thread')
     const off = await scene(s.kind, { threadTracker: false })
     try {
       await prime(off)

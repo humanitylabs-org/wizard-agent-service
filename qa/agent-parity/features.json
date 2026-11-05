@@ -1465,10 +1465,10 @@
     },
     {
         "id": "thread-tracker",
-        "description": "With the owner's Thread tracker tweak on, a reply's separate asks are recorded per thread (status line only, never shown in the transcript) and counted for the Chats dots, Seen marks persist, and a quote reply tells the agent which message and ask it answers. With the tweak off the ledger answers empty, nothing is recorded and the quote reaches the agent unchanged. Routed runs that finish while the thread is closed are ingested from their run read.",
+        "description": "With the owner's Thread tracker tweak on, separate asks stay recorded per id, but counts group by current reply anchor using the most urgent member; Seen of every member acknowledges that reply. Unknown anchors stay separate. The status line never shows in the transcript, and a quote reply tells the agent which message and ask it answers. With the tweak off the ledger answers empty, nothing is recorded and the quote reaches the agent unchanged. Routed runs that finish while the thread is closed are ingested from their run read.",
         "layer": "server",
         "fixture": "thread-tracker",
-        "how_to_test": "For each runtime kind, read a transcript whose assistant reply carries an items status line with the tweak on: assert no items text in history, counts, item list anchored to the reply row, Seen persists, and the run body the runtime receives carries the plain reply-to sentence. Then in a second scene with the tweak off: empty counts and items, Seen is a no-op, and the quote is forwarded unchanged. Synthetic HTTP fixture evidence only, not live runtime, browser or physical-phone proof.",
+        "how_to_test": "For each runtime kind, read a transcript whose assistant reply carries an items status line with the tweak on: assert no items text in history, one most-urgent count for two asks on one reply, both per-id ledger items anchored to the reply, partial Seen remains actionable, all-member Seen persists as one acknowledged reply, and the run body the runtime receives carries the plain reply-to sentence. Then in a second scene with the tweak off: empty counts and items, Seen is a no-op, and the quote is forwarded unchanged. Synthetic HTTP fixture evidence only, not live runtime, browser or physical-phone proof.",
         "source_refs": [
             "server/thread-items.mjs",
             "server/service.mjs",

@@ -61,15 +61,30 @@ const seconds = value => {
 const empty = () => ({ schema: 1, threads: {} })
 const keyOf = (agent, thread) => `${agent || 'hermes'}/${thread}`
 
+// Read projection only: custody stays per ask id. Unknown/malformed anchors never coalesce.
+const anchorKey = value => typeof value === 'string' && value.trim() ? value
+  : typeof value === 'number' && Number.isFinite(value) ? String(value) : null
+const itemKind = (item, seenFor) => seenFor(item) && (item.state === 'done' || (item.state === 'needs_you' && item.try)) ? 'acknowledged'
+  : item.state === 'done' ? 'done_unseen' : item.state === 'blocked' ? 'blocked' : item.state === 'needs_you' ? 'needs_you' : 'running'
+const urgency = { blocked: 0, needs_you: 1, running: 2, done_unseen: 3, acknowledged: 4 }
+export const groupItems = (items, seenFor = item => item.seen_at >= item.updated_at) => {
+  const groups = [], anchors = new Map()
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const anchor = anchorKey(item.message_id)
+    let members = anchor === null ? null : anchors.get(anchor)
+    if (!members) { members = []; groups.push(members); if (anchor !== null) anchors.set(anchor, members) }
+    members.push(item)
+  }
+  return groups.map(members => {
+    const member = [...members].sort((a, b) => urgency[itemKind(a, seenFor)] - urgency[itemKind(b, seenFor)])[0]
+    const kind = members.length > 1 && members.every(seenFor) ? 'acknowledged' : itemKind(member, seenFor)
+    return { members, member, kind }
+  })
+}
 export const countItems = (items, seenFor = item => item.seen_at >= item.updated_at) => {
   const out = { needs_you: 0, running: 0, done_unseen: 0, blocked: 0, acknowledged: 0, total: 0 }
-  for (const item of items) {
-    out.total++
-    if (item.state === 'done') seenFor(item) ? out.acknowledged++ : out.done_unseen++
-    else if (item.state === 'blocked') out.blocked++
-    else if (item.state === 'needs_you') item.try && seenFor(item) ? out.acknowledged++ : out.needs_you++ // "Looks good" on a try-it ask
-    else out.running++
-  }
+  for (const group of groupItems(items, seenFor)) { out.total++; out[group.kind]++ }
   return out
 }
 
