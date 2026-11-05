@@ -24,6 +24,12 @@ LOGGER = b'''    log default {
 
 
 class ActivationTests(unittest.TestCase):
+    def test_named_site_error_logger_inherits_default(self):
+        self.assertTrue(m.is_error_logger('http.log.error.log0'))
+        self.assertTrue(m.is_error_logger('http.log.error'))
+        self.assertFalse(m.is_error_logger('http.log.access.log0'))
+        self.assertFalse(m.is_error_logger('http.log.error-not'))
+
     def test_exact_block_isolated_from_route(self):
         value = b'{\n' + LOGGER + b' admin off\n}\nimport forbidden-metadata-route\n'
         self.assertEqual(m.block(value), LOGGER)

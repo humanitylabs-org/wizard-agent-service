@@ -219,6 +219,10 @@ def reload(pid):
     raise r.Gate('positive_reload_event_missing')
 
 
+def is_error_logger(name):
+    return name == 'http.log.error' or name.startswith('http.log.error.')
+
+
 def canary(root, base):
     # An already-existing, already-closed upstream; no listener/route changes.
     marker = 'security-logger-' + secrets.token_hex(10)
@@ -239,7 +243,7 @@ def canary(root, base):
                 d = json.loads(line)
             except ValueError:
                 continue
-            if d.get('request', {}).get('uri') == path and d.get('logger') == 'http.log.error':
+            if d.get('request', {}).get('uri') == path and is_error_logger(d.get('logger', '')):
                 events.append(d)
         if events:
             break
