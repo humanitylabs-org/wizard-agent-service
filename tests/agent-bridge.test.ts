@@ -315,7 +315,8 @@ describe('agent bridge: MCP gateway', () => {
     const call = keyed.calls.find((c) => c.method === 'tools/call')
     expect(call.agent).toBe('hermes')
     expect(decodeURIComponent(call.label).length).toBeGreaterThan(0)
-    expect(keyed.calls.filter((c) => c.method !== 'tools/call').every((c) => c.agent === '')).toBe(true)
+    // tools/list is asked per agent too, so the app can list only what that agent's level allows; nothing else names one.
+    expect(keyed.calls.filter((c) => c.method !== 'tools/call' && c.method !== 'tools/list').every((c) => c.agent === '')).toBe(true)
     for (const other of [plain, bad]) {
       expect(other.calls.length).toBeGreaterThan(0)
       expect(other.calls.every((c) => c.grant === '' && c.auth === '' && c.agent === '' && c.label === '')).toBe(true)
@@ -326,6 +327,37 @@ describe('agent bridge: MCP gateway', () => {
     const before = keyed.calls.length
     await rpc(base, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'messenger__wizard_time', arguments: {} } }, init.session)
     expect(keyed.calls.slice(before).every((c) => c.grant === '' && c.agent === '')).toBe(true)
+  })
+
+  it('asks an app holding the gateway key for each agent\'s own tool list, and lists it only to that agent', async () => {
+    // A Mail-like app: it lists mail_send only to the agent named "helper" (that agent\'s level allows it).
+    const calls = []
+    const server = createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => { body += c })
+      req.on('end', () => {
+        const msg = JSON.parse(body || '{}')
+        const agent = req.headers['x-wizard-agent'] || ''
+        calls.push({ method: msg.method, agent, grant: req.headers['x-wizard-grant'] || '' })
+        const tools = [{ name: 'mail_search', inputSchema: { type: 'object' } }, ...(agent === 'helper' ? [{ name: 'mail_send', inputSchema: { type: 'object' } }] : [])]
+        const result = msg.method === 'tools/list' ? { tools } : msg.method === 'initialize' ? { protocolVersion: '2025-06-18', capabilities: {} } : {}
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 's1' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+      })
+    })
+    servers.push(server)
+    const dir = box([app('messenger', (await listen(server)).port)])
+    mkdirSync(join(dir, 'grants'))
+    writeFileSync(join(dir, 'grants', 'agent-service.json'), JSON.stringify({ outgoing: { messenger: 'b2'.repeat(32) } }), { mode: 0o600 })
+    const bridge = createAgentBridge({ appsJsonPath: join(dir, 'apps.json'), watchIntervalMs: 0, writeSkills: false })
+    const main = (await bridge.listTools('hermes')).map((t) => t.name)
+    const helper = (await bridge.listTools('helper')).map((t) => t.name)
+    expect(main).toContain('messenger__mail_search')
+    expect(main).not.toContain('messenger__mail_send')
+    expect(helper).toContain('messenger__mail_send')
+    const lists = calls.filter((c) => c.method === 'tools/list')
+    expect(lists.map((c) => c.agent).sort()).toEqual(['helper', 'hermes'])
+    expect(lists.every((c) => c.grant === 'b2'.repeat(32))).toBe(true)
   })
 
   it('reads no grant keys from a symlinked, oversized or malformed gateway grants file, and never from the old app-mcp-keys files', () => {
