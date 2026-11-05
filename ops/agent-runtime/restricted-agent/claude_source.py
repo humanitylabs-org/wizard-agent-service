@@ -27,7 +27,9 @@ def resolve(containers):
         # A compiled share is a dedicated absolute directory, never a root or
         # credential file. Its authority is the installed engine's exact mount.
         if (os.path.isabs(source) and os.path.normpath(source) == source
-                and source.count('/') >= 3 and os.path.basename(source) == 'claude'):
+                and source.count('/') >= 3 and os.path.basename(source) in ('claude', '.claude')):
+            # Host-installed engines may bind the owner's Claude Code directory.
+            # Authority remains the same running engine's exact /claude mount.
             return {'type': 'bind', 'source': source}
     return None
 
