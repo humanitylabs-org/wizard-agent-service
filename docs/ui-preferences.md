@@ -18,6 +18,10 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 - `compact`: boolean. Default: false.
 - `chatLayout`: `day` (Ready, Yesterday, Past week) or `status` (Working, Ready, Archive). Default: `day`.
 - `readyOrder`: `newest`, `oldest`, `priority` or `subject`. Default: `newest`.
+- `replySummary`: optional `{on,start?,length?}` for the shell's short-answer view. `on` is boolean;
+  `start` is `collapsed` or `expanded`; `length` is `line`, `sentences` or `paragraph`. Unknown nested
+  keys are rejected. Absent stays absent: reopening the view reads the box before saving its choice.
+  This accepts the existing shell contract only; it does not change reply generation or enable the view.
 - `subjectOrder`: at most 60 unique strings, each at most 120 characters without control
   characters. Default: empty (natural order).
 

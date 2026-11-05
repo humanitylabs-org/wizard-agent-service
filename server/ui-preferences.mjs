@@ -45,6 +45,9 @@ const validators = {
   chatLayout: v => v === 'day' || v === 'status',
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
+  // Optional: the shell reads the saved choice before enabling its short-answer view on reopen.
+  replySummary: v => isPlainObject(v) && Object.keys(v).every(k => ['on', 'start', 'length'].includes(k)) && typeof v.on === 'boolean'
+    && (!Object.hasOwn(v, 'start') || ['collapsed', 'expanded'].includes(v.start)) && (!Object.hasOwn(v, 'length') || ['line', 'sentences', 'paragraph'].includes(v.length)),
   // Pinned Chats threads, in pin order, shared by every device of the owner.
   pinnedChats: v => Array.isArray(v) && v.length <= 300 && v.every(s => typeof s === 'string' && /^[A-Za-z0-9._:-]{1,180}$/.test(s)) && new Set(v).size === v.length,
 }
