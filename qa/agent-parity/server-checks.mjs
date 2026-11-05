@@ -48,6 +48,54 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'coalesced-owner-history': async s => {
+    const row = s.sessions.get('wizard_parity')
+    const human = 'Synthetic voice report: focus moved but the dialog stayed closed.'
+    const helper = '[ASYNC DELEGATION BATCH COMPLETE — synthetic]\nPrivate helper instructions\n\n--- ✓ TASK 1/1: Synthetic private task (status=completed) ---\nPrivate result\nFull live transcript (complete tool/assistant trace): /private/synthetic.log'
+    const chip = '[WIZARD_FILE_CHIPS_V1]\n[{"id":"drop_synthetic","filename":"voice.webm","mime":"audio/webm"}]\n[/WIZARD_FILE_CHIPS_V1]'
+    const media = { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }
+    row.messages = [
+      { id: 'helper-only', role: 'user', content: helper, timestamp: 100 },
+      { id: 'owner-voice', role: 'user', client_message_id: 'synthetic-client', content: [{ type: 'text', text: helper + '\n\n' + human + '\n\n' + chip }, media], timestamp: 101 },
+      { id: 'reply', role: 'assistant', content: 'Synthetic answer', timestamp: 102 },
+    ]
+    const before = JSON.stringify(row.messages), requests = s.seen.length
+    const output = await history(s)
+    assert.deepEqual(output.map(r => r.id), ['owner-voice', 'reply'])
+    assert.equal(output[0].client_message_id, 'synthetic-client')
+    assert.equal(output[0].timestamp, 101)
+    assert.equal(output[0].content[0].text, human + '\n\n' + chip)
+    assert.deepEqual(output[0].content[1], media)
+    assert.deepEqual(output[0].display_content, output[0].content)
+    assert.ok(!JSON.stringify(output).includes('Private helper'))
+    assert.ok(!JSON.stringify(output).includes('/private/'))
+    assert.equal(JSON.stringify(row.messages), before)
+    assert.ok(!s.seen.slice(requests).some(r => r.method === 'POST'), 'history reads admit no runs')
+  },
+  'reply-summary-preferences': async s => {
+    // The shell uses one owner/box preference route even while a routed chat is open.
+    // Read each kind's real transcript route too: no preference write may admit a run
+    // or change the routed transcript. Restricted fixtures retain their Unix ingress.
+    const file = join(s.root, 'os', 'ui-preferences.json')
+    const stored = { compact: true, futureShellKey: { keep: true } }
+    writeFileSync(file, JSON.stringify(stored) + '\n')
+    const read = async () => { const r = await s.raw('/wizard/v1/ui-preferences'); assert.equal(r.status, 200); return r.json() }
+    const put = value => s.raw('/wizard/v1/ui-preferences', { ...post(value), method: 'PUT' })
+    const before = await history(s)
+    const sends = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    const admitted = sends()
+    assert.equal(Object.hasOwn(await read(), 'replySummary'), false, 'absent stays absent on every kind')
+    const replySummary = { on: true, start: 'expanded', length: 'paragraph' }
+    assert.equal((await put({ replySummary })).status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { ...stored, replySummary })
+    await s.restart()
+    assert.deepEqual((await read()).replySummary, replySummary, 'reopen reads the persisted choice')
+    const saved = readFileSync(file, 'utf8')
+    assert.equal((await put({ replySummary: { on: true, length: 'bad' }, compact: false })).status, 400)
+    assert.equal(readFileSync(file, 'utf8'), saved, 'invalid preference cannot partially write')
+    assert.deepEqual(await history(s), before, 'main and routed transcripts remain unchanged')
+    assert.equal(sends(), admitted, 'reopening preferences never generates a reply')
+  },
   'head-row-owner-write-parity': async s => {
     if (s.kind === 'main') {
       const db = new DatabaseSync(join(s.root, 'hermes-state.db'))
