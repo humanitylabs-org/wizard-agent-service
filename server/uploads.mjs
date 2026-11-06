@@ -25,7 +25,6 @@ export const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 export const UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024
 export const UPLOAD_RESERVE_BYTES = 5 * 1024 * 1024 * 1024
 export const UPLOAD_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000
-export const SHARE_FILE_LIMIT = 8
 export const SHARE_NOTE_LIMIT = 8000
 
 export const UPLOAD_ID = /^up_[0-9a-f]{32}$/
@@ -582,7 +581,6 @@ export function parseShareRequest(value) {
   if (value.thread !== undefined && value.thread !== null && (typeof value.thread !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(value.thread))) throw new UploadError(400, 'invalid_request', { field: 'thread' })
   if (value.note !== undefined && value.note !== null && typeof value.note !== 'string') throw new UploadError(400, 'invalid_request', { field: 'note' })
   if (!Array.isArray(value.files) || !value.files.length) throw new UploadError(400, 'invalid_request', { field: 'files' })
-  if (value.files.length > SHARE_FILE_LIMIT) throw new UploadError(400, 'too_many_files', { max_files: SHARE_FILE_LIMIT })
   for (const file of value.files) fileSpec(file, { requireClientId: false })
   return {
     client_share_id: value.client_share_id,
