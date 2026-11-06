@@ -13,13 +13,24 @@ async function start(d: string, auth = false) {
 }
 const put = (u: string, value: any, headers = {}) => fetch(u, { method: 'PUT', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })
 describe('box-wide UI preferences HTTP contract', () => {
+  it('shares phone after-action choice across devices and restart without changing other fields', async () => {
+    const d = home(), u = await start(d)
+    expect((await (await fetch(u)).json()).chatAfterAction).toBe('stay')
+    expect((await put(u, { compact: true, chatAfterAction: 'list' })).status).toBe(200)
+    const secondDevice = await start(d)
+    expect((await (await fetch(secondDevice)).json()).chatAfterAction).toBe('list')
+    for (const chatAfterAction of [null, true, 1, 'back', [], {}]) expect((await put(u, { chatAfterAction, compact: false })).status).toBe(400)
+    expect((await (await fetch(u)).json()).compact).toBe(true)
+    expect((await put(secondDevice, { chatAfterAction: 'stay' })).status).toBe(200)
+    expect((await (await fetch(u)).json()).chatAfterAction).toBe('stay')
+  })
   it('defaults, merges only specified keys, persists across restart and leaves settings untouched', async () => {
     const d = home(), original = '{"owner":{"name":"Fixture"},"future":true}\n'; writeFileSync(join(d, 'settings.json'), original)
     const u = await start(d); expect(await (await fetch(u)).json()).toEqual(DEFAULT_UI_PREFERENCES)
     expect((await put(u, { archiveAfterDays: 0, compact: true })).status).toBe(200)
     expect((await put(u, { readyOrder: 'oldest' })).status).toBe(200)
     const u2 = await start(d)
-    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })
+    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })
     expect(readFileSync(join(d, 'settings.json'), 'utf8')).toBe(original)
     expect((await fetch(u2)).headers.get('cache-control')).toBe('no-store')
   })
@@ -113,7 +124,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   it('reads leniently: an invalid stored value defaults only that key', async () => {
     const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ archiveAfterDays: 9999, compact: true, readyOrder: 'chaos', subjectOrder: ['a', 'b'] }))
     const u = await start(d); const r = await fetch(u); expect(r.status).toBe(200)
-    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })
+    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })
     expect((await put(u, { archiveAfterDays: 9999 })).status).toBe(400)
   })
   it('unparseable stored state serves defaults without overwriting it until the next valid PUT', async () => {
@@ -127,7 +138,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   })
   it('concurrent partial writes preserve all unrelated preferences', async () => {
     const u = await start(home()); await Promise.all([put(u, { compact: true }), put(u, { readyOrder: 'subject' }), put(u, { archiveAfterDays: 14 })])
-    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
+    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
   })
 })
 

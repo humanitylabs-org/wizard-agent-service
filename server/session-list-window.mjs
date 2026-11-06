@@ -17,7 +17,7 @@ export const newestFirst = (a,b) => {
 };
 const latestArchiveActivity = s => Math.max(...[s.restoredAt,s.assignedAt,s.previewAt,s.requestAt,s.activityAt,s.lastUserAt,s.updatedAt].map(time).filter(Number.isFinite));
 export function archiveCandidate(s, now=Date.now(), days=7) {
-  if (s.hidden || priority.has(s.status) || (s.deferred && !s.archived)) return false;
+  if (s.hidden || priority.has(s.status) || (!s.archived && s.background) || (s.deferred && !s.archived)) return false;
   const latest=latestArchiveActivity(s);
   return s.archived || (days > 0 && Number.isFinite(latest) && latest <= now-days*DAY);
 }
@@ -52,7 +52,7 @@ export function selectWindow(rows, {dispositions={}, overrides={}, now=Date.now(
   // Stable projected rows can reuse their selection only until the next exact
   // age transition. Owner dispositions/overrides are already applied above.
   if (onAgeBoundary && days > 0) for (const {s} of entries) {
-    if (s.archived || priority.has(s.status) || s.deferred) continue;
+    if (s.archived || priority.has(s.status) || s.background || s.deferred) continue;
     const boundary=latestArchiveActivity(s)+days*DAY;
     if (Number.isFinite(boundary) && boundary>now) onAgeBoundary(boundary);
   }

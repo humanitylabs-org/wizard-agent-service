@@ -5,7 +5,7 @@ const realDate = v => { const [y, m, d] = v.slice(0, 10).split('-').map(Number),
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })
+export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })
 // 50 spaces × 500 thread ids (up to 180 chars), plus existing preferences.
 export const UI_PREFERENCES_MAX_BYTES = 5 * 1024 * 1024
 const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}$/
@@ -41,8 +41,11 @@ const validators = {
   spaces: v => Array.isArray(v) && v.length <= 50 && v.every(validSpace) && new Set(v.map(s => s.id)).size === v.length,
   archiveAfterDays: v => Number.isInteger(v) && [0, 1, 3, 7, 14, 30].includes(v),
   compact: v => typeof v === 'boolean',
+  // Phone navigation after sending, archiving, snoozing and marking unread.
+  chatAfterAction: v => v === 'stay' || v === 'list',
   // Chats list layout: 'day' (Ready, Yesterday, Past week) or 'status' (Working, Ready, Archive).
   chatLayout: v => v === 'day' || v === 'status',
+  workingOrder: v => ['alphabetical', 'newest', 'oldest'].includes(v),
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
   // Optional: the shell reads the saved choice before enabling its short-answer view on reopen.
