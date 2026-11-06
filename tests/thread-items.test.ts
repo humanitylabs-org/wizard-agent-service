@@ -44,6 +44,22 @@ describe('items in the status line', () => {
 })
 
 describe('the ledger', () => {
+  it('keeps action text, acknowledges any amber ask and reopens only its next version', () => {
+    expect(ITEMS_INSTRUCTIONS).toContain('one specific thing for the owner to do')
+    expect(ITEMS_INSTRUCTIONS).toContain('optional follow-ups are done')
+    // Red is only for work stuck outside both owner and agent; a "reply X and I'll retry" is the owner's move.
+    expect(ITEMS_INSTRUCTIONS).toContain('blocked only when the work is stuck on something outside both the owner and you')
+    expect(ITEMS_INSTRUCTIONS).toContain("Reply <word> and I'll retry")
+    expect(ITEMS_INSTRUCTIONS).toContain('is needs_you, never blocked')
+    expect(normalizeItems([{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }])[0]).toMatchObject({ ask: 'Reply resend to send it' })
+    const store = new ThreadItemStore('', { now: () => 1_700_000_150_000 })
+    store.ingest('hermes', 't', { items: [{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }], at: 1_700_000_100 })
+    expect(store.markSeen('hermes', 't', [{ id: 'a', updated_at: 1_700_000_100_000 }], { versioned: true })).toEqual([{ id: 'a', status: 'acknowledged' }])
+    expect(store.counts('hermes', 't')).toMatchObject({ needs_you: 0, acknowledged: 1 })
+    store.ingest('hermes', 't', { items: [{ ...item('a', 'needs_you'), ask: 'Approve the second send' }], at: 1_700_000_200 })
+    expect(store.list('hermes', 't')[0]).toMatchObject({ ask: 'Approve the second send', seen: false })
+    expect(store.counts('hermes', 't')).toMatchObject({ needs_you: 1, acknowledged: 0 })
+  })
   it('evicts seen done asks before unseen done, preserving all open states across quick answers and restart', () => {
     const path = join(tmp(), 'retention.json')
     const store = new ThreadItemStore(path, { now: () => 1_700_001_000_000 })
@@ -118,13 +134,13 @@ describe('the ledger', () => {
     store.ingest('hermes', 't2', { items: [item('x', 'done')], at: 10, messageId: '7' })
     expect(store.list('hermes', 't2')[0].message_id).toBe('7')
   })
-  it('"Looks good" on a try-it ask acknowledges it; a plain needs-you ask stays', () => {
+  it('Seen acknowledges both try-it and plain needs-you asks', () => {
     const store = new ThreadItemStore('', { now: () => 1_700_000_500_000 })
     store.ingest('hermes', 'try', { items: [item('a', 'needs_you'), item('b', 'needs_you')], at: 1_700_000_100, tryIt: true })
     store.ingest('hermes', 'try', { items: [item('c', 'needs_you')], at: 1_700_000_101 })
     expect(store.counts('hermes', 'try')).toMatchObject({ needs_you: 3, acknowledged: 0 })
     store.markSeen('hermes', 'try', ['a', 'c'])
-    expect(store.counts('hermes', 'try')).toMatchObject({ needs_you: 2, acknowledged: 1 })
+    expect(store.counts('hermes', 'try')).toMatchObject({ needs_you: 1, acknowledged: 2 })
   })
   it('counts needs-you, running, finished-unseen and acknowledged, per thread and for every thread', () => {
     let clock = 1_700_000_150_000
@@ -187,6 +203,51 @@ describe('the gate', () => {
 })
 
 describe('the counts, items and seen endpoints', () => {
+  it('validates the exact loaded version at the write, preserves legacy ids and enforces the tweak gate', async () => {
+    const { s, d } = await runs(true)
+    try {
+      const ingest = async (at: number, title: string) => {
+        at = Math.floor(Date.now() / 1000) + at - 1_700_000_000
+        s.sessions.get('t1').messages = [{ id: at, role: 'assistant', timestamp: at, content: tag({ state: 'done', ask: 'x', items: [item('a', 'done', title), item('b', 'done', 'Other')] }) }]
+        await s.request('/api/sessions/t1/messages?view=wizard&limit=50')
+      }
+      await ingest(1_700_000_100, 'First')
+      const loaded = (await (await api(s, '/wizard/v1/thread-items?thread=t1')).json()).items.find((i: any) => i.id === 'a')
+      await ingest(1_700_000_200, 'Newer version another device has not read')
+      const stale = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 't1', ids: ['a'], items: [{ id: 'a', updated_at: loaded.updated_at }] }))).json()
+      expect(stale.results).toEqual([{ id: 'a', status: 'stale' }])
+      expect(stale.items.find((i: any) => i.id === 'a').seen).toBe(false)
+      expect(JSON.parse(readFileSync(join(d, 'items.json'), 'utf8')).threads['hermes/t1'].items.a.seen_at).toBe(0)
+      const current = stale.items.find((i: any) => i.id === 'a')
+      const ack = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 't1', items: [{ id: 'a', updated_at: current.updated_at }, { id: 'missing', updated_at: 1 }] }))).json()
+      expect(ack.results).toEqual([{ id: 'a', status: 'acknowledged' }, { id: 'missing', status: 'stale' }])
+      expect(ack.items.find((i: any) => i.id === 'a').seen).toBe(true)
+      const legacy = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 't1', ids: ['b'] }))).json()
+      expect(legacy.items.every((i: any) => i.seen)).toBe(true)
+      expect(legacy.results).toBeUndefined()
+      await ingest(1_700_000_300, 'Still newer')
+      const invalid = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 't1', ids: ['a'], items: [{ id: 'a', updated_at: '1700000300000' }] }))).json()
+      expect(invalid.results).toEqual([{ id: 'a', status: 'stale' }])
+      expect(invalid.items.find((i: any) => i.id === 'a').seen).toBe(false)
+    } finally { await s.close() }
+    for (const enabled of [false, undefined]) {
+      const { s, d } = await runs(enabled)
+      try {
+        const res = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 't1', ids: ['a'], items: [{ id: 'a', updated_at: 1 }] }))).json()
+        expect(res.items).toEqual([])
+        expect(() => readFileSync(join(d, 'items.json'))).toThrow()
+      } finally { await s.close() }
+    }
+  }, 30_000)
+  it('compares and persists mixed version outcomes synchronously in the store write', () => {
+    const path = join(tmp(), 'cas.json'), store = new ThreadItemStore(path, { now: () => 1_700_001_000_000 })
+    store.ingest('hermes', 't', { items: [item('a', 'done'), item('b', 'done')], at: 1_700_000_100 })
+    const results = store.markSeen('hermes', 't', [{ id: 'a', updated_at: 1_700_000_000_000 }, { id: 'b', updated_at: 1_700_000_100_000 }], { versioned: true })
+    expect(results).toEqual([{ id: 'a', status: 'stale' }, { id: 'b', status: 'acknowledged' }])
+    const saved = new ThreadItemStore(path).list('hermes', 't')
+    expect(saved.find((i: any) => i.id === 'a').seen).toBe(false)
+    expect(saved.find((i: any) => i.id === 'b').seen).toBe(true)
+  })
   it('serve one ledger to every device, read it back from the thread history, and keep Seen', async () => {
     const { s, d } = await runs(true)
     try {

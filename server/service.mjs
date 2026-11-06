@@ -5464,18 +5464,22 @@ function buildWizardServer(options, lifetime) {
         }
         if (counts) { sendJson(response, 200, { threads: threadItems.allCounts() }, { 'Cache-Control': 'no-store' }); return }
         let thread = url.searchParams.get('thread') || '', agent = url.searchParams.get('agent') || ''
-        let ids = []
+        let ids = [], versioned = false
         if (seen) {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
           let input
           try { input = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
           thread = typeof input?.thread === 'string' ? input.thread : ''; agent = typeof input?.agent === 'string' ? input.agent : ''
-          ids = Array.isArray(input?.ids) ? input.ids.filter(id => typeof id === 'string').slice(0, 40) : []
+          // New clients include both fields for rolling upgrades. Presence of items
+          // selects strict version validation, never a fallback to blanket ids.
+          versioned = Object.hasOwn(input || {}, 'items')
+          ids = versioned ? (Array.isArray(input.items) ? input.items.slice(0, 40) : [])
+            : Array.isArray(input?.ids) ? input.ids.filter(id => typeof id === 'string').slice(0, 40) : []
         }
         agent ||= 'hermes'
         if (!/^[a-z][a-z0-9-]{0,30}$/u.test(agent) || !/^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u.test(thread)) { sendJson(response, 400, { error: 'invalid_thread' }); return }
-        if (seen) threadItems.markSeen(agent, thread, ids)
-        sendJson(response, 200, { thread, agent, items: threadItems.list(agent, thread), counts: threadItems.counts(agent, thread) }, { 'Cache-Control': 'no-store' })
+        const results = seen ? threadItems.markSeen(agent, thread, ids, { versioned }) : undefined
+        sendJson(response, 200, { thread, agent, items: threadItems.list(agent, thread), counts: threadItems.counts(agent, thread), ...(seen && versioned ? { results } : {}) }, { 'Cache-Control': 'no-store' })
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {
