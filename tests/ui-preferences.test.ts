@@ -138,7 +138,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   })
   it('concurrent partial writes preserve all unrelated preferences', async () => {
     const u = await start(home()); await Promise.all([put(u, { compact: true }), put(u, { readyOrder: 'subject' }), put(u, { archiveAfterDays: 14 })])
-    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
+    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
   })
 })
 
