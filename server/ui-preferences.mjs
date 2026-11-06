@@ -43,6 +43,7 @@ const validators = {
   compact: v => typeof v === 'boolean',
   // Chats list layout: 'day' (Ready, Yesterday, Past week) or 'status' (Working, Ready, Archive).
   chatLayout: v => v === 'day' || v === 'status',
+  workingOrder: v => ['alphabetical', 'newest', 'oldest'].includes(v),
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
   // Optional: the shell reads the saved choice before enabling its short-answer view on reopen.
