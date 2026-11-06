@@ -47,6 +47,10 @@ describe('the ledger', () => {
   it('keeps action text, acknowledges any amber ask and reopens only its next version', () => {
     expect(ITEMS_INSTRUCTIONS).toContain('one specific thing for the owner to do')
     expect(ITEMS_INSTRUCTIONS).toContain('optional follow-ups are done')
+    // Red is only for work stuck outside both owner and agent; a "reply X and I'll retry" is the owner's move.
+    expect(ITEMS_INSTRUCTIONS).toContain('blocked only when the work is stuck on something outside both the owner and you')
+    expect(ITEMS_INSTRUCTIONS).toContain("Reply <word> and I'll retry")
+    expect(ITEMS_INSTRUCTIONS).toContain('is needs_you, never blocked')
     expect(normalizeItems([{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }])[0]).toMatchObject({ ask: 'Reply resend to send it' })
     const store = new ThreadItemStore('', { now: () => 1_700_000_150_000 })
     store.ingest('hermes', 't', { items: [{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }], at: 1_700_000_100 })

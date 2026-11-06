@@ -63,7 +63,7 @@ export const trackerChecks = {
     const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote(logo.message_id) })); assert.equal(sent.status, 202)
     const instructions = sentInstructions(s)
     assert.ok(instructions.includes(ITEMS_INSTRUCTIONS), `${s.kind}: the actual upstream run receives the full tracker contract`)
-    for (const rule of ['Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer', 'a question you answer is an ask in state done', 'mid-turn additions', 'at most 16', 'list the open asks first', 'asks answered earlier need not be repeated', 'one specific thing for the owner to do', 'optional follow-ups are done', 'Reply resend to send it']) {
+    for (const rule of ['Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer', 'a question you answer is an ask in state done', 'mid-turn additions', 'at most 16', 'list the open asks first', 'asks answered earlier need not be repeated', 'one specific thing for the owner to do', 'optional follow-ups are done', 'is needs_you, never blocked', 'Reply resend to send it']) {
       assert.ok(instructions.includes(rule), `${s.kind}: missing mandatory rule: ${rule}`)
     }
     assert.ok(!instructions.includes('Optionally add'), 'listing asks is mandatory')
