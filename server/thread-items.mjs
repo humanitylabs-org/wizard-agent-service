@@ -1,6 +1,6 @@
 // Thread tracker (owner tweak `wizard/thread-tracker`, off by default): the asks inside one thread.
 //
-// While the tweak is on, an agent may list the asks its reply covers in the hidden status line:
+// While the tweak is on, an agent must list the asks its reply covers in the hidden status line:
 //   [WIZARD_STATUS_V1]{"state":"done","ask":"…","items":[{"id":"voice-notes","title":"Voice notes stuck at bottom","state":"done"}]}[/WIZARD_STATUS_V1]
 // The service keeps one ledger per thread (latest state per item id, plus the message that last updated it) and
 // the owner's Seen marks, so phone and desktop agree. Parsing `items` is harmless when the tweak is off: nothing
@@ -15,14 +15,14 @@ import { atomicStoreWrite, validAgentId } from './thread-reference.mjs'
 
 export const TRACKER_TWEAK = 'wizard/thread-tracker'
 export const ITEM_STATES = new Set(['running', 'needs_you', 'done', 'blocked'])
-export const MAX_ITEMS_PER_REPLY = 12
+export const MAX_ITEMS_PER_REPLY = 16
 const MAX_ITEMS_PER_THREAD = 40
 const MAX_THREADS = 3000
 const ITEM_ID = /^[a-z0-9][a-z0-9-]{0,39}$/u
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const STATE_ALIASES = { needs: 'needs_you', needsyou: 'needs_you', waiting: 'needs_you', working: 'running', in_progress: 'running', inprogress: 'running', complete: 'done', completed: 'done', finished: 'done', broken: 'blocked', failed: 'blocked' }
 
-export const ITEMS_INSTRUCTIONS = 'Thread tracker is on for this owner. Optionally add an "items" array to the same final WIZARD_STATUS_V1 JSON to list the separate asks this reply covers or changes (at most 8), each {"id","title","state"}: id is a short lowercase slug (letters, digits, hyphens) that you reuse in every later reply about the same ask, so the tracker updates that ask instead of adding another; title is at most 40 characters of plain words the owner would recognise; state is running (you are still working on it, for example background work started), needs_you (the owner must decide, approve, try or do one thing), done (finished and verified), or blocked (broken or stuck on something outside both of you). List only asks this reply starts or changes. Leave items out for conversation, quick answers and anything that is a single ask already obvious from the title.'
+export const ITEMS_INSTRUCTIONS = `Thread tracker is on for this owner. Add an "items" array to the same final WIZARD_STATUS_V1 JSON listing every separate ask this reply covers or changes (at most ${MAX_ITEMS_PER_REPLY}), each {"id","title","state"}: id is a short lowercase slug (letters, digits, hyphens) that you reuse in every later reply about the same ask, so the tracker updates that ask instead of adding another; title is at most 40 characters of plain words the owner would recognise; state is running (you are still working on it, for example background work started), needs_you (the owner must decide, approve, try or do one thing), done (finished and verified), or blocked (broken or stuck on something outside both of you). An ask is anything the owner asked for in this thread, including mid-turn additions and plain questions: a question you answer is an ask in state done. Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer; an ask the owner raised that is not yet listed must be added (in the reply that handles it, or as running if it is still waiting). If there are more than ${MAX_ITEMS_PER_REPLY} asks to list, list the open asks first (running, needs_you or blocked); asks answered earlier need not be repeated. List only asks this reply starts or changes, plus any unlisted open asks. Leave items out only for pure conversation with no ask.`
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -140,7 +140,13 @@ export class ThreadItemStore {
     if (!changed) return false
     const ids = Object.keys(current.items)
     if (ids.length > MAX_ITEMS_PER_THREAD) {
-      for (const id of ids.sort((a, b) => current.items[a].updated_at - current.items[b].updated_at).slice(0, ids.length - MAX_ITEMS_PER_THREAD)) delete current.items[id]
+      // Quick answered questions must not push unresolved work out of the ledger.
+      // Discard seen done items first, then unseen done (oldest within each tier).
+      // The limit is soft if open asks alone exceed it: no open ask is disposable.
+      const completed = ids.filter(id => current.items[id].state === 'done')
+      const seen = id => current.items[id].seen_at >= current.items[id].updated_at
+      completed.sort((a, b) => Number(seen(b)) - Number(seen(a)) || current.items[a].updated_at - current.items[b].updated_at)
+      for (const id of completed.slice(0, ids.length - MAX_ITEMS_PER_THREAD)) delete current.items[id]
     }
     current.updated_at = this.now()
     this.data.threads[key] = current

@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { scene, post, owner } from '../qa/agent-parity/fixture.mjs'
+import { scene, post, owner, kinds } from '../qa/agent-parity/fixture.mjs'
+import { trackerChecks } from '../qa/agent-parity/tracker-checks.mjs'
 import { parseStatus, projectStatusMarkers } from '../server/thread-status.mjs'
 import { ThreadItemStore, countItems, normalizeItems, trackerEnabled, parseReplyTo, expandReplyTo, expandReplyToInput, ITEMS_INSTRUCTIONS, TRACKER_TWEAK } from '../server/thread-items.mjs'
 
@@ -32,7 +33,9 @@ describe('items in the status line', () => {
     ])
     expect(parseStatus(tag({ state: 'done', ask: 'x', items: 'nope' })).items).toBeUndefined()
     expect(parseStatus(tag({ state: 'done', ask: 'x' }))).toEqual({ state: 'done', ask: 'x' }) // no items key at all
-    expect(normalizeItems(Array.from({ length: 30 }, (_, i) => item(`a${i}`, 'done'))).length).toBe(12)
+    const many = Array.from({ length: 30 }, (_, i) => item(`a${i}`, 'done'))
+    expect(normalizeItems(many)).toEqual(many.slice(0, 16))
+    expect(parseStatus(tag({ state: 'done', ask: 'x', items: many }))?.items).toEqual(many.slice(0, 16))
   })
   it('never show in message history', () => {
     const out = projectStatusMarkers(Buffer.from(JSON.stringify({ data: [{ role: 'assistant', content: `Hi\n${tag({ state: 'done', ask: 'x', items: [item('a', 'done')] })}` }] }))).toString()
@@ -41,6 +44,35 @@ describe('items in the status line', () => {
 })
 
 describe('the ledger', () => {
+  it('evicts seen done asks before unseen done, preserving all open states across quick answers and restart', () => {
+    const path = join(tmp(), 'retention.json')
+    const store = new ThreadItemStore(path, { now: () => 1_700_001_000_000 })
+    const put = (id: string, state: string, at: number) => store.ingest('hermes', 't', { items: [item(id, state)], at })
+    put('running', 'running', 1_700_000_001)
+    put('waiting', 'needs_you', 1_700_000_002)
+    put('blocked', 'blocked', 1_700_000_003)
+    for (let i = 0; i < 37; i++) put(`question-${i}`, 'done', 1_700_000_010 + i)
+    // Seen open asks are still open; only done items are disposable.
+    store.markSeen('hermes', 't', ['running', 'waiting', 'blocked', 'question-36'])
+    put('question-37', 'done', 1_700_000_100)
+    let ids = store.list('hermes', 't').map(i => i.id)
+    expect(ids).toHaveLength(40)
+    expect(ids).not.toContain('question-36')
+    expect(ids).toContain('question-0') // older but still unseen
+    for (let i = 38; i < 80; i++) put(`question-${i}`, 'done', 1_700_000_100 + i)
+    ids = new ThreadItemStore(path).list('hermes', 't').map(i => i.id)
+    expect(ids).toHaveLength(40)
+    expect(ids).toEqual(expect.arrayContaining(['running', 'waiting', 'blocked', 'question-79']))
+    expect(ids).not.toContain('question-0') // oldest unseen done is next to go
+  })
+  it('treats the retention limit as soft when every ask is still open', () => {
+    const store = new ThreadItemStore()
+    for (let i = 0; i < 45; i++) store.ingest('hermes', 't', { items: [item(`open-${i}`, 'running')], at: 100 + i })
+    expect(store.list('hermes', 't')).toHaveLength(45)
+    store.ingest('hermes', 't', { items: [item('question', 'done')], at: 200 })
+    expect(store.list('hermes', 't')).toHaveLength(45)
+    expect(store.list('hermes', 't').every(i => i.state === 'running')).toBe(true)
+  })
   it('counts current reply anchors, keeps per-ask custody, and moves changed asks into their new reply', () => {
     let clock = 1_700_000_500_000
     const store: any = new ThreadItemStore('', { now: () => clock })
@@ -124,6 +156,11 @@ describe('the ledger', () => {
 })
 
 describe('the gate', () => {
+  for (const kind of kinds) it(`delivers the mandatory every-ask contract only when enabled / ${kind}`, async () => {
+    const s = await scene(kind, { threadTracker: true })
+    try { await trackerChecks['thread-tracker'](s) }
+    finally { await s.close() }
+  }, 30_000)
   it('reads the synced Look file: only an explicit ON counts', () => {
     expect(TRACKER_TWEAK).toBe('wizard/thread-tracker')
     expect(trackerEnabled(JSON.stringify({ version: 1, tweaks: { [TRACKER_TWEAK]: { on: true, at: 3 } } }))).toBe(true)
@@ -218,4 +255,13 @@ describe('quote reply', () => {
       expect(steered.body.input).toContain('and also this')
     } finally { await s.close() }
   }, 30_000)
+  it('asks the agent to list every ask, including answered questions (James, 6 Nov: a quick LINE question was never listed)', () => {
+    expect(ITEMS_INSTRUCTIONS).not.toMatch(/Optionally add/u)
+    expect(ITEMS_INSTRUCTIONS).not.toMatch(/quick answers/u)
+    expect(ITEMS_INSTRUCTIONS).toMatch(/a question you answer is an ask in state done/u)
+    expect(ITEMS_INSTRUCTIONS).toMatch(/mid-turn additions/u)
+    expect(ITEMS_INSTRUCTIONS).toContain('at most 16')
+    expect(ITEMS_INSTRUCTIONS).toContain('list the open asks first')
+    expect(ITEMS_INSTRUCTIONS).toContain('asks answered earlier need not be repeated')
+  })
 })
