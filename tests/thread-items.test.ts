@@ -51,6 +51,12 @@ describe('the ledger', () => {
     expect(ITEMS_INSTRUCTIONS).toContain('blocked only when the work is stuck on something outside both the owner and you')
     expect(ITEMS_INSTRUCTIONS).toContain("Reply <word> and I'll retry")
     expect(ITEMS_INSTRUCTIONS).toContain('is needs_you, never blocked')
+    // Running means something is still doing it; a turn never ends with an unstarted ask left running (James, 7 Nov 2026).
+    expect(ITEMS_INSTRUCTIONS).toContain('running (only while something is actually still doing it: a helper you started, a job you submitted, a scheduled run, or this very turn)')
+    expect(ITEMS_INSTRUCTIONS).toContain('At the end of your turn, any ask that no started helper, submitted job or scheduled run is still doing must be needs_you')
+    expect(ITEMS_INSTRUCTIONS).toContain("naming the word to reply")
+    expect(ITEMS_INSTRUCTIONS).toContain('or done, never running')
+    expect(ITEMS_INSTRUCTIONS).not.toContain('or as running if it is still waiting')
     expect(normalizeItems([{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }])[0]).toMatchObject({ ask: 'Reply resend to send it' })
     const store = new ThreadItemStore('', { now: () => 1_700_000_150_000 })
     store.ingest('hermes', 't', { items: [{ ...item('a', 'needs_you'), ask: 'Reply resend to send it' }], at: 1_700_000_100 })
