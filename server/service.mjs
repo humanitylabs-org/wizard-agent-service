@@ -102,8 +102,9 @@ export const BODY_LIMIT = 12 * 1024 * 1024
 export const TAILNET_INGRESS = Symbol('wizard.tailnetIngress')
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
 export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
-// Eight composer files plus the retained microphone recording.
-const WIZARD_FILE_LIMIT = 9
+// No per-message file COUNT cap (James, 6 Nov 2026: "don't impose arbitrary limits on the user"). The real limits
+// are per-file upload size (WIZARD_FILE_UPLOAD_LIMIT / WIZARD_VOICE_UPLOAD_LIMIT) and the inline-image byte budget
+// below; images past that budget reach the agent as trusted paths with a vision_analyze note.
 const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
 // Non-image files the agent sends with MEDIA: (APKs, PDFs, archives, audio, video).
 const WIZARD_AGENT_FILE_LIMIT = 256 * 1024 * 1024
@@ -853,7 +854,7 @@ function durableScreenshotCandidate(record) {
       continue
     }
     const image = durableInlineImage(part)
-    if (!image || images.length >= WIZARD_FILE_LIMIT || totalBytes + image.bytes > WIZARD_AGENT_IMAGE_LIMIT) return null
+    if (!image || totalBytes + image.bytes > WIZARD_AGENT_IMAGE_LIMIT) return null
     images.push({ type: image.type, image_url: image.image_url })
     text.push(DURABLE_SCREENSHOT_MARKER)
     totalBytes += image.bytes
@@ -1017,7 +1018,7 @@ export function projectWizardFileMarkers(result, userMessagesOnly = false) {
         try {
           const files = JSON.parse(raw)
           if (!Array.isArray(files)) return ''
-          const safe = files.slice(0, WIZARD_FILE_LIMIT).map(safeAttachment)
+          const safe = files.map(safeAttachment)
           return `[WIZARD_FILE_CHIPS_V1]\n${JSON.stringify(safe)}\n[/WIZARD_FILE_CHIPS_V1]`
         } catch { return '' }
       })
@@ -1668,7 +1669,7 @@ function recoverProjectedFileChips(input) {
     if (typeof value === 'string') return value.replace(PROJECTED_FILE_CHIPS, (_marker, raw) => {
       let files
       try { files = JSON.parse(raw) } catch { throw Object.assign(new Error('invalid projected file chips'), { status: 400 }) }
-      if (!Array.isArray(files) || !files.length || files.length > WIZARD_FILE_LIMIT
+      if (!Array.isArray(files) || !files.length
         || files.some(file => !file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !FILE_ID.test(file.id))) {
         throw Object.assign(new Error('invalid projected file chips'), { status: 400 })
       }
@@ -1756,7 +1757,7 @@ export async function prepareRunBody(body, resolveFiles, includeNativeImages = f
   const recovered = recoverProjectedFileChips(value.input)
   const declared = Object.hasOwn(value, 'wizard_file_ids')
   if (!declared && !recovered.ids.length) return { body, trustedPaths: [] }
-  if (declared && (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT)) {
+  if (declared && !Array.isArray(value.wizard_file_ids)) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
   const declaredIds = declared ? [...new Set(value.wizard_file_ids)] : []
@@ -1765,7 +1766,6 @@ export async function prepareRunBody(body, resolveFiles, includeNativeImages = f
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
   const ids = [...new Set([...declaredIds, ...recovered.ids])]
-  if (ids.length > WIZARD_FILE_LIMIT) throw Object.assign(new Error('invalid file ids'), { status: 400 })
   value.input = recovered.input
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
@@ -2029,7 +2029,7 @@ export function routedMediaPaths(result, containerRoot = '/opt/data') {
     else if (value && typeof value === 'object') Object.values(value).forEach(walk)
   }
   try { walk(JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result))) } catch { return [] }
-  return [...found].slice(0, 16)
+  return [...found]
 }
 
 export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null, scoped = false) {
