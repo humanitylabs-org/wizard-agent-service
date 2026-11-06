@@ -41,10 +41,29 @@ export const trackerChecks = {
     const groupSeen = await s.raw('/wizard/v1/thread-items/seen', post({ thread: 'wizard_parity', agent: s.id || 'hermes', ids: ['logo', 'copy'] }))
     assert.equal(groupSeen.status, 200)
     assert.deepEqual((await counts(s))[key(s)], { needs_you: 0, running: 0, done_unseen: 0, blocked: 0, acknowledged: 1, total: 1 })
+    // Two independent clients read the same ledger. One version changes on the
+    // service without the older client polling; its delayed Seen must be stale.
+    const versionSession = await s.request('/api/sessions', post({ id: 'wizard_version', source: 'wizard-mobile', hidden: true })); assert.equal(versionSession.status, 201)
+    const at = Date.now() / 1000
+    const updateVersion = async (n, ask) => {
+      s.sessions.get('wizard_version').messages.push({ id: `version-${n}`, role: 'assistant', timestamp: at + n * 100, content: `[WIZARD_STATUS_V1]${JSON.stringify({state:'needs_you',ask,items:[{id:'resend',title:'Resend the reply',state:'needs_you',ask}]})}[/WIZARD_STATUS_V1]` })
+      assert.equal((await s.request('/api/sessions/wizard_version/messages?view=wizard&order=oldest')).status, 200)
+      return (await (await s.raw(`/wizard/v1/thread-items?thread=wizard_version&agent=${s.id || 'hermes'}`)).json()).items[0]
+    }
+    const olderClient = await updateVersion(1, 'Reply resend to send it')
+    const newerClient = await updateVersion(2, 'Approve the second send')
+    assert.equal(newerClient.ask, 'Approve the second send', `${s.kind}: bounded action text reaches the ledger`)
+    const seenVersion = async item => (await (await s.raw('/wizard/v1/thread-items/seen', post({thread:'wizard_version',agent:s.id || 'hermes',ids:[item.id],items:[{id:item.id,updated_at:item.updated_at}]}))).json())
+    const stale = await seenVersion(olderClient)
+    assert.deepEqual(stale.results, [{id:'resend',status:'stale'}]); assert.equal(stale.items[0].seen, false)
+    const matching = await seenVersion(newerClient)
+    assert.deepEqual(matching.results, [{id:'resend',status:'acknowledged'}]); assert.equal(matching.items[0].seen, true)
+    assert.equal(matching.counts.needs_you, 0); assert.equal(matching.counts.acknowledged, 1)
+    assert.equal((await updateVersion(3, 'Try the updated reply')).seen, false, `${s.kind}: a newer dismissed amber returns unseen`)
     const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote(logo.message_id) })); assert.equal(sent.status, 202)
     const instructions = sentInstructions(s)
     assert.ok(instructions.includes(ITEMS_INSTRUCTIONS), `${s.kind}: the actual upstream run receives the full tracker contract`)
-    for (const rule of ['Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer', 'a question you answer is an ask in state done', 'mid-turn additions', 'at most 16', 'list the open asks first', 'asks answered earlier need not be repeated']) {
+    for (const rule of ['Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer', 'a question you answer is an ask in state done', 'mid-turn additions', 'at most 16', 'list the open asks first', 'asks answered earlier need not be repeated', 'one specific thing for the owner to do', 'optional follow-ups are done', 'Reply resend to send it']) {
       assert.ok(instructions.includes(rule), `${s.kind}: missing mandatory rule: ${rule}`)
     }
     assert.ok(!instructions.includes('Optionally add'), 'listing asks is mandatory')
@@ -66,7 +85,7 @@ export const trackerChecks = {
         await read(off)
         assert.deepEqual(await counts(off), {}, 'off: nothing is recorded or shown')
         assert.deepEqual((await items(off)).items, [])
-        const seenOff = await off.raw('/wizard/v1/thread-items/seen', { ...post({ thread: 'wizard_parity', agent: off.id || 'hermes', ids: ['logo'] }) })
+        const seenOff = await off.raw('/wizard/v1/thread-items/seen', { ...post({ thread: 'wizard_parity', agent: off.id || 'hermes', ids: ['logo'], items: [{ id: 'logo', updated_at: 1 }] }) })
         assert.equal(seenOff.status, 200); assert.deepEqual((await seenOff.json()).items, [])
         const plain = await off.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote('a1') })); assert.equal(plain.status, 202)
         assert.ok(!sentInstructions(off).includes('Thread tracker'), 'off or absent: no tracker instructions reach the runtime')
