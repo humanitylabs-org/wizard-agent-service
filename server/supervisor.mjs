@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { TITLE_MAX, looksLikeSentence, normalizeTitle } from './thread-titles.mjs'
 
 export const SUPERVISOR_SPELL = `When the owner says "report this to supervisor", "tell the supervisor" or "send this to supervisor":
 Call supervisor_report: what happened (at most 400 words), the owner's feedback verbatim, evidence (paths, commands, excerpts, thread links), and a proposed_home (skill, standing rule or regression test).
@@ -18,17 +17,34 @@ const text = (value, max, field, optional = false) => {
 }
 const terminal = run => ['completed', 'failed', 'cancelled', 'interrupted'].includes(run?.status)
 const uid = prefix => `${prefix}_${randomUUID()}`
-// Report/build titles (60 chars) remain intact in the ledger. Thread labels name
-// the sustained project instead of inheriting a report's individual fix or task.
-export const THREAD_TITLE_MAX = TITLE_MAX
-export function supervisorThreadTitle(_topic) {
-  return 'Supervisor'
+// Fixed Supervisor workflow labels fit within 32 characters; these are not automatic rename rules.
+// report/build titles (60 chars) stay intact in the ledger, only the thread label is fitted.
+export const THREAD_TITLE_MAX = 32
+const PREFIX = 'Supervisor · '
+const STOP = new Set(['a', 'an', 'the', 'of', 'to', 'for', 'and', 'or', 'in', 'on', 'with', 'too'])
+const tidy = value => value.replace(/[\s.,;:!?·\-—–(]+$/u, '').trim()
+function fitTopic(topic, room) {
+  let t = String(topic ?? '').replace(/\s+/g, ' ').trim().replace(/^supervisor\s*[·:]\s*/iu, '').trim()
+  const head = t.split(/:| - | — |,|\(/u)[0].trim()
+  if (tidy(head)) t = head
+  t = tidy(t)
+  if (!t) return ''
+  const words = []
+  for (const word of t.split(' ')) { if ([...words, word].join(' ').length > room) break; words.push(word) }
+  while (words.length && STOP.has(words.at(-1).toLowerCase().replace(/[^\p{L}]/gu, ''))) words.pop()
+  return tidy(words.join(' ')) || t.split(' ')[0].slice(0, room)
 }
-/** Builder briefs can supply a project label, including a long-lived product surface. */
+export function supervisorThreadTitle(topic) {
+  return PREFIX + (fitTopic(topic, THREAD_TITLE_MAX - PREFIX.length) || 'Review')
+}
+/** Fit explicit builder/workflow labels; automatic project naming uses thread-titles.mjs. */
 export function builderThreadTitle(title) {
-  const raw = String(title ?? '').replace(/\s+/g, ' ').trim()
-  if (!raw || /^supervisor(?:\s*[·:]|$)/iu.test(raw) || looksLikeSentence(raw)) return supervisorThreadTitle()
-  return normalizeTitle(raw) || supervisorThreadTitle()
+  const t = String(title ?? '').replace(/\s+/g, ' ').trim()
+  if (/^supervisor\s*[·:]/iu.test(t) || !t.includes(' · ')) return supervisorThreadTitle(t)
+  const [project, ...rest] = t.split(' · ')
+  const p = project.trim().slice(0, 16)
+  const area = fitTopic(rest.join(' · '), THREAD_TITLE_MAX - p.length - 3)
+  return area ? `${p} · ${area}` : supervisorThreadTitle(t)
 }
 const PRIVATE = 'Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'
 export { PRIVATE as SUPERVISOR_PRIVATE_REFUSAL }
