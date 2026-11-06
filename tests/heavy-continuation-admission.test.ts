@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 import { createHeavyIntegration } from '../server/heavy-integration.mjs'
 
@@ -16,6 +17,10 @@ const path = '/wizard/internal/heavy/submit'
 
 async function fixture(providerAccessRecovery = false) {
   const root = mkdtempSync(join(tmpdir(), 'heavy-followup-'))
+  const hermesStatePath = join(root, 'state.db')
+  const sessions = new DatabaseSync(hermesStatePath)
+  sessions.exec("CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT); INSERT INTO sessions VALUES('s', NULL), ('child-session', 's')")
+  cleanup.push(() => sessions.close())
   let integration: any
   const statuses = new Map<string, string>()
   const workerStates = new Map<string, string>()
@@ -31,7 +36,7 @@ async function fixture(providerAccessRecovery = false) {
       }, lookup: async (r: any) => ({ payload: { status: statuses.get(r.publicRunId) || 'running' } }) })
     integration = createHeavyIntegration({ options: { heavyStatePath: join(root, 'heavy.db'), heavyToken: token,
       heavyTransport: async (p: any) => ({ job_id: p.job_id, state: workerStates.get(p.job_id) || 'completed', receipt: { exit_code: workerStates.get(p.job_id) === 'failed' ? 1 : 0 } }) },
-      queue: runs, request: async (p: string) => {
+      hermesStatePath, queue: runs, request: async (p: string) => {
         if (p.startsWith('/v1/runs/')) { await duringRuntime(); return { runtime: { model: 'original', provider: 'original-provider' } } }
         await duringHistory(); return { data: history }
       } })!
@@ -55,7 +60,7 @@ async function fixture(providerAccessRecovery = false) {
   const finish = async (id: string) => { statuses.set(id, 'completed'); await runs.tick(true) }
   const origin = await admit('human')
   return { get runs() { return runs }, get integration() { return integration }, submit, finish, admit, origin, history,
-    workerStates,
+    workerStates, sessions,
     restart: async () => { await integration.close(); runs.close(); open() },
     setHistoryHook: (fn: () => Promise<void>) => { duringHistory = fn },
     setRuntimeHook: (fn: () => Promise<void>) => { duringRuntime = fn } }
@@ -158,7 +163,13 @@ it.each([false, true])('admits a follow-up from the running continuation behind 
   await f.integration.validate(next)
   await f.integration.validate(f.runs.get(two.resume))
   expect(JSON.parse(next.body)).toMatchObject({ model: 'original', provider: 'original-provider', require_model_lock: true })
-  expect(JSON.parse(next.body).input).toContain('original authorization')
+  const input = JSON.parse(next.body).input
+  expect(input).toContain("thread's five-failed-run limit, including failures in your own tests/harness")
+  expect(input).toContain('If product behaviour already passed, ship it and report rather than repairing test scaffolding.')
+  expect(input).toContain('After five failed runs, stop and report what works and the blocker.')
+  expect(input).toContain('Check the receipt before claiming completion; do not blindly duplicate the job.')
+  expect(input).toContain('Preserve explicit owner approval gates; new scope still needs authorization.')
+  expect(input).not.toContain('Continue necessary repairs')
 })
 
 it.each(['human', 'helper'])('keeps a newer %s request outside the heavy generation as a hard fence', async kind => {
@@ -181,11 +192,37 @@ it.each(['stop', 'steer', 'owner-finished'])('fails closed when %s races the his
   expect(f.integration.queue.rows()).toEqual([])
 })
 
-it('rejects a helper child with no native owner and a completed origin', async () => {
+it('accepts a helper under its live parent, deduplicates with parent submission and resumes the parent', async () => {
   const f = await fixture()
-  await expect(f.submit('child', 'child-session')).rejects.toMatchObject({ status: 409 })
+  const job = await f.submit('child', 'child-session')
+  expect(job.session_id).toBe('s')
+  expect(f.integration.queue.get(job.job_id)).toMatchObject({ sessionId: 's', origin: f.origin.publicRunId })
+  expect((await f.submit('child')).job_id).toBe(job.job_id)
+  await f.finish(f.origin.publicRunId); await f.integration.queue.tick()
+  const resumed = f.runs.get(f.integration.queue.get(job.job_id).resume)
+  expect(resumed.sessionId).toBe('s')
+  expect(JSON.parse(resumed.body)).toMatchObject({ session_id: 's', model: 'original', provider: 'original-provider', require_model_lock: true })
+})
+
+it('rejects a helper whose parent is idle and unrelated sessions, without accepting a supplied parent', async () => {
+  const f = await fixture()
+  await expect(f.submit('unrelated', 'unrelated-session')).rejects.toMatchObject({ status: 409 })
+  await expect(f.integration.handle(req, path, { session_id: 'unrelated-session', parent_session_id: 's', key: 'spoof', spec })).rejects.toMatchObject({ status: 409 })
   await f.finish(f.origin.publicRunId)
+  await expect(f.submit('child', 'child-session')).rejects.toMatchObject({ status: 409 })
   await expect(f.submit('idle')).rejects.toMatchObject({ status: 409 })
+})
+
+it.each(['stop', 'steer', 'owner-finished', 'reparent'])('fences helper admission when parent %s races history', async action => {
+  const f = await fixture()
+  f.setHistoryHook(async () => {
+    if (action === 'reparent') f.sessions.exec("UPDATE sessions SET parent_session_id='other' WHERE id='child-session'")
+    else if (action === 'owner-finished') await f.finish(f.origin.publicRunId)
+    else if (action === 'steer') f.integration.supersede('s')
+    else f.integration.stopSession('s')
+  })
+  await expect(f.submit('child-race', 'child-session')).rejects.toMatchObject({ status: 409 })
+  expect(f.integration.queue.rows()).toEqual([])
 })
 
 it('replays an ambiguous pre-upgrade continuation with its exact admitted bytes', async () => {

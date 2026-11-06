@@ -5,6 +5,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { preparedRead } from './read-only-sqlite.mjs'
 import { parseStatus } from './thread-status.mjs'
 export const RECEIPT_PREFIX = '[Wizard follow-through] Recovered helper receipt '
+export const FOLLOWUP_FAILURE_GUIDANCE = "Count each failed run toward this thread's five-failed-run limit, including failures in your own tests/harness. "
+  + 'If product behaviour already passed, ship it and report rather than repairing test scaffolding. '
+  + 'After five failed runs, stop and report what works and the blocker.'
 export const receiptKey = id => `wizard-helper-receipt-${id}`
 export const completionDelegationId = text => typeof text === 'string' ? text.match(/^\[ASYNC DELEGATION BATCH COMPLETE\s*[—-]\s*(deleg_[A-Za-z0-9_-]+)\]/u)?.[1] : undefined
 export const internalHelperMessage = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop|Agent-to-agent|supervisor (?:update|build|review|question|closed)|Wizard schedule|Wizard heavy-work (?:completion|notice)|Owner requested recovery|James requested recovery|STILL IN PROGRESS)/u.test(text)
@@ -127,7 +130,7 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
       const text=results.filter(r=>typeof r?.summary==='string'&&r.summary.trim()).map(r=>`Helper ${Number(r.task_index)+1} (${String(r.status||'unknown')}):\n${r.summary.trim()}`).join('\n\n')
       if(!text||text.length>60000) continue
       receipts.push({agent_id:'hermes',session_id:sessionId,sessionId,delegationId:id,at:Number(row.completed_at),key:receiptKey(id),
-        input:RECEIPT_PREFIX+id+'\nThese are saved helper findings, not verified completion. Continue the original request through its remaining acceptance checks. Preserve the latest user instructions and original release authority. Keep internal progress in Working; return a final answer only when there is a verified result or one specific owner-only gate.\n\n'+text})
+        input:RECEIPT_PREFIX+id+'\nThese are saved helper findings, not verified completion. Check the receipt; do not blindly duplicate work. '+FOLLOWUP_FAILURE_GUIDANCE+' Preserve the latest user instructions, original release authority and explicit owner approval gates; new scope still needs authorization.\n\n'+text})
     }
     return receipts
   } catch{return []}finally{if (!suppliedDb) db?.close()}
