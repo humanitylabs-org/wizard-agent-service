@@ -79,7 +79,7 @@ for (const [name, replies, background, lastUserAt, section, attention] of cases)
 })
 test('admitted owner runs stay Working ahead of a transcript ask and helper background', () => {
   const replies = [reply(qr, 20)]
-  for (const status of ['queued', 'accepted', 'running', 'unknown']) {
+  for (const status of ['queued', 'started', 'accepted', 'running', 'unknown']) {
     const row = { id: 'wizard_active', status, wizard_run_id: 'wizardq_owner', wizard_assigned_at: 30,
       wizard_attention: qr, wizard_background: 'helper', wizard_waiting_on: 'helper' }
     const projected = projectOpenAskSession(row, { replies, lastUserAt: 10, background: 'helper' })

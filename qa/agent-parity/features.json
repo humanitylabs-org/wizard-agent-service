@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "viewer-desktop-fit-keys",
+      "description": "Scoped chat media opens the shared viewer: desktop images fit the viewport, Left/Right navigate in order, close restores the exact thread and draft, and phone open/Back remains scoped after cold selected-agent restore.",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Run QA_GROUP=media QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs on the admitted browser worker. Linux additionally requires QA_FORUM_MEDIA=1 QA_CHROMIUM=<pinned-chrome> QA_PLAYWRIGHT=<pinned-playwright>. This narrow cell clicks actual rendered MEDIA buttons from synthetic transcripts through the real Service; host-profile really traverses /p/<profile>, container uses a distinct TCP origin, restricted uses mode-0600 Unix ingress. Browser and disposable runtime reject mutations after seed; no real agents/providers/private history are opened. Desktop fit at two widths, ordered trusted Left/Right, focus, Escape/outside and phone open/Back/outside preserve cold-selected agent/thread/draft. Native video/audio UA seeking is separately covered by wizard-ux/qa-viewer-desktop-fit.cjs with mandatory provisioned QA_MEDIA_DIR. Synthetic-runtime browser evidence is not real-container/provider/physical-device acceptance. Companion UX PRs #1039/#1038.",
+      "source_refs": ["wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats.css", "wizard-ux/web/core/chats.js"],
+      "reference_tests": ["qa/agent-parity/browser.mjs", "wizard-ux/qa-viewer-desktop-fit.cjs", "wizard-ux/tests/viewer-desktop-fit.test.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "in-flight-notice",
       "description": "Controller and live-lease execution outrank out-of-band notice attention while queued or steered owner messages arrive; notices can classify Ready only after the run ends.",
       "layer": "server",
@@ -658,7 +668,7 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. A queued owner message (not yet in the transcript) or an admitted started/accepted/running/unknown run keeps its lifecycle ahead of an older transcript ask and helper background: queued input drops every transcript ask, a running run keeps only asks its own replies wrote after admission, and helper-only rows without a run id still yield to owner gates. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/open-ask.mjs",

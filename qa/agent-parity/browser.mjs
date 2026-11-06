@@ -1,6 +1,7 @@
-// Thales-only browser acceptance. Real Service, real unmodified UX, synthetic gateways.
+// Admitted-worker browser acceptance. Real Service/unmodified UX; synthetic gateways (not real agent processes).
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, statSync, realpathSync } from 'node:fs'
+import { deflateSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
@@ -9,27 +10,31 @@ import { checks } from './checks.mjs'
 const require=createRequire(import.meta.url),{chromium}=require(process.env.QA_PLAYWRIGHT||'playwright-core')
 const ux=resolve(process.env.QA_UX_ROOT||''),out=resolve(process.env.QA_OUT||'')
 const externalRoot=process.env.QA_EXTERNAL_ROOT ? resolve(process.env.QA_EXTERNAL_ROOT)+'/' : '';
-if(process.platform!=='darwin'||!externalRoot||!ux.startsWith(externalRoot)||!out.startsWith(externalRoot))throw Error('Use verified external volume via QA_EXTERNAL_ROOT')
+const forumMedia=process.platform==='linux'&&process.env.QA_GROUP==='media'&&process.env.QA_FORUM_MEDIA==='1'
+if((process.platform!=='darwin'&&!forumMedia)||!externalRoot||!ux.startsWith(externalRoot)||!out.startsWith(externalRoot)||!realpathSync(ux).startsWith(realpathSync(externalRoot)+'/'))throw Error('Use verified worker root via QA_EXTERNAL_ROOT (Linux is media-only)')
 mkdirSync(out,{recursive:true})
-const selectedGroup=process.env.QA_GROUP||'';assert.ok(['','static','compose','working'].includes(selectedGroup))
+const selectedGroup=process.env.QA_GROUP||'';assert.ok(['','static','compose','working','media'].includes(selectedGroup))
 const selectedKinds=process.env.QA_KINDS?process.env.QA_KINDS.split(','):kinds;assert.ok(selectedKinds.every(k=>kinds.includes(k)))
+const mediaShells=process.env.QA_MEDIA_SHELLS?process.env.QA_MEDIA_SHELLS.split(','):['phone','desktop'];assert.ok(mediaShells.length&&new Set(mediaShells).size===mediaShells.length&&mediaShells.every(s=>['phone','desktop'].includes(s)));assert.ok(!process.env.QA_MEDIA_SHELLS||selectedGroup==='media')
 const features=JSON.parse(readFileSync(new URL('./features.json',import.meta.url))).features.filter(f=>f.layer==='ux').map(f=>f.id)
 const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex')
 const source={service:Object.fromEntries(['server/service.mjs','server/agents-http.mjs','server/routed-run-queue.mjs','server/run-queue.mjs','server/routed-presentation.mjs','server/agent-chat-inputs.mjs','server/chat-presentation.mjs'].map(f=>[f,hash(new URL('../../'+f,import.meta.url))])),ux:Object.fromEntries(['core/chats.js','core/chat-kit.js','core/chat-power.js','core/chat-models.js','core/chat-work.js','app.js','styles.css','outbox.js','live.js'].map(f=>[f,hash(join(ux,'web',f))]))}
-const cells=[],errors=[],requests=[],network=[]
-const persist=completed=>writeFileSync(join(out,'browser.json'),JSON.stringify({schema_version:1,mode:'browser-synthetic',completed:completed&&!selectedGroup&&selectedKinds.length===kinds.length,source,cells,errors,requests,cleanup:{existing_agents_opened:false,all_fixtures_closed:completed},summary:Object.fromEntries(['pass','fail'].map(s=>[s,cells.filter(c=>c.status===s).length]))},null,2)+'\n')
-const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream']})
+const cells=[],errors=[],requests=[],network=[],mediaEvidence=[]
+const persist=completed=>writeFileSync(join(out,'browser.json'),JSON.stringify({schema_version:1,mode:'browser-synthetic',selectedGroup,selectedKinds,mediaShells,completed:completed&&!selectedGroup&&selectedKinds.length===kinds.length,source,cells,errors,requests,mediaEvidence,cleanup:{existing_agents_opened:false,all_fixtures_closed:completed},summary:Object.fromEntries(['pass','fail'].map(s=>[s,cells.filter(c=>c.status===s).length]))},null,2)+'\n')
+const browser=await chromium.launch({headless:true,executablePath:forumMedia?process.env.QA_CHROMIUM:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream','--disable-background-networking']})
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 async function until(f,reason,ms=20000){const end=Date.now()+ms;while(Date.now()<end){if(await f())return;await sleep(100)}throw Error('Timeout: '+reason)}
 async function stage(kind,group,featureIds,run){
- let s,context,page;const upstreamFailures=[]
- const record=(feature,reason)=>{assert.ok(!cells.some(c=>c.feature===feature&&c.kind===kind),'duplicate cell');cells.push({feature,kind,status:'pass',reason,evidence:'real-thales-browser',screenshots:[`${kind}-${group}.png`]});persist(false)}
+ let s,context,page;const upstreamFailures=[];let mediaReadOnly=false
+ const record=(feature,reason)=>{assert.ok(!cells.some(c=>c.feature===feature&&c.kind===kind),'duplicate cell');cells.push({feature,kind,status:'pass',reason,evidence:forumMedia?'forum-browser-real-service-synthetic-runtime':'real-thales-browser',screenshots:[`${kind}-${group}.png`]});persist(false)}
  try{
-  s=await scene(kind,{uxDir:join(ux,'web'),sttConfigured:true,fixtureHoldEvents:true,fetchImpl:async(...args)=>{try{const r=await fetch(...args);if(!r.ok)upstreamFailures.push({url:String(args[0]),status:r.status,body:(await r.clone().text()).slice(0,700)});return r}catch(e){upstreamFailures.push({url:String(args[0]),exception:String(e),cause:String(e.cause)});throw e}}})
+  s=await scene(kind,{uxDir:join(ux,'web'),sttConfigured:true,fixtureHoldEvents:true,fixtureReadOnly:()=>mediaReadOnly,fetchImpl:async(...args)=>{if(mediaReadOnly&&!['GET','HEAD'].includes(args[1]?.method||'GET'))throw Error('Media fixture origin forbids runtime mutations');try{const r=await fetch(...args);if(!r.ok)upstreamFailures.push({url:String(args[0]),status:r.status,body:(await r.clone().text()).slice(0,700)});return r}catch(e){upstreamFailures.push({url:String(args[0]),exception:String(e),cause:String(e.cause)});throw e}}})
   await checks['session-create'](s)
-  context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true,permissions:['clipboard-read','clipboard-write','microphone'],userAgent:'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0.0.0 Mobile Safari/537.36',extraHTTPHeaders:s.ownerHeaders})
+  if(group==='media')mediaReadOnly=true
+  context=await browser.newContext({serviceWorkers:'block',viewport:{width:390,height:844},isMobile:true,hasTouch:true,permissions:['clipboard-read','clipboard-write','microphone'],userAgent:'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0.0.0 Mobile Safari/537.36',extraHTTPHeaders:s.ownerHeaders})
+  if(group==='media')await context.routeWebSocket('**',ws=>ws.close())
   await context.addInitScript(()=>{try{localStorage.setItem('wos.coached','true');localStorage.setItem('wos.tour.done','1')}catch{};/* Regenerate is skin opt-in (wizard-ux #395); parity covers it */const regen=()=>document.documentElement?.style.setProperty('--wos-reply-regenerate','on');regen();document.addEventListener('readystatechange',regen)})
-  await context.route('**/*',route=>{const u=route.request().url();if(!u.startsWith(s.origin())&&!/^(data:|blob:)/.test(u)){requests.push({kind,group,refused:u});return route.fulfill({status:403,body:''})}return route.continue()})
+  await context.route('**/*',route=>{const u=route.request().url();if((group==='media'&&!['GET','HEAD'].includes(route.request().method()))||(!u.startsWith(s.origin()+'/')&&!/^(data:|blob:)/.test(u))){requests.push({kind,group,refused:u});return route.fulfill({status:403,body:''})}return route.continue()})
   page=await context.newPage();page.setDefaultTimeout(12000);page.on('response',async r=>{if(r.request().method()==='POST')network.push({kind,group,url:r.url(),status:r.status(),body:(await r.text().catch(()=>'' )).slice(0,300)});if(r.status()>=400)requests.push({kind,group,status:r.status(),url:r.url(),body:(await r.text().catch(()=>'' )).slice(0,500)})});page.on('requestfailed',r=>requests.push({kind,group,url:r.url(),failure:r.failure()}));page.on('pageerror',e=>errors.push({kind,group,error:String(e)}))
   const load=async()=>{await s.request('/api/sessions?view=list');await page.goto(s.origin()+'/wizard-os-home/',{waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:45000});await page.evaluate(()=>WosAgents.load(true))}
   const reload=async()=>{await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:45000});await page.evaluate(()=>WosAgents.load(true))}
@@ -43,8 +48,91 @@ async function stage(kind,group,featureIds,run){
   const sends=()=>s.seen.filter(x=>x.method==='POST'&&(x.path.endsWith('/v1/runs')||x.path.endsWith('/chat/stream'))).map(x=>({...x,body:x.path.endsWith('/chat/stream')?{...x.body,input:x.body.message,session_id:x.path.match(/sessions\/([^/]+)/)[1]}:x.body}))
   await run({s,context,page,record,load,reload,root,open,refresh,settle,sends})
   await page.screenshot({path:join(out,`${kind}-${group}.png`)})
- }catch(error){if(page&&s)writeFileSync(join(out,`${kind}-${group}-diagnostic.json`),JSON.stringify({upstreamFailures,network:network.filter(x=>x.kind===kind&&x.group===group),seen:s.seen.filter(x=>x.method==='POST').map(x=>({method:x.method,path:x.path,body:x.path.endsWith('/v1/runs')||x.path.endsWith('/steer')?x.body:undefined})),live:await page.evaluate(()=>({voiceError:window.__qaVoiceError,voiceEndpoint:WizConfig.endpoint('transcribe'),session:WizLive.session('wizard_parity'),outbox:WosOutbox.unsent().map(x=>({state:x.state,error:x.error,text:x.text,model:x.model,agent:x.agent,how:x.how}))})).catch(()=>null),history:await (await s.request('/api/sessions/wizard_parity/messages?view=wizard')).json(),dom:await page.locator('[data-chats]').allInnerTexts(),responses:requests.filter(x=>x.kind===kind&&x.group===group&&x.status>=400)},null,2));if(page)await page.screenshot({path:join(out,`${kind}-${group}-failure.png`)}).catch(()=>{});for(const feature of featureIds)if(!cells.some(c=>c.feature===feature&&c.kind===kind))cells.push({feature,kind,status:'fail',reason:String(error.stack||error),evidence:'real-thales-browser',screenshots:[`${kind}-${group}-failure.png`]});persist(false)}
+ }catch(error){if(page&&s)writeFileSync(join(out,`${kind}-${group}-diagnostic.json`),JSON.stringify({upstreamFailures,network:network.filter(x=>x.kind===kind&&x.group===group),seen:s.seen.filter(x=>x.method==='POST').map(x=>({method:x.method,path:x.path,body:x.path.endsWith('/v1/runs')||x.path.endsWith('/steer')?x.body:undefined})),live:await page.evaluate(()=>({voiceError:window.__qaVoiceError,voiceEndpoint:WizConfig.endpoint('transcribe'),session:WizLive.session('wizard_parity'),outbox:WosOutbox.unsent().map(x=>({state:x.state,error:x.error,text:x.text,model:x.model,agent:x.agent,how:x.how}))})).catch(()=>null),history:await (await s.request('/api/sessions/wizard_parity/messages?view=wizard')).json(),dom:await page.locator('[data-chats]').allInnerTexts(),responses:requests.filter(x=>x.kind===kind&&x.group===group&&x.status>=400)},null,2));if(page)await page.screenshot({path:join(out,`${kind}-${group}-failure.png`)}).catch(()=>{});for(const feature of featureIds)if(!cells.some(c=>c.feature===feature&&c.kind===kind))cells.push({feature,kind,status:'fail',reason:String(error.stack||error),evidence:forumMedia?'forum-browser-real-service-synthetic-runtime':'real-thales-browser',screenshots:[`${kind}-${group}-failure.png`]});persist(false)}
  finally{if(context)await context.close();if(s)await s.close()}
+}
+// One feature boundary, four genuinely different Service routes. Media comes from
+// the scoped synthetic transcript/artifact resolver, never a global viewer.open.
+async function mediaChecks({s,context,page,record}){
+ const evidence={kind:s.kind,agent:s.id,runtime:'synthetic upstream; real Wizard HTTP',screens:[],blocked:[],upstream:[]};mediaEvidence.push(evidence)
+ // Tiny deterministic solid PNGs, generated in the disposable agent home.
+ const png=(w,h)=>{const crc=b=>{let c=0xffffffff;for(const x of b){c^=x;for(let k=0;k<8;k++)c=(c>>>1)^((c&1)?0xedb88320:0)}return(c^0xffffffff)>>>0};const chunk=(type,data)=>{const t=Buffer.from(type),n=Buffer.alloc(4),c=Buffer.alloc(4);n.writeUInt32BE(data.length);c.writeUInt32BE(crc(Buffer.concat([t,data])));return Buffer.concat([n,t,data,c])};const head=Buffer.alloc(13);head.writeUInt32BE(w);head.writeUInt32BE(h,4);head[8]=8;head[9]=2;const pixels=Buffer.alloc((w*3+1)*h);for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*(w*3+1)+1+x*3;pixels[i]=25;pixels[i+1]=y<20?220:80;pixels[i+2]=150}return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',head),chunk('IDAT',deflateSync(pixels)),chunk('IEND',Buffer.alloc(0))])}
+ const mediaHome=s.agentHome
+ const names=['media-wide.png','media-portrait.png','media-square.png'];for(const [i,size] of [[2400,900],[786,1704],[1200,1200]].entries())writeFileSync(join(mediaHome,names[i]),png(...size))
+ const artifact=n=>['container','restricted'].includes(s.kind)?'/opt/data/'+n:join(mediaHome,n)
+ const row=s.sessions.get('wizard_parity');row.hidden=false;row.title='Synthetic scoped media';row.messages=[{role:'user',content:'Synthetic gallery request',timestamp:Date.now()/1000-2},{role:'assistant',content:names.map(n=>'MEDIA:'+artifact(n)).join('\n\n'),timestamp:Date.now()/1000-1,finish_reason:'stop'}]
+ assert.equal((await s.request('/api/sessions?view=list')).status,200)
+ if(s.kind==='restricted'){const socket=join(s.root,'os','agents',s.id,'gateway','ingress.sock');assert.equal(statSync(socket).mode&0o777,0o600);evidence.ingress={transport:'unix',mode:'0600'}}
+ const before=s.seen.length
+ const boot=async(p,phone,cold=false)=>{
+  if(cold)await p.reload({waitUntil:'domcontentloaded'});else await p.goto(s.origin()+'/wizard-os-home/'+(phone?'':'desktop.html'),{waitUntil:'domcontentloaded'})
+  await p.waitForFunction(phone=>window[phone?'__wos':'__wux']?.live?.ok,phone,{timeout:30000});await p.evaluate(()=>WosAgents.load(true))
+  assert.equal(await p.evaluate(()=>document.documentElement.dataset.shell),phone?'phone':'desktop')
+  // This disposable runtime has no connected provider: Welcome legitimately opens.
+  // Wait for its real async boot decision before trusted setup-only Back input;
+  // an early Escape would instead suppress boot through the owner's acted flag.
+  await p.waitForFunction(()=>window.WosWelcome?.log.some(x=>x.startsWith('boot:')),null,{timeout:10000})
+  const setup={shell:phone?'phone':'desktop',cold,boot:await p.evaluate(()=>WosWelcome.log.slice()),escapes:0}
+  for(let i=0;i<2&&await p.locator('#wosWelcome.wl-overlay').isVisible();i++){await p.keyboard.press('Escape');setup.escapes++}
+  await p.locator('#wosWelcome.wl-overlay').waitFor({state:'hidden',timeout:2000})
+  assert.equal(await p.evaluate(()=>WosWelcome.active),false,'Welcome setup complete before any thread/viewer action')
+  setup.closed=true;setup.log=await p.evaluate(()=>WosWelcome.log.slice());(evidence.bootstrap??=[]).push(setup)
+ }
+ const selected=async p=>p.evaluate(id=>{const shell=document.documentElement.dataset.shell;const api=window[shell==='phone'?'__wos':'__wux'];const w=Object.values(api.wins).find(w=>w.app==='chats'&&w.focus?.kind==='agent'&&w.focus.key===id);return w?{id:w.id,agent:w.focus.key,thread:w.thread}:null},s.id)
+ // Capture the actual desktop before fixture thread setup and before its context closes.
+ // Hidden list rows are diagnostic evidence, not a reason to force input or mutate DOM.
+ const desktopSnapshot=async(p,phase)=>{
+  const stem=`${s.kind}-media-desktop-${phase}`;const diagnostic={phase,selected:await selected(p).catch(()=>null)}
+  diagnostic.page=await p.evaluate(()=>{const api=window.__wux;const inspect=e=>{const r=e.getBoundingClientRect(),c=getComputedStyle(e);return{tag:e.tagName,id:e.id,class:e.className,hidden:e.hidden,display:c.display,visibility:c.visibility,rect:r.toJSON()}};return{url:location.href,shell:document.documentElement.dataset.shell,viewport:{width:innerWidth,height:innerHeight},active:document.activeElement?.outerHTML.slice(0,2000),homeOpen:api?.homeOpen,cur:api?.cur,windows:Object.values(api?.wins||{}).map(w=>({id:w.id,app:w.app,focus:w.focus,thread:w.thread})),rows:[...document.querySelectorAll('[data-chopen="wizard_parity"]')].map(e=>({self:inspect(e),ancestors:[e.parentElement,e.parentElement?.parentElement,e.closest('[data-chats]'),e.closest('[data-win]')].filter(Boolean).map(inspect)})),dom:document.documentElement.outerHTML.slice(0,200000)}}).catch(error=>({captureError:String(error)}))
+  writeFileSync(join(out,stem+'.json'),JSON.stringify(diagnostic,null,2)+'\n');await p.screenshot({path:join(out,stem+'.png')});(evidence.desktopDiagnostics??=[]).push({phase,json:stem+'.json',screenshot:stem+'.png'})
+ }
+ const thread=async(p,select=true)=>{
+  if(select)await p.evaluate(id=>WizOpenAgentChats(id),s.id)
+  await until(async()=>!!await selected(p),'actual selected agent window');const w=await selected(p);const chat=p.locator(`[data-chats="${w.id}"]`)
+  const desktop=await p.evaluate(()=>document.documentElement.dataset.shell==='desktop')
+  if(desktop){
+   await desktopSnapshot(p,select?'before-thread-open':'cold-before-thread-assert')
+   assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id)
+   // Production desktop openThread delegates to CHATS.openChat without changing Focus.
+   // Bootstrap only the first open. A cold missing thread must fail, never be repaired.
+   if(select&&w.thread!=='wizard_parity')await p.evaluate(()=>window.__wux.openThread('wizard_parity'))
+   else assert.equal(w.thread,'wizard_parity','cold desktop thread restored without bootstrap')
+  }else if(w.thread!=='wizard_parity'){const button=chat.locator('[data-chopen="wizard_parity"]').first();await button.waitFor();await button.click()}
+  await chat.locator('.ch-thread').waitFor();assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id);assert.equal((await selected(p)).thread,'wizard_parity');return chat
+ }
+ const ready=async p=>p.waitForFunction(()=>{const i=document.querySelector('.mviewer img');return i&&i.complete&&i.naturalWidth>0})
+ const geometry=async p=>p.evaluate(()=>{const v=document.querySelector('.mviewer'),i=v.querySelector('.mv-stage img'),s=v.querySelector('.mv-stage').getBoundingClientRect(),r=i.getBoundingClientRect(),k=Math.min(r.width/i.naturalWidth,r.height/i.naturalHeight),w=i.naturalWidth*k,h=i.naturalHeight*k;return{stage:s.toJSON(),image:{left:r.left+(r.width-w)/2,right:r.left+(r.width+w)/2,top:r.top+(r.height-h)/2,bottom:r.top+(r.height+h)/2},state:WosChat.viewer.state,viewport:{w:innerWidth,h:innerHeight}}})
+ const runScreen=async(p,phone)=>{
+  await boot(p,phone);let chat=await thread(p);await chat.locator('.ch-compose textarea').fill('Synthetic retained media draft')
+  // Reload without re-selecting the agent: a main fallback cannot pass.
+  await boot(p,phone,true);chat=await thread(p,false);assert.equal(await chat.locator('.ch-compose textarea').inputValue(),'Synthetic retained media draft')
+  const buttons=chat.locator('.msg.a button.mimg[data-mi]');assert.equal(await buttons.count(),3);const opener=buttons.nth(1);await opener.scrollIntoViewIfNeeded();await opener.click();await ready(p)
+  assert.equal((await p.evaluate(()=>WosChat.viewer.state)).i,1);assert.equal(await p.locator('.mv-ti small').textContent(),'2 of 3');assert.equal(await p.evaluate(()=>document.activeElement.classList.contains('mviewer')),true)
+  const screen={shell:phone?'phone':'desktop',coldAgent:(await selected(p)).agent,geometries:[],keys:[]};evidence.screens.push(screen)
+  await p.screenshot({path:join(out,`${s.kind}-media-${screen.shell}-viewer.png`)})
+  if(!phone){
+   for(const width of [1440,760]){await p.setViewportSize({width,height:900});for(const [key,index] of [['ArrowRight',2],['ArrowRight',0],['ArrowRight',1]]){await p.keyboard.press(key);await ready(p);const g=await geometry(p);screen.geometries.push(g);screen.keys.push({key,index:g.state.i});assert.equal(g.state.i,index);assert.equal(g.state.long,false);assert.ok(g.image.left>=g.stage.left-1&&g.image.right<=g.stage.right+1&&g.image.top>=g.stage.top-1&&g.image.bottom<=g.stage.bottom+1,'entire painted photo fits desktop stage');assert.ok(g.stage.top>=0&&g.stage.bottom<=g.viewport.h)}}
+   await p.keyboard.press('ArrowLeft');await ready(p);assert.equal((await p.evaluate(()=>WosChat.viewer.state)).i,0)
+   await p.keyboard.press('Escape')
+  }else{await p.evaluate(()=>__wosNativeBack())}
+  await p.locator('.mviewer').waitFor({state:'hidden'});assert.equal((await selected(p)).thread,'wizard_parity');assert.equal(await chat.locator('.ch-compose textarea').inputValue(),'Synthetic retained media draft')
+  // Outside dismissal is a trusted pointer action, not direct viewer.close.
+  await buttons.nth(phone?0:1).click();await ready(p);const g=await geometry(p);if(phone)await p.touchscreen.tap(g.stage.left+4,g.stage.top+4);else await p.mouse.click(g.stage.left+4,g.stage.top+4);await p.locator('.mviewer').waitFor({state:'hidden'});assert.equal((await selected(p)).thread,'wizard_parity')
+  await p.screenshot({path:join(out,`${s.kind}-media-${screen.shell}.png`)});screen.restoredDraft=await chat.locator('.ch-compose textarea').inputValue();assert.equal(screen.restoredDraft,'Synthetic retained media draft')
+ }
+ // The stage's ordinary context is a real phone UA/touch context.
+ if(mediaShells.includes('phone'))await runScreen(page,true)
+ if(mediaShells.includes('desktop')){const desktop=await browser.newContext({viewport:{width:1440,height:900},serviceWorkers:'block',extraHTTPHeaders:s.ownerHeaders});let p;try{
+  await desktop.addInitScript(()=>{localStorage.setItem('wos.coached','true');localStorage.setItem('wos.tour.done','1');localStorage.setItem('wos.desktop-view.v1','classic')})
+  await desktop.routeWebSocket('**',ws=>ws.close())
+  await desktop.route('**/*',r=>{const q=r.request(),u=q.url();if(!['GET','HEAD'].includes(q.method())||(!u.startsWith(s.origin()+'/')&&!/^(data:|blob:)/.test(u))){evidence.blocked.push({method:q.method(),url:u});return r.fulfill({status:403,body:''})}return r.continue()})
+  p=await desktop.newPage();p.setDefaultTimeout(10000);p.on('pageerror',e=>errors.push({kind:s.kind,group:'media',error:String(e)}));await runScreen(p,false)
+ }catch(error){if(p)await desktopSnapshot(p,'failure').catch(captureError=>{evidence.desktopDiagnosticError=String(captureError)});throw error}finally{await desktop.close()}}
+ evidence.upstream=s.seen.slice(before).filter(x=>x.method==='GET'&&/\/api\/sessions/.test(x.path)).map(x=>({method:x.method,path:x.path,localPort:x.localPort}));assert.ok(evidence.upstream.some(x=>x.path.endsWith('/api/sessions/wizard_parity/messages')),'scoped HTTP history really read')
+ if(s.kind==='host-profile')assert.ok(evidence.upstream.every(x=>x.path.startsWith('/p/parity-profile/')),'profile really traverses /p/<profile>')
+ const scoped=evidence.upstream.filter(x=>x.path.endsWith('/api/sessions/wizard_parity/messages'));if(s.kind==='restricted')assert.ok(scoped.every(x=>x.localPort===null),'restricted history really arrived on Unix ingress');else assert.ok(scoped.every(x=>x.localPort===s.runtimePorts[s.kind==='container'?'container':'main']));if(s.kind==='container')assert.notEqual(s.runtimePorts.container,s.runtimePorts.main)
+ assert.equal(s.runs.size,0);assert.equal(s.seen.filter(x=>x.method==='POST'&&/\/v1\/runs|\/chat\/stream/.test(x.path)).length,0)
+ evidence.noRuntimeAdmissions=true;record('viewer-desktop-fit-keys','Scoped rendered MEDIA buttons open shared viewer; requested shells '+mediaShells.join(',')+' retain cold-selected agent, exact thread and draft; desktop contain/Left/Right/focus/Escape/outside or phone open/Back/outside as selected. Real Service HTTP, synthetic runtime; no real containers/providers or physical device proof.')
 }
 async function staticChecks({s,context,page,record,load,reload,root,open,refresh,settle,sends}){
  await checks['native-images'](s);await settle();await checks['nonimage-files'](s)
@@ -136,7 +224,7 @@ async function workingChecks({s,page,record,load,reload,open,refresh,settle,send
  await reload();({chat}=await open());await chat.locator('[data-chretry]').waitFor({timeout:20000});assert.ok(!(await chat.innerText()).includes('Traceback'));await chat.locator('[data-chretry]').click();await until(()=>sends().length===retryBaseline+2&&JSON.stringify(sends().at(-1).body.input).includes('Synthetic retry question'),'retry new turn');assert.equal(sends().at(-1).body.session_id,'wizard_parity');record('error-recovery','Live steer uses same run; Stop cancels exact run; failed run reload shows safe Retry, which returns to same thread without raw traceback')
  plan(3,true);row.messages.push({role:'assistant',content:'Synthetic milestones completed.',timestamp:Date.now()/1000+2});await settle('Synthetic milestones completed.');await refresh();await until(async()=> (await chat.innerText()).includes('Synthetic milestones completed.'),'settled final answer');await until(async()=>await chat.locator('[data-chstop]').count()===0,'terminal work control settles');record('working-milestones','Real projected todo_list milestones update in Working dropdown; live steer and Stop work; terminal reply settles work receipt')
 }
-try{for(const kind of selectedKinds){if(!selectedGroup||selectedGroup==='static')await stage(kind,'static',['inline-agent-images','archive-placement','image-thumbnail','ready-needs-you','copy-share','appearance','reading-position','thread-links','swipe-gestures','regenerate','notifications','back-contract'],staticChecks);if(!selectedGroup||selectedGroup==='compose')await stage(kind,'compose',['dictation','pending-echo','outbox-offline','pending-first-send','stop-on-send'],composeChecks);if(!selectedGroup||selectedGroup==='working')await stage(kind,'working',['working-milestones','error-recovery'],workingChecks)}}finally{await browser.close();persist(true)}
-assert.equal(cells.length,(selectedGroup?({static:12,compose:5,working:2}[selectedGroup]):features.length)*selectedKinds.length);assert.equal(new Set(cells.map(c=>c.feature+'/'+c.kind)).size,cells.length)
+try{for(const kind of selectedKinds){if(!selectedGroup||selectedGroup==='static')await stage(kind,'static',['inline-agent-images','archive-placement','image-thumbnail','ready-needs-you','copy-share','appearance','reading-position','thread-links','swipe-gestures','regenerate','notifications','back-contract'],staticChecks);if(!selectedGroup||selectedGroup==='compose')await stage(kind,'compose',['dictation','pending-echo','outbox-offline','pending-first-send','stop-on-send'],composeChecks);if(!selectedGroup||selectedGroup==='working')await stage(kind,'working',['working-milestones','error-recovery'],workingChecks);if(!selectedGroup||selectedGroup==='media')await stage(kind,'media',['viewer-desktop-fit-keys'],mediaChecks)}}finally{await browser.close();persist(true)}
+assert.equal(cells.length,(selectedGroup?({static:12,compose:5,working:2,media:1}[selectedGroup]):features.length)*selectedKinds.length);assert.equal(new Set(cells.map(c=>c.feature+'/'+c.kind)).size,cells.length)
 console.log(JSON.stringify({out,summary:Object.fromEntries(['pass','fail'].map(s=>[s,cells.filter(c=>c.status===s).length])),errors}))
 if(cells.some(c=>c.status==='fail')||errors.length)process.exitCode=1
