@@ -218,4 +218,10 @@ describe('quote reply', () => {
       expect(steered.body.input).toContain('and also this')
     } finally { await s.close() }
   }, 30_000)
+  it('asks the agent to list every ask, including answered questions (James, 6 Nov: a quick LINE question was never listed)', () => {
+    expect(ITEMS_INSTRUCTIONS).not.toMatch(/Optionally add/u)
+    expect(ITEMS_INSTRUCTIONS).not.toMatch(/quick answers/u)
+    expect(ITEMS_INSTRUCTIONS).toMatch(/a question you answer is an ask in state done/u)
+    expect(ITEMS_INSTRUCTIONS).toMatch(/mid-turn additions/u)
+  })
 })
