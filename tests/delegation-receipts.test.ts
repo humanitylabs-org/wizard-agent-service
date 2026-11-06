@@ -23,6 +23,12 @@ function fixture({ delivery = 'dropped', final = '', lease = false, consumed = f
  db.close(); return path
 }
 test('recovers dropped review which completed before the parent handoff',()=>{const rows=readUndeliveredHelperReceipts(fixture(),{now});assert.equal(rows.length,1);assert.match(rows[0].input,/MUST-FIX/);assert.ok(!rows[0].input.includes('NEVER RECOVER'));assert.equal(rows[0].key,'wizard-helper-receipt-deleg_a')})
+test('recovered guidance bounds failures including agent harness bugs and preserves release gates',()=>{
+ const input=readUndeliveredHelperReceipts(fixture(),{now})[0].input
+ for(const text of ["thread's five-failed-run limit, including failures in your own tests/harness", 'If product behaviour already passed, ship it and report rather than repairing test scaffolding.', 'After five failed runs, stop and report what works and the blocker.', 'Check the receipt; do not blindly duplicate work.', 'explicit owner approval gates; new scope still needs authorization.']) assert.ok(input.includes(text),text)
+ assert.ok(!input.includes('Continue the original request through its remaining acceptance checks'))
+ assert.ok(!input.includes('return a final answer only when'))
+})
 test('pending receipt also recoverable without any completion message',()=>assert.equal(findIdleUndeliveredHelperReceipts(fixture({delivery:'pending'}),{now}).length,1))
 test('projection stays agent-owned while completed result remains undelivered',()=>{const truth=readHermesSessionTruth(fixture(),['wizard_a'],now/1000).get('wizard_a');assert.equal(truth.helperResultUnanswered,true)})
 test('active parent is never concurrently resumed',()=>assert.equal(findIdleUndeliveredHelperReceipts(fixture({lease:true}),{now}).length,0))
