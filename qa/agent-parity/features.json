@@ -692,9 +692,9 @@
     },
     {
       "id": "automatic-titles",
-      "description": "Complete an untitled thread and verify its generated title after list reload without touching other agents",
+      "description": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks",
       "layer": "server",
-      "how_to_test": "Complete an untitled thread and verify its generated title after list reload without touching other agents.",
+      "how_to_test": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks.",
       "source_refs": [
         "server/thread-titles.mjs"
       ],
