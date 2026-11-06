@@ -243,6 +243,16 @@ function homeScreen(raw) {
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
  * links from launcher.json. Only what a front end needs to draw and open a tile leaves the box.
  */
+// Routes are data, not an app-installed speech receiver. Keep the destination local;
+// the shell further binds it to the declaring app's URL before opening it.
+export function voiceRoutes(value) {
+  return (Array.isArray(value) ? value : []).slice(0, 16).flatMap(route => {
+    const words = Array.isArray(route?.words) ? [...new Set(route.words.filter(w => typeof w === 'string' && /^[\p{L}\p{N}-]{1,40}$/u.test(w)).map(w => w.toLowerCase()))].slice(0, 8) : []
+    if (!words.length || typeof route.open !== 'string' || !/^(?:\?|\/(?!\/))[^\x00-\x1f\x7f\\]{0,500}$/.test(route.open)) return []
+    if (route.rest_param !== undefined && !/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(route.rest_param)) return []
+    return [{ words, open: route.open, ...(route.rest_param ? { rest_param: route.rest_param } : {}) }]
+  })
+}
 export function readApps({ appsJsonPath, launcherPath }) {
   const out = []
   const seen = new Set()
@@ -260,6 +270,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
+      voice_routes: voiceRoutes(app.voice_routes),
       receives_voice_input: !!view && app.receives_voice_input === true,
       // Omit only when the key is absent (pre-metadata installations); [] is an explicit declaration, and a present
       // malformed value (string, null) normalizes to [] so it is never mistaken for an old registration.
@@ -286,6 +297,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url, view: { mode: 'original', url },
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
+      voice_routes: voiceRoutes(link.voice_routes),
       receives_voice_input: link.receives_voice_input === true,
     })
   }
