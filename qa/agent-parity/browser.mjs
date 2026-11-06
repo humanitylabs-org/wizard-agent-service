@@ -79,7 +79,27 @@ async function mediaChecks({s,context,page,record}){
   setup.closed=true;setup.log=await p.evaluate(()=>WosWelcome.log.slice());(evidence.bootstrap??=[]).push(setup)
  }
  const selected=async p=>p.evaluate(id=>{const shell=document.documentElement.dataset.shell;const api=window[shell==='phone'?'__wos':'__wux'];const w=Object.values(api.wins).find(w=>w.app==='chats'&&w.focus?.kind==='agent'&&w.focus.key===id);return w?{id:w.id,agent:w.focus.key,thread:w.thread}:null},s.id)
- const thread=async(p,select=true)=>{if(select)await p.evaluate(id=>WizOpenAgentChats(id),s.id);await until(async()=>!!await selected(p),'actual selected agent window');const w=await selected(p);const chat=p.locator(`[data-chats="${w.id}"]`);if(w.thread!=='wizard_parity'){const button=chat.locator('[data-chopen="wizard_parity"]').first();await button.waitFor();await button.click()}await chat.locator('.ch-thread').waitFor();assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id);assert.equal((await selected(p)).thread,'wizard_parity');return chat}
+ // Capture the actual desktop before fixture thread setup and before its context closes.
+ // Hidden list rows are diagnostic evidence, not a reason to force input or mutate DOM.
+ const desktopSnapshot=async(p,phase)=>{
+  const stem=`${s.kind}-media-desktop-${phase}`;const diagnostic={phase,selected:await selected(p).catch(()=>null)}
+  diagnostic.page=await p.evaluate(()=>{const api=window.__wux;const inspect=e=>{const r=e.getBoundingClientRect(),c=getComputedStyle(e);return{tag:e.tagName,id:e.id,class:e.className,hidden:e.hidden,display:c.display,visibility:c.visibility,rect:r.toJSON()}};return{url:location.href,shell:document.documentElement.dataset.shell,viewport:{width:innerWidth,height:innerHeight},active:document.activeElement?.outerHTML.slice(0,2000),homeOpen:api?.homeOpen,cur:api?.cur,windows:Object.values(api?.wins||{}).map(w=>({id:w.id,app:w.app,focus:w.focus,thread:w.thread})),rows:[...document.querySelectorAll('[data-chopen="wizard_parity"]')].map(e=>({self:inspect(e),ancestors:[e.parentElement,e.parentElement?.parentElement,e.closest('[data-chats]'),e.closest('[data-win]')].filter(Boolean).map(inspect)})),dom:document.documentElement.outerHTML.slice(0,200000)}}).catch(error=>({captureError:String(error)}))
+  writeFileSync(join(out,stem+'.json'),JSON.stringify(diagnostic,null,2)+'\n');await p.screenshot({path:join(out,stem+'.png')});(evidence.desktopDiagnostics??=[]).push({phase,json:stem+'.json',screenshot:stem+'.png'})
+ }
+ const thread=async(p,select=true)=>{
+  if(select)await p.evaluate(id=>WizOpenAgentChats(id),s.id)
+  await until(async()=>!!await selected(p),'actual selected agent window');const w=await selected(p);const chat=p.locator(`[data-chats="${w.id}"]`)
+  const desktop=await p.evaluate(()=>document.documentElement.dataset.shell==='desktop')
+  if(desktop){
+   await desktopSnapshot(p,select?'before-thread-open':'cold-before-thread-assert')
+   assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id)
+   // Production desktop openThread delegates to CHATS.openChat without changing Focus.
+   // Bootstrap only the first open. A cold missing thread must fail, never be repaired.
+   if(select&&w.thread!=='wizard_parity')await p.evaluate(()=>window.__wux.openThread('wizard_parity'))
+   else assert.equal(w.thread,'wizard_parity','cold desktop thread restored without bootstrap')
+  }else if(w.thread!=='wizard_parity'){const button=chat.locator('[data-chopen="wizard_parity"]').first();await button.waitFor();await button.click()}
+  await chat.locator('.ch-thread').waitFor();assert.equal(await p.evaluate(()=>WizLive.agentOf('wizard_parity')||WosAgents.defaultId()),s.id);assert.equal((await selected(p)).thread,'wizard_parity');return chat
+ }
  const ready=async p=>p.waitForFunction(()=>{const i=document.querySelector('.mviewer img');return i&&i.complete&&i.naturalWidth>0})
  const geometry=async p=>p.evaluate(()=>{const v=document.querySelector('.mviewer'),i=v.querySelector('.mv-stage img'),s=v.querySelector('.mv-stage').getBoundingClientRect(),r=i.getBoundingClientRect(),k=Math.min(r.width/i.naturalWidth,r.height/i.naturalHeight),w=i.naturalWidth*k,h=i.naturalHeight*k;return{stage:s.toJSON(),image:{left:r.left+(r.width-w)/2,right:r.left+(r.width+w)/2,top:r.top+(r.height-h)/2,bottom:r.top+(r.height+h)/2},state:WosChat.viewer.state,viewport:{w:innerWidth,h:innerHeight}}})
  const runScreen=async(p,phone)=>{
@@ -102,12 +122,12 @@ async function mediaChecks({s,context,page,record}){
  }
  // The stage's ordinary context is a real phone UA/touch context.
  if(mediaShells.includes('phone'))await runScreen(page,true)
- if(mediaShells.includes('desktop')){const desktop=await browser.newContext({viewport:{width:1440,height:900},serviceWorkers:'block',extraHTTPHeaders:s.ownerHeaders});try{
+ if(mediaShells.includes('desktop')){const desktop=await browser.newContext({viewport:{width:1440,height:900},serviceWorkers:'block',extraHTTPHeaders:s.ownerHeaders});let p;try{
   await desktop.addInitScript(()=>{localStorage.setItem('wos.coached','true');localStorage.setItem('wos.tour.done','1');localStorage.setItem('wos.desktop-view.v1','classic')})
   await desktop.routeWebSocket('**',ws=>ws.close())
   await desktop.route('**/*',r=>{const q=r.request(),u=q.url();if(!['GET','HEAD'].includes(q.method())||(!u.startsWith(s.origin()+'/')&&!/^(data:|blob:)/.test(u))){evidence.blocked.push({method:q.method(),url:u});return r.fulfill({status:403,body:''})}return r.continue()})
-  const p=await desktop.newPage();p.setDefaultTimeout(10000);p.on('pageerror',e=>errors.push({kind:s.kind,group:'media',error:String(e)}));await runScreen(p,false)
- }finally{await desktop.close()}}
+  p=await desktop.newPage();p.setDefaultTimeout(10000);p.on('pageerror',e=>errors.push({kind:s.kind,group:'media',error:String(e)}));await runScreen(p,false)
+ }catch(error){if(p)await desktopSnapshot(p,'failure').catch(captureError=>{evidence.desktopDiagnosticError=String(captureError)});throw error}finally{await desktop.close()}}
  evidence.upstream=s.seen.slice(before).filter(x=>x.method==='GET'&&/\/api\/sessions/.test(x.path)).map(x=>({method:x.method,path:x.path,localPort:x.localPort}));assert.ok(evidence.upstream.some(x=>x.path.endsWith('/api/sessions/wizard_parity/messages')),'scoped HTTP history really read')
  if(s.kind==='host-profile')assert.ok(evidence.upstream.every(x=>x.path.startsWith('/p/parity-profile/')),'profile really traverses /p/<profile>')
  const scoped=evidence.upstream.filter(x=>x.path.endsWith('/api/sessions/wizard_parity/messages'));if(s.kind==='restricted')assert.ok(scoped.every(x=>x.localPort===null),'restricted history really arrived on Unix ingress');else assert.ok(scoped.every(x=>x.localPort===s.runtimePorts[s.kind==='container'?'container':'main']));if(s.kind==='container')assert.notEqual(s.runtimePorts.container,s.runtimePorts.main)
